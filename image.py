@@ -14,11 +14,19 @@ MNOM=["Январь","Февраль","Март","Апрель","Май","Июн
 WD=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
 S=3  # supersample factor
 
+GOLOS=os.path.join(HERE,"assets","GolosText.ttf")
 def _f(name,size):
-    for p in (os.path.join(HERE,"assets",name),
-              "/usr/share/fonts/truetype/dejavu/"+name,
-              "/usr/local/lib/python3.10/dist-packages/matplotlib/mpl-data/fonts/ttf/"+name):
-        if os.path.exists(p): return ImageFont.truetype(p,size*S)
+    """Единый шрифт всех картинок: Golos Text (русский, OFL), вес из имени. Фолбэк DejaVu."""
+    w=700 if "Bold" in name else (600 if "Serif" in name else 400)
+    if os.path.exists(GOLOS):
+        try:
+            f=ImageFont.truetype(GOLOS,int(size*S))
+            try: f.set_variation_by_axes([w])
+            except Exception: pass
+            return f
+        except Exception: pass
+    for p in (os.path.join(HERE,"assets",name),"/usr/share/fonts/truetype/dejavu/"+name):
+        if os.path.exists(p): return ImageFont.truetype(p,int(size*S))
     return ImageFont.load_default()
 
 def _seg(d, cx, cy, R, a0, a1, color, w):
@@ -87,10 +95,7 @@ def render_delay(st):
     W,H=720,540; S2=S
     img=Image.new("RGB",(W*S2,H*S2),PAPER); d=ImageDraw.Draw(img)
     def X(v): return v*S2
-    def f(name,size):
-        for p in (os.path.join(HERE,"assets",name),"/usr/share/fonts/truetype/dejavu/"+name):
-            if os.path.exists(p): return ImageFont.truetype(p,size*S2)
-        return ImageFont.load_default()
+    f=_f
     f_eye=f("DejaVuSans-Bold.ttf",22); f_sm=f("DejaVuSans.ttf",20)
     f_h=f("DejaVuSerif.ttf",34); f_big=f("DejaVuSerif.ttf",80); f_t=f("DejaVuSans.ttf",19)
     d.text((X(40),X(34)),"AIWA",font=f_eye,fill=ROSE)
@@ -147,6 +152,60 @@ def render_menu(data, phase_ru="Лютеиновая"):
         sub=(note+(" · "+kcal if kcal else "")).strip(" ·")
         d.text((X(tx),X(y+48)),fit(sub,f_note,maxw),font=f_note,fill=INKMID)
         y+=92
+    img=img.resize((W,H),Image.LANCZOS)
+    buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
+
+def training_plan(st):
+    ph=st["phase"]; sub=st["subphase"]
+    if ph=="menstrual":
+        return 2,"низкая",["Ходьба 30-40 мин","Мягкая йога","Растяжка","Дыхание"],["Силовые рекорды","Длинный HIIT"]
+    if ph=="follicular":
+        return 4,"высокая",["Силовая тренировка","Интервальный бег","Групповые классы","Новые нагрузки"],["Лишние дни отдыха"]
+    if ph=="ovulation":
+        return 5,"пик",["HIIT и спринты","Тяжёлые силовые","Кроссфит","Игровые виды"],["Резкие максимумы без разминки"]
+    if sub=="поздняя":
+        return 2,"низкая",["Йога и пилатес","Плавание","Ходьба","Лёгкая мобилизация"],["HIIT и спринты","Тяжёлые максимумы","Длинное интенсивное кардио"]
+    return 3,"средняя",["Умеренные силовые","Кардио в темпе","Пилатес","Велотренажёр"],["Личные рекорды","Изнуряющий HIIT"]
+
+def render_training(st):
+    """Отдельная карточка нагрузки: интенсивность под фазу, что подходит и что отложить."""
+    W,H=720,640
+    img=Image.new("RGB",(W*S,H*S),PAPER); d=ImageDraw.Draw(img)
+    def X(v): return int(v*S)
+    acc=COL.get(st["phase"],ROSE)
+    f_eye=_f("DejaVuSans-Bold.ttf",22); f_h=_f("DejaVuSerif.ttf",34); f_sm=_f("DejaVuSans.ttf",20)
+    f_pill=_f("DejaVuSans-Bold.ttf",20); f_lab=_f("DejaVuSans-Bold.ttf",16); f_big=_f("DejaVuSerif.ttf",30)
+    f_item=_f("DejaVuSans.ttf",19); f_col=_f("DejaVuSans-Bold.ttf",18)
+    d.text((X(40),X(34)),"AIWA",font=f_eye,fill=ROSE)
+    d.text((X(40),X(66)),"Нагрузка сегодня",font=f_h,fill=INK)
+    # пилюля фазы
+    py=X(120); tw=d.textlength(st["phase_ru"],font=f_pill)
+    d.rounded_rectangle([X(40),py,X(40)+tw+X(34),py+X(38)],radius=X(19),fill=ROSEWASH)
+    d.text((X(57),py+X(19)),st["phase_ru"],font=f_pill,fill=ROSE,anchor="lm")
+    d.text((X(40)+tw+X(52),py+X(19)),f"день {st['day']} из {st['cycle_len']}, под-фаза {st['subphase']}",font=f_sm,fill=INKMID,anchor="lm")
+    lvl,word,do,avoid=training_plan(st)
+    # шкала интенсивности
+    gy=X(188); d.text((X(40),gy),"ИНТЕНСИВНОСТЬ",font=f_lab,fill=SOFT)
+    bx=X(40); bw=X(116); bh=X(20); gap=X(12); by=gy+X(28)
+    for i in range(5):
+        on=i<lvl
+        d.rounded_rectangle([bx,by,bx+bw,by+bh],radius=X(8),fill=acc if on else (236,229,224))
+        bx+=bw+gap
+    d.text((X(40)+5*bw+5*gap-gap+X(0),by-X(2)) if False else (X(W-40),by+bh/2),word,font=f_big,fill=acc,anchor="rm")
+    # две колонки
+    cy=by+X(70); colw=X(320)
+    d.text((X(40),cy),"Сегодня подходит",font=f_col,fill=(74,122,86))
+    d.text((X(40)+colw+X(20),cy),"Лучше отложить",font=f_col,fill=(176,86,96))
+    iy=cy+X(40)
+    for i in range(max(len(do),len(avoid))):
+        if i<len(do):
+            d.ellipse([X(40),iy+X(7),X(40)+X(9),iy+X(16)],fill=(120,170,130))
+            d.text((X(40)+X(20),iy),do[i],font=f_item,fill=INK)
+        if i<len(avoid):
+            xx=X(40)+colw+X(20)
+            d.text((xx,iy),"×",font=f_col,fill=(196,110,118))
+            d.text((xx+X(22),iy),avoid[i],font=f_item,fill=INKMID)
+        iy+=X(40)
     img=img.resize((W,H),Image.LANCZOS)
     buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
 

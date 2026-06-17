@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""AIWA — Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
+"""AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
 import os, io, re, sqlite3, logging
 from datetime import datetime, date, time as dtime
 from zoneinfo import ZoneInfo
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.constants import KeyboardButtonStyle as KBS
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
 
@@ -27,35 +28,36 @@ SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), (
             ("sweet", "тяга к сладкому"), ("anx", "тревожность"), ("tired", "усталость")]
 SYM = dict(SYMPTOMS)
 
-START_TEXT = ("🌸 Привет! Я AIWA, ИИ-ассистент женского здоровья по циклу. Цветок на логотипе — про то, чтобы расцветать в своём ритме. "
+START_TEXT = ("🌸 Привет! Я AIWA, ИИ-ассистент женского здоровья по циклу. Цветок на логотипе, про то, чтобы расцветать в своём ритме. "
  "Каждое утро собираю сводку под твою фазу: тело, питание, тренировки, и отвечаю на любые вопросы про цикл и самочувствие.\n\n"
  "Чтобы я считала фазу и отвечала точно, укажи дату последних месячных: напиши её (например 25.05.2026) или нажми кнопку ниже.")
-ABOUT_TEXT = ("🌸 Я AIWA (AI for Woman Awareness), ИИ-ассистент женского здоровья по циклу. Цветок на логотипе — про идею расцветать в своём ритме. "
+ABOUT_TEXT = ("🌸 Я AIWA (AI for Woman Awareness), ИИ-ассистент женского здоровья по циклу. Цветок на логотипе, про идею расцветать в своём ритме. "
  "Каждое утро собираю сводку под твою фазу: тело, питание, тренировки, и отвечаю на вопросы про цикл и самочувствие. Работаю на GigaChat.\n\n"
  "Открой Меню, чтобы увидеть всё, что я умею.")
-PRIVACY_TEXT = ("🔒 Про данные: храню минимум — дату последних месячных, длину цикла, твои чек-ины и время рассылки, чтобы считать фазу. "
+PRIVACY_TEXT = ("🔒 Про данные: храню минимум, дату последних месячных, длину цикла, твои чек-ины и время рассылки, чтобы считать фазу. "
  "Это не передаётся третьим лицам. Удалить все данные и отключиться можно командой /stop в любой момент.")
+TECH_TEXT = ("🤖 Я работаю на GigaChat, это большая языковая модель от Сбера. На её основе я считаю фазу цикла, собираю утреннюю сводку и отвечаю на вопросы про здоровье и самочувствие. Это помощь для ориентира, а не замена врача.")
 PHASES_TEXT = (
  "🌸 Четыре фазы цикла\n\n"
  "🩸 Менструальная, дни 1-5\n"
  "Эстроген и прогестерон на минимуме, энергии мало.\n"
  "• Самочувствие: усталость, иногда спазмы\n"
- "• Еда: восполняй железо — печень, гречка, чечевица, свёкла\n"
+ "• Еда: восполняй железо, печень, гречка, чечевица, свёкла\n"
  "• Спорт: ходьба, растяжка, мягкая йога\n\n"
  "🌱 Фолликулярная, дни 6-13\n"
  "Эстроген растёт, энергия и настроение поднимаются.\n"
  "• Самочувствие: бодрость, ясная голова\n"
- "• Еда: белок и свежее — яйца, рыба, зелень\n"
+ "• Еда: белок и свежее, яйца, рыба, зелень\n"
  "• Спорт: лучшее время для силовых\n\n"
  "☀️ Овуляторная, дни 14-16\n"
  "Пик эстрогена, максимум энергии и либидо.\n"
  "• Самочувствие: уверенность, общительность\n"
- "• Еда: антиоксиданты и клетчатка — ягоды, зелень, брокколи\n"
- "• Спорт: самое интенсивное — HIIT, спринты\n\n"
+ "• Еда: антиоксиданты и клетчатка, ягоды, зелень, брокколи\n"
+ "• Спорт: самое интенсивное, HIIT, спринты\n\n"
  "🌙 Лютеиновая, дни 17 и до месячных\n"
  "Растёт прогестерон, ближе к концу ПМС и тяга к сладкому.\n"
  "• Самочувствие: спад энергии, перепады настроения\n"
- "• Еда: магний и B6 — тёмный шоколад 85%, орехи, киноа\n"
+ "• Еда: магний и B6, тёмный шоколад 85%, орехи, киноа\n"
  "• Спорт: средняя нагрузка, ближе к месячным восстановление\n\n"
  "Дни даны для цикла около 28 дней и сдвигаются под твою длину.")
 
@@ -165,8 +167,11 @@ def calc_calories(cm, kg, age, act):
 
 def match_meta(text):
     t = text.lower()
+    if any(k in t for k in ("гигачат", "gigachat", "на чём ты работаешь", "на чем ты работаешь", "чём ты работаешь", "чем ты работаешь",
+                            "какая модель", "что за модель", "на какой модели", "какая нейросеть", "какой ии", "что за нейросеть", "кто тебя сделал")): return "tech"
     if any(k in t for k in ("что такое айва", "что такое aiwa", "расскажи о себе", "кто ты", "о тебе", "про себя", "что ты умеешь", "ты кто")): return "about"
-    if any(k in t for k in ("храните данные", "хранишь данные", "мои данные", "персональные данные", "приватн", "конфиденц", "что с данными", "безопасн")): return "privacy"
+    if any(k in t for k in ("храните данные", "хранишь данные", "хранение данных", "мои данные", "персональные данные", "приватн", "конфиденц",
+                            "что с данными", "безопасн", "удалить данные", "передаёте", "передаете данные", "данные в безопас")): return "privacy"
     return None
 
 def is_gibberish(t):
@@ -190,12 +195,31 @@ def status_of(cid):
     return u, C.cycle_status(date.fromisoformat(u["last_period"]), u["cycle_len"])
 
 # ---------- keyboards ----------
+ICONS = {  # набор Goodluck_sasha (@goodluck_alex): callback_data -> custom_emoji_id
+    "food": "5357115384065434291",         # 🍀
+    "sec:training": "5359581378193138129",  # 🔥
+    "calendar": "5337010070922209271",      # 📌
+    "phases": "5357450271255440737",        # 🌙
+    "checkin": "5359479974015279269",       # ✅
+    "guides": "5359285137118864843",        # 📕
+    "calc": "5361618558491041145",          # 🔟
+    "period": "5357334118159883232",        # ❤️
+    "set:time": "5345780407025542851",      # ☀️
+    "menu": "5415634562581538032",          # 🔘
+}
+def B(text, cb, style=None):
+    kw = {"callback_data": cb}
+    if style is not None: kw["style"] = style
+    icon = ICONS.get(cb)
+    if icon: kw["icon_custom_emoji_id"] = icon
+    return InlineKeyboardButton(text, **kw)
+
 MENU_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Питание", callback_data="food"), InlineKeyboardButton("Нагрузка", callback_data="sec:training")],
-    [InlineKeyboardButton("Календарь", callback_data="calendar"), InlineKeyboardButton("Чек-ин", callback_data="checkin")],
-    [InlineKeyboardButton("Калькулятор калорий", callback_data="calc"), InlineKeyboardButton("Фазы цикла", callback_data="phases")],
-    [InlineKeyboardButton("Отметить месячные", callback_data="period"), InlineKeyboardButton("Гид: норма цикла", callback_data="guides")],
-    [InlineKeyboardButton("Время рассылки", callback_data="set:time")],
+    [B("Питание", "food"), B("Нагрузка", "sec:training")],
+    [B("Календарь", "calendar"), B("Фазы цикла", "phases")],
+    [B("Чек-ин", "checkin", KBS.SUCCESS), B("Гид: норма цикла", "guides")],
+    [B("Калькулятор калорий", "calc"), B("Отметить месячные", "period", KBS.DANGER)],
+    [B("Время рассылки", "set:time")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Месячные начались сегодня", callback_data="onb_today")]])
@@ -210,8 +234,13 @@ def sym_kb(selected):
     rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in SYMPTOMS]
     rows.append([InlineKeyboardButton("Готово", callback_data="ci:done")]); return InlineKeyboardMarkup(rows)
 def sugg_kb(cid, items):
-    rows = [[InlineKeyboardButton(t, callback_data=f"q:{add_sugg(cid,t)}")] for t in items[:3]]
-    rows.append([InlineKeyboardButton("Меню", callback_data="menu")]); return InlineKeyboardMarkup(rows)
+    rows = [[B(t, f"q:{add_sugg(cid,t)}")] for t in items[:2]]
+    rows.append([B("Меню", "menu", KBS.PRIMARY)]); return InlineKeyboardMarkup(rows)
+def summary_kb():
+    return InlineKeyboardMarkup([
+        [B("Питание", "food"), B("Нагрузка", "sec:training")],
+        [B("Меню", "menu", KBS.PRIMARY), B("Отметить симптомы", "checkin", KBS.SUCCESS)],
+    ])
 
 # ---------- senders ----------
 async def need_onboard(t):
@@ -230,6 +259,15 @@ async def send_infographic(bot, cid):
         await bot.send_photo(cid, photo=bio, caption=f"AIWA · {st['subphase']} {st['phase_ru'].lower()}, день {st['day']}. Месячные через ~{st['days_to_next']} дн.")
     except Exception as e: log.warning("infographic: %s", e)
 
+async def send_training_card(context, cid, st):
+    if not IMG: return
+    await context.bot.send_chat_action(cid, "upload_photo")
+    try:
+        bio = io.BytesIO(IMG.render_training(st)); bio.name = "training.png"
+        await context.bot.send_photo(cid, photo=bio)
+    except Exception as e:
+        log.warning("training img: %s", e)
+
 async def send_menu(context, cid):
     u, st = status_of(cid)
     if not st: return
@@ -247,7 +285,7 @@ async def send_section(context, cid, st, key):
     await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
     usage = []
     if key == "training":
-        await send_infographic(context.bot, cid)
+        await send_training_card(context, cid, st)
         text = L.explain_section(st, "training", usage=usage)
         return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage)
     if key == "food":
@@ -265,9 +303,9 @@ async def send_delay(context, cid, st):
     msgs = {
         "due": "🟡 Месячные ожидаются примерно сейчас.\n• Если уже начались, отметь их кнопкой ниже.\n• Задержка в пару дней бывает нормой.",
         "delay": f"🔴 Задержка {st['delay_days']} дн.\n• Если был незащищённый секс, сделай тест на ХГЧ (струйный или полоска): информативен с первого дня задержки, точнее через 3-5 дней.\n• Частые причины: стресс, перелёты, резкие изменения веса и сна, интенсивные тренировки, болезнь.\n• Если задержка растёт или есть тревожные симптомы, обратись к гинекологу.\n• Когда месячные начнутся, отметь их кнопкой ниже.",
-        "stale": f"⚪ С последних отмеченных месячных прошло {st['days_since']} дн.\n• Похоже, данные устарели — отметь дату последних месячных кнопкой ниже.\n• Если менструации действительно нет так долго, это повод обратиться к гинекологу.\n• Возможные причины: беременность, СПКЯ, щитовидная железа, резкая потеря веса, перименопауза."}
+        "stale": f"⚪ С последних отмеченных месячных прошло {st['days_since']} дн.\n• Похоже, данные устарели, отметь дату последних месячных кнопкой ниже.\n• Если менструации действительно нет так долго, это повод обратиться к гинекологу.\n• Возможные причины: беременность, СПКЯ, щитовидная железа, резкая потеря веса, перименопауза."}
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Отметить месячные", callback_data="period")], [InlineKeyboardButton("Меню", callback_data="menu")]])
-    await context.bot.send_message(cid, msgs.get(st["status"], "") + "\n\n— AIWA · " + DISCLAIMER, reply_markup=kb)
+    await context.bot.send_message(cid, msgs.get(st["status"], "") + "\n\nAIWA · " + DISCLAIMER, reply_markup=kb)
 
 async def send_guide(context, cid, g):
     path = os.path.join(GUIDE_DIR, g["file"])
@@ -299,8 +337,8 @@ async def push_summary(context, cid, with_image=True):
     if with_image: await send_infographic(context.bot, cid)
     usage = []
     body = L.generate_summary(st, u["modules"], hint=last_hint(cid), usage=usage)
-    kb = sugg_kb(cid, L.followups(st, "утренняя сводка", body, usage=usage))
-    await context.bot.send_message(cid, f"{body}\n\n— AIWA · {DISCLAIMER}", reply_markup=kb)
+    kb = summary_kb()
+    await context.bot.send_message(cid, f"{body}\n\nAIWA · {DISCLAIMER}", reply_markup=kb)
     ev(cid, "tokens", sum(usage))
 
 def schedule_daily(app, cid, hhmm):
@@ -314,7 +352,12 @@ def finish_onboarding(context, cid, last_period_iso, n):
 
 # ---------- commands ----------
 async def start(update, context):
-    await begin_onboard(update.effective_chat.id, update.message)
+    cid = update.effective_chat.id
+    if is_onboarded(row(cid)):
+        return await update.message.reply_text(
+            "У тебя уже настроен цикл, данные на месте. Продолжить или начать настройку заново?",
+            reply_markup=InlineKeyboardMarkup([[B("Продолжить", "keep", KBS.PRIMARY)], [B("Начать заново", "go_start", KBS.DANGER)]]))
+    await begin_onboard(cid, update.message)
 async def today(update, context):
     ev(update.effective_chat.id, "command")
     _, st = status_of(update.effective_chat.id)
@@ -371,7 +414,7 @@ async def stop(update, context):
     for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     del_user(cid); await update.message.reply_text("Отключила сводки и удалила данные. Вернуться: /start")
 async def help_cmd(update, context):
-    await update.message.reply_text("AIWA — сводка по циклу.\n/today сводка\n/menu кнопки\n/calendar инфографика\n/checkin самочувствие\n/phases фазы\n/period отметить месячные\n/time время\n/stop отключить")
+    await update.message.reply_text("AIWA, сводка по циклу.\n/today сводка\n/menu кнопки\n/calendar инфографика\n/checkin самочувствие\n/phases фазы\n/period отметить месячные\n/time время\n/stop отключить")
 
 # ---------- stats ----------
 def aggregate_stats():
@@ -413,6 +456,9 @@ async def stats_cmd(update, context):
 # ---------- text ----------
 async def on_text(update, context):
     cid = update.effective_chat.id; u = row(cid); state = u["state"] if u else None; txt = update.message.text.strip()
+    cem = [e.custom_emoji_id for e in (update.message.entities or []) if getattr(e, "custom_emoji_id", None)]
+    if cem:
+        return await update.message.reply_text("ID кастомных эмодзи:\n" + "\n".join(cem))
 
     if state == "await_date":
         d = parse_date(txt)
@@ -427,7 +473,7 @@ async def on_text(update, context):
         finish_onboarding(context, cid, u["pending_date"], n)
         await update.message.reply_text("Готово! Сводку буду присылать каждое утро в 09:00 по МСК. Время можно поменять в Меню.")
         await push_summary(context, cid)
-        return await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда обращаться к врачу. Открыть — кнопкой ниже.",
+        return await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда обращаться к врачу. Открыть, кнопкой ниже.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Гид: норма цикла", callback_data="guides")]]))
 
     if state == "await_time":
@@ -459,7 +505,7 @@ async def on_text(update, context):
 
     m = match_meta(txt)
     if m:
-        return await update.message.reply_text(ABOUT_TEXT if m == "about" else PRIVACY_TEXT)
+        return await update.message.reply_text({"about": ABOUT_TEXT, "privacy": PRIVACY_TEXT, "tech": TECH_TEXT}[m])
 
     low = txt.lower()
     if is_onboarded(u) and re.search(r"(замен\w*|друго[ей]\w*\s+блюд\w*|другое на (завтрак|обед|ужин|перекус)|не нравит\w* блюд\w*|обнови\w* меню|пересобер\w* меню)", low):
@@ -481,6 +527,7 @@ async def on_text(update, context):
 async def on_cb(update, context):
     q = update.callback_query; await q.answer(); cid = q.message.chat.id; data = q.data
     if data == "go_start": return await begin_onboard(cid, q.message)
+    if data == "keep": return await q.message.reply_text("О чём рассказать сегодня?", reply_markup=MENU_KB)
     if data == "onb_today":
         upsert(cid, pending_date=date.today().isoformat(), state="await_len")
         return await q.message.reply_text("Отметила начало месячных сегодня. Какая средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
