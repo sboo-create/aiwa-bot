@@ -21,13 +21,9 @@ def _f(name,size):
         if os.path.exists(p): return ImageFont.truetype(p,size*S)
     return ImageFont.load_default()
 
-def _arc_round(d, cx, cy, R, a0, a1, color, w):
-    """Дуга со скруглёнными концами: сама дуга + круги-капы на концах."""
-    box=[cx-R,cy-R,cx+R,cy+R]
-    d.arc(box,a0,a1,fill=color,width=w)
-    for a in (a0,a1):
-        rad=math.radians(a); x=cx+R*math.cos(rad); y=cy+R*math.sin(rad)
-        d.ellipse([x-w/2,y-w/2,x+w/2,y+w/2],fill=color)
+def _seg(d, cx, cy, R, a0, a1, color, w):
+    """Сегмент кольца плоскими концами, с лёгким перекрытием чтобы не было швов."""
+    d.arc([cx-R,cy-R,cx+R,cy+R], a0, a1+1.4, fill=color, width=w)
 
 def render_cycle(last_period: date, cycle_len: int, today: date) -> bytes:
     W,H=720,950
@@ -46,7 +42,7 @@ def render_cycle(last_period: date, cycle_len: int, today: date) -> bytes:
     cx,cy,R,wd=X(W//2),X(330),X(150),X(26)
     ov=max(12,cycle_len-14)
     for name,fday,tday in (("menstrual",0,5),("follicular",5,ov),("ovulation",ov,ov+3),("luteal",ov+3,cycle_len)):
-        _arc_round(d,cx,cy,R,270+fday/cycle_len*360,270+tday/cycle_len*360,COL[name],wd)
+        _seg(d,cx,cy,R,270+fday/cycle_len*360,270+tday/cycle_len*360,COL[name],wd)
     am=math.radians(270+st["day"]/cycle_len*360)
     mx,my=cx+R*math.cos(am),cy+R*math.sin(am); mr=X(15)
     d.ellipse([mx-mr,my-mr,mx+mr,my+mr],fill=(255,255,255),outline=ROSE,width=X(6))
@@ -83,6 +79,37 @@ def render_cycle(last_period: date, cycle_len: int, today: date) -> bytes:
         lx=X(40)+(n%2)*X(330); yy=ly+(n//2)*X(30)
         d.ellipse([lx,yy,lx+X(14),yy+X(14)],fill=COL[key]); d.text((lx+X(20),yy+X(7)),nm,font=f_leg,fill=INKMID,anchor="lm")
 
+    img=img.resize((W,H),Image.LANCZOS)
+    buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
+
+
+def render_delay(st):
+    W,H=720,540; S2=3
+    img=Image.new("RGB",(W*S2,H*S2),PAPER); d=ImageDraw.Draw(img)
+    def X(v): return v*S2
+    def f(name,size):
+        for p in (os.path.join(HERE,"assets",name),"/usr/share/fonts/truetype/dejavu/"+name):
+            if os.path.exists(p): return ImageFont.truetype(p,size*S2)
+        return ImageFont.load_default()
+    f_eye=f("DejaVuSans-Bold.ttf",22); f_sm=f("DejaVuSans.ttf",20)
+    f_h=f("DejaVuSerif.ttf",34); f_big=f("DejaVuSerif.ttf",80); f_t=f("DejaVuSans.ttf",19)
+    d.text((X(40),X(34)),"AIWA",font=f_eye,fill=ROSE)
+    titles={"due":"Месячные ожидаются","delay":"Задержка","stale":"Данные устарели"}
+    d.text((X(40),X(70)),titles.get(st["status"],"Цикл"),font=f_h,fill=INK)
+    num = st["delay_days"] if st["status"]=="delay" else st["days_since"]
+    # бейдж с числом
+    cx,cy,r=X(W//2),X(250),X(95)
+    d.ellipse([cx-r,cy-r,cx+r,cy+r],fill=ROSEWASH)
+    d.text((cx,cy-X(20)),str(num),font=f_big,fill=ROSEDEEP if False else (158,66,87),anchor="mm")
+    d.text((cx,cy+X(40)),"дней",font=f_sm,fill=SOFT,anchor="mm")
+    advice={"due":"Если месячные начались, отметь их кнопкой. Небольшая задержка бывает нормой.",
+            "delay":"Если был незащищённый секс, имеет смысл сделать тест на ХГЧ (струйный или полоска).",
+            "stale":"Отметь дату последних месячных. Если менструации нет дольше обычного — к гинекологу."}
+    # перенос строки
+    import textwrap
+    y=X(380)
+    for line in textwrap.wrap(advice.get(st["status"],""), width=46):
+        d.text((X(40),y),line,font=f_t,fill=INKMID); y+=X(28)
     img=img.resize((W,H),Image.LANCZOS)
     buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
 

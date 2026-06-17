@@ -22,6 +22,15 @@ DB = os.environ.get("AIWA_DB", "aiwa.db")
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
+GUIDE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "guides")
+GUIDES = [{"id":"cycle_length","title":"Сколько длится нормальный цикл","file":"cycle_length.png",
+           "kw":["нормальн","сколько длит","длина цикл","норма цикл","цикл длит","какой цикл норм"]}]
+def guide_by_id(gid): return next((g for g in GUIDES if g["id"]==gid), None)
+def match_guide(text):
+    t=text.lower()
+    for g in GUIDES:
+        if any(k in t for k in g["kw"]): return g
+    return None
 EN = {1:"низкая",2:"средняя",3:"высокая"}; MD = {1:"низкое",2:"нормальное",3:"хорошее"}
 SYMPTOMS = [("cramps","спазмы"),("head","головная боль"),("bloat","вздутие"),
             ("sweet","тяга к сладкому"),("anx","тревожность"),("tired","усталость")]
@@ -29,7 +38,8 @@ SYM = dict(SYMPTOMS)
 
 # ---------- DB ----------
 def db():
-    c = sqlite3.connect(DB)
+    c = sqlite3.connect(DB, timeout=30)
+    c.execute("PRAGMA journal_mode=WAL")
     c.execute("""CREATE TABLE IF NOT EXISTS users(chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
         send_time TEXT DEFAULT '08:00', modules TEXT DEFAULT 'phase,general,food,training',
         state TEXT, pending_date TEXT, created TEXT)""")
@@ -119,9 +129,20 @@ MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Питание", callback_data="sec:food"), InlineKeyboardButton("Нагрузка", callback_data="sec:training")],
     [InlineKeyboardButton("Календарь", callback_data="calendar"), InlineKeyboardButton("Чек-ин", callback_data="checkin")],
     [InlineKeyboardButton("Отметить месячные", callback_data="period"), InlineKeyboardButton("Спросить AIWA", callback_data="ask")],
+    [InlineKeyboardButton("Гид по циклу", callback_data="guides")],
     [InlineKeyboardButton("Время рассылки", callback_data="set:time")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
+def time_kb():
+    times=["07:00","08:00","09:00","10:00","21:00","22:00"]
+    return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=f"tm:{t}") for t in times[i:i+3]] for i in (0,3)])
+
+async def send_guide(context, cid, g):
+    path = os.path.join(GUIDE_DIR, g["file"])
+    if not os.path.exists(path):
+        return await context.bot.send_message(cid, "Этот гид скоро появится.")
+    with open(path, "rb") as fh:
+        await context.bot.send_photo(cid, photo=fh, caption=g["title"])
 
 def sugg_kb(cid, items):
     rows = [[InlineKeyboardButton(t, callback_data=f"q:{add_sugg(cid,t)}")] for t in items[:3]]
@@ -153,9 +174,24 @@ async def send_answer(context, cid, text, st, basis_q, usage=None):
     await context.bot.send_message(cid, text, reply_markup=kb)
     ev(cid, "tokens", sum(usage))
 
+async def send_delay(context, cid, st):
+    if IMG:
+        try:
+            bio = io.BytesIO(IMG.render_delay(st)); bio.name = "delay.png"
+            await context.bot.send_photo(cid, photo=bio)
+        except Exception as e: log.warning("delay img: %s", e)
+    msgs = {
+      "due":"Месячные ожидаются примерно сейчас. Если уже начались, отметь их кнопкой ниже. Небольшая задержка бывает нормой.",
+      "delay":f"Задержка {st['delay_days']} дней. Если был незащищённый секс, имеет смысл сделать тест на ХГЧ (струйный или полоска): он информативен с первого дня задержки, точнее через 3-5 дней. Если задержка растёт или есть тревожные симптомы, обратись к гинекологу. Когда месячные начнутся, отметь кнопкой ниже.",
+      "stale":f"С последних отмеченных месячных прошло {st['days_since']} дней, данные похоже устарели. Отметь дату последних месячных. Если менструации нет дольше обычного, обратись к гинекологу."}
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Отметить месячные", callback_data="period")],
+                               [InlineKeyboardButton("Меню", callback_data="menu")]])
+    await context.bot.send_message(cid, msgs.get(st["status"], "") + "\n\n— AIWA · " + DISCLAIMER, reply_markup=kb)
+
 async def push_summary(context, cid, with_image=True):
     u, st = status_of(cid)
     if not st: return
+    if st["status"] != "normal": return await send_delay(context, cid, st)
     if with_image: await send_infographic(context.bot, cid)
     usage = []
     body = L.generate_summary(st, u["modules"], hint=last_hint(cid), usage=usage)
@@ -182,6 +218,7 @@ async def calendar_cmd(update, context):
     ev(update.effective_chat.id, "command")
     _, st = status_of(update.effective_chat.id)
     if not st: return await need_onboard(update.message)
+    if st["status"] != "normal": return await send_delay(context, update.effective_chat.id, st)
     await send_infographic(context.bot, update.effective_chat.id)
 async def menu(update, context):
     ev(update.effective_chat.id, "command")
@@ -215,6 +252,13 @@ async def stop(update, context):
     cid = update.effective_chat.id
     for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     del_user(cid); await update.message.reply_text("Отключила сводки и удалила данные. Вернуться: /start")
+async def guide_cmd(update, context):
+    ev(update.effective_chat.id, "command")
+    if len(GUIDES)==1:
+        return await send_guide(context, update.effective_chat.id, GUIDES[0])
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton(g["title"], callback_data=f"g:{g['id']}")] for g in GUIDES])
+    await update.message.reply_text("Гиды по циклу:", reply_markup=kb)
+
 async def help_cmd(update, context):
     await update.message.reply_text("AIWA — сводка по циклу.\n/start — настроить\n/today — сводка\n/calendar — инфографика\n/checkin — чек-ин\n/period — отметить месячные\n/menu — кнопки\n/time 09:30 — время\n/stop — отключить")
 
@@ -236,7 +280,10 @@ async def on_text(update, context):
         return await push_summary(context, cid)
     if is_onboarded(u):
         _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing")
-        ev(cid, "manual"); usage = []
+        ev(cid, "manual")
+        g = match_guide(txt)
+        if g: await send_guide(context, cid, g)
+        usage = []
         ans = L.answer_question(st, txt, usage=usage)
         return await send_answer(context, cid, ans, st, txt, usage=usage)
     await need_onboard(update.message)
@@ -255,6 +302,14 @@ async def on_cb(update, context):
         text = L.section_text(st, data.split(":")[1]); await send_answer(context, cid, text, st, text)
     elif data == "calendar":
         await send_infographic(context.bot, cid)
+    elif data == "guides":
+        if len(GUIDES)==1: await send_guide(context, cid, GUIDES[0])
+        else:
+            kb=InlineKeyboardMarkup([[InlineKeyboardButton(g["title"], callback_data=f"g:{g['id']}")] for g in GUIDES])
+            await q.message.reply_text("Гиды по циклу:", reply_markup=kb)
+    elif data.startswith("g:"):
+        g=guide_by_id(data.split(":",1)[1])
+        if g: await send_guide(context, cid, g)
     elif data == "ask":
         upsert(cid, state="await_question"); await q.message.reply_text("Напиши свой вопрос AIWA, отвечу с учётом твоей фазы.")
     elif data == "checkin":
@@ -263,7 +318,11 @@ async def on_cb(update, context):
         cyc_add(cid, today_s); upsert(cid, last_period=today_s); schedule_daily(context.application, cid, u["send_time"] or "08:00")
         await q.message.reply_text("Отметила начало месячных сегодня. Учту в прогнозе и динамике.")
     elif data == "set:time":
-        await q.message.reply_text("Отправь время в формате: /time 09:30")
+        await q.message.reply_text("Во сколько присылать сводку (МСК)?", reply_markup=time_kb())
+    elif data.startswith("tm:"):
+        hhmm = data.split(":", 1)[1]
+        upsert(cid, send_time=hhmm); schedule_daily(context.application, cid, hhmm)
+        await q.message.reply_text(f"Время сводки: {hhmm} (МСК).")
     elif data.startswith("ci:e:"):
         log_set(cid, today_s, energy=int(data.split(":")[2]))
         await q.edit_message_text("Настроение?", reply_markup=en_kb("m"))
@@ -328,11 +387,19 @@ async def stats_cmd(update, context):
         return await update.message.reply_text("Эта команда доступна только администратору.")
     await update.message.reply_text(aggregate_stats())
 
+async def on_error(update, context):
+    log.error("handler error", exc_info=context.error)
+    try:
+        if isinstance(update, Update) and update.effective_chat:
+            await context.bot.send_message(update.effective_chat.id, "Упс, что-то пошло не так. Попробуй ещё раз или нажми Меню.")
+    except Exception: pass
+
 def main():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).post_init(on_startup).build()
     for cmd, fn in (("start",start),("today",today),("summary",today),("calendar",calendar_cmd),("checkin",checkin_cmd),
-                    ("period",period_cmd),("menu",menu),("time",set_time_cmd),("stop",stop),("help",help_cmd),("stats",stats_cmd)):
+                    ("period",period_cmd),("menu",menu),("time",set_time_cmd),("guide",guide_cmd),("stop",stop),("help",help_cmd),("stats",stats_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
+    app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     log.info("AIWA bot starting..."); app.run_polling(allowed_updates=Update.ALL_TYPES)
