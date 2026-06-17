@@ -58,7 +58,13 @@ def cycle_status(last_period: date, cycle_len: int, today: date | None = None) -
     ph = phase_for_day(day, cycle_len)
     days_to_next = cycle_len - day + 1
     next_period = today + timedelta(days=days_to_next)
+    # под-фаза: ранняя/средняя/поздняя внутри текущей фазы
+    bounds={"menstrual":(1,5),"follicular":(6,max(12,cycle_len-14)-1),
+            "ovulation":(max(12,cycle_len-14),max(12,cycle_len-14)+2),"luteal":(max(12,cycle_len-14)+3,cycle_len)}
+    lo,hi=bounds[ph]; span=max(1,hi-lo); pos=(day-lo)/span
+    sub="ранняя" if pos<0.34 else ("средняя" if pos<0.67 else "поздняя")
     return {
+        "subphase": sub,
         "day": day,
         "cycle_len": cycle_len,
         "phase": ph,
