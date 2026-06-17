@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """AIWA — Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, sqlite3, logging
+import os, io, re, sqlite3, logging
 from datetime import datetime, date, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -169,6 +169,14 @@ def match_meta(text):
     if any(k in t for k in ("храните данные", "хранишь данные", "мои данные", "персональные данные", "приватн", "конфиденц", "что с данными", "безопасн")): return "privacy"
     return None
 
+def is_gibberish(t):
+    s = t.strip(); low = s.lower()
+    letters = re.sub(r"[^а-яёa-z]", "", low)
+    if len(s) <= 1 or len(letters) == 0: return True
+    if len(set(letters)) == 1 and len(letters) >= 3: return True
+    if len(letters) >= 4 and not re.search(r"[аеёиоуыэюяaeiouy]", letters): return True
+    return False
+
 def match_guide(text):
     t = text.lower()
     for g in GUIDES:
@@ -230,9 +238,24 @@ async def send_menu(context, cid):
     note = st["content"]["food"]
     try:
         bio = io.BytesIO(IMG.render_menu(mdata, st["phase_ru"])); bio.name = "menu.png"
-        await context.bot.send_photo(cid, photo=bio, caption=f"🍽 Меню под {st['phase_ru'].lower()} фазу. {note} Хочешь замену блюда — просто спроси.")
+        await context.bot.send_photo(cid, photo=bio, caption=f"🍽 Меню под {st['phase_ru'].lower()} фазу. Не нравится блюдо, напиши «замени обед» или «другое на ужин».")
     except Exception as e:
         log.warning("menu: %s", e); await context.bot.send_message(cid, "🍽 " + note)
+
+async def send_section(context, cid, st, key):
+    """Нагрузка и питание: живой ответ с мед-обоснованием. Для нагрузки картинка цикла идёт над текстом, для питания сверху карточка-меню."""
+    await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
+    usage = []
+    if key == "training":
+        await send_infographic(context.bot, cid)
+        text = L.explain_section(st, "training", usage=usage)
+        return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage)
+    if key == "food":
+        await send_menu(context, cid)
+        text = L.explain_section(st, "food", usage=usage)
+        return await send_answer(context, cid, text, st, "питание сегодня", usage=usage)
+    text = L.section_text(st, key)
+    await send_answer(context, cid, text, st, text, usage=usage)
 
 async def send_delay(context, cid, st):
     if IMG:
@@ -438,6 +461,13 @@ async def on_text(update, context):
     if m:
         return await update.message.reply_text(ABOUT_TEXT if m == "about" else PRIVACY_TEXT)
 
+    low = txt.lower()
+    if is_onboarded(u) and re.search(r"(замен\w*|друго[ей]\w*\s+блюд\w*|другое на (завтрак|обед|ужин|перекус)|не нравит\w* блюд\w*|обнови\w* меню|пересобер\w* меню)", low):
+        _, st = status_of(cid); ev(cid, "manual")
+        return await send_menu(context, cid)
+    if is_onboarded(u) and is_gibberish(txt):
+        return await update.message.reply_text("Не поняла запрос. Напиши вопрос словами, например: «почему тянет на сладкое» или «какая тренировка сегодня».")
+
     if is_onboarded(u):
         _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "manual")
         g = match_guide(txt)
@@ -462,9 +492,9 @@ async def on_cb(update, context):
     if data == "menu":
         await q.message.reply_text("О чём рассказать сегодня?", reply_markup=MENU_KB)
     elif data == "food":
-        await send_menu(context, cid)
+        await send_section(context, cid, st, "food")
     elif data.startswith("sec:"):
-        text = L.section_text(st, data.split(":")[1]); await send_answer(context, cid, text, st, text)
+        await send_section(context, cid, st, data.split(":")[1])
     elif data == "calendar":
         if st["status"] != "normal": await send_delay(context, cid, st)
         else: await send_infographic(context.bot, cid)

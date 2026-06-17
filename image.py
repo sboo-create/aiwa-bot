@@ -84,7 +84,7 @@ def render_cycle(last_period: date, cycle_len: int, today: date) -> bytes:
 
 
 def render_delay(st):
-    W,H=720,540; S2=3
+    W,H=720,540; S2=S
     img=Image.new("RGB",(W*S2,H*S2),PAPER); d=ImageDraw.Draw(img)
     def X(v): return v*S2
     def f(name,size):
@@ -115,37 +115,37 @@ def render_delay(st):
 
 
 def render_menu(data, phase_ru="Лютеиновая"):
-    W=720; S2=2
+    """Карточка питания на день. Единый рендер (3x супер-сэмплинг), длинный текст обрезается, а не вылезает."""
+    W=720
     meals=data.get("meals",[])[:4]; H=300+len(meals)*92
-    img=Image.new("RGB",(W*S2,H*S2),PAPER); d=ImageDraw.Draw(img)
-    def X(v): return int(v*S2)
-    def f(name,size):
-        for p in (os.path.join(HERE,"assets",name),"/usr/share/fonts/truetype/dejavu/"+name):
-            if os.path.exists(p): return ImageFont.truetype(p,size*S2)
-        return ImageFont.load_default()
-    f_eye=f("DejaVuSans-Bold.ttf",22); f_h=f("DejaVuSerif.ttf",32)
-    f_ml=f("DejaVuSans-Bold.ttf",17); f_mv=f("DejaVuSerif.ttf",30)
-    f_t=f("DejaVuSans-Bold.ttf",13); f_dish=f("DejaVuSans-Bold.ttf",18); f_note=f("DejaVuSans.ttf",15)
+    img=Image.new("RGB",(W*S,H*S),PAPER); d=ImageDraw.Draw(img)
+    def X(v): return int(v*S)
+    f_eye=_f("DejaVuSans-Bold.ttf",22); f_h=_f("DejaVuSerif.ttf",32)
+    f_ml=_f("DejaVuSans-Bold.ttf",17); f_mv=_f("DejaVuSerif.ttf",28)
+    f_t=_f("DejaVuSans-Bold.ttf",13); f_dish=_f("DejaVuSans-Bold.ttf",18); f_note=_f("DejaVuSans.ttf",15)
+    def fit(text,font,maxw_pt):
+        maxw=X(maxw_pt); text=str(text)
+        if d.textlength(text,font=font)<=maxw: return text
+        while text and d.textlength(text+"…",font=font)>maxw: text=text[:-1]
+        return (text.rstrip()+"…") if text else text
     d.text((X(40),X(34)),"AIWA",font=f_eye,fill=ROSE)
-    d.text((X(40),X(66)),"Меню на сегодня",font=f_h,fill=INK)
-    # макросы
+    d.text((X(40),X(66)),"Питание на сегодня",font=f_h,fill=INK)
     m=data.get("macros",{}); items=[("Белок",m.get("protein","")),("Жиры",m.get("fat","")),("Углеводы",m.get("carbs",""))]
     bw=(W-80-2*14)/3; bx=40; by=120
     for lab,val in items:
         d.rounded_rectangle([X(bx),X(by),X(bx+bw),X(by+86)],radius=X(16),fill=(246,238,232))
         d.text((X(bx+bw/2),X(by+24)),lab,font=f_ml,fill=SOFT,anchor="mm")
-        d.text((X(bx+bw/2),X(by+58)),str(val),font=f_mv,fill=INK,anchor="mm")
+        d.text((X(bx+bw/2),X(by+58)),fit(val,f_mv,bw-12),font=f_mv,fill=INK,anchor="mm")
         bx+=bw+14
-    # блюда
     tints=[(251,228,233),(230,235,221),(251,239,203),(246,238,232)]
-    y=235
+    y=235; tx=112; maxw=W-tx-40
     for i,meal in enumerate(meals):
         d.rounded_rectangle([X(40),X(y),X(40+56),X(y+56)],radius=X(14),fill=tints[i%4])
-        d.text((X(112),X(y+2)),str(meal.get("time","")),font=f_t,fill=SOFT)
-        d.text((X(112),X(y+22)),str(meal.get("dish","")),font=f_dish,fill=INK)
+        d.text((X(tx),X(y+2)),str(meal.get("time","")),font=f_t,fill=SOFT)
+        d.text((X(tx),X(y+22)),fit(meal.get("dish",""),f_dish,maxw),font=f_dish,fill=INK)
         note=str(meal.get("note","")); kcal=str(meal.get("kcal",""))
         sub=(note+(" · "+kcal if kcal else "")).strip(" ·")
-        d.text((X(112),X(y+48)),sub,font=f_note,fill=INKMID)
+        d.text((X(tx),X(y+48)),fit(sub,f_note,maxw),font=f_note,fill=INKMID)
         y+=92
     img=img.resize((W,H),Image.LANCZOS)
     buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
