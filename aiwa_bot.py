@@ -4,7 +4,7 @@ import os, io, sqlite3, logging
 from datetime import datetime, date, time as dtime
 from zoneinfo import ZoneInfo
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
 
@@ -31,6 +31,29 @@ def match_guide(text):
     for g in GUIDES:
         if any(k in t for k in g["kw"]): return g
     return None
+PHASES_TEXT = (
+ "🌸 Фазы цикла\n\n"
+ "🩸 Менструальная (дни 1-5)\n• Гормоны на минимуме, энергия низкая.\n• Питание: железо и тепло — гречка, печень, чечевица, свёкла.\n• Нагрузка: ходьба, растяжка, мягкая йога.\n\n"
+ "🌱 Фолликулярная (дни 6-13)\n• Эстроген растёт, энергия и настроение вверх.\n• Питание: белок и свежее — яйца, рыба, зелень.\n• Нагрузка: силовые на пике (выше чувствительность к инсулину).\n\n"
+ "☀️ Овуляторная (дни 14-16)\n• Пик эстрогена, максимум энергии и либидо.\n• Питание: антиоксиданты и клетчатка — ягоды, листовые.\n• Нагрузка: HIIT и интенсивное кардио.\n\n"
+ "🌙 Лютеиновая (дни 17-конец)\n• Прогестерон растёт, к концу ПМС и тяга к сладкому.\n• Питание: магний, B6, сложные углеводы — тёмный шоколад 85%, орехи.\n• Нагрузка: средняя интенсивность, ближе к месячным восстановление."
+)
+ABOUT_TEXT = ("🌸 Я AIWA (AI for Woman Awareness), ИИ-ассистент женского здоровья по циклу. "
+ "Цветок на логотипе — про идею расцветать в своём ритме. Каждое утро собираю сводку под твою фазу: тело, питание, тренировки, "
+ "и отвечаю на вопросы про цикл и самочувствие. Работаю на GigaChat.\n\n"
+ "Что умею: /today сводка, /calendar инфографика, /checkin самочувствие, /phases фазы, /menu все кнопки.")
+PRIVACY_TEXT = ("🔒 Про данные: храню минимум — дату последних месячных, длину цикла, твои чек-ины и время рассылки, чтобы считать фазу. "
+ "Это не передаётся третьим лицам. Удалить все данные и отключиться можно командой /stop в любой момент.")
+def match_meta(text):
+    t = text.lower()
+    if any(k in t for k in ("что такое айва","что такое aiwa","расскажи о себе","кто ты","о тебе","про себя","что ты умеешь","ты кто")): return "about"
+    if any(k in t for k in ("храните данные","хранишь данные","мои данные","персональные данные","приватн","конфиденц","что с данными","безопасн")): return "privacy"
+    return None
+def calc_calories(cm, kg, age, act):
+    bmr = 10*kg + 6.25*cm - 5*age - 161
+    tdee = bmr * {1:1.2,2:1.375,3:1.55,4:1.725,5:1.9}.get(act, 1.375)
+    p = round(1.6*kg); fat = round(tdee*0.3/9); carbs = round(max(0, tdee - p*4 - fat*9)/4)
+    return round(tdee), p, fat, carbs
 EN = {1:"низкая",2:"средняя",3:"высокая"}; MD = {1:"низкое",2:"нормальное",3:"хорошее"}
 SYMPTOMS = [("cramps","спазмы"),("head","головная боль"),("bloat","вздутие"),
             ("sweet","тяга к сладкому"),("anx","тревожность"),("tired","усталость")]
@@ -110,8 +133,9 @@ def del_user(cid):
 
 # ---------- helpers ----------
 def parse_date(t):
-    t = t.strip().replace("/", ".").replace("-", ".")
-    for fmt in ("%d.%m.%Y","%Y.%m.%d","%d.%m.%y","%d.%m"):
+    t = t.strip().replace("/", ".").replace("-", ".").replace(" ", ".").replace(",", ".")
+    while ".." in t: t = t.replace("..", ".")
+    for fmt in ("%d.%m.%Y","%Y.%m.%d","%d.%m.%y","%d.%m","%d%m%Y","%d%m%y"):
         try:
             d = datetime.strptime(t, fmt).date()
             if fmt == "%d.%m": d = d.replace(year=date.today().year)
@@ -129,7 +153,8 @@ MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Питание", callback_data="sec:food"), InlineKeyboardButton("Нагрузка", callback_data="sec:training")],
     [InlineKeyboardButton("Календарь", callback_data="calendar"), InlineKeyboardButton("Чек-ин", callback_data="checkin")],
     [InlineKeyboardButton("Отметить месячные", callback_data="period"), InlineKeyboardButton("Спросить AIWA", callback_data="ask")],
-    [InlineKeyboardButton("Гид по циклу", callback_data="guides")],
+    [InlineKeyboardButton("Меню на сегодня", callback_data="menu_today"), InlineKeyboardButton("Калькулятор калорий", callback_data="calc")],
+    [InlineKeyboardButton("Фазы цикла", callback_data="phases"), InlineKeyboardButton("Гид по циклу", callback_data="guides")],
     [InlineKeyboardButton("Время рассылки", callback_data="set:time")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
@@ -141,8 +166,19 @@ async def send_guide(context, cid, g):
     path = os.path.join(GUIDE_DIR, g["file"])
     if not os.path.exists(path):
         return await context.bot.send_message(cid, "Этот гид скоро появится.")
-    with open(path, "rb") as fh:
-        await context.bot.send_photo(cid, photo=fh, caption=g["title"])
+    try:
+        from PIL import Image
+        im = Image.open(path).convert("RGB"); w, h = im.size; n = 3; part = h // n
+        media = []
+        for i in range(n):
+            top = i * part; bottom = h if i == n - 1 else (i + 1) * part
+            b = io.BytesIO(); im.crop((0, top, w, bottom)).save(b, "JPEG", quality=90); b.seek(0)
+            media.append(InputMediaPhoto(b, caption=(g["title"] if i == 0 else None)))
+        await context.bot.send_media_group(cid, media)
+    except Exception as e:
+        log.warning("guide split: %s", e)
+        with open(path, "rb") as fh:
+            await context.bot.send_photo(cid, photo=fh, caption=g["title"])
 
 def sugg_kb(cid, items):
     rows = [[InlineKeyboardButton(t, callback_data=f"q:{add_sugg(cid,t)}")] for t in items[:3]]
@@ -181,9 +217,9 @@ async def send_delay(context, cid, st):
             await context.bot.send_photo(cid, photo=bio)
         except Exception as e: log.warning("delay img: %s", e)
     msgs = {
-      "due":"Месячные ожидаются примерно сейчас. Если уже начались, отметь их кнопкой ниже. Небольшая задержка бывает нормой.",
-      "delay":f"Задержка {st['delay_days']} дней. Если был незащищённый секс, имеет смысл сделать тест на ХГЧ (струйный или полоска): он информативен с первого дня задержки, точнее через 3-5 дней. Если задержка растёт или есть тревожные симптомы, обратись к гинекологу. Когда месячные начнутся, отметь кнопкой ниже.",
-      "stale":f"С последних отмеченных месячных прошло {st['days_since']} дней, данные похоже устарели. Отметь дату последних месячных. Если менструации нет дольше обычного, обратись к гинекологу."}
+      "due":"🟡 Месячные ожидаются примерно сейчас.\n• Если уже начались, отметь их кнопкой ниже.\n• Задержка в пару дней бывает нормой.",
+      "delay":f"🔴 Задержка {st['delay_days']} дн.\n• Если был незащищённый секс, сделай тест на ХГЧ (струйный или полоска): информативен с первого дня задержки, точнее через 3-5 дней.\n• Частые причины: стресс, перелёты, резкие изменения веса и сна, интенсивные тренировки, болезнь.\n• Если задержка растёт или есть тревожные симптомы, обратись к гинекологу.\n• Когда месячные начнутся, отметь их кнопкой ниже.",
+      "stale":f"⚪ С последних отмеченных месячных прошло {st['days_since']} дн.\n• Похоже, данные устарели — отметь дату последних месячных кнопкой ниже.\n• Если менструации действительно нет так долго, это повод обратиться к гинекологу.\n• Возможные причины: беременность, СПКЯ, щитовидная железа, резкая потеря веса, перименопауза."}
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Отметить месячные", callback_data="period")],
                                [InlineKeyboardButton("Меню", callback_data="menu")]])
     await context.bot.send_message(cid, msgs.get(st["status"], "") + "\n\n— AIWA · " + DISCLAIMER, reply_markup=kb)
@@ -259,6 +295,22 @@ async def guide_cmd(update, context):
     kb=InlineKeyboardMarkup([[InlineKeyboardButton(g["title"], callback_data=f"g:{g['id']}")] for g in GUIDES])
     await update.message.reply_text("Гиды по циклу:", reply_markup=kb)
 
+async def about_cmd(update, context):
+    ev(update.effective_chat.id, "command"); await update.message.reply_text(ABOUT_TEXT)
+
+async def menutoday_cmd(update, context):
+    ev(update.effective_chat.id, "command")
+    _, st = status_of(update.effective_chat.id)
+    if not st: return await need_onboard(update.message)
+    await context.bot.send_chat_action(update.effective_chat.id, "upload_photo")
+    usage = []; mdata = L.menu_today(st, usage=usage); ev(update.effective_chat.id, "tokens", sum(usage))
+    bio = io.BytesIO(IMG.render_menu(mdata, st["phase_ru"])); bio.name = "menu.png"
+    await context.bot.send_photo(update.effective_chat.id, photo=bio, caption="Меню под твою фазу.")
+
+async def phases_cmd(update, context):
+    ev(update.effective_chat.id, "command")
+    await update.message.reply_text(PHASES_TEXT)
+
 async def help_cmd(update, context):
     await update.message.reply_text("AIWA — сводка по циклу.\n/start — настроить\n/today — сводка\n/calendar — инфографика\n/checkin — чек-ин\n/period — отметить месячные\n/menu — кнопки\n/time 09:30 — время\n/stop — отключить")
 
@@ -277,7 +329,30 @@ async def on_text(update, context):
         upsert(cid, last_period=u["pending_date"], cycle_len=n, state=None, pending_date=None)
         cyc_add(cid, u["pending_date"]); schedule_daily(context.application, cid, u["send_time"] or "08:00")
         await update.message.reply_text("Готово! Сводка будет приходить каждое утро в 08:00 (МСК). Время: /time 09:30")
-        return await push_summary(context, cid)
+        await push_summary(context, cid)
+        return await context.bot.send_message(cid, "📘 Есть гид «Сколько длится нормальный цикл». Открой кнопкой ниже или спроси «нормальный цикл».",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Гид по циклу", callback_data="guides")]]))
+    if state == "await_time":
+        try:
+            h, m = map(int, txt.replace(".", ":").replace(" ", "").split(":")); assert 0 <= h < 24 and 0 <= m < 60
+        except Exception:
+            return await update.message.reply_text("Формат времени, например 09:30 или 13:00.")
+        upsert(cid, send_time=f"{h:02d}:{m:02d}", state=None); schedule_daily(context.application, cid, f"{h:02d}:{m:02d}")
+        return await update.message.reply_text(f"Время сводки: {h:02d}:{m:02d} (МСК).")
+    if state == "await_calc":
+        try:
+            parts = [p for p in txt.replace(",", ".").replace(";", " ").split() if p]
+            cm, kg, age = float(parts[0]), float(parts[1]), int(float(parts[2])); act = int(parts[3]) if len(parts) > 3 else 3
+            assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80 and 1 <= act <= 5
+        except Exception:
+            return await update.message.reply_text("Формат: рост вес возраст активность(1-5). Например: 168 60 30 3")
+        upsert(cid, state=None); tdee, p, fat, carbs = calc_calories(cm, kg, age, act)
+        return await update.message.reply_text(
+            f"🔥 Норма калорий: ~{tdee} ккал в день (поддержание).\n• Белок: {p} г\n• Жиры: {fat} г\n• Углеводы: {carbs} г\n\n"
+            "Для снижения веса минус 15-20%, для набора плюс 10-15%. Это ориентир, не медицинское назначение.")
+    m = match_meta(txt)
+    if m:
+        return await update.message.reply_text(ABOUT_TEXT if m == "about" else PRIVACY_TEXT)
     if is_onboarded(u):
         _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing")
         ev(cid, "manual")
@@ -318,11 +393,25 @@ async def on_cb(update, context):
         cyc_add(cid, today_s); upsert(cid, last_period=today_s); schedule_daily(context.application, cid, u["send_time"] or "08:00")
         await q.message.reply_text("Отметила начало месячных сегодня. Учту в прогнозе и динамике.")
     elif data == "set:time":
-        await q.message.reply_text("Во сколько присылать сводку (МСК)?", reply_markup=time_kb())
+        upsert(cid, state="await_time")
+        await q.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 13:00.", reply_markup=time_kb())
     elif data.startswith("tm:"):
         hhmm = data.split(":", 1)[1]
-        upsert(cid, send_time=hhmm); schedule_daily(context.application, cid, hhmm)
+        upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
         await q.message.reply_text(f"Время сводки: {hhmm} (МСК).")
+    elif data == "phases":
+        await q.message.reply_text(PHASES_TEXT)
+    elif data == "menu_today":
+        await context.bot.send_chat_action(cid, "upload_photo")
+        usage = []; mdata = L.menu_today(st, usage=usage); ev(cid, "tokens", sum(usage))
+        try:
+            bio = io.BytesIO(IMG.render_menu(mdata, st["phase_ru"])); bio.name = "menu.png"
+            await context.bot.send_photo(cid, photo=bio, caption="Меню под твою фазу. Хочешь замену блюда — просто спроси.")
+        except Exception as e:
+            log.warning("menu img: %s", e); await context.bot.send_message(cid, "Меню сейчас не собралось, попробуй ещё раз.")
+    elif data == "calc":
+        upsert(cid, state="await_calc")
+        await q.message.reply_text("Калькулятор калорий. Напиши через пробел: рост(см) вес(кг) возраст активность(1-5).\n1 сидячий, 3 умеренно, 5 очень активный. Например: 168 60 30 3")
     elif data.startswith("ci:e:"):
         log_set(cid, today_s, energy=int(data.split(":")[2]))
         await q.edit_message_text("Настроение?", reply_markup=en_kb("m"))
@@ -397,7 +486,7 @@ async def on_error(update, context):
 def main():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).post_init(on_startup).build()
     for cmd, fn in (("start",start),("today",today),("summary",today),("calendar",calendar_cmd),("checkin",checkin_cmd),
-                    ("period",period_cmd),("menu",menu),("time",set_time_cmd),("guide",guide_cmd),("stop",stop),("help",help_cmd),("stats",stats_cmd)):
+                    ("period",period_cmd),("menu",menu),("time",set_time_cmd),("guide",guide_cmd),("phases",phases_cmd),("about",about_cmd),("menutoday",menutoday_cmd),("stop",stop),("help",help_cmd),("stats",stats_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
