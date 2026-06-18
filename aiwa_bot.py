@@ -1242,6 +1242,7 @@ async def _api_data(request):
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
                     "days_since": stt["days_since"], "status": stt["status"], "delay_days": stt["delay_days"]})
+        out["cycles"] = cycles_of(cid)
     return _cors(web.json_response(out))
 async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))

@@ -39,6 +39,10 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .stat .v{font-family:var(--serif);font-size:23px;font-weight:500;margin-top:4px}.stat .s{font-size:10.5px;color:var(--inkSoft)}
 .sec{font-family:var(--serif);font-size:18px;font-weight:500;margin:18px 2px 10px}
 .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.calhead{display:flex;align-items:center;justify-content:space-between;margin:18px 2px 10px}
+.calnav{border:none;background:var(--paper2);color:var(--roseDeep);width:34px;height:34px;border-radius:11px;font-size:20px;line-height:1;cursor:pointer;font-family:var(--sans)}
+.calnav:active{transform:scale(.94)}
+.calhint{font-size:11px;color:var(--inkSoft);text-align:center;margin-top:8px;min-height:14px}
 .wd{text-align:center;font-size:10px;color:var(--inkSoft);font-weight:600}
 .day{aspect-ratio:1;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:13px;border:2px solid transparent}
 .day.empty{border:none}.day.today{background:var(--ink);color:#fff;font-weight:700}
@@ -107,6 +111,7 @@ async function api(path,body){try{var r=await fetch(path,{method:'POST',headers:
 function phaseForDay(d,l){if(d<=5)return"men";var ov=Math.max(12,l-14);if(d<ov)return"fol";if(d<=ov+2)return"ovu";return"lut";}
 function subphase(d,ph,l){var ov=Math.max(12,l-14);var B={men:[1,5],fol:[6,ov-1],ovu:[ov,ov+2],lut:[ov+3,l]}[ph];var sp=Math.max(1,B[1]-B[0]);var p=(d-B[0])/sp;return p<0.34?"ранняя":(p<0.67?"средняя":"поздняя");}
 var D=null,today=new Date();today.setHours(0,0,0,0);
+var STARTS=[],calOffset=0;
 function lastDate(){return D.last_period?new Date(D.last_period+"T00:00:00"):(function(){var d=new Date();d.setDate(d.getDate()-6);return d;})();}
 function dayOfCycle(dt){var L=lastDate();var diff=Math.floor((dt-L)/86400000);return((diff%D.cycle_len)+D.cycle_len)%D.cycle_len+1;}
 document.getElementById('date').textContent=today.getDate()+" "+MONTHS[today.getMonth()];
@@ -127,16 +132,50 @@ function renderToday(){
   var metaHtml=delayed?delayMsg:("из "+D.cycle_len+" · месячные через ~"+toNext+" дн.");
   html+="<div class='card'><div class='pl'>"+tagHtml+"</div><div class='pday'>День "+day+"</div><div class='pmeta'>"+metaHtml+"</div></div>";
   html+="<div class='stats'><div class='stat'><div class='l'>День цикла</div><div class='v'>"+day+"</div><div class='s'>из "+D.cycle_len+"</div></div><div class='stat'><div class='l'>Фаза</div><div class='v'>"+RU[ph].slice(0,4)+".</div><div class='s'>"+sub+"</div></div><div class='stat'><div class='l'>До месячных</div><div class='v'>~"+toNext+"</div><div class='s'>дней</div></div></div>";
-  html+="<div class='sec'>"+MNOM[today.getMonth()]+" "+today.getFullYear()+"</div><div class='cal' id='cal'></div>";
+  html+="<div class='calhead'><button class='calnav' id='calPrev'>\u2039</button><div class='sec' id='calLabel' style='margin:0'></div><button class='calnav' id='calNext'>\u203A</button></div><div class='cal' id='cal'></div><div class='calhint' id='calHint'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:#C25E76'></span>Менструальная</div><div class='lg'><span class='dot' style='background:#94A97E'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:#E5A734'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:#E0879A'></span>Лютеиновая</div></div>";
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>\u{1F4F2} Добавить Айву на экран телефона</button>";html+="<div class='foot'>Айва не ставит диагнозы. Данные ориентировочные, при тревожных симптомах обратись к гинекологу.</div>";
   el.innerHTML=html;blossom(document.getElementById('al'),34);updateHomeBtn();
   var tc=document.getElementById('tchips');(CHIPS[ph]||[]).forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc.appendChild(b);});
-  var y=today.getFullYear(),m=today.getMonth(),cal=document.getElementById('cal');
+  STARTS=buildStarts();calOffset=0;
+  document.getElementById('calPrev').onclick=function(){calOffset--;drawCal();if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();};
+  document.getElementById('calNext').onclick=function(){calOffset++;drawCal();if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();};
+  drawCal();
+}
+function buildStarts(){
+  var arr=[];(D.cycles||[]).forEach(function(sd){var dt=new Date(sd+'T00:00:00');dt.setHours(0,0,0,0);arr.push(dt);});
+  var L=lastDate();if(!arr.some(function(x){return x.getTime()===L.getTime();}))arr.push(L);
+  arr.sort(function(a,b){return a-b;});return arr;
+}
+function fcast(dd){var L=lastDate();var diff=Math.floor((dd-L)/86400000);var day=((diff%D.cycle_len)+D.cycle_len)%D.cycle_len+1;return {day:day,ph:phaseForDay(day,D.cycle_len),fut:dd>today};}
+function dayInfo(dd){
+  if(dd>today)return fcast(dd);
+  if(!STARTS||!STARTS.length)return fcast(dd);
+  var a=null;STARTS.forEach(function(sx){if(sx<=dd&&(!a||sx>a))a=sx;});
+  if(!a)return null;
+  var dn=Math.floor((dd-a)/86400000)+1;
+  if(dn>D.cycle_len)return {day:dn,ph:null,fut:false};
+  return {day:dn,ph:phaseForDay(dn,D.cycle_len),fut:false};
+}
+function drawCal(){
+  var base=new Date(today.getFullYear(),today.getMonth()+calOffset,1);
+  var y=base.getFullYear(),m=base.getMonth();
+  document.getElementById('calLabel').textContent=MNOM[m]+" "+y;
+  var cal=document.getElementById('cal');cal.innerHTML='';
   WD.forEach(function(w){var e=document.createElement('div');e.className='wd';e.textContent=w;cal.appendChild(e);});
   var fw=(new Date(y,m,1).getDay()+6)%7,dim=new Date(y,m+1,0).getDate();
   for(var i=0;i<fw;i++){var e0=document.createElement('div');e0.className='day empty';cal.appendChild(e0);}
-  for(var d=1;d<=dim;d++){(function(d){var dd=new Date(y,m,d),cyc=dayOfCycle(dd),p=phaseForDay(cyc,D.cycle_len);var e=document.createElement('div');e.className='day';e.textContent=d;if(dd.getTime()===today.getTime())e.classList.add('today');else{e.style.borderColor=COL[p];e.style.color=(dd>today)?'var(--inkSoft)':'var(--ink)';}cal.appendChild(e);})(d);}
+  for(var d=1;d<=dim;d++){(function(d){
+    var dd=new Date(y,m,d);dd.setHours(0,0,0,0);
+    var e=document.createElement('div');e.className='day';e.textContent=d;
+    if(dd.getTime()===today.getTime()){e.classList.add('today');}
+    else{var inf=dayInfo(dd);
+      if(inf&&inf.ph){e.style.borderColor=COL[inf.ph];if(inf.day<=5)e.style.background=WASH[inf.ph];e.style.color=inf.fut?'var(--inkSoft)':'var(--ink)';}
+      else{e.style.color='var(--inkSoft)';}}
+    cal.appendChild(e);
+  })(d);}
+  var hint=document.getElementById('calHint');
+  hint.textContent=calOffset>0?'Прогноз на основе твоего цикла':(calOffset<0?'История по отмеченным месячным':'');
 }
 function ayvaCard(text){return "<div class='ayva'><div class='ayva-top'><span class='blossom' id='sl'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+(text||"")+"</div></div></div></div>";}
 var loadedFood=false,loadedTrain=false;
