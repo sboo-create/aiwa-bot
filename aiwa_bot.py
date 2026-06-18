@@ -269,7 +269,8 @@ def match_intent(t):
     if re.search(r"(стере|сотри|удали|обнул|снес|снос|очист)", t) and re.search(r"(вс[её]|\bвсе\b|данн|аккаунт|профил|себя|про меня|обо мне|информац)", t): return "wipe"
     if re.search(r"(партнёр|партнер|подключить (парня|мужа|партнёр))", t): return "partner"
     if re.search(r"(какие\s+команд|список\s+команд|что\s+ты\s+умеешь|твои\s+команд|покажи\s+команд|^\s*команды\s*$|^\s*помощь\s*$|^\s*help\s*$|меню\s+команд)", t): return "help"
-    if re.search(r"(отметить месячн|внести измен\w*\s+(в\s+)?месячн|изменить\s+(дату\s+)?месячн|поменять\s+(дату\s+)?месячн|обновить\s+(дату\s+)?месячн|исправить\s+месячн|месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн)", t): return "period"
+    if re.search(r"месячн|менструац|критическ\w* дн", t) and re.search(r"(отмет|отмеч|добав|записа|внес|залог|зафиксир|поменя|измен|обнов|исправ|как.{0,14}(отмет|добав|внес))", t): return "period"
+    if re.search(r"(месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн|сегодня начал\w* месячн|снова месячн|опять месячн)", t): return "period"
     return None
 
 def is_gibberish(t):
@@ -337,6 +338,7 @@ NOCYCLE_KB = InlineKeyboardMarkup([
 GENERAL_MENU_KB = InlineKeyboardMarkup([
     [B("Питание", "food"), B("Нагрузка", "sec:training")],
     [B("Симптомы", "checkin", KBS.SUCCESS), B("История и выписка", "history")],
+    [B("Отметить месячные", "period", KBS.DANGER)],
     [B("Партнёр", "partner"), B("Время рассылки", "set:time")],
 ])
 PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
@@ -1047,7 +1049,7 @@ async def handle_text(update, context, txt):
         ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=last_hint(cid), history=hist_get(cid), usage=usage)
         ev(cid, "answered", tokens=sum(usage), meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         hist_push(cid, txt, ans)
-        return await context.bot.send_message(cid, ans, reply_markup=summary_kb())
+        return await send_answer(context, cid, ans, None, txt, usage=usage)
     if is_onboarded(u):
         _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing")
         g = match_guide(txt)
@@ -1142,8 +1144,7 @@ async def on_cb(update, context):
         if general:
             usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), question, hint=last_hint(cid), history=hist_get(cid), usage=usage)
             hist_push(cid, question, ans)
-            body = f"<blockquote>{html.escape(question)}</blockquote>\n{html.escape(ans)}"
-            await q.message.reply_text(body, reply_markup=summary_kb(), parse_mode="HTML"); ev(cid, "tokens", sum(usage))
+            await send_answer(context, cid, ans, None, question, usage=usage, quote=question)
         else:
             usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, profile_of(u), hist_get(cid), usage=usage)
             hist_push(cid, question, ans)
