@@ -119,7 +119,7 @@ def render_delay(st):
     buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
 
 
-def render_menu(data, phase_ru="Лютеиновая"):
+def render_menu(data, phase_ru="Лютеиновая", target_kcal=None):
     """Карточка питания на день. Единый рендер (3x супер-сэмплинг), длинный текст обрезается, а не вылезает."""
     W=720
     meals=data.get("meals",[])[:4]; H=300+len(meals)*92
@@ -135,6 +135,8 @@ def render_menu(data, phase_ru="Лютеиновая"):
         return (text.rstrip()+"…") if text else text
     d.text((X(40),X(34)),"AIWA",font=f_eye,fill=ROSE)
     d.text((X(40),X(66)),"Питание на сегодня",font=f_h,fill=INK)
+    if target_kcal:
+        d.text((X(W-40),X(82)),f"~{target_kcal} ккал/день",font=_f("DejaVuSans-Bold.ttf",17),fill=ROSE,anchor="rm")
     m=data.get("macros",{}); items=[("Белок",m.get("protein","")),("Жиры",m.get("fat","")),("Углеводы",m.get("carbs",""))]
     bw=(W-80-2*14)/3; bx=40; by=120
     for lab,val in items:

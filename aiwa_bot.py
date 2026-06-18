@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, sqlite3, logging
+import os, io, re, sqlite3, secrets, logging
 from datetime import datetime, date, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -15,6 +15,11 @@ try:
     import image as IMG
 except Exception as e:
     IMG = None; print("image off:", e)
+try:
+    import report as RPT
+except Exception as e:
+    RPT = None; print("report off:", e)
+BOT_USERNAME = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("aiwa")
@@ -36,7 +41,7 @@ ABOUT_TEXT = ("🌸 Я AIWA (AI for Woman Awareness), ИИ-ассистент ж
  "Открой Меню, чтобы увидеть всё, что я умею.")
 PRIVACY_TEXT = ("🔒 Про данные: храню минимум, дату последних месячных, длину цикла, твои чек-ины и время рассылки, чтобы считать фазу. "
  "Это не передаётся третьим лицам. Удалить все данные и отключиться можно командой /stop в любой момент.")
-TECH_TEXT = ("🤖 Я работаю на GigaChat, это большая языковая модель от Сбера. На её основе я считаю фазу цикла, собираю утреннюю сводку и отвечаю на вопросы про здоровье и самочувствие. Это помощь для ориентира, а не замена врача.")
+TECH_TEXT = ("🤖 Я работаю на GigaChat. GigaChat, это мультимодальная диалоговая нейросеть, разработанная Сбером. На её основе я считаю фазу цикла, собираю утреннюю сводку и отвечаю на вопросы про здоровье. Данные о тебе не передаются третьим лицам и не используются для обучения; храню только то, что нужно для расчёта цикла, и всё можно удалить командой /stop.")
 PHASES_TEXT = (
  "🌸 Четыре фазы цикла\n\n"
  "🩸 Менструальная, дни 1-5\n"
@@ -78,16 +83,19 @@ def db():
         symptoms TEXT, PRIMARY KEY(chat_id,log_date))""")
     c.execute("""CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
         ts TEXT, action TEXT, tokens INTEGER DEFAULT 0)""")
-    for col in ("state TEXT", "pending_date TEXT"):
+    c.execute("CREATE TABLE IF NOT EXISTS partners(partner_id INTEGER PRIMARY KEY, woman_id INTEGER, created TEXT)")
+    for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
+                "activity INTEGER", "diet TEXT", "partner_code TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     return c
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
-            "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6]}
+            "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
+            "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12]}
 
 def upsert(cid, **kw):
     c = db()
@@ -127,7 +135,28 @@ def all_users():
 def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs"): c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))
-    c.commit(); c.close()
+    c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid)); c.commit(); c.close()
+def set_partner_code(cid, code): upsert(cid, partner_code=code)
+def woman_by_code(code):
+    c = db(); r = c.execute("SELECT chat_id FROM users WHERE partner_code=?", (code,)).fetchone(); c.close(); return r[0] if r else None
+def link_partner(partner_id, woman_id):
+    c = db(); c.execute("INSERT OR REPLACE INTO partners(partner_id,woman_id,created) VALUES(?,?,?)", (partner_id, woman_id, datetime.now().isoformat())); c.commit(); c.close()
+def partner_of(woman_id):
+    c = db(); r = c.execute("SELECT partner_id FROM partners WHERE woman_id=?", (woman_id,)).fetchone(); c.close(); return r[0] if r else None
+def cycles_of(cid, since_iso=None):
+    c = db()
+    if since_iso:
+        rows = c.execute("SELECT start_date FROM cycles WHERE chat_id=? AND start_date>=? ORDER BY start_date", (cid, since_iso)).fetchall()
+    else:
+        rows = c.execute("SELECT start_date FROM cycles WHERE chat_id=? ORDER BY start_date", (cid,)).fetchall()
+    c.close(); return [x[0] for x in rows]
+def logs_of(cid, since_iso=None):
+    c = db()
+    if since_iso:
+        rows = c.execute("SELECT log_date,energy,mood,symptoms FROM logs WHERE chat_id=? AND log_date>=? ORDER BY log_date", (cid, since_iso)).fetchall()
+    else:
+        rows = c.execute("SELECT log_date,energy,mood,symptoms FROM logs WHERE chat_id=? ORDER BY log_date", (cid,)).fetchall()
+    c.close(); return [{"date": r[0], "energy": r[1], "mood": r[2], "symptoms": (r[3].split(",") if r[3] else [])} for r in rows]
 
 # ---------- helpers ----------
 def parse_date(t):
@@ -164,6 +193,19 @@ def calc_calories(cm, kg, age, act):
     tdee = bmr * {1: 1.2, 2: 1.375, 3: 1.55, 4: 1.725, 5: 1.9}.get(act, 1.375)
     p = round(1.6 * kg); fat = round(tdee * 0.3 / 9); carbs = round(max(0, tdee - p * 4 - fat * 9) / 4)
     return round(tdee), p, fat, carbs
+
+ACT_RU = {1: "сидячий образ жизни", 2: "лёгкая активность", 3: "умеренная активность", 4: "высокая активность", 5: "очень высокая активность"}
+DIET = [("veg", "Вегетарианство"), ("vegan", "Веган"), ("nolac", "Без лактозы"), ("noglu", "Без глютена"), ("nonuts", "Без орехов"), ("pesc", "Только рыба из мяса")]
+DIETD = dict(DIET)
+def profile_of(u):
+    if u and u.get("height") and u.get("weight") and u.get("age"):
+        return {"height": u["height"], "weight": u["weight"], "age": u["age"], "activity": u.get("activity") or 3, "diet": u.get("diet") or ""}
+    return None
+def diet_human(code_csv):
+    if not code_csv: return "без ограничений"
+    return ", ".join(DIETD.get(x, x) for x in code_csv.split(",") if x) or "без ограничений"
+def profile_kcal(p):
+    return calc_calories(p["height"], p["weight"], p["age"], p["activity"])
 
 def match_meta(text):
     t = text.lower()
@@ -206,6 +248,8 @@ ICONS = {  # набор Goodluck_sasha (@goodluck_alex): callback_data -> custom
     "period": "5357334118159883232",        # ❤️
     "set:time": "5345780407025542851",      # ☀️
     "menu": "5415634562581538032",          # 🔘
+    "history": "5336781746165785173",       # 📎
+    "partner": "5359654731939586471",       # 💛
 }
 def B(text, cb, style=None):
     kw = {"callback_data": cb}
@@ -216,14 +260,27 @@ def B(text, cb, style=None):
 
 MENU_KB = InlineKeyboardMarkup([
     [B("Питание", "food"), B("Нагрузка", "sec:training")],
-    [B("Календарь", "calendar"), B("Фазы цикла", "phases")],
-    [B("Чек-ин", "checkin", KBS.SUCCESS), B("Гид: норма цикла", "guides")],
-    [B("Калькулятор калорий", "calc"), B("Отметить месячные", "period", KBS.DANGER)],
+    [B("Календарь", "calendar"), B("Симптомы", "checkin", KBS.SUCCESS)],
+    [B("История и выписка", "history"), B("Гид: норма цикла", "guides")],
+    [B("Партнёр", "partner"), B("Отметить месячные", "period", KBS.DANGER)],
     [B("Время рассылки", "set:time")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Месячные начались сегодня", callback_data="onb_today")]])
 PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
+SKIP_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Пропустить", callback_data="prof_skip")]])
+HIST_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("3 месяца", callback_data="rep:3"), InlineKeyboardButton("6 месяцев", callback_data="rep:6")],
+    [InlineKeyboardButton("Весь период", callback_data="rep:all")],
+])
+ACT_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Сидячий", callback_data="act:1"), InlineKeyboardButton("Лёгкая", callback_data="act:2")],
+    [InlineKeyboardButton("Умеренная", callback_data="act:3"), InlineKeyboardButton("Высокая", callback_data="act:4")],
+    [InlineKeyboardButton("Очень высокая", callback_data="act:5")],
+])
+def diet_kb(selected):
+    rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"diet:s:{code}")] for code, ru in DIET]
+    rows.append([InlineKeyboardButton("Готово", callback_data="diet:done")]); return InlineKeyboardMarkup(rows)
 
 def time_kb():
     times = ["07:00", "08:00", "09:00", "10:00", "21:00", "22:00"]
@@ -239,7 +296,7 @@ def sugg_kb(cid, items):
 def summary_kb():
     return InlineKeyboardMarkup([
         [B("Питание", "food"), B("Нагрузка", "sec:training")],
-        [B("Меню", "menu", KBS.PRIMARY), B("Отметить симптомы", "checkin", KBS.SUCCESS)],
+        [B("Меню", "menu", KBS.PRIMARY), B("Симптомы", "checkin", KBS.SUCCESS)],
     ])
 
 # ---------- senders ----------
@@ -272,11 +329,18 @@ async def send_menu(context, cid):
     u, st = status_of(cid)
     if not st: return
     await context.bot.send_chat_action(cid, "upload_photo")
-    usage = []; mdata = L.menu_today(st, usage=usage); ev(cid, "tokens", sum(usage))
+    prof = profile_of(u); target = profile_kcal(prof) if prof else None
+    usage = []; mdata = L.menu_today(st, profile=prof, target=target, usage=usage); ev(cid, "tokens", sum(usage))
+    if target:
+        mdata["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
     note = st["content"]["food"]
     try:
-        bio = io.BytesIO(IMG.render_menu(mdata, st["phase_ru"])); bio.name = "menu.png"
-        await context.bot.send_photo(cid, photo=bio, caption=f"🍽 Меню под {st['phase_ru'].lower()} фазу. Не нравится блюдо, напиши «замени обед» или «другое на ужин».")
+        bio = io.BytesIO(IMG.render_menu(mdata, st["phase_ru"], target_kcal=(target[0] if target else None))); bio.name = "menu.png"
+        cap = f"🍽 Меню под {st['phase_ru'].lower()} фазу"
+        if target: cap += f", цель ~{target[0]} ккал/день"
+        cap += ". Не нравится блюдо, напиши «замени обед» или «другое на ужин»."
+        if not prof: cap += "\n\nЧтобы считать калории под тебя, добавь данные командой /profile."
+        await context.bot.send_photo(cid, photo=bio, caption=cap)
     except Exception as e:
         log.warning("menu: %s", e); await context.bot.send_message(cid, "🍽 " + note)
 
@@ -344,15 +408,87 @@ async def push_summary(context, cid, with_image=True):
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     h, m = map(int, hhmm.split(":")); app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
-async def daily_job(context: ContextTypes.DEFAULT_TYPE): await push_summary(context, context.job.chat_id)
+async def daily_job(context: ContextTypes.DEFAULT_TYPE):
+    await push_summary(context, context.job.chat_id)
+    await push_partner(context, context.job.chat_id)
 
 def finish_onboarding(context, cid, last_period_iso, n):
     upsert(cid, last_period=last_period_iso, cycle_len=n, state=None, pending_date=None)
     cyc_add(cid, last_period_iso); schedule_daily(context.application, cid, row(cid)["send_time"] or "09:00")
 
+async def welcome_finish(context, cid, msg):
+    await msg.reply_text("Всё готово! Утреннюю сводку буду присылать каждый день в 09:00 (МСК), время меняется в Меню.")
+    await push_summary(context, cid)
+    await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда к врачу.",
+        reply_markup=InlineKeyboardMarkup([[B("Гид: норма цикла", "guides")]]))
+
+async def send_report(context, cid, period):
+    u, st = status_of(cid)
+    if not st: return await context.bot.send_message(cid, "Сначала настрой цикл: /start.")
+    if not RPT: return await context.bot.send_message(cid, "Выписка временно недоступна.")
+    await context.bot.send_chat_action(cid, "upload_document")
+    since, label = RPT.period_since(period)
+    cycles = cycles_of(cid, since); logs = logs_of(cid, since)
+    if u["last_period"] and u["last_period"] not in cycles:
+        cycles = sorted(set(cycles + [u["last_period"]]))
+    try:
+        pdf = RPT.build_report({"cycles": cycles, "logs": logs, "st": st, "cycle_len": u["cycle_len"], "period_label": label})
+        bio = io.BytesIO(pdf); bio.name = "AIWA_vypiska.pdf"
+        await context.bot.send_document(cid, document=bio, filename="AIWA_vypiska.pdf",
+            caption=f"📄 Выписка по циклу, {label.lower()}. Можно показать гинекологу.")
+        ev(cid, "button")
+    except Exception as e:
+        log.warning("report: %s", e); await context.bot.send_message(cid, "Не удалось собрать выписку, попробуй позже.")
+
+PARTNER_TIPS = {
+    "menstrual": "Идут месячные, может болеть живот и не быть сил. Грелка, тёплый чай, еда с железом и спокойный режим зайдут, на марафон лучше не звать.",
+    "follicular": "Энергия на подъёме, хорошее окно для активностей, спорта и планов вместе.",
+    "ovulation": "Пик энергии и настроения, отличное время для свиданий и совместного спорта.",
+    "luteal": "Ближе к месячным возможны ПМС, усталость и тяга к сладкому. Тёмный шоколад, забота и спокойный вечер будут кстати.",
+}
+def partner_text(st, hint):
+    extra = f"\nСегодня она отмечала: {hint}." if hint else ""
+    return (f"💛 Апдейт AIWA\nОна на дне {st['day']} цикла, {st['subphase']} {st['phase_ru'].lower()} фаза.\n"
+            f"{PARTNER_TIPS.get(st['phase'],'')}{extra}\n\nЭто короткая подсказка, не диагноз.")
+
+async def push_partner(context, woman_cid):
+    pid = partner_of(woman_cid)
+    if not pid: return
+    u, st = status_of(woman_cid)
+    if not st or st["status"] != "normal": return
+    try:
+        await context.bot.send_message(pid, partner_text(st, last_hint(woman_cid)))
+    except Exception as e:
+        log.warning("partner push: %s", e)
+
+async def partner_entry(context, cid, msg):
+    u = row(cid); code = u.get("partner_code")
+    if not code:
+        code = secrets.token_hex(4); set_partner_code(cid, code)
+    link = f"https://t.me/{BOT_USERNAME}?start=p_{code}" if BOT_USERNAME else f"код подключения: {code}"
+    connected = "Партнёр уже подключён. Отключить: /unlink" if partner_of(cid) else "Партнёр пока не подключён."
+    await msg.reply_text(
+        "👫 Партнёрский режим. Перешли партнёру ссылку ниже. Он откроет бота и каждое утро будет получать короткий апдейт: "
+        "твоя фаза, настроение и что можно сделать или купить.\n\n"
+        f"{link}\n\n{connected}")
+
+async def partner_join(context, partner_cid, msg, code):
+    woman = woman_by_code(code)
+    if not woman:
+        return await msg.reply_text("Ссылка недействительна. Попроси прислать новую через Меню, кнопка Партнёр.")
+    if woman == partner_cid:
+        return await msg.reply_text("Это твоя же ссылка, перешли её партнёру.")
+    link_partner(partner_cid, woman)
+    await msg.reply_text("Готово! Буду присылать тебе короткий ежедневный апдейт о её цикле и настроении. Отключить: /unlink")
+    try:
+        await context.bot.send_message(woman, "💛 Партнёр подключился к твоему AIWA и будет получать ежедневный апдейт. Отключить можно в Меню, кнопка Партнёр.")
+    except Exception: pass
+
 # ---------- commands ----------
 async def start(update, context):
     cid = update.effective_chat.id
+    if context.args and context.args[0].startswith("p_"):
+        return await partner_join(context, cid, update.message, context.args[0][2:])
     if is_onboarded(row(cid)):
         return await update.message.reply_text(
             "У тебя уже настроен цикл, данные на месте. Продолжить или начать настройку заново?",
@@ -377,7 +513,7 @@ async def checkin_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
     log_ensure(cid, date.today().isoformat())
-    await update.message.reply_text("Чек-ин на сегодня. Какая энергия?", reply_markup=en_kb("e"))
+    await update.message.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
 async def period_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
@@ -403,18 +539,33 @@ async def menutoday_cmd(update, context):
     _, st = status_of(update.effective_chat.id)
     if not st: return await need_onboard(update.message)
     await send_menu(context, update.effective_chat.id)
-async def phases_cmd(update, context):
-    ev(update.effective_chat.id, "command"); await update.message.reply_text(PHASES_TEXT)
+async def profile_cmd(update, context):
+    cid = update.effective_chat.id; ev(cid, "command")
+    if not is_onboarded(row(cid)): return await need_onboard(update.message)
+    upsert(cid, state="await_profile")
+    await update.message.reply_text("Обновим данные для питания. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.", reply_markup=SKIP_KB)
 async def guide_cmd(update, context):
     ev(update.effective_chat.id, "command"); await send_guide(context, update.effective_chat.id, GUIDES[0])
 async def about_cmd(update, context):
     ev(update.effective_chat.id, "command"); await update.message.reply_text(ABOUT_TEXT)
+async def report_cmd(update, context):
+    cid = update.effective_chat.id; ev(cid, "command")
+    if not is_onboarded(row(cid)): return await need_onboard(update.message)
+    await update.message.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
+async def partner_cmd(update, context):
+    cid = update.effective_chat.id; ev(cid, "command")
+    if not is_onboarded(row(cid)): return await need_onboard(update.message)
+    await partner_entry(context, cid, update.message)
+async def unlink_cmd(update, context):
+    cid = update.effective_chat.id
+    c = db(); c.execute("DELETE FROM partners WHERE partner_id=? OR woman_id=?", (cid, cid)); c.commit(); c.close()
+    await update.message.reply_text("Партнёрская связь отключена.")
 async def stop(update, context):
     cid = update.effective_chat.id
     for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     del_user(cid); await update.message.reply_text("Отключила сводки и удалила данные. Вернуться: /start")
 async def help_cmd(update, context):
-    await update.message.reply_text("AIWA, сводка по циклу.\n/today сводка\n/menu кнопки\n/calendar инфографика\n/checkin самочувствие\n/phases фазы\n/period отметить месячные\n/time время\n/stop отключить")
+    await update.message.reply_text("AIWA, помощник по циклу.\n/today сводка\n/menu кнопки\n/calendar календарь\n/checkin симптомы\n/period отметить месячные\n/profile данные для питания\n/report выписка для врача\n/partner подключить партнёра\n/time время\n/stop отключить")
 
 # ---------- stats ----------
 def aggregate_stats():
@@ -471,10 +622,20 @@ async def on_text(update, context):
         except (ValueError, AssertionError):
             return await update.message.reply_text("Нужно число от 20 до 40. Если не знаешь, напиши 28.")
         finish_onboarding(context, cid, u["pending_date"], n)
-        await update.message.reply_text("Готово! Сводку буду присылать каждое утро в 09:00 по МСК. Время можно поменять в Меню.")
-        await push_summary(context, cid)
-        return await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда обращаться к врачу. Открыть, кнопкой ниже.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Гид: норма цикла", callback_data="guides")]]))
+        upsert(cid, state="await_profile")
+        return await update.message.reply_text(
+            "Цикл настроен. Осталось немного для персонального питания и калорий.\n\n"
+            "Напиши через пробел рост (см), вес (кг) и возраст. Например: 168 60 30.", reply_markup=SKIP_KB)
+
+    if state == "await_profile":
+        nums = [p for p in re.split(r"[ ,;/]+", txt) if p]
+        try:
+            cm = float(nums[0]); kg = float(nums[1]); age = int(float(nums[2]))
+            assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80
+        except Exception:
+            return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
+        upsert(cid, height=int(cm), weight=kg, age=age, state=None)
+        return await update.message.reply_text("Принято. Насколько ты активна в среднем?", reply_markup=ACT_KB)
 
     if state == "await_time":
         hhmm = parse_time(txt)
@@ -489,25 +650,14 @@ async def on_text(update, context):
             schedule_daily(context.application, cid, row(cid)["send_time"] or "09:00")
             return await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}.")
         upsert(cid, state=None)
-    elif state == "await_calc":
-        nums = [p for p in txt.replace(",", ".").replace(";", " ").split() if p]
-        ok = False
-        try:
-            cm = float(nums[0]); kg = float(nums[1]); age = int(float(nums[2])); act = int(nums[3]) if len(nums) > 3 else 3
-            ok = 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80 and 1 <= act <= 5
-        except Exception: ok = False
-        if ok:
-            upsert(cid, state=None); tdee, p, fat, carbs = calc_calories(cm, kg, age, act)
-            return await update.message.reply_text(
-                f"🔥 Норма калорий: ~{tdee} ккал в день (поддержание).\n• Белок: {p} г\n• Жиры: {fat} г\n• Углеводы: {carbs} г\n\n"
-                "Для снижения веса минус 15-20%, для набора плюс 10-15%. Это ориентир, не медицинское назначение.")
-        upsert(cid, state=None)
 
     m = match_meta(txt)
     if m:
         return await update.message.reply_text({"about": ABOUT_TEXT, "privacy": PRIVACY_TEXT, "tech": TECH_TEXT}[m])
 
     low = txt.lower()
+    if is_onboarded(u) and re.search(r"(где.*сводк|пришл\w*\s*сводк|покажи\s*сводк|моя\s*сводк|^сводк|что там сегодня|что сегодня по циклу)", low):
+        ev(cid, "manual"); return await push_summary(context, cid)
     if is_onboarded(u) and re.search(r"(замен\w*|друго[ей]\w*\s+блюд\w*|другое на (завтрак|обед|ужин|перекус)|не нравит\w* блюд\w*|обнови\w* меню|пересобер\w* меню)", low):
         _, st = status_of(cid); ev(cid, "manual")
         return await send_menu(context, cid)
@@ -531,6 +681,17 @@ async def on_cb(update, context):
     if data == "onb_today":
         upsert(cid, pending_date=date.today().isoformat(), state="await_len")
         return await q.message.reply_text("Отметила начало месячных сегодня. Какая средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
+    if data == "prof_skip":
+        upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
+    if data.startswith("act:"):
+        upsert(cid, activity=int(data.split(":")[1]), state="await_diet")
+        return await q.message.reply_text("Есть ограничения в еде? Отметь, что подходит, потом Готово.", reply_markup=diet_kb(set()))
+    if data.startswith("diet:s:"):
+        code = data.split(":")[2]; cur = set((row(cid).get("diet") or "").split(",")) - {""}
+        cur.symmetric_difference_update({code}); upsert(cid, diet=",".join(sorted(cur)))
+        return await q.edit_message_reply_markup(reply_markup=diet_kb(cur))
+    if data == "diet:done":
+        upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
     ev(cid, "suggest" if data.startswith("q:") else "button")
     u, st = status_of(cid)
     if not st:
@@ -545,15 +706,16 @@ async def on_cb(update, context):
     elif data == "calendar":
         if st["status"] != "normal": await send_delay(context, cid, st)
         else: await send_infographic(context.bot, cid)
-    elif data == "phases":
-        await q.message.reply_text(PHASES_TEXT)
+    elif data == "history":
+        await q.message.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
+    elif data.startswith("rep:"):
+        await send_report(context, cid, data.split(":")[1])
+    elif data == "partner":
+        await partner_entry(context, cid, q.message)
     elif data == "guides":
         await send_guide(context, cid, GUIDES[0])
-    elif data == "calc":
-        upsert(cid, state="await_calc")
-        await q.message.reply_text("Калькулятор калорий. Напиши через пробел: рост(см) вес(кг) возраст активность(1-5).\n1 сидячий, 3 умеренно, 5 очень активный. Например: 168 60 30 3")
     elif data == "checkin":
-        log_ensure(cid, today_s); await q.message.reply_text("Чек-ин на сегодня. Какая энергия?", reply_markup=en_kb("e"))
+        log_ensure(cid, today_s); await q.message.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
     elif data == "period":
         upsert(cid, state="await_period_date")
         await q.message.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
@@ -573,7 +735,7 @@ async def on_cb(update, context):
     elif data.startswith("ci:s:"):
         log_toggle(cid, today_s, data.split(":")[2]); sel = set((log_get(cid, today_s) or {}).get("symptoms", [])); await q.edit_message_reply_markup(reply_markup=sym_kb(sel))
     elif data == "ci:done":
-        await q.edit_message_text("Записала чек-ин. Учту в завтрашней сводке.")
+        await q.edit_message_text("Записала. Учту в завтрашней сводке.")
     elif data.startswith("q:"):
         question = get_sugg(int(data.split(":")[1])) or "Расскажи про эту фазу"
         await context.bot.send_chat_action(cid, "typing")
@@ -589,6 +751,9 @@ async def on_error(update, context):
     except Exception: pass
 
 async def on_startup(app):
+    global BOT_USERNAME
+    try: BOT_USERNAME = app.bot.username
+    except Exception: BOT_USERNAME = None
     n = 0
     for cid in all_users(): schedule_daily(app, cid, row(cid)["send_time"] or "09:00"); n += 1
     log.info("Rescheduled %d", n)
@@ -597,7 +762,7 @@ def main():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).post_init(on_startup).build()
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("menutoday", menutoday_cmd),
-                    ("phases", phases_cmd), ("guide", guide_cmd), ("about", about_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
