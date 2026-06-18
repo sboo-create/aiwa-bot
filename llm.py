@@ -154,17 +154,19 @@ def explain_section(st, key, usage=None):
     base = (f"Её фаза: {st['subphase']} {st['phase_ru'].lower()}, день {st['day']} из {st['cycle_len']}, "
             f"до месячных ~{st['days_to_next']} дн.")
     if key == "training":
-        q = ("Объясни, какая физическая нагрузка уместна именно в эту под-фазу и обязательно ПОЧЕМУ с точки зрения "
-             "гормонов (эстроген, прогестерон, чувствительность к инсулину, температура тела и связки). "
-             "Дай 3-4 конкретных варианта тренировки под этот день и что снизить. Будь конкретной, без воды и повторов, максимум 6 коротких пунктов. Начни строкой «🏋️ Нагрузка сегодня».")
+        q = ("Подробно объясни, какая физическая нагрузка уместна именно в эту под-фазу и обязательно ПОЧЕМУ с точки зрения гормонов "
+             "(эстроген, прогестерон, чувствительность к инсулину, температура тела, состояние связок). "
+             "Дай 4-5 конкретных вариантов тренировки под этот день с деталями: тип, интенсивность, примерная длительность; "
+             "отдельно что усилить, что снизить, и короткий совет по восстановлению. Начни строкой «🏋️ Нагрузка сегодня».")
     elif key == "food":
-        q = ("Объясни, что есть именно в эту под-фазу и ПОЧЕМУ: какие нутриенты сейчас важны и какой эффект дают. "
-             "Дай 4-5 конкретных продуктов строками «• продукт - нутриент и зачем». Без воды и повторов. Начни строкой «🍽 Питание сегодня».")
+        q = ("Подробно объясни, что есть именно в эту под-фазу и ПОЧЕМУ: какие нутриенты сейчас важны и какой эффект дают. "
+             "Дай 5-6 конкретных продуктов строками «• продукт - нутриент и зачем», добавь идею завтрака, обеда, перекуса и ужина, "
+             "и что лучше ограничить. Начни строкой «🍽 Питание сегодня».")
     else:
         return section_text(st, key)
     msgs = [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": base + "\n\n" + q + " Конкретно, с числами где уместно, только обычный текст без markdown."}]
-    out = _call(msgs, max_tokens=600, temperature=0.3, usage=usage)
+            {"role": "user", "content": base + "\n\n" + q + " Развёрнуто и конкретно, с числами где уместно, но без воды. Только обычный текст без markdown."}]
+    out = _call(msgs, max_tokens=900, temperature=0.4, usage=usage)
     return _clean(out, section_text(st, key))
 
 
@@ -300,3 +302,19 @@ def section_text(st, key):
 
 def fallback_summary(st, modules):
     return "\n\n".join(section_text(st, k) for k in ["phase", "general", "food", "training"] if k in modules)
+
+
+def transcribe(audio_bytes, filename="voice.ogg"):
+    """Распознавание голосового через Groq Whisper."""
+    key = os.environ.get("GROQ_API_KEY")
+    if not key:
+        return None
+    try:
+        r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {key}"},
+            files={"file": (filename, audio_bytes, "audio/ogg")},
+            data={"model": "whisper-large-v3-turbo", "language": "ru"}, timeout=60)
+        r.raise_for_status()
+        return (r.json().get("text") or "").strip() or None
+    except Exception as e:
+        print("STT error:", e); return None

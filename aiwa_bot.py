@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, time, sqlite3, secrets, logging
+import os, io, re, time, html, sqlite3, secrets, logging
 from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -33,12 +33,15 @@ SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), (
             ("sweet", "тяга к сладкому"), ("anx", "тревожность"), ("tired", "усталость")]
 SYM = dict(SYMPTOMS)
 
-START_TEXT = ("🌸 Привет! Я AIWA, ИИ-ассистент женского здоровья по циклу. Цветок на логотипе, про то, чтобы расцветать в своём ритме. "
- "Каждое утро собираю сводку под твою фазу: тело, питание, тренировки, и отвечаю на любые вопросы про цикл и самочувствие.\n\n"
- "Чтобы я считала фазу и отвечала точно, укажи дату последних месячных: напиши её (например 25.05.2026) или нажми кнопку ниже.")
-ABOUT_TEXT = ("🌸 Я AIWA (AI for Woman Awareness), ИИ-ассистент женского здоровья по циклу. Цветок на логотипе, про идею расцветать в своём ритме. "
- "Каждое утро собираю сводку под твою фазу: тело, питание, тренировки, и отвечаю на вопросы про цикл и самочувствие. Работаю на GigaChat.\n\n"
- "Открой Меню, чтобы увидеть всё, что я умею.")
+START_TEXT = ("🌸 Привет! Я AIWA, ИИ-ассистент по женскому здоровью на базе GigaChat.\n\n"
+ "Умею: считать фазу цикла и присылать утреннюю сводку, подбирать питание и тренировки под фазу и под тебя, "
+ "отслеживать симптомы, собирать выписку для врача и держать в курсе партнёра. Персонализируюсь под твои данные.\n\n"
+ "Полный функционал в разделе Меню. Можешь писать или наговаривать вопросы прямо в чат, я отвечу.\n\n"
+ "Для начала отметь последние месячные: напиши дату (например 25.05.2026) или нажми кнопку ниже.")
+ABOUT_TEXT = ("🌸 Я AIWA, ИИ-ассистент по женскому здоровью на базе GigaChat.\n\n"
+ "Умею: утренние сводки по фазе цикла, персональное питание и тренировки, ответы на вопросы про здоровье, "
+ "отслеживание симптомов, выписку для врача и партнёрский режим. Персонализируюсь под тебя.\n\n"
+ "Полный функционал в разделе Меню. Можно писать или наговаривать вопросы прямо в чат.")
 PRIVACY_TEXT = ("🔒 Про данные: храню минимум, дату последних месячных, длину цикла, твои чек-ины и время рассылки, чтобы считать фазу. "
  "Это не передаётся третьим лицам. Удалить все данные и отключиться можно командой /stop в любой момент.")
 PARTNER_HELLO = ("💛 Привет! Ты подключился как партнёр в AIWA.\n\n"
@@ -231,6 +234,18 @@ def match_meta(text):
                             "что с данными", "безопасн", "удалить данные", "передаёте", "передаете данные", "данные в безопас")): return "privacy"
     return None
 
+def match_intent(t):
+    t = t.lower()
+    if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
+    if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|упражнени|фитнес)", t): return "training"
+    if re.search(r"(что (мне )?(съесть|поесть|есть)|что приготов|какое питани|меню (на )?сегодня|что покушать|еда на сегодня|рацион|что поедим)", t): return "food"
+    if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
+    if re.search(r"(выписк|для врача|истори[яю] цикл|собери отчёт|собери отчет)", t): return "history"
+    if re.search(r"(отметить симптом|записать симптом|чек.?ин|отметить самочувств)", t): return "checkin"
+    if re.search(r"(партнёр|партнер|подключить (парня|мужа|партнёр))", t): return "partner"
+    if re.search(r"(отметить месячн|месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн)", t): return "period"
+    return None
+
 def is_gibberish(t):
     s = t.strip(); low = s.lower()
     letters = re.sub(r"[^а-яёa-z]", "", low)
@@ -335,7 +350,9 @@ async def need_onboard(t):
     cid = getattr(getattr(t, "chat", None), "id", None)
     if cid and is_partner(cid) and not is_onboarded(row(cid)):
         return await t.reply_text(PARTNER_INFO)
-    await t.reply_text("Чтобы рекомендации были точными, сначала укажи дату последних месячных и длину цикла.", reply_markup=GATE_KB)
+    if cid:
+        return await begin_onboard(cid, t)
+    await t.reply_text("Чтобы я считала фазу, отметь последние месячные.", reply_markup=ONB_KB)
 async def begin_onboard(cid, msg):
     if not row(cid): ev(cid, "signup")
     upsert(cid, state="await_date", pending_date=None)
@@ -423,10 +440,14 @@ async def send_guide(context, cid, g):
         log.warning("guide: %s", e)
         with open(path, "rb") as fh: await context.bot.send_photo(cid, photo=fh, caption=g["title"])
 
-async def send_answer(context, cid, text, st, basis_q, usage=None):
+async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None):
     if usage is None: usage = []
     kb = sugg_kb(cid, L.followups(st, basis_q, text, usage=usage))
-    await context.bot.send_message(cid, text, reply_markup=kb)
+    if quote:
+        body = f"<blockquote>{html.escape(quote)}</blockquote>\n{html.escape(text)}"
+        await context.bot.send_message(cid, body, reply_markup=kb, parse_mode="HTML")
+    else:
+        await context.bot.send_message(cid, text, reply_markup=kb)
     ev(cid, "tokens", sum(usage))
 
 async def push_general(context, cid):
@@ -443,6 +464,34 @@ async def send_general(context, cid, key):
             "training": "Какая физическая активность мне сейчас подходит и почему? Дай конкретные варианты."}
     usage = []; ans = L.general_answer(profile_of(u), u.get("mode"), qmap.get(key, key), hint=last_hint(cid), usage=usage)
     await context.bot.send_message(cid, ans, reply_markup=summary_kb()); ev(cid, "tokens", sum(usage))
+
+async def dispatch_intent(context, update, cid, u, intent):
+    msg = update.message; general = not is_cycle(u); ev(cid, "manual", meta="intent_" + intent)
+    if intent == "time":
+        upsert(cid, state="await_time")
+        return await msg.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 08:00.", reply_markup=time_kb())
+    if intent == "checkin":
+        log_ensure(cid, date.today().isoformat())
+        return await msg.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
+    if intent == "history":
+        return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
+    if intent == "partner":
+        return await partner_entry(context, cid, msg)
+    if intent == "training":
+        if general: return await send_general(context, cid, "training")
+        _, st = status_of(cid); return await send_section(context, cid, st, "training")
+    if intent == "food":
+        if general: return await send_general(context, cid, "food")
+        _, st = status_of(cid); return await send_section(context, cid, st, "food")
+    if intent == "calendar":
+        if general: return await msg.reply_text("В этом режиме фазы цикла не отслеживаются.")
+        _, st = status_of(cid)
+        if st["status"] != "normal": return await send_delay(context, cid, st)
+        return await send_infographic(context.bot, cid)
+    if intent == "period":
+        if general: return await msg.reply_text("В этом режиме месячные не отслеживаются. Обнови данные через /start.")
+        upsert(cid, state="await_period_date")
+        return await msg.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
 
 async def push_summary(context, cid, with_image=True):
     u0 = row(cid)
@@ -750,7 +799,24 @@ async def stats_cmd(update, context):
 
 # ---------- text ----------
 async def on_text(update, context):
-    cid = update.effective_chat.id; u = row(cid); state = u["state"] if u else None; txt = update.message.text.strip()
+    await handle_text(update, context, update.message.text.strip())
+
+async def on_voice(update, context):
+    cid = update.effective_chat.id; txt = None
+    await context.bot.send_chat_action(cid, "typing")
+    try:
+        f = await context.bot.get_file(update.message.voice.file_id)
+        ba = await f.download_as_bytearray(); txt = L.transcribe(bytes(ba))
+    except Exception as e:
+        log.warning("voice: %s", e)
+    if not txt:
+        return await update.message.reply_text("Не разобрала голосовое, попробуй ещё раз или напиши текстом.")
+    ev(cid, "voice", n=len(txt))
+    await update.message.reply_text(f"🎙 Расслышала: «{txt}»")
+    await handle_text(update, context, txt)
+
+async def handle_text(update, context, txt):
+    cid = update.effective_chat.id; u = row(cid); state = u["state"] if u else None
     cem = [e.custom_emoji_id for e in (update.message.entities or []) if getattr(e, "custom_emoji_id", None)]
     if cem:
         return await update.message.reply_text("ID кастомных эмодзи:\n" + "\n".join(cem))
@@ -833,6 +899,11 @@ async def on_text(update, context):
     if is_onboarded(u) and is_gibberish(txt):
         ev(cid, "fallback", meta="gibberish", n=len(txt))
         return await update.message.reply_text("Не поняла запрос. Напиши вопрос словами, например: «почему тянет на сладкое» или «какая тренировка сегодня».")
+
+    if is_onboarded(u):
+        _intent = match_intent(txt)
+        if _intent:
+            return await dispatch_intent(context, update, cid, u, _intent)
 
     if is_onboarded(u) and not is_cycle(u):
         await context.bot.send_chat_action(cid, "typing")
@@ -935,11 +1006,11 @@ async def on_cb(update, context):
         await context.bot.send_chat_action(cid, "typing")
         if general:
             usage = []; ans = L.general_answer(profile_of(u), u.get("mode"), question, hint=last_hint(cid), usage=usage)
-            await q.message.reply_text(f"❓ {question}"); await q.message.reply_text(ans, reply_markup=summary_kb()); ev(cid, "tokens", sum(usage))
+            body = f"<blockquote>{html.escape(question)}</blockquote>\n{html.escape(ans)}"
+            await q.message.reply_text(body, reply_markup=summary_kb(), parse_mode="HTML"); ev(cid, "tokens", sum(usage))
         else:
             usage = []; ans = L.answer_question(st, question, usage=usage)
-            await q.message.reply_text(f"❓ {question}")
-            await send_answer(context, cid, ans, st, question, usage=usage)
+            await send_answer(context, cid, ans, st, question, usage=usage, quote=question)
 
 async def on_error(update, context):
     log.error("handler error", exc_info=context.error)
@@ -965,6 +1036,7 @@ def main():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
+    app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     log.info("AIWA bot starting..."); app.run_polling(allowed_updates=Update.ALL_TYPES)
 
