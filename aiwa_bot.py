@@ -37,7 +37,7 @@ def hist_push(cid, q, a):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("aiwa")
 TZ = ZoneInfo(os.environ.get("AIWA_TZ", "Europe/Moscow"))
-DB = os.environ.get("AIWA_DB", "aiwa.db")
+DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") else "aiwa.db")
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
@@ -265,7 +265,9 @@ def match_intent(t):
     if re.search(r"(проанализир|сделай анализ|^\s*анализ|разбер|оцени мой цикл|что (говор|показыв)\w*.*(данн|цикл|выписк)|анализ (выписк|цикл|данн))", t): return "analysis"
     if re.search(r"(выписк|выпуск|для врача|истори[яю]|отчёт|отчет|справк)", t): return "history"
     if re.search(r"(отметить симптом|записать симптом|чек.?ин|отметить самочувств)", t): return "checkin"
+    if re.search(r"(отключить|отвязать|удалить)\s+партн", t): return "unlink"
     if re.search(r"(партнёр|партнер|подключить (парня|мужа|партнёр))", t): return "partner"
+    if re.search(r"(какие\s+команд|список\s+команд|что\s+ты\s+умеешь|твои\s+команд|покажи\s+команд|^\s*команды\s*$|^\s*помощь\s*$|^\s*help\s*$|меню\s+команд)", t): return "help"
     if re.search(r"(отметить месячн|внести измен\w*\s+(в\s+)?месячн|изменить\s+(дату\s+)?месячн|поменять\s+(дату\s+)?месячн|обновить\s+(дату\s+)?месячн|исправить\s+месячн|месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн)", t): return "period"
     return None
 
@@ -490,7 +492,7 @@ async def push_general(context, cid):
     body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=last_hint(cid), usage=usage)
     if not body:
         body = "💛 Доброе утро! Отметь самочувствие через Симптомы, и подскажу, на что обратить внимание сегодня."
-    await context.bot.send_message(cid, f"{body}\n\nAIWA · {DISCLAIMER}", reply_markup=summary_kb())
+    await context.bot.send_message(cid, f"{body}\n\nДобавь сегодняшние симптомы через Симптомы, чтобы сводка была точнее.\n\nAIWA · {DISCLAIMER}", reply_markup=summary_kb())
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
 
 async def send_general(context, cid, key):
@@ -550,6 +552,10 @@ async def dispatch_intent(context, update, cid, u, intent):
         return await msg.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
     if intent == "history":
         return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
+    if intent == "unlink":
+        return await msg.reply_text("Чтобы отключить партнёра, введи команду /unlink")
+    if intent == "help":
+        return await help_cmd(update, context)
     if intent == "partner":
         return await partner_entry(context, cid, msg)
     if intent == "training":
@@ -578,7 +584,7 @@ async def push_summary(context, cid, with_image=True):
     usage = []
     body = await asyncio.to_thread(L.generate_summary, st, u["modules"], hint=last_hint(cid), usage=usage)
     kb = summary_kb()
-    await context.bot.send_message(cid, f"{body}\n\nAIWA · {DISCLAIMER}", reply_markup=kb)
+    await context.bot.send_message(cid, f"{body}\n\nДобавь сегодняшние симптомы через Симптомы, чтобы сводка была точнее.\n\nAIWA · {DISCLAIMER}", reply_markup=kb)
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
 
 def schedule_daily(app, cid, hhmm):
@@ -677,15 +683,22 @@ async def push_partner(context, woman_cid):
         log.warning("partner push: %s", e)
 
 async def partner_entry(context, cid, msg):
+    global BOT_USERNAME
     u = row(cid); code = u.get("partner_code")
     if not code:
         code = secrets.token_hex(4); set_partner_code(cid, code)
-    link = f"https://t.me/{BOT_USERNAME}?start=p_{code}" if BOT_USERNAME else f"код подключения: {code}"
-    connected = "Партнёр уже подключён. Отключить: /unlink" if partner_of(cid) else "Партнёр пока не подключён."
-    await msg.reply_text(
-        "👫 Партнёрский режим. Перешли партнёру ссылку ниже. Он откроет бота и каждое утро будет получать короткий апдейт: "
-        "твоя фаза, настроение и что можно сделать или купить.\n\n"
-        f"{link}\n\n{connected}")
+    if not BOT_USERNAME:
+        try: BOT_USERNAME = (await context.bot.get_me()).username
+        except Exception: BOT_USERNAME = None
+    link = f"https://t.me/{BOT_USERNAME}?start=p_{code}" if BOT_USERNAME else None
+    linked = partner_of(cid)
+    body = ("👫 Партнёрский режим. Перешли партнёру ссылку ниже. Он откроет бота и каждое утро будет получать короткий апдейт: "
+            "твоя фаза, настроение и что можно сделать или купить.\n\n")
+    body += (link if link else f"Код подключения: {code}")
+    body += ("\n\nПартнёр уже подключён." if linked else "\n\nПартнёр пока не подключён.")
+    if linked:
+        body += " Отключить можно командой /unlink"
+    await msg.reply_text(body)
 
 async def partner_join(context, partner_cid, msg, code):
     woman = woman_by_code(code)
@@ -794,7 +807,7 @@ async def stop(update, context):
     for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     del_user(cid); await update.message.reply_text("Отключила сводки и удалила данные. Вернуться: /start")
 async def help_cmd(update, context):
-    await update.message.reply_text("AIWA, помощник по циклу.\n/today сводка\n/menu кнопки\n/calendar календарь\n/checkin симптомы\n/period отметить месячные\n/profile данные для питания\n/report выписка для врача\n/partner подключить партнёра\n/time время\n/stop отключить")
+    await update.message.reply_text("AIWA, помощник по циклу. Команды:\n/menu меню\n/today сводка за день\n/checkin отметить симптомы\n/period отметить месячные\n/calendar календарь цикла\n/report выписка для врача\n/partner подключить партнёра\n/unlink отключить партнёра\n/profile мои данные\n/app открыть приложение\n/time время сводки\n/about о боте\n/stop удалить данные")
 
 # ---------- stats ----------
 def aggregate_stats():
@@ -1148,8 +1161,14 @@ async def on_startup(app):
         except Exception as e:
             log.warning("menu button: %s", e)
     try:
-        await app.bot.set_my_commands([BotCommand("start", "Старт"), BotCommand("menu", "Меню"),
-                                       BotCommand("stop", "Удалить данные и отключить")])
+        await app.bot.set_my_commands([
+            BotCommand("menu", "Меню"), BotCommand("today", "Сводка за день"),
+            BotCommand("checkin", "Отметить симптомы"), BotCommand("period", "Отметить месячные"),
+            BotCommand("calendar", "Календарь цикла"), BotCommand("report", "Выписка для врача"),
+            BotCommand("partner", "Подключить партнёра"), BotCommand("unlink", "Отключить партнёра"),
+            BotCommand("profile", "Мои данные"), BotCommand("app", "Открыть приложение"),
+            BotCommand("time", "Время сводки"), BotCommand("about", "О боте"),
+            BotCommand("help", "Команды"), BotCommand("stop", "Удалить данные")])
     except Exception as e:
         log.warning("set commands: %s", e)
     try: BOT_USERNAME = app.bot.username
