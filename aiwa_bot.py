@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, sqlite3, secrets, logging
-from datetime import datetime, date, time as dtime
+import os, io, re, time, sqlite3, secrets, logging
+from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -80,7 +80,7 @@ def db():
     c = sqlite3.connect(DB, timeout=30)
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("""CREATE TABLE IF NOT EXISTS users(chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
-        send_time TEXT DEFAULT '09:00', modules TEXT DEFAULT 'phase,general,food,training',
+        send_time TEXT DEFAULT '08:00', modules TEXT DEFAULT 'phase,general,food,training',
         state TEXT, pending_date TEXT, created TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS sugg(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, q TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS cycles(chat_id INTEGER, start_date TEXT, PRIMARY KEY(chat_id,start_date))")
@@ -89,18 +89,21 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
         ts TEXT, action TEXT, tokens INTEGER DEFAULT 0)""")
     c.execute("CREATE TABLE IF NOT EXISTS partners(partner_id INTEGER PRIMARY KEY, woman_id INTEGER, created TEXT)")
+    for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0"):
+        try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
+        except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
-                "activity INTEGER", "diet TEXT", "partner_code TEXT"):
+                "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     return c
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
             "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
-            "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12]}
+            "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12], "mode": r[13] or "cycle"}
 
 def upsert(cid, **kw):
     c = db()
@@ -113,8 +116,9 @@ def add_sugg(cid, q):
     c = db(); sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?)", (cid, q)).lastrowid; c.commit(); c.close(); return sid
 def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
-def ev(cid, action, tokens=0):
-    c = db(); c.execute("INSERT INTO events(chat_id,ts,action,tokens) VALUES(?,?,?,?)", (cid, datetime.now().isoformat(), action, int(tokens))); c.commit(); c.close()
+def ev(cid, action, tokens=0, meta=None, ms=0, n=0):
+    c = db(); c.execute("INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n) VALUES(?,?,?,?,?,?,?)",
+        (cid, datetime.now().isoformat(), action, int(tokens), meta, int(ms), int(n))); c.commit(); c.close()
 def cyc_add(cid, d):
     c = db(); c.execute("INSERT OR IGNORE INTO cycles(chat_id,start_date) VALUES(?,?)", (cid, d)); c.commit(); c.close()
 def log_get(cid, d):
@@ -218,7 +222,9 @@ def profile_kcal(p):
 def match_meta(text):
     t = text.lower()
     if any(k in t for k in ("гигачат", "gigachat", "на чём ты работаешь", "на чем ты работаешь", "чём ты работаешь", "чем ты работаешь",
-                            "какая модель", "что за модель", "на какой модели", "какая нейросеть", "какой ии", "что за нейросеть", "кто тебя сделал")): return "tech"
+                            "на чем ты сделан", "на чём ты сделан", "из чего ты", "что под капотом", "какой движок", "какая технология", "на какой технологии",
+                            "какая модель", "что за модель", "на какой модели", "какая нейросеть", "какой ии", "что за нейросеть", "ты нейросеть",
+                            "ты gpt", "ты чат gpt", "chatgpt", "ты openai", "openai", "ты llama", "языковая модель", "ты ллм", "кто тебя сделал", "кто тебя создал")): return "tech"
     if any(k in t for k in ("что такое айва", "что такое aiwa", "расскажи о себе", "кто ты", "о тебе", "про себя", "что ты умеешь", "ты кто")): return "about"
     if any(k in t for k in ("храните данные", "хранишь данные", "хранение данных", "мои данные", "персональные данные", "приватн", "конфиденц",
                             "что с данными", "безопасн", "удалить данные", "передаёте", "передаете данные", "данные в безопас")): return "privacy"
@@ -238,10 +244,15 @@ def match_guide(text):
         if any(k in t for k in g["kw"]): return g
     return None
 
-def is_onboarded(u): return u and u.get("last_period") and u.get("cycle_len")
+def is_cycle(u): return not (u and u.get("mode") in ("irregular", "none", "meno"))
+def is_onboarded(u):
+    if not u: return False
+    if u.get("mode") in ("irregular", "none", "meno"): return True
+    return bool(u.get("last_period") and u.get("cycle_len"))
 def status_of(cid):
     u = row(cid)
-    if not is_onboarded(u): return None, None
+    if not (u and u.get("last_period") and u.get("cycle_len") and is_cycle(u)):
+        return u, None
     return u, C.cycle_status(date.fromisoformat(u["last_period"]), u["cycle_len"])
 
 # ---------- keyboards ----------
@@ -272,7 +283,20 @@ MENU_KB = InlineKeyboardMarkup([
     [B("Время рассылки", "set:time")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
-ONB_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Месячные начались сегодня", callback_data="onb_today")]])
+ONB_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Месячные начались сегодня", callback_data="onb_today")],
+    [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
+])
+NOCYCLE_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Нерегулярный / не знаю", callback_data="mode:irregular")],
+    [InlineKeyboardButton("Сейчас нет месячных", callback_data="mode:none")],
+    [InlineKeyboardButton("Менопауза", callback_data="mode:meno")],
+])
+GENERAL_MENU_KB = InlineKeyboardMarkup([
+    [B("Питание", "food"), B("Нагрузка", "sec:training")],
+    [B("Симптомы", "checkin", KBS.SUCCESS), B("История и выписка", "history")],
+    [B("Партнёр", "partner"), B("Время рассылки", "set:time")],
+])
 PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
 SKIP_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Пропустить", callback_data="prof_skip")]])
 HIST_KB = InlineKeyboardMarkup([
@@ -312,6 +336,7 @@ async def need_onboard(t):
         return await t.reply_text(PARTNER_INFO)
     await t.reply_text("Чтобы рекомендации были точными, сначала укажи дату последних месячных и длину цикла.", reply_markup=GATE_KB)
 async def begin_onboard(cid, msg):
+    if not row(cid): ev(cid, "signup")
     upsert(cid, state="await_date", pending_date=None)
     await msg.reply_text(START_TEXT, reply_markup=ONB_KB)
 
@@ -403,7 +428,24 @@ async def send_answer(context, cid, text, st, basis_q, usage=None):
     await context.bot.send_message(cid, text, reply_markup=kb)
     ev(cid, "tokens", sum(usage))
 
+async def push_general(context, cid):
+    u = row(cid); usage = []
+    body = L.general_summary(profile_of(u), u.get("mode"), hint=last_hint(cid), usage=usage)
+    if not body:
+        body = "💛 Доброе утро! Отметь самочувствие через Симптомы, и подскажу, на что обратить внимание сегодня."
+    await context.bot.send_message(cid, f"{body}\n\nAIWA · {DISCLAIMER}", reply_markup=summary_kb())
+    ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
+
+async def send_general(context, cid, key):
+    u = row(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
+    qmap = {"food": "Что мне есть сегодня под мой возраст и самочувствие? Дай конкретные продукты или меню на день.",
+            "training": "Какая физическая активность мне сейчас подходит и почему? Дай конкретные варианты."}
+    usage = []; ans = L.general_answer(profile_of(u), u.get("mode"), qmap.get(key, key), hint=last_hint(cid), usage=usage)
+    await context.bot.send_message(cid, ans, reply_markup=summary_kb()); ev(cid, "tokens", sum(usage))
+
 async def push_summary(context, cid, with_image=True):
+    u0 = row(cid)
+    if u0 and not is_cycle(u0): return await push_general(context, cid)
     u, st = status_of(cid)
     if not st: return
     if st["status"] != "normal": return await send_delay(context, cid, st)
@@ -412,7 +454,7 @@ async def push_summary(context, cid, with_image=True):
     body = L.generate_summary(st, u["modules"], hint=last_hint(cid), usage=usage)
     kb = summary_kb()
     await context.bot.send_message(cid, f"{body}\n\nAIWA · {DISCLAIMER}", reply_markup=kb)
-    ev(cid, "tokens", sum(usage))
+    ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
 
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
@@ -423,29 +465,34 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 
 def finish_onboarding(context, cid, last_period_iso, n):
     upsert(cid, last_period=last_period_iso, cycle_len=n, state=None, pending_date=None)
-    cyc_add(cid, last_period_iso); schedule_daily(context.application, cid, row(cid)["send_time"] or "09:00")
+    cyc_add(cid, last_period_iso); schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 
 async def welcome_finish(context, cid, msg):
-    await msg.reply_text("Всё готово! Утреннюю сводку буду присылать каждый день в 09:00 (МСК), время меняется в Меню.")
+    ev(cid, "activated", meta=(row(cid).get("mode") or "cycle"))
+    await msg.reply_text("Всё готово! Утреннюю сводку буду присылать автоматически каждый день в 08:00 (МСК), время меняется в Меню.",
+        reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     await push_summary(context, cid)
-    await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда к врачу.",
-        reply_markup=InlineKeyboardMarkup([[B("Гид: норма цикла", "guides")]]))
+    if is_cycle(row(cid)):
+        await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда к врачу.",
+            reply_markup=InlineKeyboardMarkup([[B("Гид: норма цикла", "guides")]]))
 
 async def send_report(context, cid, period):
-    u, st = status_of(cid)
-    if not st: return await context.bot.send_message(cid, "Сначала настрой цикл: /start.")
+    u = row(cid)
+    if not is_onboarded(u): return await context.bot.send_message(cid, "Сначала пройди настройку: /start.")
     if not RPT: return await context.bot.send_message(cid, "Выписка временно недоступна.")
+    _, st = status_of(cid)
     await context.bot.send_chat_action(cid, "upload_document")
     since, label = RPT.period_since(period)
     cycles = cycles_of(cid, since); logs = logs_of(cid, since)
-    if u["last_period"] and u["last_period"] not in cycles:
+    if st and u.get("last_period") and u["last_period"] not in cycles:
         cycles = sorted(set(cycles + [u["last_period"]]))
     try:
-        pdf = RPT.build_report({"cycles": cycles, "logs": logs, "st": st, "cycle_len": u["cycle_len"], "period_label": label})
+        pdf = RPT.build_report({"cycles": cycles, "logs": logs, "st": st, "cycle_len": (u.get("cycle_len") or 28),
+                                "period_label": label, "profile": profile_of(u), "mode": u.get("mode")})
         bio = io.BytesIO(pdf); bio.name = "AIWA_vypiska.pdf"
         await context.bot.send_document(cid, document=bio, filename="AIWA_vypiska.pdf",
             caption=f"📄 Выписка по циклу, {label.lower()}. Можно показать гинекологу.")
-        ev(cid, "button")
+        ev(cid, "goal", meta="report")
     except Exception as e:
         log.warning("report: %s", e); await context.bot.send_message(cid, "Не удалось собрать выписку, попробуй позже.")
 
@@ -465,8 +512,13 @@ async def push_partner(context, woman_cid):
     if not pid: return
     u, st = status_of(woman_cid)
     if not st: return
+    hint = last_hint(woman_cid)
+    text = None
+    try: text = L.partner_brief(st, hint)
+    except Exception as e: log.warning("partner_brief: %s", e)
+    if not text: text = partner_text(st, hint)
     try:
-        await context.bot.send_message(pid, partner_text(st, last_hint(woman_cid)))
+        await context.bot.send_message(pid, text)
     except Exception as e:
         log.warning("partner push: %s", e)
 
@@ -487,7 +539,7 @@ async def partner_join(context, partner_cid, msg, code):
         return await msg.reply_text("Ссылка недействительна. Попроси прислать новую через Меню, кнопка Партнёр.")
     if woman == partner_cid:
         return await msg.reply_text("Это твоя же ссылка, перешли её партнёру.")
-    link_partner(partner_cid, woman)
+    link_partner(partner_cid, woman); ev(partner_cid, "goal", meta="partner_link")
     await msg.reply_text(PARTNER_HELLO)
     await push_partner(context, woman)  # сразу первый апдейт, не ждать утра
     try:
@@ -507,16 +559,15 @@ async def start(update, context):
             reply_markup=InlineKeyboardMarkup([[B("Продолжить", "keep", KBS.PRIMARY)], [B("Начать заново", "go_start", KBS.DANGER)]]))
     await begin_onboard(cid, update.message)
 async def today(update, context):
-    ev(update.effective_chat.id, "command")
-    _, st = status_of(update.effective_chat.id)
-    if not st: return await need_onboard(update.message)
-    await push_summary(context, update.effective_chat.id)
+    cid = update.effective_chat.id; ev(cid, "command")
+    if not is_onboarded(row(cid)): return await need_onboard(update.message)
+    await push_summary(context, cid)
 async def calendar_cmd(update, context):
-    ev(update.effective_chat.id, "command")
-    _, st = status_of(update.effective_chat.id)
-    if not st: return await need_onboard(update.message)
-    if st["status"] != "normal": return await send_delay(context, update.effective_chat.id, st)
-    await send_infographic(context.bot, update.effective_chat.id)
+    cid = update.effective_chat.id; ev(cid, "command"); u, st = status_of(cid)
+    if not is_onboarded(u): return await need_onboard(update.message)
+    if st is None: return await update.message.reply_text("В этом режиме фазы цикла не отслеживаются.")
+    if st["status"] != "normal": return await send_delay(context, cid, st)
+    await send_infographic(context.bot, cid)
 async def menu(update, context):
     ev(update.effective_chat.id, "command")
     if not is_onboarded(row(update.effective_chat.id)): return await need_onboard(update.message)
@@ -529,11 +580,12 @@ async def checkin_cmd(update, context):
 async def period_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
+    if not is_cycle(row(cid)): return await update.message.reply_text("В этом режиме месячные не отслеживаются. Если цикл вернулся, обнови данные через /start.")
     if context.args:
         d = parse_date(context.args[0])
         if d:
             cyc_add(cid, d.isoformat()); upsert(cid, last_period=d.isoformat(), state=None)
-            schedule_daily(context.application, cid, row(cid)["send_time"] or "09:00")
+            schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
             return await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}.")
     upsert(cid, state="await_period_date")
     await update.message.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
@@ -547,10 +599,10 @@ async def set_time_cmd(update, context):
     upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
     await update.message.reply_text(f"Время сводки: {hhmm} (МСК).")
 async def menutoday_cmd(update, context):
-    ev(update.effective_chat.id, "command")
-    _, st = status_of(update.effective_chat.id)
-    if not st: return await need_onboard(update.message)
-    await send_menu(context, update.effective_chat.id)
+    cid = update.effective_chat.id; ev(cid, "command"); u, st = status_of(cid)
+    if not is_onboarded(u): return await need_onboard(update.message)
+    if st is None: return await send_general(context, cid, "food")
+    await send_menu(context, cid)
 async def profile_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
@@ -581,33 +633,111 @@ async def help_cmd(update, context):
 
 # ---------- stats ----------
 def aggregate_stats():
-    from collections import defaultdict
+    from collections import defaultdict, Counter
     import statistics as ST
-    c = db(); n_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    rows = c.execute("SELECT chat_id,ts,action,tokens FROM events ORDER BY chat_id,ts").fetchall(); c.close()
-    byu = defaultdict(list)
-    for cid, ts, action, tok in rows: byu[cid].append((datetime.fromisoformat(ts), action, tok or 0))
-    actions = {"manual": 0, "suggest": 0, "button": 0, "command": 0}; tokens = 0; msgs = 0
-    sessions = 0; slens = []; sev = []; active7 = set(); now = datetime.now(); GAP = 1800
-    for cid, evs in byu.items():
-        cur = []
-        for t, a, tok in evs:
-            if a == "tokens": tokens += tok; continue
-            if a in actions: actions[a] += 1; msgs += 1
-            if (now - t).days < 7: active7.add(cid)
+    PRICE = float(os.environ.get("AIWA_TOKEN_PRICE_USD", "0.5"))  # $ за 1M токенов, blended, приблизительно
+    c = db()
+    users = c.execute("SELECT chat_id, created, last_period, cycle_len, mode FROM users").fetchall()
+    rows = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, n FROM events ORDER BY chat_id, ts").fetchall()
+    c.close()
+    now = datetime.now(); today = now.date()
+    ACT = {"manual", "button", "suggest", "command", "fallback", "answered"}
+    ev_by_user = defaultdict(list); active_days = defaultdict(set); first_day = {}
+    tokens_total = 0; answered = 0; fallback = 0; errors = 0
+    goals = Counter(); intents = Counter(); lat = []; reqlens = []
+    for cid, ts, action, tok, meta, ms, n in rows:
+        t = datetime.fromisoformat(ts); d = t.date(); tokens_total += (tok or 0)
+        if action in ACT:
+            ev_by_user[cid].append(t); active_days[cid].add(d)
+            if cid not in first_day or d < first_day[cid]: first_day[cid] = d
+            intents[meta or action] += 1
+        if action == "answered":
+            answered += 1
+            if ms: lat.append(ms)
+            if n: reqlens.append(n)
+        elif action == "fallback": fallback += 1
+        elif action == "error": errors += 1
+        elif action == "goal": goals[meta or "goal"] += 1
+        elif action == "manual" and n: reqlens.append(n)
+
+    n_users = len(users)
+    onboarded = sum(1 for _, _, lp, cl, md in users if (lp and cl) or md in ("irregular", "none", "meno"))
+    signups = len(set(r[0] for r in rows if r[2] == "signup")) or n_users
+    activated = len(set(r[0] for r in rows if r[2] == "activated"))
+    act_rate = activated / signups * 100 if signups else 0
+    def active_in(days):
+        cut = today - timedelta(days=days - 1)
+        return len(set(cid for cid, ds in active_days.items() if any(dd >= cut for dd in ds)))
+    dau, wau, mau = active_in(1), active_in(7), active_in(30)
+    sev7 = today - timedelta(days=7)
+    returning = len(set(cid for cid, ds in active_days.items() if any(dd > sev7 for dd in ds) and any(dd <= sev7 for dd in ds)))
+    stick = dau / mau * 100 if mau else 0
+
+    GAP = 1800; sessions = 0; slens = []; sev = []; requests = 0
+    for cid, tl in ev_by_user.items():
+        tl = sorted(tl); requests += len(tl); cur = []
+        for t in tl:
             if cur and (t - cur[-1]).total_seconds() > GAP:
                 sessions += 1; slens.append((cur[-1] - cur[0]).total_seconds()); sev.append(len(cur)); cur = []
             cur.append(t)
         if cur: sessions += 1; slens.append((cur[-1] - cur[0]).total_seconds()); sev.append(len(cur))
-    avg_slen = (ST.mean(slens) / 60 if slens else 0); avg_sev = (ST.mean(sev) if sev else 0)
-    mpu = (msgs / n_users if n_users else 0); tot = sum(actions.values()) or 1
-    mix = ", ".join(f"{k} {actions[k]} ({actions[k]*100//tot}%)" for k in ("manual", "suggest", "button", "command"))
-    return ("Статистика AIWA\n"
-            f"Пользователей: {n_users}, активных за 7 дней: {len(active7)}\n"
-            f"Сессий: {sessions}, средняя длина {avg_slen:.1f} мин, событий на сессию {avg_sev:.1f}\n"
-            f"Сообщений на пользователя: {mpu:.1f}\n"
-            f"Ввод: {mix}\n"
-            f"Токенов всего: {tokens}, на сообщение ~{tokens//(msgs or 1)}")
+    avg_slen = ST.mean(slens) / 60 if slens else 0; avg_sev = ST.mean(sev) if sev else 0
+    spu = sessions / len(ev_by_user) if ev_by_user else 0; rps = requests / sessions if sessions else 0
+
+    def retention(win):
+        elig = [cid for cid, fd in first_day.items() if (today - fd).days >= win]
+        if not elig: return None
+        ret = sum(1 for cid in elig if any((dd - first_day[cid]).days >= win for dd in active_days[cid]))
+        return ret / len(elig) * 100
+    r1, r7, r30 = retention(1), retention(7), retention(30)
+    l7 = [len([dd for dd in ds if (today - dd).days < 7]) for ds in active_days.values()]
+    avg_l7 = ST.mean(l7) if l7 else 0
+
+    ans_tot = answered + fallback + errors
+    succ = answered / ans_tot * 100 if ans_tot else 0
+    fb_rate = fallback / requests * 100 if requests else 0
+    err_rate = errors / requests * 100 if requests else 0
+    avg_reqlen = ST.mean(reqlens) if reqlens else 0
+    tpd = tokens_total / answered if answered else 0
+    cost = tokens_total / 1e6 * PRICE; cost_act = cost / mau if mau else 0
+    def pct(a, p):
+        a = sorted(a); return a[min(len(a) - 1, int(len(a) * p))] if a else 0
+    p50, p95 = pct(lat, 0.5), pct(lat, 0.95)
+    modes = Counter((md or "cycle") for _, _, lp, cl, md in users)
+    got_sum = len(set(r[0] for r in rows if r[2] == "goal" and r[4] == "summary"))
+    got_out = len(set(r[0] for r in rows if r[2] == "goal" and r[4] in ("report", "partner_link")))
+    def fr(x): return f"{x:.0f}%" if x is not None else "n/a"
+    top = ", ".join(f"{k} {v}" for k, v in intents.most_common(8)) or "нет данных"
+    goalstr = ", ".join(f"{k} {v}" for k, v in goals.most_common()) or "нет"
+    modestr = ", ".join(f"{k} {v}" for k, v in modes.most_common())
+
+    return (
+        "Аналитика AIWA\n\n"
+        "АУДИТОРИЯ\n"
+        f"Всего: {n_users}, онбординг пройден: {onboarded}\n"
+        f"DAU {dau} / WAU {wau} / MAU {mau}\n"
+        f"Вернувшиеся: {returning}, stickiness DAU/MAU: {stick:.0f}%\n"
+        f"Режимы: {modestr}\n\n"
+        "АКТИВАЦИЯ\n"
+        f"Регистраций: {signups}, активаций: {activated} ({act_rate:.0f}%)\n\n"
+        "ВОВЛЕЧЕНИЕ\n"
+        f"Сессий: {sessions}, на юзера {spu:.1f}, средняя длина {avg_slen:.1f} мин, событий/сессия {avg_sev:.1f}\n"
+        f"Запросов: {requests}, на сессию {rps:.1f}, средняя длина ввода {avg_reqlen:.0f} симв.\n\n"
+        "УДЕРЖАНИЕ (rolling)\n"
+        f"D1 {fr(r1)}, D7 {fr(r7)}, D30 {fr(r30)}; активных дней за 7: {avg_l7:.1f}\n\n"
+        "УСПЕШНОСТЬ\n"
+        f"Ответов: {answered}, доля успешных {succ:.0f}%, фолбэков {fallback} ({fb_rate:.0f}%), ошибок {errors} ({err_rate:.0f}%)\n"
+        f"Целевые действия: {goalstr}\n"
+        f"Воронка: рег {signups} → актив {activated} → получили сводку {got_sum} → выписка/партнёр {got_out}\n\n"
+        "ЗАПРОСЫ\n"
+        f"Топ интентов: {top}\n\n"
+        "ТОКЕНЫ И СКОРОСТЬ\n"
+        f"Токенов: {tokens_total}, на диалог ~{tpd:.0f}\n"
+        f"Оценка стоимости: ${cost:.2f} (по ${PRICE}/1M токенов), на активного ${cost_act:.3f}\n"
+        f"Латентность ответа: p50 {p50} мс, p95 {p95} мс"
+    )
+
+
 async def stats_cmd(update, context):
     cid = update.effective_chat.id
     if not AIWA_ADMIN:
@@ -623,6 +753,21 @@ async def on_text(update, context):
     if cem:
         return await update.message.reply_text("ID кастомных эмодзи:\n" + "\n".join(cem))
 
+    if is_partner(cid) and not is_onboarded(u):
+        wid = woman_of_partner(cid); _, wst = status_of(wid)
+        if not wst:
+            return await update.message.reply_text(PARTNER_INFO)
+        mt = match_meta(txt)
+        if mt:
+            return await update.message.reply_text({"about": ABOUT_TEXT, "privacy": PRIVACY_TEXT, "tech": TECH_TEXT}[mt])
+        if is_gibberish(txt):
+            return await update.message.reply_text("Не поняла вопрос. Напиши словами, например: «как её поддержать сегодня» или «что ей купить».")
+        await context.bot.send_chat_action(cid, "typing")
+        t0 = time.monotonic(); usage = []
+        ans = L.partner_answer(wst, txt, last_hint(wid), usage=usage)
+        ev(cid, "answered", tokens=sum(usage), meta="partner_q", ms=int((time.monotonic()-t0)*1000), n=len(txt))
+        return await context.bot.send_message(cid, ans)
+
     if state == "await_date":
         d = parse_date(txt)
         if not d: return await update.message.reply_text("Не разобрала дату. Напиши в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
@@ -630,14 +775,17 @@ async def on_text(update, context):
         return await update.message.reply_text("Поняла. Какая у тебя средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
     if state == "await_len":
         try:
-            n = int(txt); assert 20 <= n <= 40
+            n = int(txt); assert 20 <= n <= 60
         except (ValueError, AssertionError):
-            return await update.message.reply_text("Нужно число от 20 до 40. Если не знаешь, напиши 28.")
+            return await update.message.reply_text("Нужно число от 20 до 60. Если цикла нет или он нерегулярный, начни заново через /start и выбери «Нет регулярного цикла». Если не знаешь длину, напиши 28.")
         finish_onboarding(context, cid, u["pending_date"], n)
+        note = ""
+        if n > 40:
+            note = ("Цикл длиннее 40 дней часто говорит о нерегулярности (бывает при СПКЯ, щитовидке, стрессе), это стоит обсудить с гинекологом. "
+                    "Ориентировочные фазы я всё равно посчитаю и буду следить за симптомами.\n\n")
         upsert(cid, state="await_profile")
-        return await update.message.reply_text(
-            "Цикл настроен. Осталось немного для персонального питания и калорий.\n\n"
-            "Напиши через пробел рост (см), вес (кг) и возраст. Например: 168 60 30.", reply_markup=SKIP_KB)
+        return await update.message.reply_text(note +
+            "Осталось немного для персонального питания и калорий.\nНапиши через пробел рост (см), вес (кг) и возраст. Например: 168 60 30.", reply_markup=SKIP_KB)
 
     if state == "await_profile":
         nums = [p for p in re.split(r"[ ,;/]+", txt) if p]
@@ -659,29 +807,38 @@ async def on_text(update, context):
         d = parse_date(txt)
         if d:
             cyc_add(cid, d.isoformat()); upsert(cid, last_period=d.isoformat(), state=None)
-            schedule_daily(context.application, cid, row(cid)["send_time"] or "09:00")
+            schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
             return await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}.")
         upsert(cid, state=None)
 
     m = match_meta(txt)
     if m:
+        ev(cid, "manual", meta="meta", n=len(txt))
         return await update.message.reply_text({"about": ABOUT_TEXT, "privacy": PRIVACY_TEXT, "tech": TECH_TEXT}[m])
 
     low = txt.lower()
     if is_onboarded(u) and re.search(r"(где.*сводк|пришл\w*\s*сводк|покажи\s*сводк|моя\s*сводк|^сводк|что там сегодня|что сегодня по циклу)", low):
-        ev(cid, "manual"); return await push_summary(context, cid)
-    if is_onboarded(u) and re.search(r"(замен\w*|друго[ей]\w*\s+блюд\w*|другое на (завтрак|обед|ужин|перекус)|не нравит\w* блюд\w*|обнови\w* меню|пересобер\w* меню)", low):
-        _, st = status_of(cid); ev(cid, "manual")
+        ev(cid, "manual", meta="summary_intent", n=len(txt)); return await push_summary(context, cid)
+    if is_onboarded(u) and is_cycle(u) and re.search(r"(замен\w*|друго[ей]\w*\s+блюд\w*|другое на (завтрак|обед|ужин|перекус)|не нравит\w* блюд\w*|обнови\w* меню|пересобер\w* меню)", low):
+        _, st = status_of(cid); ev(cid, "manual", meta="menu_replace", n=len(txt))
         return await send_menu(context, cid)
     if is_onboarded(u) and is_gibberish(txt):
+        ev(cid, "fallback", meta="gibberish", n=len(txt))
         return await update.message.reply_text("Не поняла запрос. Напиши вопрос словами, например: «почему тянет на сладкое» или «какая тренировка сегодня».")
 
+    if is_onboarded(u) and not is_cycle(u):
+        await context.bot.send_chat_action(cid, "typing")
+        t0 = time.monotonic(); usage = []
+        ans = L.general_answer(profile_of(u), u.get("mode"), txt, hint=last_hint(cid), usage=usage)
+        ev(cid, "answered", tokens=sum(usage), meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
+        return await context.bot.send_message(cid, ans, reply_markup=summary_kb())
     if is_onboarded(u):
-        _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "manual")
+        _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing")
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
-        usage = []
+        t0 = time.monotonic(); usage = []
         ans = L.answer_question(st, txt, usage=usage)
+        ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         return await send_answer(context, cid, ans, st, txt, usage=usage)
     await need_onboard(update.message)
 
@@ -704,19 +861,31 @@ async def on_cb(update, context):
         return await q.edit_message_reply_markup(reply_markup=diet_kb(cur))
     if data == "diet:done":
         upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
-    ev(cid, "suggest" if data.startswith("q:") else "button")
+    if data == "no_cycle":
+        return await q.message.reply_text("Понимаю. Что ближе?", reply_markup=NOCYCLE_KB)
+    if data.startswith("mode:"):
+        m = data.split(":")[1]; upsert(cid, mode=m, state="await_profile")
+        schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
+        return await q.message.reply_text(
+            "Поняла. Фазы цикла отслеживать не буду, но дам рекомендации по самочувствию, питанию и движению с учётом возраста и помогу следить за симптомами.\n\n"
+            "Чтобы советы были точнее, напиши через пробел рост (см), вес (кг) и возраст. Например 168 60 30.", reply_markup=SKIP_KB)
+    ev(cid, "suggest" if data.startswith("q:") else "button", meta=data)
     u, st = status_of(cid)
-    if not st:
+    if not st and not is_onboarded(u):
         return await need_onboard(q.message)
+    general = st is None
     today_s = date.today().isoformat()
     if data == "menu":
-        await q.message.reply_text("О чём рассказать сегодня?", reply_markup=MENU_KB)
+        await q.message.reply_text("О чём рассказать сегодня?", reply_markup=(GENERAL_MENU_KB if general else MENU_KB))
     elif data == "food":
-        await send_section(context, cid, st, "food")
+        if general: await send_general(context, cid, "food")
+        else: await send_section(context, cid, st, "food")
     elif data.startswith("sec:"):
-        await send_section(context, cid, st, data.split(":")[1])
+        if general: await send_general(context, cid, "training")
+        else: await send_section(context, cid, st, data.split(":")[1])
     elif data == "calendar":
-        if st["status"] != "normal": await send_delay(context, cid, st)
+        if general: await q.message.reply_text("В этом режиме фазы цикла не отслеживаются. Если цикл вернётся, обнови данные через /start.")
+        elif st["status"] != "normal": await send_delay(context, cid, st)
         else: await send_infographic(context.bot, cid)
     elif data == "history":
         await q.message.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
@@ -729,10 +898,13 @@ async def on_cb(update, context):
     elif data == "checkin":
         log_ensure(cid, today_s); await q.message.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
     elif data == "period":
-        upsert(cid, state="await_period_date")
-        await q.message.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
+        if general:
+            await q.message.reply_text("В этом режиме месячные не отслеживаются. Если цикл вернётся, обнови данные через /start.")
+        else:
+            upsert(cid, state="await_period_date")
+            await q.message.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
     elif data == "period_today":
-        cyc_add(cid, today_s); upsert(cid, last_period=today_s, state=None); schedule_daily(context.application, cid, row(cid)["send_time"] or "09:00")
+        cyc_add(cid, today_s); upsert(cid, last_period=today_s, state=None); schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
         await q.message.reply_text("Отметила начало месячных сегодня.")
     elif data == "set:time":
         upsert(cid, state="await_time")
@@ -747,18 +919,23 @@ async def on_cb(update, context):
     elif data.startswith("ci:s:"):
         log_toggle(cid, today_s, data.split(":")[2]); sel = set((log_get(cid, today_s) or {}).get("symptoms", [])); await q.edit_message_reply_markup(reply_markup=sym_kb(sel))
     elif data == "ci:done":
-        await q.edit_message_text("Записала. Учту в завтрашней сводке.")
+        ev(cid, "goal", meta="checkin"); await q.edit_message_text("Записала. Учту в завтрашней сводке.")
     elif data.startswith("q:"):
-        question = get_sugg(int(data.split(":")[1])) or "Расскажи про эту фазу"
+        question = get_sugg(int(data.split(":")[1])) or "Дай рекомендацию"
         await context.bot.send_chat_action(cid, "typing")
-        usage = []; ans = L.answer_question(st, question, usage=usage)
-        await q.message.reply_text(f"❓ {question}")
-        await send_answer(context, cid, ans, st, question, usage=usage)
+        if general:
+            usage = []; ans = L.general_answer(profile_of(u), u.get("mode"), question, hint=last_hint(cid), usage=usage)
+            await q.message.reply_text(f"❓ {question}"); await q.message.reply_text(ans, reply_markup=summary_kb()); ev(cid, "tokens", sum(usage))
+        else:
+            usage = []; ans = L.answer_question(st, question, usage=usage)
+            await q.message.reply_text(f"❓ {question}")
+            await send_answer(context, cid, ans, st, question, usage=usage)
 
 async def on_error(update, context):
     log.error("handler error", exc_info=context.error)
     try:
         if isinstance(update, Update) and update.effective_chat:
+            ev(update.effective_chat.id, "error", meta=type(context.error).__name__)
             await context.bot.send_message(update.effective_chat.id, "Упс, что-то пошло не так. Попробуй ещё раз или нажми Меню.")
     except Exception: pass
 
@@ -767,7 +944,7 @@ async def on_startup(app):
     try: BOT_USERNAME = app.bot.username
     except Exception: BOT_USERNAME = None
     n = 0
-    for cid in all_users(): schedule_daily(app, cid, row(cid)["send_time"] or "09:00"); n += 1
+    for cid in all_users(): schedule_daily(app, cid, row(cid)["send_time"] or "08:00"); n += 1
     log.info("Rescheduled %d", n)
 
 def main():

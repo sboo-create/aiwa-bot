@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Сводка, ответы и динамические саджесты через OSS-модель на Groq. Брендинг: GigaChat (тестовый вариант)."""
-import os, re, json, requests
+import os, re, json, requests, unicodedata
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = os.environ.get("AIWA_MODEL", "openai/gpt-oss-120b")
@@ -13,7 +13,7 @@ SYSTEM = (
     "markdown-таблицы и вертикальную черту |. Не используй длинные тире, ставь обычный дефис, запятую или скобки. "
     "Каждый смысловой блок начинай с эмодзи-заголовка (🌙 фаза, 💛 самочувствие, 🍽 питание, 🏋️ нагрузка, 📅 прогноз). "
     "Перечисления давай короткими строками, каждая с «• ». "
-    "Пиши строго и только на грамотном русском языке. Никогда не вставляй слова, слоги или буквы из других языков (английского, вьетнамского и т.п.) внутрь слов; используй правильные русские термины (например «силовая тренировка», а не «силачья»). "
+    "Пиши строго и только на грамотном русском языке кириллицей. Никогда не вставляй латинские буквы и слова из других языков внутрь русских слов: пиши «сперматозоиды», а не «Сpermatozoиды»; «помогает», а не «giúpает»; «силовая тренировка», а не «силачья»; «кости», а не «bones». "
     "Отвечай ПО СУЩЕСТВУ вопроса и конкретно: названия, продукты, числа (нормы, дни, граммы), а не общие слова. "
     "Лекарства: безрецептурные препараты называть можно (например, ибупрофен, парацетамол, дротаверин), но БЕЗ конкретных "
     "дозировок и схем приёма; добавляй, что принимать по инструкции, а при сильной или частой боли обратиться к врачу. "
@@ -36,6 +36,27 @@ SYSTEM = (
 FOCI = ["сон и восстановление", "железо и уровень энергии", "настроение и ПМС", "гидратация и отёки",
         "белок и сытость", "магний и тяга к сладкому", "пищеварение и клетчатка", "кожа и гормоны"]
 
+
+_LAT2CYR = {"a":"а","b":"б","c":"с","d":"д","e":"е","f":"ф","g":"г","h":"х","i":"и","j":"й","k":"к",
+            "l":"л","m":"м","n":"н","o":"о","p":"п","q":"к","r":"р","s":"с","t":"т","u":"у","v":"в",
+            "w":"в","x":"кс","y":"ы","z":"з"}
+def _translit_word(w):
+    out = []
+    for ch in w:
+        rep = _LAT2CYR.get(ch.lower(), ch)
+        if ch.isupper() and rep: rep = rep[0].upper() + rep[1:]
+        out.append(rep)
+    return "".join(out)
+def fix_mixed_script(text):
+    """Чиним слова, где модель смешала кириллицу и латиницу (Сpermatozoиды -> Сперматозоиды)."""
+    if not text: return text
+    def repl(m):
+        w = m.group(0)
+        w2 = "".join(c for c in unicodedata.normalize("NFD", w) if unicodedata.category(c) != "Mn")
+        has_cyr = any("а" <= c.lower() <= "я" or c.lower() == "ё" for c in w2)
+        has_lat = any("a" <= c.lower() <= "z" for c in w2)
+        return _translit_word(w2) if (has_cyr and has_lat) else w
+    return re.sub(r"[^\W\d_]+", repl, text, flags=re.UNICODE)
 
 def strip_md(t):
     """Убираем markdown, который Telegram не рендерит, и длинные тире (SB их не любит)."""
@@ -60,7 +81,7 @@ def strip_md(t):
     t = "\n".join(out)
     t = t.replace("—", "-").replace("–", "-")
     t = re.sub(r"\n{3,}", "\n\n", t)
-    return t.strip()
+    return fix_mixed_script(t.strip())
 
 
 def _ctx(st):
@@ -117,7 +138,7 @@ def answer_question(st, question, usage=None):
              "Если вопрос про цикл, питание, тренировки или самочувствие - свяжи с её фазой. "
              "Если вопрос общий (фильмы, досуг, быт), ответь по теме конкретно; цикл упоминай только если это правда уместно и коротко. "
              "Начни с уместного эмодзи. Перечни оформляй пунктами с «• », каждый с новой строки. Только обычный текст, без markdown. Вопрос: " + question)}]
-    out = _call(msgs, max_tokens=1000, temperature=0.4, usage=usage)
+    out = _call(msgs, max_tokens=1000, temperature=0.3, usage=usage)
     return strip_md(out) if out else ("Подключи модель (ключ), и отвечу развёрнуто. По фазе: " + st["content"]["general"])
 
 
@@ -135,7 +156,7 @@ def explain_section(st, key, usage=None):
         return section_text(st, key)
     msgs = [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": base + "\n\n" + q + " Конкретно, с числами где уместно, только обычный текст без markdown."}]
-    out = _call(msgs, max_tokens=600, temperature=0.4, usage=usage)
+    out = _call(msgs, max_tokens=600, temperature=0.3, usage=usage)
     return strip_md(out) if out else section_text(st, key)
 
 
@@ -164,7 +185,71 @@ def _static(st):
     return S.get(st["phase"], S["luteal"])
 
 
+def partner_brief(st, hint=None, usage=None):
+    h = f" Сегодня она отмечала: {hint}." if hint else ""
+    prompt = (f"Её цикл: день {st['day']} из {st['cycle_len']}, {st['subphase']} {st['phase_ru'].lower()} фаза, "
+              f"до месячных примерно {st['days_to_next']} дн.{h}\n\n"
+              "Напиши короткий тёплый ежедневный апдейт для её партнёра (парня), по-человечески, на русском. "
+              "Строго такая структура, каждый блок с эмодзи-заголовком на отдельной строке и 1-2 короткими пунктами:\n"
+              "💛 День цикла и что происходит (какой гормон ведёт и как влияет на её состояние)\n"
+              "🤝 Как поддержать сегодня (2-3 конкретных действия)\n"
+              "🛍 Что принести или купить (1-2 конкретные вещи под фазу)\n"
+              "📌 Почему это важно (одно короткое предложение)\n"
+              "Без markdown, без длинных тире, только русский.")
+    out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=550, temperature=0.4, usage=usage)
+    return strip_md(out) if out else None
+
+def partner_answer(st, question, hint=None, usage=None):
+    h = f" Сегодня она отмечала: {hint}." if hint else ""
+    msgs = [{"role": "system", "content": SYSTEM},
+            {"role": "user", "content": (f"К тебе обращается ПАРТНЁР женщины (её парень). Она сейчас: день {st['day']} из {st['cycle_len']}, "
+             f"{st['subphase']} {st['phase_ru'].lower()} фаза, до месячных примерно {st['days_to_next']} дн.{h}\n\n"
+             "Ответь на его вопрос конкретно и тепло: как именно ей помочь и поддержать с учётом фазы, какие действия и что можно купить. "
+             "Без воды, только русский, без markdown. Вопрос: " + question)}]
+    out = _call(msgs, max_tokens=700, temperature=0.35, usage=usage)
+    return strip_md(out) if out else "Поддержи её вниманием и заботой, спроси, чего ей сейчас хочется."
+
 DIET_RU = {"veg": "вегетарианство", "vegan": "веган", "nolac": "без лактозы", "noglu": "без глютена", "nonuts": "без орехов", "pesc": "из мяса только рыба"}
+MODE_RU = {"irregular": "нерегулярный цикл", "none": "сейчас нет месячных (аменорея)", "meno": "менопауза или постменопауза", "long": "длинный цикл (более 40 дней)"}
+def _age_band(age):
+    a = age or 0
+    if a >= 55: return "постменопауза"
+    if a >= 45: return "перименопауза, 45+"
+    if a >= 40: return "40+"
+    if a > 0: return "репродуктивный возраст"
+    return "возраст не указан"
+
+def _gen_ctx(profile, mode):
+    band = _age_band(profile.get("age") if profile else None)
+    age = (profile.get("age") if profile else None) or "не указан"
+    diet = ""
+    if profile and profile.get("diet"):
+        human = ", ".join(DIET_RU.get(x, x) for x in profile["diet"].split(",") if x)
+        if human: diet = f" Пищевые ограничения: {human}."
+    return f"Режим без отслеживания фазы цикла: {MODE_RU.get(mode, mode)}. Возраст примерно {age} ({band}).{diet}"
+
+def general_summary(profile, mode, hint=None, usage=None):
+    h = f" {hint}." if hint else ""
+    prompt = (_gen_ctx(profile, mode) + h + "\n\n"
+        "Дай короткую утреннюю wellness-сводку БЕЗ привязки к фазе цикла, блоками с эмодзи-заголовками, каждый блок 1-2 пункта:\n"
+        "💛 Самочувствие и энергия\n🍽 Питание (под возраст)\n🏋️ Движение\n📌 На что обратить внимание по возрасту\n"
+        "Если это аменорея в репродуктивном возрасте, мягко напомни: отсутствие месячных дольше 3 месяцев стоит обсудить с гинекологом (причины: стресс, вес, спорт, щитовидная железа, СПКЯ). "
+        "Если перименопауза или менопауза, учитывай приливы, сон, плотность костей (кальций, витамин D), достаточный белок, здоровье сердца. "
+        "Конкретно, без воды, только русский, без markdown.")
+    out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=700, temperature=0.3, usage=usage)
+    return strip_md(out) if out else None
+
+def general_answer(profile, mode, question, hint=None, usage=None):
+    h = f" {hint}." if hint else ""
+    msgs = [{"role": "system", "content": SYSTEM},
+            {"role": "user", "content": (_gen_ctx(profile, mode) + h + "\n\n"
+             "Ответь на вопрос по существу и конкретно, с учётом возраста и режима, БЕЗ привязки к фазе цикла. "
+             "Если вопрос про питание, движение или симптомы, дай конкретные продукты, действия, числа. "
+             "Если уместно по возрасту (перименопауза, менопауза, аменерея), добавь, на что обратить внимание и когда к врачу. "
+             "Только русский, без markdown. Вопрос: " + question)}]
+    out = _call(msgs, max_tokens=900, temperature=0.3, usage=usage)
+    return strip_md(out) if out else "Расскажи чуть подробнее, и подскажу конкретнее."
+
 def menu_today(st, profile=None, target=None, usage=None):
     extra = ""
     if target:

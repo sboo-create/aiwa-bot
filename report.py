@@ -112,8 +112,9 @@ def _summary_box(cycles, logs, st, w):
         avg = lens[0]
         lines.append(f"<b>Цикл:</b> по отмеченным данным около {avg} дн, для оценки регулярности нужно больше циклов.")
     else:
-        avg = st["cycle_len"]
-        lines.append(f"<b>Цикл:</b> заявленная длина {avg} дн, отмеченных месячных пока мало для статистики.")
+        avg = st["cycle_len"] if st else 28
+        if st:
+            lines.append(f"<b>Цикл:</b> заявленная длина {avg} дн, отмеченных месячных пока мало для статистики.")
     cnt = Counter()
     for lg in logs:
         for s in lg.get("symptoms", []): cnt[s] += 1
@@ -123,14 +124,17 @@ def _summary_box(cycles, logs, st, w):
     en = [lg["energy"] for lg in logs if lg.get("energy")]
     if en:
         lines.append(f"<b>Энергия:</b> в среднем {ENR.get(round(statistics.mean(en)),'')} (по {len(en)} отметкам).")
-    lines.append(f"<b>Сейчас:</b> {st['subphase']} {st['phase_ru'].lower()} фаза, день {st['day']} из {st['cycle_len']}.")
+    if st:
+        lines.append(f"<b>Сейчас:</b> {st['subphase']} {st['phase_ru'].lower()} фаза, день {st['day']} из {st['cycle_len']}.")
+    else:
+        lines.append("<b>Режим:</b> без отслеживания фазы цикла, выписка по симптомам и самочувствию.")
     style = ParagraphStyle("sm", fontName=_FONT, fontSize=10, textColor=INK, leading=15, spaceAfter=2)
     inner = [[Paragraph(t, style)] for t in lines]
     t = Table(inner, colWidths=[w-12*mm])
     t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),ROSEW),("LEFTPADDING",(0,0),(-1,-1),6*mm),
                            ("RIGHTPADDING",(0,0),(-1,-1),6*mm),("TOPPADDING",(0,0),(0,0),4*mm),
                            ("BOTTOMPADDING",(0,-1),(-1,-1),4*mm),("ROUNDEDCORNERS",[6,6,6,6])]))
-    return t, (round(statistics.mean(lens)) if lens else st["cycle_len"])
+    return t, (round(statistics.mean(lens)) if lens else (st["cycle_len"] if st else 28))
 
 
 def _cycle_chart(cycles):
@@ -197,30 +201,33 @@ def build_report(meta):
 
     st = meta["st"]; cycles = sorted(set(meta.get("cycles", []))); logs = meta.get("logs", [])
     story = []
-    story.append(Band(fw, "Выписка по менструальному циклу", f"{meta['period_label']} · сформировано {_ru(date.today())}"))
+    story.append(Band(fw, ("Выписка по менструальному циклу" if st else "Выписка по самочувствию"), f"{meta['period_label']} · сформировано {_ru(date.today())}"))
     story.append(Spacer(1, 7*mm))
 
-    nxt = st.get("next_period")
+    nxt = st.get("next_period") if st else None
     pretty = _cycle_lengths(cycles)
-    avg_len = round(statistics.mean([l for _, l in pretty])) if pretty else meta.get("cycle_len", st["cycle_len"])
-    story.append(_stat_cards([
-        ("Средняя длина", f"{avg_len} дн"),
-        ("Отмечено циклов", f"{len(cycles)}"),
-        ("Текущая фаза", st["phase_ru"]),
-        ("Следующие месячные", _ru(nxt) if nxt else "-"),
-    ], fw))
+    avg_len = round(statistics.mean([l for _, l in pretty])) if pretty else meta.get("cycle_len", 28)
+    prof = meta.get("profile") or {}
+    if st:
+        cards = [("Средняя длина", f"{avg_len} дн"), ("Отмечено циклов", f"{len(cycles)}"),
+                 ("Текущая фаза", st["phase_ru"]), ("Следующие месячные", _ru(nxt) if nxt else "-")]
+    else:
+        nsym = sum(len(lg.get("symptoms", [])) for lg in logs)
+        cards = [("Режим", "без цикла"), ("Возраст", f"{prof.get('age')}" if prof.get("age") else "-"),
+                 ("Дней с отметками", f"{len(logs)}"), ("Симптомов отмечено", f"{nsym}")]
+    story.append(_stat_cards(cards, fw))
     story.append(Spacer(1, 5*mm))
 
     story.append(H2("Краткий вывод"))
     box, avg2 = _summary_box(cycles, logs, st, fw)
     story.append(box); story.append(Spacer(1, 6*mm))
 
-    story.append(H2("Длина цикла по времени"))
-    story.append(Image(_cycle_chart(cycles), width=fw, height=fw*2.4/7.0))
-    story.append(Spacer(1, 5*mm))
-
-    story.append(H2("История отмеченных месячных"))
-    if cycles:
+    if st:
+        story.append(H2("Длина цикла по времени"))
+        story.append(Image(_cycle_chart(cycles), width=fw, height=fw*2.4/7.0))
+        story.append(Spacer(1, 5*mm))
+        story.append(H2("История отмеченных месячных"))
+    if st and cycles:
         rows = [[P("Дата начала"), P("Длина цикла")]]
         for idx in range(len(cycles)-1, -1, -1):
             dd = date.fromisoformat(cycles[idx]); ln = "-"
@@ -236,22 +243,23 @@ def build_report(meta):
                                ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
                                ("LEFTPADDING",(0,0),(-1,-1),6)]))
         story.append(t)
-    else:
+    elif st:
         story.append(P("Пока нет отмеченных дат."))
-    story.append(Spacer(1, 6*mm))
+    if st: story.append(Spacer(1, 6*mm))
 
     story.append(H2("Симптомы за период"))
     story.append(_symptom_table(logs, fw)); story.append(Spacer(1, 6*mm))
 
-    story.append(H2("Рекомендации на текущую фазу"))
-    c = st["content"]
-    story.append(P(f"<b>Фаза:</b> {st['subphase']} {st['phase_ru'].lower()}, день {st['day']} из {st['cycle_len']}."))
-    story.append(P(f"<b>Тело:</b> {c['general']}"))
-    story.append(P(f"<b>Питание:</b> {c['food']}"))
-    story.append(P(f"<b>Нагрузка:</b> {c['training']}"))
-    story.append(Spacer(1, 5*mm))
+    if st:
+        story.append(H2("Рекомендации на текущую фазу"))
+        c = st["content"]
+        story.append(P(f"<b>Фаза:</b> {st['subphase']} {st['phase_ru'].lower()}, день {st['day']} из {st['cycle_len']}."))
+        story.append(P(f"<b>Тело:</b> {c['general']}"))
+        story.append(P(f"<b>Питание:</b> {c['food']}"))
+        story.append(P(f"<b>Нагрузка:</b> {c['training']}"))
+        story.append(Spacer(1, 5*mm))
 
-    if nxt:
+    if st and nxt:
         fc = []; d = nxt
         for _ in range(3): fc.append(_ru(d)); d = d + timedelta(days=avg_len)
         story.append(H2("Прогноз следующих месячных"))
