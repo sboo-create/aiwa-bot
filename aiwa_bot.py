@@ -497,8 +497,10 @@ async def send_general(context, cid, key):
     u = row(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
     qmap = {"food": "Что мне есть сегодня под мой возраст и самочувствие? Дай конкретные продукты или меню на день.",
             "training": "Какая физическая активность мне сейчас подходит и почему? Дай конкретные варианты."}
-    usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), qmap.get(key, key), hint=last_hint(cid), usage=usage)
-    await context.bot.send_message(cid, ans, reply_markup=summary_kb()); ev(cid, "tokens", sum(usage))
+    usage = []; q = qmap.get(key, key)
+    ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), q, hint=last_hint(cid), usage=usage)
+    _, st = status_of(cid)
+    await send_answer(context, cid, ans, st, q, usage=usage)
 
 def cycle_text_analysis(cid):
     import statistics as ST
