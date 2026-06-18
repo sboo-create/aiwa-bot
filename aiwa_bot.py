@@ -48,8 +48,12 @@ def webapp_url(u):
         sep = "&" if "?" in AIWA_WEBAPP_URL else "?"
         return f"{AIWA_WEBAPP_URL}{sep}d={u['last_period']}&c={u['cycle_len']}"
     return AIWA_WEBAPP_URL
-def menu_kb_for(u):
-    return MENU_KB
+def menu_kb_for(u, general=False):
+    base = GENERAL_MENU_KB if general else MENU_KB
+    rows = [list(r) for r in base.inline_keyboard]
+    if AIWA_WEBAPP_URL:
+        rows.append([InlineKeyboardButton("\U0001F4F2 Открыть приложение", web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
+    return InlineKeyboardMarkup(rows)
 EN = {1: "низкая", 2: "средняя", 3: "высокая"}
 SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), ("bloat", "вздутие"),
             ("sweet", "тяга к сладкому"), ("anx", "тревожность"), ("tired", "усталость")]
@@ -209,8 +213,9 @@ def parse_date(t):
     for fmt in formats:
         try:
             d = datetime.strptime(t if "." in t else digits, fmt).date()
-            if fmt in ("%d.%m", "%d%m"): d = d.replace(year=date.today().year)
-            if d > date.today(): d = d.replace(year=d.year - 1)
+            if fmt in ("%d.%m", "%d%m"):
+                d = d.replace(year=date.today().year)
+                if d > date.today(): d = d.replace(year=d.year - 1)
             return d
         except ValueError: continue
     return None
@@ -284,7 +289,7 @@ ADDCYCLES_TEXT = ("\U0001F4C5 История цикла вручную.\n\n"
 def match_intent(t):
     t = t.lower()
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
-    if re.search(r"(добав\w*|ввес\w*|внес\w*|загруз\w*|импорт\w*)\s*(прошл\w*\s*)?(истори|цикл)|истори\w*\s*цикл\w*\s*вручную|(импорт|перенес\w*|перенест\w*).{0,12}(flo|фло)", t): return "addcycles"
+    if re.search(r"(добав|ввес|внес|загруз|импорт)\w*.{0,16}(истори\w*\s*цикл|цикл)|истори\w*\s*цикл\w*\s*вручную|(импорт|перенес\w*).{0,12}(flo|фло)", t): return "addcycles"
     if re.search(r"месячн|менструац", t) and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t): return "period_end"
     if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
     if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|упражнени|фитнес|какая активн)", t): return "training"
@@ -315,7 +320,7 @@ def match_guide(text):
         if any(k in t for k in g["kw"]): return g
     return None
 
-def is_cycle(u): return not (u and u.get("mode") in ("irregular", "none", "meno"))
+def is_cycle(u): return not (u and u.get("mode") in ("irregular", "none", "meno", "preg"))
 def is_onboarded(u):
     if not u: return False
     if u.get("mode") in ("irregular", "none", "meno"): return True
@@ -351,7 +356,7 @@ MENU_KB = InlineKeyboardMarkup([
     [B("Календарь", "calendar"), B("Симптомы", "checkin", KBS.SUCCESS)],
     [B("История и выписка", "history"), B("Гид: норма цикла", "guides")],
     [B("Партнёр", "partner"), B("Отметить месячные", "period", KBS.DANGER)],
-    [B("Добавить историю циклов", "addcycles"), B("Длина цикла", "cyclelen")],
+    [B("📋 Добавить историю циклов", "addcycles")],
     [B("Время рассылки", "set:time")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
@@ -363,12 +368,13 @@ NOCYCLE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Нерегулярный / не знаю", callback_data="mode:irregular")],
     [InlineKeyboardButton("Сейчас нет месячных", callback_data="mode:none")],
     [InlineKeyboardButton("Менопауза", callback_data="mode:meno")],
+    [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
 ])
 GENERAL_MENU_KB = InlineKeyboardMarkup([
     [B("Питание", "food"), B("Нагрузка", "sec:training")],
     [B("Симптомы", "checkin", KBS.SUCCESS), B("История и выписка", "history")],
     [B("Отметить месячные", "period", KBS.DANGER)],
-    [B("Добавить историю циклов", "addcycles"), B("Длина цикла", "cyclelen")],
+    [B("📋 Добавить историю циклов", "addcycles")],
     [B("Партнёр", "partner"), B("Время рассылки", "set:time")],
 ])
 PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
@@ -442,7 +448,7 @@ async def send_training_card(context, cid, st):
 
 async def send_menu(context, cid):
     u, st = status_of(cid)
-    if not st: return
+    if not st: return None
     await context.bot.send_chat_action(cid, "upload_photo")
     prof = profile_of(u); target = profile_kcal(prof) if prof else None
     usage = []; mdata = await asyncio.to_thread(L.menu_today, st, profile=prof, target=target, usage=usage); ev(cid, "tokens", sum(usage))
@@ -456,8 +462,10 @@ async def send_menu(context, cid):
         cap += ". Не нравится блюдо, напиши «замени обед» или «другое на ужин»."
         if not prof: cap += "\n\nЧтобы считать калории под тебя, добавь данные командой /profile."
         await context.bot.send_photo(cid, photo=bio, caption=cap)
+        return mdata, target
     except Exception as e:
         log.warning("menu: %s", e); await context.bot.send_message(cid, "🍽 " + note)
+        return None
 
 async def send_section(context, cid, st, key):
     """Нагрузка и питание: живой ответ с мед-обоснованием. Для нагрузки картинка цикла идёт над текстом, для питания сверху карточка-меню."""
@@ -468,8 +476,12 @@ async def send_section(context, cid, st, key):
         text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
         return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage)
     if key == "food":
-        await send_menu(context, cid)
-        text = await think_llm(context, cid, L.explain_section, st, "food", usage=usage)
+        res = await send_menu(context, cid)
+        if res:
+            mdata, target = res
+            text = L.menu_text(st, mdata, target)
+        else:
+            text = L.section_text(st, "food")
         return await send_answer(context, cid, text, st, "питание сегодня", usage=usage)
     text = L.section_text(st, key)
     await send_answer(context, cid, text, st, text, usage=usage)
@@ -700,7 +712,7 @@ async def welcome_finish(context, cid, msg):
         reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     await push_summary(context, cid)
     await context.bot.send_message(cid, "Хочешь сразу видеть историю в календаре? Можно ввести прошлые циклы вручную.",
-        reply_markup=InlineKeyboardMarkup([[B("Добавить историю циклов", "addcycles")]]))
+        reply_markup=InlineKeyboardMarkup([[B("📋 Добавить историю циклов", "addcycles")]]))
     if is_cycle(row(cid)):
         await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда к врачу.",
             reply_markup=InlineKeyboardMarkup([[B("Гид: норма цикла", "guides")]]))
@@ -815,7 +827,7 @@ async def menu(update, context):
     ev(update.effective_chat.id, "command")
     u = row(update.effective_chat.id)
     if not is_onboarded(u): return await need_onboard(update.message)
-    await update.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u))
+    await update.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u, not is_cycle(u)))
 async def checkin_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
@@ -849,8 +861,8 @@ async def menutoday_cmd(update, context):
 async def profile_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
-    upsert(cid, state="await_profile")
-    await update.message.reply_text("Обновим данные для питания. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.", reply_markup=SKIP_KB)
+    upsert(cid, state="await_profile_edit")
+    await update.message.reply_text("Обновим данные. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.")
 async def guide_cmd(update, context):
     ev(update.effective_chat.id, "command"); await send_guide(context, update.effective_chat.id, GUIDES[0])
 async def about_cmd(update, context):
@@ -1061,6 +1073,15 @@ async def handle_text(update, context, txt):
         sel = set((row(cid).get("diet") or "").split(",")) - {""}
         return await update.message.reply_text("Записала: " + txt[:200] + ". Можно отметить ещё кнопками или нажать Готово.", reply_markup=diet_kb(sel))
 
+    if state == "await_profile_edit":
+        nums = [p for p in re.split(r"[ ,;/]+", txt) if p]
+        try:
+            cm = float(nums[0]); kg = float(nums[1]); age = int(float(nums[2]))
+            assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80
+        except Exception:
+            return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30.")
+        upsert(cid, height=int(cm), weight=kg, age=age, state=None)
+        return await update.message.reply_text(f"Обновила: рост {int(cm)} см, вес {kg:g} кг, возраст {age}. Пересчитаю калории и питание под тебя.")
     if state == "await_profile":
         nums = [p for p in re.split(r"[ ,;/]+", txt) if p]
         try:
@@ -1179,7 +1200,7 @@ async def on_cb(update, context):
     general = st is None
     today_s = date.today().isoformat()
     if data == "menu":
-        await q.message.reply_text("О чём рассказать сегодня?", reply_markup=(GENERAL_MENU_KB if general else menu_kb_for(u)))
+        await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u, general))
     elif data == "food":
         if general: await send_general(context, cid, "food")
         else: await send_section(context, cid, st, "food")
@@ -1330,7 +1351,28 @@ async def _api_data(request):
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
                     "days_since": stt["days_since"], "status": stt["status"], "delay_days": stt["delay_days"]})
-        out["cycles"] = cycles_of(cid)
+        cyc = cycles_of(cid)
+        out["cycles"] = cyc
+        lens = []
+        for i in range(1, len(cyc)):
+            dd = (date.fromisoformat(cyc[i]) - date.fromisoformat(cyc[i - 1])).days
+            if 10 <= dd <= 90: lens.append(dd)
+        reg = None
+        if len(lens) >= 2:
+            mlen = sum(lens) / len(lens); sd = (sum((x - mlen) ** 2 for x in lens) / len(lens)) ** 0.5
+            reg = "регулярный" if sd <= 2.5 else ("умеренный разброс" if sd <= 5 else "нерегулярный")
+        history = [{"start": cyc[i], "len": ((date.fromisoformat(cyc[i + 1]) - date.fromisoformat(cyc[i])).days if i + 1 < len(cyc) else None)} for i in range(len(cyc))]
+        out["stats"] = {
+            "cycles_count": len(cyc),
+            "last_cycle_len": lens[-1] if lens else None,
+            "avg_cycle": round(sum(lens) / len(lens)) if lens else None,
+            "min_cycle": min(lens) if lens else None,
+            "max_cycle": max(lens) if lens else None,
+            "spread": (max(lens) - min(lens)) if lens else None,
+            "period_len": u.get("period_len"),
+            "regularity": reg,
+            "history": history,
+        }
     return _cors(web.json_response(out))
 async def _api_period(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -1362,8 +1404,7 @@ async def _api_section(request):
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
         menu = await asyncio.to_thread(L.menu_today, st, profile=prof, target=target)
         if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
-        text = await asyncio.to_thread(L.explain_section, st, "food")
-        text = L.split_followups(text)[0]
+        text = st["content"]["food"]
         return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text}))
     text = await asyncio.to_thread(L.explain_section, st, "training")
     text = L.split_followups(text)[0]
