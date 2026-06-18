@@ -5,6 +5,74 @@ import os, re, json, requests, unicodedata
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = os.environ.get("AIWA_MODEL", "openai/gpt-oss-120b")
 
+# ---- выбор движка: groq (по умолчанию) или gigachat ----
+PROVIDER = os.environ.get("AIWA_PROVIDER", "groq").lower()
+GIGA_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat-2")
+GIGA_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+GIGA_OAUTH = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+GIGA_CHAT = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+_GIGA_CA = os.environ.get("GIGACHAT_CA_BUNDLE_FILE")
+_GIGA_VERIFY = _GIGA_CA if _GIGA_CA else False
+if _GIGA_VERIFY is False:
+    try:
+        import urllib3; urllib3.disable_warnings()
+    except Exception: pass
+_giga_tok = {"token": None, "exp": 0.0}
+
+def _giga_auth():
+    import time as _t, uuid
+    if _giga_tok["token"] and _giga_tok["exp"] - 60 > _t.time():
+        return _giga_tok["token"]
+    creds = os.environ.get("GIGACHAT_CREDENTIALS")
+    if not creds:
+        cid = os.environ.get("GIGACHAT_CLIENT_ID"); sec = os.environ.get("GIGACHAT_CLIENT_SECRET")
+        if cid and sec:
+            import base64
+            creds = base64.b64encode(f"{cid}:{sec}".encode()).decode()
+    if not creds:
+        return None
+    try:
+        r = requests.post(GIGA_OAUTH,
+            headers={"Authorization": f"Basic {creds}", "RqUID": str(uuid.uuid4()),
+                     "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            data={"scope": GIGA_SCOPE}, timeout=30, verify=_GIGA_VERIFY)
+        r.raise_for_status(); d = r.json()
+        _giga_tok["token"] = d["access_token"]
+        _giga_tok["exp"] = (d.get("expires_at", 0) / 1000) or (_t.time() + 1500)
+        return _giga_tok["token"]
+    except Exception as e:
+        print("Giga auth error:", e); return None
+
+def _call_giga(messages, max_tokens, temperature, usage):
+    import time as _t
+    tok = _giga_auth()
+    if not tok:
+        return None
+    wait = 1.5
+    for i in range(4):
+        try:
+            r = requests.post(GIGA_CHAT,
+                headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"},
+                json={"model": GIGA_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
+                timeout=60, verify=_GIGA_VERIFY)
+            if r.status_code == 401:
+                _giga_tok["token"] = None; tok = _giga_auth()
+                if not tok: return None
+                continue
+            if r.status_code == 429:
+                _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+            r.raise_for_status(); data = r.json()
+            if usage is not None:
+                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            txt = (data["choices"][0]["message"]["content"] or "").strip()
+            txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
+            return txt or None
+        except Exception as e:
+            print("Giga error:", e)
+            if i < 3: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+            return None
+    return None
+
 SYSTEM = (
     "Ты — AIWA, ИИ-ассистент женского здоровья по циклу. Пиши конкретно и тепло, на русском, без воды и без AI-флёра. "
     "Опирайся на физиологию цикла и рекомендации гинекологов и эндокринологов. "
@@ -98,13 +166,47 @@ def _focus(st):
     return FOCI[st["day"] % len(FOCI)]
 
 
-def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=5):
-    """При лимите Groq (429) не сдаёмся, а ждём и повторяем, пока не получим ответ."""
+PROXY_URL = os.environ.get("LITELLM_URL", "https://94.139.253.119:8002/litellm/v1/chat/completions")
+PROXY_MODEL = os.environ.get("LITELLM_MODEL", "gigachat-3-ultra")
+def _call_proxy(messages, max_tokens, temperature, usage):
+    import time as _t
+    key = os.environ.get("LITELLM_KEY"); xkey = os.environ.get("LITELLM_XKEY")
+    if not (key or xkey):
+        return None
+    headers = {"Content-Type": "application/json"}
+    if key: headers["Authorization"] = f"Bearer {key}"
+    if xkey: headers["X-API-Key"] = xkey
+    wait = 1.5
+    for i in range(4):
+        try:
+            r = requests.post(PROXY_URL, headers=headers,
+                json={"model": PROXY_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
+                timeout=60, verify=False)
+            if r.status_code == 429:
+                _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+            r.raise_for_status(); data = r.json()
+            if usage is not None:
+                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            txt = (data["choices"][0]["message"]["content"] or "").strip()
+            txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
+            return txt or None
+        except Exception as e:
+            print("Proxy error:", e)
+            if i < 3: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+            return None
+    return None
+
+def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
+    """Единая точка вызова модели. Движок выбирается переменной AIWA_PROVIDER."""
+    if PROVIDER in ("litellm", "proxy"):
+        return _call_proxy(messages, max_tokens, temperature, usage)
+    if PROVIDER == "gigachat":
+        return _call_giga(messages, max_tokens, temperature, usage)
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         return None
     import time as _t
-    wait = 2.0
+    wait = 1.5
     for i in range(attempts):
         try:
             r = requests.post(GROQ_URL, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -262,7 +364,34 @@ def general_answer(profile, mode, question, hint=None, usage=None):
     out = _call(msgs, max_tokens=900, temperature=0.3, usage=usage)
     return _clean(out, "Не получилось ответить с первого раза, попробуй переспросить чуть иначе или загляни в Меню.")
 
+CURATED_MENU = {
+    "menstrual": {"macros": {"protein": "90 г", "fat": "55 г", "carbs": "180 г"}, "meals": [
+        {"time": "08:00", "dish": "Омлет со шпинатом", "note": "Белок и железо", "kcal": "360 ккал"},
+        {"time": "13:00", "dish": "Говядина с гречкой и свёклой", "note": "Железо и B12", "kcal": "560 ккал"},
+        {"time": "16:00", "dish": "Хумус с овощами", "note": "Магний и клетчатка", "kcal": "190 ккал"},
+        {"time": "20:00", "dish": "Чечевичный суп с зеленью", "note": "Железо и тепло", "kcal": "430 ккал"}]},
+    "follicular": {"macros": {"protein": "95 г", "fat": "55 г", "carbs": "200 г"}, "meals": [
+        {"time": "08:00", "dish": "Омлет с овощами и сыром", "note": "Белок и сытость", "kcal": "370 ккал"},
+        {"time": "13:00", "dish": "Курица с киноа и зеленью", "note": "Белок и сложные углеводы", "kcal": "540 ккал"},
+        {"time": "16:00", "dish": "Греческий йогурт с ягодами", "note": "Белок и пробиотики", "kcal": "200 ккал"},
+        {"time": "20:00", "dish": "Лосось со спаржей", "note": "Омега-3", "kcal": "520 ккал"}]},
+    "ovulation": {"macros": {"protein": "98 г", "fat": "58 г", "carbs": "190 г"}, "meals": [
+        {"time": "08:00", "dish": "Яичница с авокадо", "note": "Белок и полезные жиры", "kcal": "390 ккал"},
+        {"time": "13:00", "dish": "Рыба с брокколи и булгуром", "note": "Антиоксиданты и белок", "kcal": "530 ккал"},
+        {"time": "16:00", "dish": "Ягоды с орехами", "note": "Антиоксиданты", "kcal": "200 ккал"},
+        {"time": "20:00", "dish": "Индейка с зелёным салатом", "note": "Лёгкий белок", "kcal": "470 ккал"}]},
+    "luteal": {"macros": {"protein": "92 г", "fat": "60 г", "carbs": "185 г"}, "meals": [
+        {"time": "08:00", "dish": "Творог с орехами и бананом", "note": "Белок и магний", "kcal": "380 ккал"},
+        {"time": "13:00", "dish": "Индейка с бататом", "note": "Белок и сложные углеводы", "kcal": "550 ккал"},
+        {"time": "16:00", "dish": "Тёмный шоколад 85% и миндаль", "note": "Магний при тяге к сладкому", "kcal": "200 ккал"},
+        {"time": "20:00", "dish": "Жирная рыба с овощами", "note": "Омега-3 и B6", "kcal": "520 ккал"}]},
+}
 def menu_today(st, profile=None, target=None, usage=None):
+    # Без диет-ограничений отдаём готовый набор под фазу (без обращения к модели, экономим лимит).
+    has_diet = bool(profile and (profile.get("diet") or profile.get("diet_note")))
+    if not has_diet:
+        import copy
+        return copy.deepcopy(CURATED_MENU.get(st["phase"], CURATED_MENU["follicular"]))
     extra = ""
     if target:
         extra += (f" Ориентир по дню: примерно {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, "
@@ -286,11 +415,9 @@ def menu_today(st, profile=None, target=None, usage=None):
                 return data
         except Exception:
             pass
-    return {"macros": {"protein": "92 г", "fat": "54 г", "carbs": "180 г"},
-            "meals": [{"time": "08:00", "dish": "Омлет с овощами и сыром", "note": "Белок и сытость", "kcal": "360 ккал"},
-                      {"time": "13:00", "dish": "Киноа, печёная свёкла, фета", "note": "Железо и B6", "kcal": "520 ккал"},
-                      {"time": "16:00", "dish": "Греческий йогурт с орехами", "note": "Белок и магний", "kcal": "200 ккал"},
-                      {"time": "20:00", "dish": "Лосось, шпинат, батат", "note": "Омега-3", "kcal": "540 ккал"}]}
+    import copy
+    return copy.deepcopy(CURATED_MENU.get(st["phase"], CURATED_MENU["follicular"]))
+
 
 
 def section_text(st, key):

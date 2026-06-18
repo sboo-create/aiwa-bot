@@ -383,7 +383,7 @@ async def send_menu(context, cid):
     if not st: return
     await context.bot.send_chat_action(cid, "upload_photo")
     prof = profile_of(u); target = profile_kcal(prof) if prof else None
-    usage = []; mdata = L.menu_today(st, profile=prof, target=target, usage=usage); ev(cid, "tokens", sum(usage))
+    usage = []; mdata = await asyncio.to_thread(L.menu_today, st, profile=prof, target=target, usage=usage); ev(cid, "tokens", sum(usage))
     if target:
         mdata["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
     note = st["content"]["food"]
@@ -403,11 +403,11 @@ async def send_section(context, cid, st, key):
     usage = []
     if key == "training":
         await send_training_card(context, cid, st)
-        text = L.explain_section(st, "training", usage=usage)
+        text = await asyncio.to_thread(L.explain_section, st, "training", usage=usage)
         return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage)
     if key == "food":
         await send_menu(context, cid)
-        text = L.explain_section(st, "food", usage=usage)
+        text = await asyncio.to_thread(L.explain_section, st, "food", usage=usage)
         return await send_answer(context, cid, text, st, "питание сегодня", usage=usage)
     text = L.section_text(st, key)
     await send_answer(context, cid, text, st, text, usage=usage)
@@ -453,7 +453,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None):
 
 async def push_general(context, cid):
     u = row(cid); usage = []
-    body = L.general_summary(profile_of(u), u.get("mode"), hint=last_hint(cid), usage=usage)
+    body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=last_hint(cid), usage=usage)
     if not body:
         body = "💛 Доброе утро! Отметь самочувствие через Симптомы, и подскажу, на что обратить внимание сегодня."
     await context.bot.send_message(cid, f"{body}\n\nAIWA · {DISCLAIMER}", reply_markup=summary_kb())
@@ -463,7 +463,7 @@ async def send_general(context, cid, key):
     u = row(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
     qmap = {"food": "Что мне есть сегодня под мой возраст и самочувствие? Дай конкретные продукты или меню на день.",
             "training": "Какая физическая активность мне сейчас подходит и почему? Дай конкретные варианты."}
-    usage = []; ans = L.general_answer(profile_of(u), u.get("mode"), qmap.get(key, key), hint=last_hint(cid), usage=usage)
+    usage = []; ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), qmap.get(key, key), hint=last_hint(cid), usage=usage)
     await context.bot.send_message(cid, ans, reply_markup=summary_kb()); ev(cid, "tokens", sum(usage))
 
 async def dispatch_intent(context, update, cid, u, intent):
@@ -502,7 +502,7 @@ async def push_summary(context, cid, with_image=True):
     if st["status"] != "normal": return await send_delay(context, cid, st)
     if with_image: await send_infographic(context.bot, cid)
     usage = []
-    body = L.generate_summary(st, u["modules"], hint=last_hint(cid), usage=usage)
+    body = await asyncio.to_thread(L.generate_summary, st, u["modules"], hint=last_hint(cid), usage=usage)
     kb = summary_kb()
     await context.bot.send_message(cid, f"{body}\n\nAIWA · {DISCLAIMER}", reply_markup=kb)
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
@@ -585,7 +585,7 @@ async def push_partner(context, woman_cid):
     if not st: return
     hint = last_hint(woman_cid)
     text = None
-    try: text = L.partner_brief(st, hint)
+    try: text = await asyncio.to_thread(L.partner_brief, st, hint)
     except Exception as e: log.warning("partner_brief: %s", e)
     if not text: text = partner_text(st, hint)
     try:
@@ -827,7 +827,7 @@ async def on_voice(update, context):
     await context.bot.send_chat_action(cid, "typing")
     try:
         f = await context.bot.get_file(update.message.voice.file_id)
-        ba = await f.download_as_bytearray(); txt = L.transcribe(bytes(ba))
+        ba = await f.download_as_bytearray(); txt = await asyncio.to_thread(L.transcribe, bytes(ba))
     except Exception as e:
         log.warning("voice: %s", e)
     if not txt:
@@ -853,7 +853,7 @@ async def handle_text(update, context, txt):
             return await update.message.reply_text("Не поняла вопрос. Напиши словами, например: «как её поддержать сегодня» или «что ей купить».")
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = L.partner_answer(wst, txt, last_hint(wid), usage=usage)
+        ans = await asyncio.to_thread(L.partner_answer, wst, txt, last_hint(wid), usage=usage)
         ev(cid, "answered", tokens=sum(usage), meta="partner_q", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         return await context.bot.send_message(cid, ans)
 
@@ -929,7 +929,7 @@ async def handle_text(update, context, txt):
     if is_onboarded(u) and not is_cycle(u):
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = L.general_answer(profile_of(u), u.get("mode"), txt, hint=last_hint(cid), usage=usage)
+        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), txt, hint=last_hint(cid), usage=usage)
         ev(cid, "answered", tokens=sum(usage), meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         return await context.bot.send_message(cid, ans, reply_markup=summary_kb())
     if is_onboarded(u):
@@ -937,7 +937,7 @@ async def handle_text(update, context, txt):
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
         t0 = time.monotonic(); usage = []
-        ans = L.answer_question(st, txt, usage=usage)
+        ans = await asyncio.to_thread(L.answer_question, st, txt, usage=usage)
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         return await send_answer(context, cid, ans, st, txt, usage=usage)
     await need_onboard(update.message)
@@ -1026,11 +1026,11 @@ async def on_cb(update, context):
         question = get_sugg(int(data.split(":")[1])) or "Дай рекомендацию"
         await context.bot.send_chat_action(cid, "typing")
         if general:
-            usage = []; ans = L.general_answer(profile_of(u), u.get("mode"), question, hint=last_hint(cid), usage=usage)
+            usage = []; ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), question, hint=last_hint(cid), usage=usage)
             body = f"<blockquote>{html.escape(question)}</blockquote>\n{html.escape(ans)}"
             await q.message.reply_text(body, reply_markup=summary_kb(), parse_mode="HTML"); ev(cid, "tokens", sum(usage))
         else:
-            usage = []; ans = L.answer_question(st, question, usage=usage)
+            usage = []; ans = await asyncio.to_thread(L.answer_question, st, question, usage=usage)
             await send_answer(context, cid, ans, st, question, usage=usage, quote=question)
 
 async def on_error(update, context):
