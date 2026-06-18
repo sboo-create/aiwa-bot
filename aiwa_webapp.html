@@ -54,16 +54,18 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .blossom{position:relative;flex-shrink:0}
 .petal{position:absolute;left:50%;top:50%;transform-origin:50% 86%;background:radial-gradient(115% 88% at 50% 14%,#FFF 0%,var(--roseWash) 34%,var(--rose) 92%);border-radius:50% 50% 46% 46% / 62% 62% 38% 38%;box-shadow:inset 0 -6px 12px rgba(194,94,118,.28),inset 0 3px 6px rgba(255,255,255,.6)}
 .core{position:absolute;left:50%;top:50%;border-radius:50%;background:radial-gradient(circle at 38% 32%,#F2C24E,var(--quinceDeep));box-shadow:0 0 0 4px rgba(229,167,52,.16)}
-.tabs{position:fixed;bottom:0;left:0;right:0;background:rgba(250,245,242,.94);backdrop-filter:blur(10px);border-top:1px solid var(--line);display:flex;max-width:480px;margin:0 auto;padding:8px 4px env(safe-area-inset-bottom)}
+.tabs{position:fixed;bottom:0;left:0;right:0;background:rgba(250,245,242,.94);backdrop-filter:blur(10px);border-top:1px solid var(--line);display:flex;max-width:480px;margin:0 auto;padding:8px 4px env(safe-area-inset-bottom);z-index:10}
 .tab{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:7px 0 6px;cursor:pointer;color:var(--inkSoft);font-size:10.5px;font-weight:600;transition:color .15s}
 .tab.on{color:var(--roseDeep)}.tab svg{width:23px;height:23px;display:block}
-.chatwrap{display:flex;flex-direction:column;gap:12px}
+.chatwrap{display:flex;flex-direction:column;gap:12px;padding-bottom:64px}
 .msg{max-width:86%;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
 .msg.me{align-self:flex-end;background:var(--ink);color:#fff;padding:10px 14px;border-radius:16px 16px 4px 16px}
 .msg.ai{align-self:flex-start;background:#fff;border:1px solid var(--line);padding:12px 14px;border-radius:16px 16px 16px 4px}
-.composer{position:fixed;bottom:62px;left:0;right:0;max-width:480px;margin:0 auto;padding:8px 12px;display:flex;gap:8px;background:var(--paper)}
+.composer{position:fixed;bottom:calc(60px + env(safe-area-inset-bottom));left:0;right:0;max-width:480px;margin:0 auto;padding:8px 12px;display:flex;gap:8px;background:var(--paper);z-index:9}
 .composer input{flex:1;border:1px solid var(--line);border-radius:18px;padding:11px 15px;font-size:14px;font-family:var(--sans);outline:none;background:#fff}
 .composer button{border:none;background:var(--roseDeep);color:#fff;border-radius:18px;padding:0 18px;font-weight:700;cursor:pointer}
+.homebtn{display:block;width:100%;margin:18px 0 2px;padding:13px;border:1px solid var(--roseLine);background:var(--roseWash);color:var(--roseDeep);border-radius:16px;font-family:var(--sans);font-weight:600;font-size:13.5px;cursor:pointer}
+.homebtn:active{transform:scale(.98)}
 .think{display:inline-flex;gap:4px;align-items:center;color:var(--roseDeep);font-size:13px;font-style:italic}
 .think span{width:4px;height:4px;border-radius:50%;background:var(--rose);animation:dp 1s infinite}
 .think span:nth-child(2){animation-delay:.16s}.think span:nth-child(3){animation-delay:.32s}
@@ -121,8 +123,8 @@ function renderToday(){
   html+="<div class='stats'><div class='stat'><div class='l'>День цикла</div><div class='v'>"+day+"</div><div class='s'>из "+D.cycle_len+"</div></div><div class='stat'><div class='l'>Фаза</div><div class='v'>"+RU[ph].slice(0,4)+".</div><div class='s'>"+sub+"</div></div><div class='stat'><div class='l'>До месячных</div><div class='v'>~"+toNext+"</div><div class='s'>дней</div></div></div>";
   html+="<div class='sec'>"+MNOM[today.getMonth()]+" "+today.getFullYear()+"</div><div class='cal' id='cal'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:#C25E76'></span>Менструальная</div><div class='lg'><span class='dot' style='background:#94A97E'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:#E5A734'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:#E0879A'></span>Лютеиновая</div></div>";
-  html+="<div class='foot'>Айва не ставит диагнозы. Данные ориентировочные, при тревожных симптомах обратись к гинекологу.</div>";
-  el.innerHTML=html;blossom(document.getElementById('al'),34);
+  html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>\u{1F4F2} Добавить Айву на экран телефона</button>";html+="<div class='foot'>Айва не ставит диагнозы. Данные ориентировочные, при тревожных симптомах обратись к гинекологу.</div>";
+  el.innerHTML=html;blossom(document.getElementById('al'),34);updateHomeBtn();
   var tc=document.getElementById('tchips');(CHIPS[ph]||[]).forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc.appendChild(b);});
   var y=today.getFullYear(),m=today.getMonth(),cal=document.getElementById('cal');
   WD.forEach(function(w){var e=document.createElement('div');e.className='wd';e.textContent=w;cal.appendChild(e);});
@@ -158,6 +160,8 @@ function showNeedOnboard(){
   el.innerHTML="<div style='display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:78vh;text-align:center;gap:18px;padding:24px'><span class='blossom' id='nl'></span><div class='h' style='margin:0'>Сначала настрой цикл</div><div style='font-size:14px;color:var(--inkMid);line-height:1.5;max-width:280px'>Открой чат с Айвой и отметь последние месячные. После этого приложение покажет твой цикл, питание и нагрузку.</div><button class='chip' style='font-size:14px;padding:11px 22px' onclick='if(window.Telegram&&window.Telegram.WebApp)window.Telegram.WebApp.close()'>Перейти в чат</button></div>";
   blossom(document.getElementById('nl'),56);
 }
+function addHome(){if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred('light');if(tg&&tg.addToHomeScreen){tg.addToHomeScreen();}else if(tg&&tg.showAlert){tg.showAlert('Доступно в новых версиях Telegram: меню \u22EE \u2192 «На главный экран».');}}
+function updateHomeBtn(){var b=document.getElementById('homebtn');if(!b)return;if(!(tg&&tg.isVersionAtLeast&&tg.isVersionAtLeast('8.0'))){b.style.display='none';return;}if(tg.checkHomeScreenStatus){tg.checkHomeScreenStatus(function(st){b.style.display=(st==='added'||st==='unsupported')?'none':'block';});}else{b.style.display='block';}}
 function boot(){renderToday();go('today');}
 if(INIT){api('/api/data',{name:NAME}).then(function(d){if(d&&d.onboarded){D=d;boot();}else{showNeedOnboard();}});}
 else{D={onboarded:true,cycle:true,last_period:null,cycle_len:28,name:NAME};boot();}
