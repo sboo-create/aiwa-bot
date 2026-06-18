@@ -5,7 +5,7 @@ from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.constants import KeyboardButtonStyle as KBS
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
@@ -49,9 +49,6 @@ def webapp_url(u):
         return f"{AIWA_WEBAPP_URL}{sep}d={u['last_period']}&c={u['cycle_len']}"
     return AIWA_WEBAPP_URL
 def menu_kb_for(u):
-    url = webapp_url(u)
-    if url:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("📅 Открыть приложение", web_app=WebAppInfo(url=url))]] + list(MENU_KB.inline_keyboard))
     return MENU_KB
 EN = {1: "низкая", 2: "средняя", 3: "высокая"}
 SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), ("bloat", "вздутие"),
@@ -269,7 +266,7 @@ def match_intent(t):
     if re.search(r"(выписк|выпуск|для врача|истори[яю]|отчёт|отчет|справк)", t): return "history"
     if re.search(r"(отметить симптом|записать симптом|чек.?ин|отметить самочувств)", t): return "checkin"
     if re.search(r"(партнёр|партнер|подключить (парня|мужа|партнёр))", t): return "partner"
-    if re.search(r"(отметить месячн|месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн)", t): return "period"
+    if re.search(r"(отметить месячн|внести измен\w*\s+(в\s+)?месячн|изменить\s+(дату\s+)?месячн|поменять\s+(дату\s+)?месячн|обновить\s+(дату\s+)?месячн|исправить\s+месячн|месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн)", t): return "period"
     return None
 
 def is_gibberish(t):
@@ -380,7 +377,11 @@ async def need_onboard(t):
     if cid and not row(cid): ev(cid, "signup")
     if cid: upsert(cid, state="await_date")
     await t.reply_text("Чтобы считать фазу и давать рекомендации, отметь последние месячные: напиши дату (например 25.05.2026), нажми кнопку или выбери «Нет регулярного цикла».", reply_markup=ONB_KB)
+_last_start = {}
 async def begin_onboard(cid, msg):
+    now = time.time()
+    if now - _last_start.get(cid, 0) < 4: return   # не показываем приветствие дважды подряд
+    _last_start[cid] = now
     if not row(cid): ev(cid, "signup")
     upsert(cid, state="await_date", pending_date=None)
     await msg.reply_text(START_TEXT, reply_markup=ONB_KB)
@@ -1139,6 +1140,16 @@ async def on_error(update, context):
 
 async def on_startup(app):
     global BOT_USERNAME, BCAST_Q
+    if AIWA_WEBAPP_URL:
+        try:
+            await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Айва", web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
+        except Exception as e:
+            log.warning("menu button: %s", e)
+    try:
+        await app.bot.set_my_commands([BotCommand("start", "Старт"), BotCommand("menu", "Меню"),
+                                       BotCommand("stop", "Удалить данные и отключить")])
+    except Exception as e:
+        log.warning("set commands: %s", e)
     try: BOT_USERNAME = app.bot.username
     except Exception: BOT_USERNAME = None
     BCAST_Q = asyncio.Queue()
@@ -1194,8 +1205,10 @@ async def _api_section(request):
         menu = await asyncio.to_thread(L.menu_today, st, profile=prof, target=target)
         if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
         text = await asyncio.to_thread(L.explain_section, st, "food")
+        text = L.split_followups(text)[0]
         return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text}))
     text = await asyncio.to_thread(L.explain_section, st, "training")
+    text = L.split_followups(text)[0]
     return _cors(web.json_response({"text": text}))
 async def _api_chat(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -1225,6 +1238,7 @@ def build_web():
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/chat", _api_chat)
     aio.router.add_route("OPTIONS", "/api/{tail:.*}", _api_opts)
+    aio.router.add_get("/{tail:.*}", _serve_index)
     return aio
 
 async def run_all():
