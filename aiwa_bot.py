@@ -444,10 +444,13 @@ async def send_guide(context, cid, g):
 
 async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None):
     if usage is None: usage = []
-    clean, sugg = L.split_followups(text)
+    sf = getattr(L, "split_followups", None)
+    clean, sugg = sf(text) if sf else (text, [])
     if len(sugg) < 2:
-        for e in L.followups(st, basis_q, clean):
-            if e not in sugg and len(sugg) < 2: sugg.append(e)
+        try:
+            for e in L.followups(st, basis_q, clean):
+                if e not in sugg and len(sugg) < 2: sugg.append(e)
+        except Exception: pass
     kb = sugg_kb(cid, sugg)
     if quote:
         body = f"<blockquote>{html.escape(quote)}</blockquote>\n{html.escape(clean)}"
@@ -1090,7 +1093,9 @@ async def on_error(update, context):
     try:
         if isinstance(update, Update) and update.effective_chat:
             ev(update.effective_chat.id, "error", meta=type(context.error).__name__)
-            await context.bot.send_message(update.effective_chat.id, "Упс, что-то пошло не так. Попробуй ещё раз или нажми Меню.")
+            await context.bot.send_message(update.effective_chat.id,
+                "Упс, что-то пошло не так. Попробуй ещё раз.",
+                reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     except Exception: pass
 
 async def on_startup(app):
