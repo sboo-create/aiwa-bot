@@ -568,12 +568,11 @@ async def dispatch_intent(context, update, cid, u, intent):
         if general: return await send_general(context, cid, "food")
         _, st = status_of(cid); return await send_section(context, cid, st, "food")
     if intent == "calendar":
-        if general: return await msg.reply_text("В этом режиме фазы цикла не отслеживаются.")
+        if general: return await msg.reply_text("Пока не вижу данных цикла. Отметь последние месячные командой /period или кнопкой «Отметить месячные», и я покажу фазы и календарь.")
         _, st = status_of(cid)
         if st["status"] != "normal": return await send_delay(context, cid, st)
         return await send_infographic(context.bot, cid)
     if intent == "period":
-        if general: return await msg.reply_text("В этом режиме месячные не отслеживаются. Обнови данные через /start.")
         upsert(cid, state="await_period_date")
         return await msg.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
 
@@ -596,6 +595,13 @@ def schedule_daily(app, cid, hhmm):
     m += abs(cid) % 15  # разброс 0..14 мин: у многих юзеров сводки не падают в одну минуту
     h = (h + m // 60) % 24; m %= 60
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
+
+def mark_period(context, cid, iso):
+    """Отметка месячных доступна всем. Любая отметка включает трекинг цикла (динамику)."""
+    u = row(cid); cl = u.get("cycle_len") or 28
+    cyc_add(cid, iso)
+    upsert(cid, last_period=iso, cycle_len=cl, mode="cycle", state=None)
+    schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
     task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
@@ -738,7 +744,7 @@ async def today(update, context):
 async def calendar_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command"); u, st = status_of(cid)
     if not is_onboarded(u): return await need_onboard(update.message)
-    if st is None: return await update.message.reply_text("В этом режиме фазы цикла не отслеживаются.")
+    if st is None: return await update.message.reply_text("Пока не вижу данных цикла. Отметь последние месячные командой /period или кнопкой «Отметить месячные», и я покажу фазы и календарь.")
     if st["status"] != "normal": return await send_delay(context, cid, st)
     await send_infographic(context.bot, cid)
 async def menu(update, context):
@@ -754,12 +760,10 @@ async def checkin_cmd(update, context):
 async def period_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
-    if not is_cycle(row(cid)): return await update.message.reply_text("В этом режиме месячные не отслеживаются. Если цикл вернулся, обнови данные через /start.")
     if context.args:
         d = parse_date(context.args[0])
         if d:
-            cyc_add(cid, d.isoformat()); upsert(cid, last_period=d.isoformat(), state=None)
-            schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
+            mark_period(context, cid, d.isoformat())
             await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
             return await push_summary(context, cid)
     upsert(cid, state="await_period_date")
@@ -1012,8 +1016,7 @@ async def handle_text(update, context, txt):
     elif state == "await_period_date":
         d = parse_date(txt)
         if d:
-            cyc_add(cid, d.isoformat()); upsert(cid, last_period=d.isoformat(), state=None)
-            schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
+            mark_period(context, cid, d.isoformat())
             await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
             return await push_summary(context, cid)
         upsert(cid, state=None)
@@ -1099,7 +1102,7 @@ async def on_cb(update, context):
         if general: await send_general(context, cid, "training")
         else: await send_section(context, cid, st, data.split(":")[1])
     elif data == "calendar":
-        if general: await q.message.reply_text("В этом режиме фазы цикла не отслеживаются. Если цикл вернётся, обнови данные через /start.")
+        if general: await q.message.reply_text("Пока не вижу данных цикла. Отметь последние месячные командой /period или кнопкой «Отметить месячные», и я покажу фазы и календарь.")
         elif st["status"] != "normal": await send_delay(context, cid, st)
         else: await send_infographic(context.bot, cid)
     elif data == "history":
@@ -1113,13 +1116,10 @@ async def on_cb(update, context):
     elif data == "checkin":
         log_ensure(cid, today_s); await q.message.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
     elif data == "period":
-        if general:
-            await q.message.reply_text("В этом режиме месячные не отслеживаются. Если цикл вернётся, обнови данные через /start.")
-        else:
-            upsert(cid, state="await_period_date")
-            await q.message.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
+        upsert(cid, state="await_period_date")
+        await q.message.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
     elif data == "period_today":
-        cyc_add(cid, today_s); upsert(cid, last_period=today_s, state=None); schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
+        mark_period(context, cid, today_s)
         await q.message.reply_text("Отметила начало месячных сегодня. Вот свежая сводка:")
         await push_summary(context, cid)
     elif data == "set:time":
