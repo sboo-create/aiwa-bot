@@ -120,7 +120,8 @@ function renderToday(){
   var el=document.getElementById('scr-today');
   if(D.cycle===false){el.innerHTML="<div class='eyebrow'>Сегодня</div><div class='greet'>Привет"+(NAME?",<span class='nm'> "+NAME+"</span>":"")+"</div><div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>Цикл сейчас не отслеживается. Я слежу за самочувствием и даю рекомендации с учётом возраста. Спроси меня о питании, движении или симптомах.</div></div></div></div>";blossom(document.getElementById('al'),34);return;}
   var day=dayOfCycle(today),ph=phaseForDay(day,D.cycle_len),sub=subphase(day,ph,D.cycle_len),toNext=D.cycle_len-day+1;
-  if(typeof D.day==='number'){day=D.day;ph=D.phase||ph;sub=subphase(day,ph,D.cycle_len);if(typeof D.days_to_next==='number')toNext=D.days_to_next;}
+  var PHMAP={menstrual:'men',follicular:'fol',ovulation:'ovu',luteal:'lut'};
+  if(typeof D.day==='number'){day=D.day;ph=PHMAP[D.phase]||ph;sub=subphase(day,ph,D.cycle_len);if(typeof D.days_to_next==='number')toNext=D.days_to_next;}
   var delayed=!!(D.status&&D.status!=='normal');
   var delayMsg=!delayed?'':(D.status==='due'?'месячные ожидаются примерно сейчас':(D.status==='delay'?('задержка '+(D.delay_days||0)+' дн., отметь когда начнутся'):'данные устарели, отметь последние месячные'));
   var ayvaTxt=delayed?('Месячные пока не начались по прогнозу ('+delayMsg+'). При нерегулярном цикле это бывает: стресс, смена режима, вес. Отметь их, когда придут, и я пересчитаю прогноз.'):SUMM[ph];
