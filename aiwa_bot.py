@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, time, html, sqlite3, secrets, logging
+import os, io, re, time, html, asyncio, sqlite3, secrets, logging
 from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,7 @@ try:
 except Exception as e:
     RPT = None; print("report off:", e)
 BOT_USERNAME = None
+BCAST_Q = None  # очередь утренней рассылки (троттлинг под лимиты Groq)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("aiwa")
@@ -237,10 +238,10 @@ def match_meta(text):
 def match_intent(t):
     t = t.lower()
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
-    if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|упражнени|фитнес)", t): return "training"
+    if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|упражнени|фитнес|какая активн)", t): return "training"
     if re.search(r"(что (мне )?(съесть|поесть|есть)|что приготов|какое питани|меню (на )?сегодня|что покушать|еда на сегодня|рацион|что поедим)", t): return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
-    if re.search(r"(выписк|для врача|истори[яю] цикл|собери отчёт|собери отчет)", t): return "history"
+    if re.search(r"(выписк|выпуск|для врача|истори[яю]|отчёт|отчет|справк)", t): return "history"
     if re.search(r"(отметить симптом|записать симптом|чек.?ин|отметить самочувств)", t): return "checkin"
     if re.search(r"(партнёр|партнер|подключить (парня|мужа|партнёр))", t): return "partner"
     if re.search(r"(отметить месячн|месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн)", t): return "period"
@@ -350,9 +351,9 @@ async def need_onboard(t):
     cid = getattr(getattr(t, "chat", None), "id", None)
     if cid and is_partner(cid) and not is_onboarded(row(cid)):
         return await t.reply_text(PARTNER_INFO)
-    if cid:
-        return await begin_onboard(cid, t)
-    await t.reply_text("Чтобы я считала фазу, отметь последние месячные.", reply_markup=ONB_KB)
+    if cid and not row(cid): ev(cid, "signup")
+    if cid: upsert(cid, state="await_date")
+    await t.reply_text("Чтобы считать фазу и давать рекомендации, отметь последние месячные: напиши дату (например 25.05.2026), нажми кнопку или выбери «Нет регулярного цикла».", reply_markup=ONB_KB)
 async def begin_onboard(cid, msg):
     if not row(cid): ev(cid, "signup")
     upsert(cid, state="await_date", pending_date=None)
@@ -509,9 +510,29 @@ async def push_summary(context, cid, with_image=True):
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     h, m = map(int, hhmm.split(":")); app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
+class _BCtx:
+    def __init__(self, app): self.bot = app.bot; self.application = app
+
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
-    await push_summary(context, context.job.chat_id)
-    await push_partner(context, context.job.chat_id)
+    cid = context.job.chat_id
+    if BCAST_Q is not None:
+        return await BCAST_Q.put(cid)          # в очередь, обработает воркер с паузами
+    await push_summary(context, cid); await push_partner(context, cid)
+
+async def broadcast_worker(app):
+    """Шлёт утренние сводки по одной с паузой, чтобы не превышать лимит токенов/мин Groq."""
+    delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "15"))
+    while True:
+        cid = await BCAST_Q.get()
+        try:
+            ctx = _BCtx(app)
+            await push_summary(ctx, cid)
+            await push_partner(ctx, cid)
+        except Exception as e:
+            log.warning("broadcast %s: %s", cid, e)
+        finally:
+            BCAST_Q.task_done()
+        await asyncio.sleep(delay)
 
 def finish_onboarding(context, cid, last_period_iso, n):
     upsert(cid, last_period=last_period_iso, cycle_len=n, state=None, pending_date=None)
@@ -1021,9 +1042,11 @@ async def on_error(update, context):
     except Exception: pass
 
 async def on_startup(app):
-    global BOT_USERNAME
+    global BOT_USERNAME, BCAST_Q
     try: BOT_USERNAME = app.bot.username
     except Exception: BOT_USERNAME = None
+    BCAST_Q = asyncio.Queue()
+    asyncio.create_task(broadcast_worker(app))
     n = 0
     for cid in all_users(): schedule_daily(app, cid, row(cid)["send_time"] or "08:00"); n += 1
     log.info("Rescheduled %d", n)

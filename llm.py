@@ -98,15 +98,21 @@ def _focus(st):
     return FOCI[st["day"] % len(FOCI)]
 
 
-def _call(messages, max_tokens=1100, temperature=0.45, usage=None):
+def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=5):
+    """При лимите Groq (429) не сдаёмся, а ждём и повторяем, пока не получим ответ."""
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         return None
     import time as _t
-    for attempt in range(2):
+    wait = 2.0
+    for i in range(attempts):
         try:
             r = requests.post(GROQ_URL, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": MODEL, "max_tokens": max_tokens, "temperature": temperature, "messages": messages}, timeout=45)
+                json={"model": MODEL, "max_tokens": max_tokens, "temperature": temperature, "messages": messages}, timeout=60)
+            if r.status_code == 429:
+                ra = r.headers.get("retry-after", "")
+                delay = float(ra) if ra.replace(".", "", 1).isdigit() else wait
+                _t.sleep(min(delay, 12)); wait = min(wait * 2, 12); continue
             r.raise_for_status(); data = r.json()
             if usage is not None:
                 usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
@@ -115,8 +121,9 @@ def _call(messages, max_tokens=1100, temperature=0.45, usage=None):
             return txt or None
         except Exception as e:
             print("LLM error:", e)
-            if attempt == 0: _t.sleep(1.3); continue
+            if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             return None
+    return None
 
 
 def build_prompt(st, modules):
@@ -147,7 +154,7 @@ def answer_question(st, question, usage=None):
              "Если вопрос общий (фильмы, досуг, быт), ответь по теме конкретно; цикл упоминай только если это правда уместно и коротко. "
              "Начни с уместного эмодзи. Перечни оформляй пунктами с «• », каждый с новой строки. Только обычный текст, без markdown. Вопрос: " + question)}]
     out = _call(msgs, max_tokens=1000, temperature=0.3, usage=usage)
-    return _clean(out, "По твоей фазе: " + st["content"]["general"])
+    return _clean(out, "Не получилось ответить с первого раза, попробуй переспросить чуть иначе или загляни в Меню.")
 
 
 def explain_section(st, key, usage=None):
@@ -167,23 +174,18 @@ def explain_section(st, key, usage=None):
     msgs = [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": base + "\n\n" + q + " Развёрнуто и конкретно, с числами где уместно, но без воды. Только обычный текст без markdown."}]
     out = _call(msgs, max_tokens=900, temperature=0.4, usage=usage)
-    return _clean(out, section_text(st, key))
+    return _clean(out, _section_fallback(st, key))
+
+def _section_fallback(st, key):
+    c = st["content"]
+    head = "🍽 Питание сегодня" if key == "food" else "🏋️ Нагрузка сегодня"
+    body = c["food"] if key == "food" else c["training"]
+    return (f"{head}, день {st['day']} из {st['cycle_len']}, {st['subphase']} {st['phase_ru'].lower()} фаза.\n"
+            f"{body}\n\nПереспроси, и я соберу подробный разбор по этой фазе.")
 
 
 def followups(st, basis_q, basis_a, usage=None):
-    out = _call([{"role": "system", "content": "Ты придумываешь follow-up вопросы для femtech-ассистента."},
-                 {"role": "user", "content": (f"Фаза: {st['subphase']} {st['phase_ru']}, день {st['day']}. Вопрос: «{basis_q}». "
-                  f"Ответ: «{basis_a[:500]}». Дай 3 коротких уточняющих вопроса от лица пользовательницы, по 3-6 слов, "
-                  "разные по теме, релевантные именно этому ответу. Ответь строго JSON-массивом строк.")}],
-                max_tokens=200, temperature=0.7, usage=usage)
-    if out:
-        try:
-            arr = json.loads(out[out.find("["):out.rfind("]") + 1])
-            arr = [str(x).strip() for x in arr if str(x).strip()][:3]
-            if arr:
-                return arr
-        except Exception:
-            pass
+    # статические саджесты по фазе: без обращения к модели (экономим лимиты)
     return [t for _, t in _static(st)]
 
 
@@ -258,7 +260,7 @@ def general_answer(profile, mode, question, hint=None, usage=None):
              "Если уместно по возрасту (перименопауза, менопауза, аменерея), добавь, на что обратить внимание и когда к врачу. "
              "Только русский, без markdown. Вопрос: " + question)}]
     out = _call(msgs, max_tokens=900, temperature=0.3, usage=usage)
-    return _clean(out, "Сейчас не могу собрать ответ, попробуй переспросить чуть иначе или нажми Меню.")
+    return _clean(out, "Не получилось ответить с первого раза, попробуй переспросить чуть иначе или загляни в Меню.")
 
 def menu_today(st, profile=None, target=None, usage=None):
     extra = ""
