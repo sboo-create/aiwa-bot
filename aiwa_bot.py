@@ -52,7 +52,7 @@ def menu_kb_for(u, general=False):
     base = GENERAL_MENU_KB if general else MENU_KB
     rows = [list(r) for r in base.inline_keyboard]
     if AIWA_WEBAPP_URL:
-        rows.append([InlineKeyboardButton("\U0001F4F2 Открыть приложение", web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
+        rows.append([InlineKeyboardButton("Открыть приложение", web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL), icon_custom_emoji_id="5343944274146764032")])
     return InlineKeyboardMarkup(rows)
 EN = {1: "низкая", 2: "средняя", 3: "высокая"}
 SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), ("bloat", "вздутие"),
@@ -63,7 +63,7 @@ START_TEXT = ("🌸 Привет! Я AIWA, ИИ-ассистент по женс
  "Умею: считать фазу цикла и присылать утреннюю сводку, подбирать питание и тренировки под фазу и под тебя, "
  "отслеживать симптомы, собирать выписку для врача и держать в курсе партнёра. Персонализируюсь под твои данные.\n\n"
  "Полный функционал в разделе Меню. Можешь писать или наговаривать вопросы прямо в чат, я отвечу.\n\n"
- "Для начала отметь последние месячные: напиши дату (например 25.05.2026) или нажми кнопку ниже.")
+ "Для начала выбери: отслеживаешь ли ты цикл? Если есть регулярные месячные, нажми «Веду цикл» и отметишь дату последних. Если цикла нет, он нерегулярный, менопауза или беременность, нажми «Нет регулярного цикла».")
 ABOUT_TEXT = ("🌸 Я AIWA, ИИ-ассистент по женскому здоровью на базе GigaChat.\n\n"
  "Умею: утренние сводки по фазе цикла, персональное питание и тренировки, ответы на вопросы про здоровье, "
  "отслеживание симптомов, выписку для врача и партнёрский режим. Персонализируюсь под тебя.\n\n"
@@ -290,6 +290,7 @@ def match_intent(t):
     t = t.lower()
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
     if re.search(r"(добав|ввес|внес|загруз|импорт)\w*.{0,16}(истори\w*\s*цикл|цикл)|истори\w*\s*цикл\w*\s*вручную|(импорт|перенес\w*).{0,12}(flo|фло)", t): return "addcycles"
+    if re.search(r"(ввес\w*|поменя\w*|измен\w*|обнов\w*|исправ\w*|задат\w*|укаж\w*|написа\w*|внес\w*|поправ\w*)\s*(свой|свои|мой|мои)?\s*(вес|рост|возраст|данные|параметр)|мой вес|новый вес|неправильн\w*.{0,18}(вес|рост|возраст|данные)", t): return "profile"
     if re.search(r"месячн|менструац", t) and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t): return "period_end"
     if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
     if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|упражнени|фитнес|какая активн)", t): return "training"
@@ -343,6 +344,10 @@ ICONS = {  # набор Goodluck_sasha (@goodluck_alex): подобраны ра
     "period": "5357334118159883232",        # ❤️ красный
     "set:time": "5415597204955996883",      # 🟡 жёлтый
     "menu": "5415634562581538032",          # 🔘 нейтральный
+    "edit": "5336819202575573316",          # ✏️ карандаш
+    "cyclelen": "5337121636992690373",      # 🔁 цикл
+    "addcycles": "5337010070922209271",     # 📌 пин
+    "profile_edit": "5359307659927364818",  # 🌸 цветок
 }
 def B(text, cb, style=None):
     kw = {"callback_data": cb}
@@ -355,13 +360,11 @@ MENU_KB = InlineKeyboardMarkup([
     [B("Питание", "food"), B("Нагрузка", "sec:training")],
     [B("Календарь", "calendar"), B("Симптомы", "checkin", KBS.SUCCESS)],
     [B("История и выписка", "history"), B("Гид: норма цикла", "guides")],
-    [B("Партнёр", "partner"), B("Отметить месячные", "period", KBS.DANGER)],
-    [B("📋 Добавить историю циклов", "addcycles")],
-    [B("Время рассылки", "set:time")],
+    [B("Партнёр", "partner"), B("Изменить данные", "edit")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Месячные начались сегодня", callback_data="onb_today")],
+    [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
     [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
 ])
 NOCYCLE_KB = InlineKeyboardMarkup([
@@ -373,9 +376,14 @@ NOCYCLE_KB = InlineKeyboardMarkup([
 GENERAL_MENU_KB = InlineKeyboardMarkup([
     [B("Питание", "food"), B("Нагрузка", "sec:training")],
     [B("Симптомы", "checkin", KBS.SUCCESS), B("История и выписка", "history")],
+    [B("Партнёр", "partner"), B("Изменить данные", "edit")],
+])
+EDIT_KB = InlineKeyboardMarkup([
     [B("Отметить месячные", "period", KBS.DANGER)],
-    [B("📋 Добавить историю циклов", "addcycles")],
-    [B("Партнёр", "partner"), B("Время рассылки", "set:time")],
+    [B("Длина цикла", "cyclelen"), B("Рост, вес, возраст", "profile_edit")],
+    [B("История циклов", "addcycles")],
+    [B("Время рассылки", "set:time")],
+    [B("Назад", "menu", KBS.PRIMARY)],
 ])
 PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
 SKIP_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Пропустить", callback_data="prof_skip")]])
@@ -416,15 +424,15 @@ async def need_onboard(t):
     if cid and is_partner(cid) and not is_onboarded(row(cid)):
         return await t.reply_text(PARTNER_INFO)
     if cid and not row(cid): ev(cid, "signup")
-    if cid: upsert(cid, state="await_date")
-    await t.reply_text("Чтобы считать фазу и давать рекомендации, отметь последние месячные: напиши дату (например 25.05.2026), нажми кнопку или выбери «Нет регулярного цикла».", reply_markup=ONB_KB)
+    if cid: upsert(cid, state=None)
+    await t.reply_text("Чтобы начать, выбери: отслеживаешь ли ты цикл? Если есть регулярные месячные, нажми «Веду цикл». Если нет, выбери «Нет регулярного цикла».", reply_markup=ONB_KB)
 _last_start = {}
 async def begin_onboard(cid, msg):
     now = time.time()
     if now - _last_start.get(cid, 0) < 4: return   # не показываем приветствие дважды подряд
     _last_start[cid] = now
     if not row(cid): ev(cid, "signup")
-    upsert(cid, state="await_date", pending_date=None)
+    upsert(cid, state=None, pending_date=None)
     await msg.reply_text(START_TEXT, reply_markup=ONB_KB)
 
 async def send_infographic(bot, cid):
@@ -599,6 +607,9 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
     if intent == "addcycles":
         return await addcycles_entry(context, cid, msg)
+    if intent == "profile":
+        upsert(cid, state="await_profile_edit")
+        return await msg.reply_text("Обновим данные. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.")
     if intent == "period_end":
         u2 = row(cid)
         if not (is_cycle(u2) and u2.get("last_period")):
@@ -712,7 +723,7 @@ async def welcome_finish(context, cid, msg):
         reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     await push_summary(context, cid)
     await context.bot.send_message(cid, "Хочешь сразу видеть историю в календаре? Можно ввести прошлые циклы вручную.",
-        reply_markup=InlineKeyboardMarkup([[B("📋 Добавить историю циклов", "addcycles")]]))
+        reply_markup=InlineKeyboardMarkup([[B("Добавить историю циклов", "addcycles")]]))
     if is_cycle(row(cid)):
         await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда к врачу.",
             reply_markup=InlineKeyboardMarkup([[B("Гид: норма цикла", "guides")]]))
@@ -1170,9 +1181,9 @@ async def on_cb(update, context):
     q = update.callback_query; await q.answer(); cid = q.message.chat.id; data = q.data
     if data == "go_start": return await begin_onboard(cid, q.message)
     if data == "keep": return await q.message.reply_text("О чём рассказать сегодня?", reply_markup=MENU_KB)
-    if data == "onb_today":
-        upsert(cid, pending_date=date.today().isoformat(), state="await_len")
-        return await q.message.reply_text("Отметила начало месячных сегодня. Какая средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
+    if data == "onb_cycle":
+        upsert(cid, state="await_date", pending_date=None)
+        return await q.message.reply_text("Когда начались последние месячные? Напиши дату, например 25.05.2026.")
     if data == "prof_skip":
         upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
     if data.startswith("act:"):
@@ -1201,6 +1212,11 @@ async def on_cb(update, context):
     today_s = date.today().isoformat()
     if data == "menu":
         await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u, general))
+    elif data == "edit":
+        await q.message.reply_text("Что изменить?", reply_markup=EDIT_KB)
+    elif data == "profile_edit":
+        upsert(cid, state="await_profile_edit")
+        await q.message.reply_text("Обновим данные. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.")
     elif data == "food":
         if general: await send_general(context, cid, "food")
         else: await send_section(context, cid, st, "food")
@@ -1337,7 +1353,10 @@ async def _serve_index(request):
     BD = os.path.dirname(os.path.abspath(__file__))
     for p in (os.path.join(WEB_DIR, "index.html"), os.path.join(BD, "index.html"),
               os.path.join(BD, "webapp.html"), os.path.join(BD, "aiwa_webapp.html")):
-        if os.path.exists(p): return web.FileResponse(p)
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as fh: html_text = fh.read()
+            return web.Response(text=html_text, content_type="text/html",
+                                headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
 async def _api_data(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
