@@ -41,6 +41,11 @@ ABOUT_TEXT = ("🌸 Я AIWA (AI for Woman Awareness), ИИ-ассистент ж
  "Открой Меню, чтобы увидеть всё, что я умею.")
 PRIVACY_TEXT = ("🔒 Про данные: храню минимум, дату последних месячных, длину цикла, твои чек-ины и время рассылки, чтобы считать фазу. "
  "Это не передаётся третьим лицам. Удалить все данные и отключиться можно командой /stop в любой момент.")
+PARTNER_HELLO = ("💛 Привет! Ты подключился как партнёр в AIWA.\n\n"
+ "Каждое утро я буду присылать короткий апдейт: на каком дне цикла твоя девушка, какая фаза и настроение, и чем её поддержать, что сделать или купить.\n\n"
+ "От тебя ничего не требуется, просто будь рядом. Отключить в любой момент: /unlink.")
+PARTNER_INFO = ("💛 Ты в партнёрском режиме AIWA. Я присылаю ежедневный апдейт о цикле и самочувствии твоей девушки. "
+ "Своего меню и календаря тут нет, они в её приложении. Отключить: /unlink.")
 TECH_TEXT = ("🤖 Я работаю на GigaChat. GigaChat, это мультимодальная диалоговая нейросеть, разработанная Сбером. На её основе я считаю фазу цикла, собираю утреннюю сводку и отвечаю на вопросы про здоровье. Данные о тебе не передаются третьим лицам и не используются для обучения; храню только то, что нужно для расчёта цикла, и всё можно удалить командой /stop.")
 PHASES_TEXT = (
  "🌸 Четыре фазы цикла\n\n"
@@ -143,6 +148,9 @@ def link_partner(partner_id, woman_id):
     c = db(); c.execute("INSERT OR REPLACE INTO partners(partner_id,woman_id,created) VALUES(?,?,?)", (partner_id, woman_id, datetime.now().isoformat())); c.commit(); c.close()
 def partner_of(woman_id):
     c = db(); r = c.execute("SELECT partner_id FROM partners WHERE woman_id=?", (woman_id,)).fetchone(); c.close(); return r[0] if r else None
+def woman_of_partner(pid):
+    c = db(); r = c.execute("SELECT woman_id FROM partners WHERE partner_id=?", (pid,)).fetchone(); c.close(); return r[0] if r else None
+def is_partner(cid): return woman_of_partner(cid) is not None
 def cycles_of(cid, since_iso=None):
     c = db()
     if since_iso:
@@ -237,19 +245,17 @@ def status_of(cid):
     return u, C.cycle_status(date.fromisoformat(u["last_period"]), u["cycle_len"])
 
 # ---------- keyboards ----------
-ICONS = {  # набор Goodluck_sasha (@goodluck_alex): callback_data -> custom_emoji_id
-    "food": "5357115384065434291",         # 🍀
-    "sec:training": "5359581378193138129",  # 🔥
-    "calendar": "5337010070922209271",      # 📌
-    "phases": "5357450271255440737",        # 🌙
-    "checkin": "5359479974015279269",       # ✅
-    "guides": "5359285137118864843",        # 📕
-    "calc": "5361618558491041145",          # 🔟
-    "period": "5357334118159883232",        # ❤️
-    "set:time": "5345780407025542851",      # ☀️
-    "menu": "5415634562581538032",          # 🔘
-    "history": "5336781746165785173",       # 📎
-    "partner": "5359654731939586471",       # 💛
+ICONS = {  # набор Goodluck_sasha (@goodluck_alex): подобраны разные по цвету
+    "food": "5418123573438980585",          # 🟢 зелёный
+    "sec:training": "5359581378193138129",  # 🔥 оранжевый
+    "calendar": "5415856681110217088",      # 🔵 синий
+    "checkin": "5337172201642664657",       # 💜 фиолетовый
+    "history": "5418143957353766660",       # ⭐️ золотой
+    "guides": "5359285137118864843",        # 📕 красный
+    "partner": "5359828776899322943",       # 💙 голубое сердце
+    "period": "5357334118159883232",        # ❤️ красный
+    "set:time": "5415597204955996883",      # 🟡 жёлтый
+    "menu": "5415634562581538032",          # 🔘 нейтральный
 }
 def B(text, cb, style=None):
     kw = {"callback_data": cb}
@@ -301,6 +307,9 @@ def summary_kb():
 
 # ---------- senders ----------
 async def need_onboard(t):
+    cid = getattr(getattr(t, "chat", None), "id", None)
+    if cid and is_partner(cid) and not is_onboarded(row(cid)):
+        return await t.reply_text(PARTNER_INFO)
     await t.reply_text("Чтобы рекомендации были точными, сначала укажи дату последних месячных и длину цикла.", reply_markup=GATE_KB)
 async def begin_onboard(cid, msg):
     upsert(cid, state="await_date", pending_date=None)
@@ -455,7 +464,7 @@ async def push_partner(context, woman_cid):
     pid = partner_of(woman_cid)
     if not pid: return
     u, st = status_of(woman_cid)
-    if not st or st["status"] != "normal": return
+    if not st: return
     try:
         await context.bot.send_message(pid, partner_text(st, last_hint(woman_cid)))
     except Exception as e:
@@ -479,7 +488,8 @@ async def partner_join(context, partner_cid, msg, code):
     if woman == partner_cid:
         return await msg.reply_text("Это твоя же ссылка, перешли её партнёру.")
     link_partner(partner_cid, woman)
-    await msg.reply_text("Готово! Буду присылать тебе короткий ежедневный апдейт о её цикле и настроении. Отключить: /unlink")
+    await msg.reply_text(PARTNER_HELLO)
+    await push_partner(context, woman)  # сразу первый апдейт, не ждать утра
     try:
         await context.bot.send_message(woman, "💛 Партнёр подключился к твоему AIWA и будет получать ежедневный апдейт. Отключить можно в Меню, кнопка Партнёр.")
     except Exception: pass
@@ -489,6 +499,8 @@ async def start(update, context):
     cid = update.effective_chat.id
     if context.args and context.args[0].startswith("p_"):
         return await partner_join(context, cid, update.message, context.args[0][2:])
+    if is_partner(cid) and not is_onboarded(row(cid)):
+        return await update.message.reply_text(PARTNER_INFO)
     if is_onboarded(row(cid)):
         return await update.message.reply_text(
             "У тебя уже настроен цикл, данные на месте. Продолжить или начать настройку заново?",
