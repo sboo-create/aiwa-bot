@@ -58,6 +58,10 @@ def fix_mixed_script(text):
         return _translit_word(w2) if (has_cyr and has_lat) else w
     return re.sub(r"[^\W\d_]+", repl, text, flags=re.UNICODE)
 
+def _clean(out, fallback):
+    r = strip_md(out) if out else ""
+    return r if r and r.strip() else fallback
+
 def strip_md(t):
     """Убираем markdown, который Telegram не рендерит, и длинные тире (SB их не любит)."""
     if not t:
@@ -98,17 +102,21 @@ def _call(messages, max_tokens=1100, temperature=0.45, usage=None):
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         return None
-    try:
-        r = requests.post(GROQ_URL, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model": MODEL, "max_tokens": max_tokens, "temperature": temperature, "messages": messages}, timeout=45)
-        r.raise_for_status(); data = r.json()
-        if usage is not None:
-            usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
-        txt = (data["choices"][0]["message"]["content"] or "").strip()
-        txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
-        return txt or None
-    except Exception as e:
-        print("LLM error:", e); return None
+    import time as _t
+    for attempt in range(2):
+        try:
+            r = requests.post(GROQ_URL, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": MODEL, "max_tokens": max_tokens, "temperature": temperature, "messages": messages}, timeout=45)
+            r.raise_for_status(); data = r.json()
+            if usage is not None:
+                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            txt = (data["choices"][0]["message"]["content"] or "").strip()
+            txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
+            return txt or None
+        except Exception as e:
+            print("LLM error:", e)
+            if attempt == 0: _t.sleep(1.3); continue
+            return None
 
 
 def build_prompt(st, modules):
@@ -128,7 +136,7 @@ def generate_summary(st, modules, hint=None, usage=None):
     if hint:
         prompt += f"\nУчитывай вчерашний чек-ин пользовательницы: {hint}. Свяжи рекомендации с этим."
     out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=1100, usage=usage)
-    return strip_md(out) if out else fallback_summary(st, modules)
+    return _clean(out, fallback_summary(st, modules))
 
 
 def answer_question(st, question, usage=None):
@@ -139,7 +147,7 @@ def answer_question(st, question, usage=None):
              "Если вопрос общий (фильмы, досуг, быт), ответь по теме конкретно; цикл упоминай только если это правда уместно и коротко. "
              "Начни с уместного эмодзи. Перечни оформляй пунктами с «• », каждый с новой строки. Только обычный текст, без markdown. Вопрос: " + question)}]
     out = _call(msgs, max_tokens=1000, temperature=0.3, usage=usage)
-    return strip_md(out) if out else ("Подключи модель (ключ), и отвечу развёрнуто. По фазе: " + st["content"]["general"])
+    return _clean(out, "По твоей фазе: " + st["content"]["general"])
 
 
 def explain_section(st, key, usage=None):
@@ -157,7 +165,7 @@ def explain_section(st, key, usage=None):
     msgs = [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": base + "\n\n" + q + " Конкретно, с числами где уместно, только обычный текст без markdown."}]
     out = _call(msgs, max_tokens=600, temperature=0.3, usage=usage)
-    return strip_md(out) if out else section_text(st, key)
+    return _clean(out, section_text(st, key))
 
 
 def followups(st, basis_q, basis_a, usage=None):
@@ -197,7 +205,7 @@ def partner_brief(st, hint=None, usage=None):
               "📌 Почему это важно (одно короткое предложение)\n"
               "Без markdown, без длинных тире, только русский.")
     out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=550, temperature=0.4, usage=usage)
-    return strip_md(out) if out else None
+    return _clean(out, None)
 
 def partner_answer(st, question, hint=None, usage=None):
     h = f" Сегодня она отмечала: {hint}." if hint else ""
@@ -207,9 +215,9 @@ def partner_answer(st, question, hint=None, usage=None):
              "Ответь на его вопрос конкретно и тепло: как именно ей помочь и поддержать с учётом фазы, какие действия и что можно купить. "
              "Без воды, только русский, без markdown. Вопрос: " + question)}]
     out = _call(msgs, max_tokens=700, temperature=0.35, usage=usage)
-    return strip_md(out) if out else "Поддержи её вниманием и заботой, спроси, чего ей сейчас хочется."
+    return _clean(out, "Поддержи её вниманием и заботой, спроси, чего ей сейчас хочется.")
 
-DIET_RU = {"veg": "вегетарианство", "vegan": "веган", "nolac": "без лактозы", "noglu": "без глютена", "nonuts": "без орехов", "pesc": "из мяса только рыба"}
+DIET_RU = {"veg": "вегетарианство", "vegan": "веган", "nolac": "без лактозы", "noglu": "без глютена", "nonuts": "без орехов", "pesc": "пескетарианство, из мяса только рыба"}
 MODE_RU = {"irregular": "нерегулярный цикл", "none": "сейчас нет месячных (аменорея)", "meno": "менопауза или постменопауза", "long": "длинный цикл (более 40 дней)"}
 def _age_band(age):
     a = age or 0
@@ -223,9 +231,9 @@ def _gen_ctx(profile, mode):
     band = _age_band(profile.get("age") if profile else None)
     age = (profile.get("age") if profile else None) or "не указан"
     diet = ""
-    if profile and profile.get("diet"):
-        human = ", ".join(DIET_RU.get(x, x) for x in profile["diet"].split(",") if x)
-        if human: diet = f" Пищевые ограничения: {human}."
+    parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
+    if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
+    if parts: diet = f" Пищевые ограничения: {', '.join(parts)}."
     return f"Режим без отслеживания фазы цикла: {MODE_RU.get(mode, mode)}. Возраст примерно {age} ({band}).{diet}"
 
 def general_summary(profile, mode, hint=None, usage=None):
@@ -234,10 +242,10 @@ def general_summary(profile, mode, hint=None, usage=None):
         "Дай короткую утреннюю wellness-сводку БЕЗ привязки к фазе цикла, блоками с эмодзи-заголовками, каждый блок 1-2 пункта:\n"
         "💛 Самочувствие и энергия\n🍽 Питание (под возраст)\n🏋️ Движение\n📌 На что обратить внимание по возрасту\n"
         "Если это аменорея в репродуктивном возрасте, мягко напомни: отсутствие месячных дольше 3 месяцев стоит обсудить с гинекологом (причины: стресс, вес, спорт, щитовидная железа, СПКЯ). "
-        "Если перименопауза или менопауза, учитывай приливы, сон, плотность костей (кальций, витамин D), достаточный белок, здоровье сердца. "
+        "Если перименопауза или менопауза, объясни, что происходит с гормонами (снижение эстрогена и прогестерона) и к чему это ведёт (приливы, сон, настроение, кости, сердце). Расскажи про варианты: менопаузальная гормональная терапия (МГТ) для замещения эстрогена под контролем гинеколога-эндокринолога, негормональные методы и образ жизни (кальций, витамин D, белок, движение, сон). Конкретные препараты и дозы не назначай, советуй подбор с врачом. "
         "Конкретно, без воды, только русский, без markdown.")
     out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=700, temperature=0.3, usage=usage)
-    return strip_md(out) if out else None
+    return _clean(out, None)
 
 def general_answer(profile, mode, question, hint=None, usage=None):
     h = f" {hint}." if hint else ""
@@ -248,16 +256,16 @@ def general_answer(profile, mode, question, hint=None, usage=None):
              "Если уместно по возрасту (перименопауза, менопауза, аменерея), добавь, на что обратить внимание и когда к врачу. "
              "Только русский, без markdown. Вопрос: " + question)}]
     out = _call(msgs, max_tokens=900, temperature=0.3, usage=usage)
-    return strip_md(out) if out else "Расскажи чуть подробнее, и подскажу конкретнее."
+    return _clean(out, "Сейчас не могу собрать ответ, попробуй переспросить чуть иначе или нажми Меню.")
 
 def menu_today(st, profile=None, target=None, usage=None):
     extra = ""
     if target:
         extra += (f" Ориентир по дню: примерно {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, "
                   f"углеводы {target[3]} г, распредели по приёмам.")
-    if profile and profile.get("diet"):
-        human = ", ".join(DIET_RU.get(x, x) for x in profile["diet"].split(",") if x)
-        if human: extra += f" Строго учитывай пищевые ограничения: {human}. Не предлагай запрещённые продукты."
+    parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
+    if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
+    if parts: extra += f" Строго учитывай пищевые ограничения: {', '.join(parts)}. Не предлагай запрещённые продукты."
     prompt = (f"Составь меню на день под {st['subphase']} {st['phase_ru'].lower()} фазу (день {st['day']} цикла). "
               "Четыре приёма: завтрак ~08:00, обед ~13:00, перекус ~16:00, ужин ~20:00. "
               "Завтрак обязательно белковый (яйца, омлет, творог, греческий йогурт, рыба, тофу), а не сладкая каша как основа. "

@@ -93,17 +93,17 @@ def db():
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
-                "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT"):
+                "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     return c
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
             "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
-            "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12], "mode": r[13] or "cycle"}
+            "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12], "mode": r[13] or "cycle", "diet_note": r[14] or ""}
 
 def upsert(cid, **kw):
     c = db()
@@ -207,11 +207,12 @@ def calc_calories(cm, kg, age, act):
     return round(tdee), p, fat, carbs
 
 ACT_RU = {1: "сидячий образ жизни", 2: "лёгкая активность", 3: "умеренная активность", 4: "высокая активность", 5: "очень высокая активность"}
-DIET = [("veg", "Вегетарианство"), ("vegan", "Веган"), ("nolac", "Без лактозы"), ("noglu", "Без глютена"), ("nonuts", "Без орехов"), ("pesc", "Только рыба из мяса")]
+DIET = [("veg", "Вегетарианство"), ("vegan", "Веган"), ("nolac", "Без лактозы"), ("noglu", "Без глютена"), ("nonuts", "Без орехов"), ("pesc", "Пескетарианство")]
 DIETD = dict(DIET)
 def profile_of(u):
     if u and u.get("height") and u.get("weight") and u.get("age"):
-        return {"height": u["height"], "weight": u["weight"], "age": u["age"], "activity": u.get("activity") or 3, "diet": u.get("diet") or ""}
+        return {"height": u["height"], "weight": u["weight"], "age": u["age"], "activity": u.get("activity") or 3,
+                "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or ""}
     return None
 def diet_human(code_csv):
     if not code_csv: return "без ограничений"
@@ -304,7 +305,7 @@ HIST_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Весь период", callback_data="rep:all")],
 ])
 ACT_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Сидячий", callback_data="act:1"), InlineKeyboardButton("Лёгкая", callback_data="act:2")],
+    [InlineKeyboardButton("Минимальная", callback_data="act:1"), InlineKeyboardButton("Лёгкая", callback_data="act:2")],
     [InlineKeyboardButton("Умеренная", callback_data="act:3"), InlineKeyboardButton("Высокая", callback_data="act:4")],
     [InlineKeyboardButton("Очень высокая", callback_data="act:5")],
 ])
@@ -586,7 +587,8 @@ async def period_cmd(update, context):
         if d:
             cyc_add(cid, d.isoformat()); upsert(cid, last_period=d.isoformat(), state=None)
             schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
-            return await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}.")
+            await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
+            return await push_summary(context, cid)
     upsert(cid, state="await_period_date")
     await update.message.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
 async def set_time_cmd(update, context):
@@ -787,6 +789,11 @@ async def on_text(update, context):
         return await update.message.reply_text(note +
             "Осталось немного для персонального питания и калорий.\nНапиши через пробел рост (см), вес (кг) и возраст. Например: 168 60 30.", reply_markup=SKIP_KB)
 
+    if state == "await_diet":
+        upsert(cid, diet_note=txt[:200])
+        sel = set((row(cid).get("diet") or "").split(",")) - {""}
+        return await update.message.reply_text("Записала: " + txt[:200] + ". Можно отметить ещё кнопками или нажать Готово.", reply_markup=diet_kb(sel))
+
     if state == "await_profile":
         nums = [p for p in re.split(r"[ ,;/]+", txt) if p]
         try:
@@ -795,7 +802,7 @@ async def on_text(update, context):
         except Exception:
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
         upsert(cid, height=int(cm), weight=kg, age=age, state=None)
-        return await update.message.reply_text("Принято. Насколько ты активна в среднем?", reply_markup=ACT_KB)
+        return await update.message.reply_text("Принято. Оцени свой уровень физической активности:", reply_markup=ACT_KB)
 
     if state == "await_time":
         hhmm = parse_time(txt)
@@ -808,7 +815,8 @@ async def on_text(update, context):
         if d:
             cyc_add(cid, d.isoformat()); upsert(cid, last_period=d.isoformat(), state=None)
             schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
-            return await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}.")
+            await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
+            return await push_summary(context, cid)
         upsert(cid, state=None)
 
     m = match_meta(txt)
@@ -854,7 +862,8 @@ async def on_cb(update, context):
         upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
     if data.startswith("act:"):
         upsert(cid, activity=int(data.split(":")[1]), state="await_diet")
-        return await q.message.reply_text("Есть ограничения в еде? Отметь, что подходит, потом Готово.", reply_markup=diet_kb(set()))
+        upsert(cid, state="await_diet")
+        return await q.message.reply_text("Есть ограничения в еде? Отметь кнопками или напиши своё текстом (например «без свинины, без сахара»), потом Готово.", reply_markup=diet_kb(set()))
     if data.startswith("diet:s:"):
         code = data.split(":")[2]; cur = set((row(cid).get("diet") or "").split(",")) - {""}
         cur.symmetric_difference_update({code}); upsert(cid, diet=",".join(sorted(cur)))
@@ -905,7 +914,8 @@ async def on_cb(update, context):
             await q.message.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
     elif data == "period_today":
         cyc_add(cid, today_s); upsert(cid, last_period=today_s, state=None); schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
-        await q.message.reply_text("Отметила начало месячных сегодня.")
+        await q.message.reply_text("Отметила начало месячных сегодня. Вот свежая сводка:")
+        await push_summary(context, cid)
     elif data == "set:time":
         upsert(cid, state="await_time")
         await q.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
