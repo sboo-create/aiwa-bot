@@ -241,6 +241,7 @@ def match_intent(t):
     if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|упражнени|фитнес|какая активн)", t): return "training"
     if re.search(r"(что (мне )?(съесть|поесть|есть)|что приготов|какое питани|меню (на )?сегодня|что покушать|еда на сегодня|рацион|что поедим)", t): return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
+    if re.search(r"(проанализир|сделай анализ|^\s*анализ|разбер|оцени мой цикл|что (говор|показыв)\w*.*(данн|цикл|выписк)|анализ (выписк|цикл|данн))", t): return "analysis"
     if re.search(r"(выписк|выпуск|для врача|истори[яю]|отчёт|отчет|справк)", t): return "history"
     if re.search(r"(отметить симптом|записать симптом|чек.?ин|отметить самочувств)", t): return "checkin"
     if re.search(r"(партнёр|партнер|подключить (парня|мужа|партнёр))", t): return "partner"
@@ -403,11 +404,11 @@ async def send_section(context, cid, st, key):
     usage = []
     if key == "training":
         await send_training_card(context, cid, st)
-        text = await asyncio.to_thread(L.explain_section, st, "training", usage=usage)
+        text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
         return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage)
     if key == "food":
         await send_menu(context, cid)
-        text = await asyncio.to_thread(L.explain_section, st, "food", usage=usage)
+        text = await think_llm(context, cid, L.explain_section, st, "food", usage=usage)
         return await send_answer(context, cid, text, st, "питание сегодня", usage=usage)
     text = L.section_text(st, key)
     await send_answer(context, cid, text, st, text, usage=usage)
@@ -443,12 +444,16 @@ async def send_guide(context, cid, g):
 
 async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None):
     if usage is None: usage = []
-    kb = sugg_kb(cid, L.followups(st, basis_q, text, usage=usage))
+    clean, sugg = L.split_followups(text)
+    if len(sugg) < 2:
+        for e in L.followups(st, basis_q, clean):
+            if e not in sugg and len(sugg) < 2: sugg.append(e)
+    kb = sugg_kb(cid, sugg)
     if quote:
-        body = f"<blockquote>{html.escape(quote)}</blockquote>\n{html.escape(text)}"
+        body = f"<blockquote>{html.escape(quote)}</blockquote>\n{html.escape(clean)}"
         await context.bot.send_message(cid, body, reply_markup=kb, parse_mode="HTML")
     else:
-        await context.bot.send_message(cid, text, reply_markup=kb)
+        await context.bot.send_message(cid, clean, reply_markup=kb)
     ev(cid, "tokens", sum(usage))
 
 async def push_general(context, cid):
@@ -463,11 +468,49 @@ async def send_general(context, cid, key):
     u = row(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
     qmap = {"food": "Что мне есть сегодня под мой возраст и самочувствие? Дай конкретные продукты или меню на день.",
             "training": "Какая физическая активность мне сейчас подходит и почему? Дай конкретные варианты."}
-    usage = []; ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), qmap.get(key, key), hint=last_hint(cid), usage=usage)
+    usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), qmap.get(key, key), hint=last_hint(cid), usage=usage)
     await context.bot.send_message(cid, ans, reply_markup=summary_kb()); ev(cid, "tokens", sum(usage))
+
+def cycle_text_analysis(cid):
+    import statistics as ST
+    from collections import Counter
+    u = row(cid); cyc = cycles_of(cid); logs = logs_of(cid)
+    lens = []
+    for i in range(1, len(cyc)):
+        d = (date.fromisoformat(cyc[i]) - date.fromisoformat(cyc[i - 1])).days
+        if 15 <= d <= 60: lens.append(d)
+    parts = ["📊 Анализ твоих данных"]
+    if not is_cycle(u):
+        parts.append("• Сейчас режим без отслеживания фазы цикла, смотрю по симптомам и самочувствию.")
+    elif len(lens) >= 2:
+        avg = round(ST.mean(lens)); sd = ST.pstdev(lens)
+        reg = "регулярный" if sd <= 2.5 else ("умеренно нерегулярный" if sd <= 5 else "нерегулярный")
+        parts.append(f"• Средняя длина цикла {avg} дн (разброс {min(lens)}-{max(lens)}), цикл {reg}.")
+        ov = max(12, avg - 14)
+        parts.append(f"• Овуляция ориентировочно на {ov} день, фертильное окно за 5 дней до неё.")
+    elif lens:
+        parts.append(f"• Длина цикла около {lens[0]} дн, для оценки регулярности нужно больше отмеченных циклов.")
+    else:
+        parts.append(f"• Отмеченных циклов пока мало. Заявленная длина {u.get('cycle_len') or 28} дн.")
+    cnt = Counter()
+    for lg in logs:
+        for x in lg.get("symptoms", []): cnt[x] += 1
+    if cnt:
+        top = ", ".join(SYM.get(c, c) for c, _ in cnt.most_common(3))
+        parts.append(f"• Чаще всего отмечаешь: {top}.")
+    en = [lg["energy"] for lg in logs if lg.get("energy")]
+    if en:
+        parts.append(f"• Средняя энергия по отметкам: {EN.get(round(ST.mean(en)), '')}.")
+    if len(parts) == 2 and not cnt and not en:
+        parts.append("Пока мало данных. Отмечай месячные и симптомы — и анализ станет точнее.")
+    parts.append("\nПодробную выписку для врача можно собрать кнопкой ниже.")
+    return "\n".join(parts)
 
 async def dispatch_intent(context, update, cid, u, intent):
     msg = update.message; general = not is_cycle(u); ev(cid, "manual", meta="intent_" + intent)
+    if intent == "analysis":
+        return await msg.reply_text(cycle_text_analysis(cid),
+            reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
     if intent == "time":
         upsert(cid, state="await_time")
         return await msg.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 08:00.", reply_markup=time_kb())
@@ -510,6 +553,15 @@ async def push_summary(context, cid, with_image=True):
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     h, m = map(int, hhmm.split(":")); app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
+async def think_llm(context, cid, fn, *args, **kwargs):
+    """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
+    task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    while not task.done():
+        try: await context.bot.send_chat_action(cid, "typing")
+        except Exception: pass
+        await asyncio.wait({task}, timeout=4)
+    return task.result()
+
 class _BCtx:
     def __init__(self, app): self.bot = app.bot; self.application = app
 
@@ -929,7 +981,7 @@ async def handle_text(update, context, txt):
     if is_onboarded(u) and not is_cycle(u):
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), txt, hint=last_hint(cid), usage=usage)
+        ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=last_hint(cid), usage=usage)
         ev(cid, "answered", tokens=sum(usage), meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         return await context.bot.send_message(cid, ans, reply_markup=summary_kb())
     if is_onboarded(u):
@@ -937,7 +989,7 @@ async def handle_text(update, context, txt):
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
         t0 = time.monotonic(); usage = []
-        ans = await asyncio.to_thread(L.answer_question, st, txt, usage=usage)
+        ans = await think_llm(context, cid, L.answer_question, st, txt, usage=usage)
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         return await send_answer(context, cid, ans, st, txt, usage=usage)
     await need_onboard(update.message)
@@ -1026,11 +1078,11 @@ async def on_cb(update, context):
         question = get_sugg(int(data.split(":")[1])) or "Дай рекомендацию"
         await context.bot.send_chat_action(cid, "typing")
         if general:
-            usage = []; ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), question, hint=last_hint(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), question, hint=last_hint(cid), usage=usage)
             body = f"<blockquote>{html.escape(question)}</blockquote>\n{html.escape(ans)}"
             await q.message.reply_text(body, reply_markup=summary_kb(), parse_mode="HTML"); ev(cid, "tokens", sum(usage))
         else:
-            usage = []; ans = await asyncio.to_thread(L.answer_question, st, question, usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, usage=usage)
             await send_answer(context, cid, ans, st, question, usage=usage, quote=question)
 
 async def on_error(update, context):
