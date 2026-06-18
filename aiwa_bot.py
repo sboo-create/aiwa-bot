@@ -118,7 +118,8 @@ def db():
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
-                "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT"):
+                "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
+                "period_end TEXT", "period_len INTEGER"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     return c
@@ -256,9 +257,36 @@ def match_meta(text):
                             "что с данными", "безопасн", "удалить данные", "передаёте", "передаете данные", "данные в безопас")): return "privacy"
     return None
 
+_DATE_RE = re.compile(r"\d{1,2}[.\-/ ]\d{1,2}(?:[.\-/ ]\d{2,4})?")
+def parse_cycle_starts(text):
+    lines = [l for l in re.split(r"[\n;]+", text) if l.strip()]
+    if len(lines) == 1 and len(_DATE_RE.findall(lines[0])) > 1 and not re.search(r"[-\u2013]|\bпо\b", lines[0].lower()):
+        segs = [x for x in re.split(r"[,]+", lines[0]) if x.strip()]
+    else:
+        segs = lines
+    out = []
+    for seg in segs:
+        m = _DATE_RE.search(seg)
+        if not m: continue
+        d = parse_date(m.group(0))
+        if d: out.append(d.isoformat())
+    seen = set(); res = []
+    for x in sorted(out):
+        if x not in seen: seen.add(x); res.append(x)
+    return res
+
+ADDCYCLES_TEXT = ("\U0001F4C5 История цикла вручную.\n\n"
+    "Прямой импорт из Flo и других трекеров, к сожалению, невозможен: у них нет открытого доступа к данным для сторонних приложений, поэтому автоматически перенести цикл нельзя. Но историю можно быстро ввести руками.\n\n"
+    "Напиши даты начала последних месячных, каждую с новой строки (по желанию через тире можно добавить дату окончания, но это не обязательно). Например:\n"
+    "12.04.2026\n14.05.2026\n10.06.2026\n\n"
+    "Сколько хочешь, столько и добавляй. Я занесу их в календарь и точнее посчитаю цикл.")
+
 def match_intent(t):
     t = t.lower()
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
+    if re.search(r"(добав\w*|ввес\w*|внес\w*|загруз\w*|импорт\w*)\s*(прошл\w*\s*)?(истори|цикл)|истори\w*\s*цикл\w*\s*вручную|(импорт|перенес\w*|перенест\w*).{0,12}(flo|фло)", t): return "addcycles"
+    if re.search(r"месячн|менструац", t) and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t): return "period_end"
+    if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
     if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|упражнени|фитнес|какая активн)", t): return "training"
     if re.search(r"(что (мне )?(съесть|поесть|есть)|что приготов|какое питани|меню (на )?сегодня|что покушать|еда на сегодня|рацион|что поедим)", t): return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
@@ -323,6 +351,7 @@ MENU_KB = InlineKeyboardMarkup([
     [B("Календарь", "calendar"), B("Симптомы", "checkin", KBS.SUCCESS)],
     [B("История и выписка", "history"), B("Гид: норма цикла", "guides")],
     [B("Партнёр", "partner"), B("Отметить месячные", "period", KBS.DANGER)],
+    [B("Добавить историю циклов", "addcycles"), B("Длина цикла", "cyclelen")],
     [B("Время рассылки", "set:time")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
@@ -339,6 +368,7 @@ GENERAL_MENU_KB = InlineKeyboardMarkup([
     [B("Питание", "food"), B("Нагрузка", "sec:training")],
     [B("Симптомы", "checkin", KBS.SUCCESS), B("История и выписка", "history")],
     [B("Отметить месячные", "period", KBS.DANGER)],
+    [B("Добавить историю циклов", "addcycles"), B("Длина цикла", "cyclelen")],
     [B("Партнёр", "partner"), B("Время рассылки", "set:time")],
 ])
 PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
@@ -542,7 +572,7 @@ def cycle_text_analysis(cid):
     parts.append("\nПодробную выписку для врача можно собрать кнопкой ниже.")
     return "\n".join(parts)
 
-async def dispatch_intent(context, update, cid, u, intent):
+async def dispatch_intent(context, update, cid, u, intent, txt=""):
     msg = update.message; general = not is_cycle(u); ev(cid, "manual", meta="intent_" + intent)
     if intent == "analysis":
         return await msg.reply_text(cycle_text_analysis(cid),
@@ -555,6 +585,27 @@ async def dispatch_intent(context, update, cid, u, intent):
         return await msg.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
     if intent == "history":
         return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
+    if intent == "addcycles":
+        return await addcycles_entry(context, cid, msg)
+    if intent == "period_end":
+        u2 = row(cid)
+        if not (is_cycle(u2) and u2.get("last_period")):
+            return await msg.reply_text("Сначала отметь начало последних месячных, тогда посчитаю их длину. Кнопка «Отметить месячные» в Меню.")
+        mdt = _DATE_RE.search(txt or "")
+        end = (parse_date(mdt.group(0)) if mdt else None) or date.today()
+        ln = (end - date.fromisoformat(u2["last_period"])).days + 1
+        if 1 <= ln <= 10:
+            upsert(cid, period_end=end.isoformat(), period_len=ln)
+            return await msg.reply_text(f"Записала: месячные длились {ln} дн. Учту это в прогнозе и выписке для врача.")
+        return await msg.reply_text("Поняла, месячные закончились. Чтобы посчитать длину, отметь ещё и дату их начала кнопкой «Отметить месячные».")
+    if intent == "cyclelen":
+        mnum = re.search(r"\b(1[5-9]|[2-5]\d|60)\b", txt or "")
+        if mnum:
+            upsert(cid, cycle_len=int(mnum.group(1)), state=None)
+            await msg.reply_text(f"Записала длину цикла: {mnum.group(1)} дн.")
+            return await push_summary(context, cid)
+        upsert(cid, state="await_cycle_len")
+        return await msg.reply_text("Какая у тебя средняя длина цикла в днях? Обычно 21-35. Напиши число, например 28.")
     if intent == "unlink":
         return await msg.reply_text("Чтобы отключить партнёра, введи команду /unlink")
     if intent == "wipe":
@@ -598,11 +649,13 @@ def schedule_daily(app, cid, hhmm):
     h = (h + m // 60) % 24; m %= 60
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
 
-def mark_period(context, cid, iso):
-    """Отметка месячных доступна всем. Любая отметка включает трекинг цикла (динамику)."""
+def db_mark_period(cid, iso):
+    """Записывает старт месячных в БД и включает трекинг цикла. Без планировщика, безопасно из веб-обработчика."""
     u = row(cid); cl = u.get("cycle_len") or 28
     cyc_add(cid, iso)
     upsert(cid, last_period=iso, cycle_len=cl, mode="cycle", state=None)
+def mark_period(context, cid, iso):
+    db_mark_period(cid, iso)
     schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
@@ -646,6 +699,8 @@ async def welcome_finish(context, cid, msg):
     await msg.reply_text("Всё готово! Утреннюю сводку буду присылать автоматически каждый день в 08:00 (МСК), время меняется в Меню.",
         reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     await push_summary(context, cid)
+    await context.bot.send_message(cid, "Хочешь сразу видеть историю в календаре? Можно ввести прошлые циклы вручную.",
+        reply_markup=InlineKeyboardMarkup([[B("Добавить историю циклов", "addcycles")]]))
     if is_cycle(row(cid)):
         await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда к врачу.",
             reply_markup=InlineKeyboardMarkup([[B("Гид: норма цикла", "guides")]]))
@@ -696,6 +751,13 @@ async def push_partner(context, woman_cid):
     except Exception as e:
         log.warning("partner push: %s", e)
 
+async def addcycles_entry(context, cid, msg):
+    upsert(cid, state="await_cycles")
+    await msg.reply_text(ADDCYCLES_TEXT)
+async def addcycles_cmd(update, context):
+    cid = update.effective_chat.id; ev(cid, "command")
+    if not is_onboarded(row(cid)): return await need_onboard(update.message)
+    await addcycles_entry(context, cid, update.message)
 async def partner_entry(context, cid, msg):
     global BOT_USERNAME
     u = row(cid); code = u.get("partner_code")
@@ -1022,6 +1084,27 @@ async def handle_text(update, context, txt):
             await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
             return await push_summary(context, cid)
         upsert(cid, state=None)
+    elif state == "await_cycle_len":
+        mnum = re.search(r"\d{1,2}", txt)
+        if mnum and 15 <= int(mnum.group()) <= 60:
+            upsert(cid, cycle_len=int(mnum.group()), state=None)
+            await update.message.reply_text(f"Записала длину цикла: {mnum.group()} дн.")
+            return await push_summary(context, cid)
+        upsert(cid, state=None)
+        return await update.message.reply_text("Нужно число от 15 до 60. Открой «Длина цикла» в Меню и попробуй ещё раз.")
+    elif state == "await_cycles":
+        starts = parse_cycle_starts(txt)
+        if not starts:
+            upsert(cid, state=None)
+            return await update.message.reply_text("Не нашла дат. Попробуй ещё раз: открой «Добавить историю циклов» в Меню и пришли даты начала месячных, по одной на строке, например 12.04.2026.")
+        for iso in starts: cyc_add(cid, iso)
+        u2 = row(cid)
+        latest = max(starts + ([u2["last_period"]] if u2.get("last_period") else []))
+        upsert(cid, last_period=latest, cycle_len=(u2.get("cycle_len") or 28), mode="cycle", state=None)
+        schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
+        word = "цикл" if len(starts)==1 else ("цикла" if len(starts)<5 else "циклов")
+        await update.message.reply_text(f"Добавила {len(starts)} {word} в историю. Теперь календарь показывает твою динамику.")
+        return await push_summary(context, cid)
 
     m = match_meta(txt)
     if m:
@@ -1041,7 +1124,7 @@ async def handle_text(update, context, txt):
     if is_onboarded(u):
         _intent = match_intent(txt)
         if _intent:
-            return await dispatch_intent(context, update, cid, u, _intent)
+            return await dispatch_intent(context, update, cid, u, _intent, txt)
 
     if is_onboarded(u) and not is_cycle(u):
         await context.bot.send_chat_action(cid, "typing")
@@ -1117,6 +1200,11 @@ async def on_cb(update, context):
         await send_guide(context, cid, GUIDES[0])
     elif data == "checkin":
         log_ensure(cid, today_s); await q.message.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
+    elif data == "addcycles":
+        await addcycles_entry(context, cid, q.message)
+    elif data == "cyclelen":
+        upsert(cid, state="await_cycle_len")
+        await q.message.reply_text("Какая у тебя средняя длина цикла в днях? Обычно 21-35. Напиши число, например 28.")
     elif data == "period":
         upsert(cid, state="await_period_date")
         await q.message.reply_text("Когда начались последние месячные? Напиши дату (например 25.05.2026) или нажми кнопку.", reply_markup=PERIOD_KB)
@@ -1244,6 +1332,24 @@ async def _api_data(request):
                     "days_since": stt["days_since"], "status": stt["status"], "delay_days": stt["delay_days"]})
         out["cycles"] = cycles_of(cid)
     return _cors(web.json_response(out))
+async def _api_period(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    action = body.get("action"); ds = body.get("date")
+    try: d = date.fromisoformat(ds) if ds else date.today()
+    except Exception: d = date.today()
+    if action == "start":
+        db_mark_period(cid, d.isoformat()); ev(cid, "manual", meta="web_period_start")
+        return _cors(web.json_response({"ok": True}))
+    if action == "end":
+        u = row(cid); ok = False
+        if is_cycle(u) and u.get("last_period"):
+            ln = (d - date.fromisoformat(u["last_period"])).days + 1
+            if 1 <= ln <= 10:
+                upsert(cid, period_end=d.isoformat(), period_len=ln); ok = True
+        ev(cid, "manual", meta="web_period_end")
+        return _cors(web.json_response({"ok": ok}))
+    return _cors(web.json_response({"error": "bad action"}, status=400))
 async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -1289,6 +1395,7 @@ def build_web():
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/chat", _api_chat)
+    aio.router.add_post("/api/period", _api_period)
     aio.router.add_route("OPTIONS", "/api/{tail:.*}", _api_opts)
     aio.router.add_get("/{tail:.*}", _serve_index)
     return aio
@@ -1297,7 +1404,7 @@ async def run_all():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).post_init(on_startup).build()
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))

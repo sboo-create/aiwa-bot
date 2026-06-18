@@ -68,6 +68,10 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .composer{position:fixed;bottom:calc(60px + env(safe-area-inset-bottom));left:0;right:0;max-width:480px;margin:0 auto;padding:8px 12px;display:flex;gap:8px;background:var(--paper);z-index:9}
 .composer input{flex:1;border:1px solid var(--line);border-radius:18px;padding:11px 15px;font-size:14px;font-family:var(--sans);outline:none;background:#fff}
 .composer button{border:none;background:var(--roseDeep);color:#fff;border-radius:18px;padding:0 18px;font-weight:700;cursor:pointer}
+.prow{display:flex;gap:8px;margin:0 0 14px}
+.pbtn{flex:1;border:none;border-radius:14px;padding:12px;font-family:var(--sans);font-weight:600;font-size:13px;cursor:pointer;background:var(--roseDeep);color:#fff}
+.pbtn.alt{background:var(--paper2);color:var(--roseDeep)}
+.pbtn:active{transform:scale(.97)}
 .homebtn{display:block;width:100%;margin:18px 0 2px;padding:13px;border:1px solid var(--roseLine);background:var(--roseWash);color:var(--roseDeep);border-radius:16px;font-family:var(--sans);font-weight:600;font-size:13.5px;cursor:pointer}
 .homebtn:active{transform:scale(.98)}
 .think{display:inline-flex;gap:4px;align-items:center;color:var(--roseDeep);font-size:13px;font-style:italic}
@@ -116,9 +120,15 @@ function lastDate(){return D.last_period?new Date(D.last_period+"T00:00:00"):(fu
 function dayOfCycle(dt){var L=lastDate();var diff=Math.floor((dt-L)/86400000);return((diff%D.cycle_len)+D.cycle_len)%D.cycle_len+1;}
 document.getElementById('date').textContent=today.getDate()+" "+MONTHS[today.getMonth()];
 
+async function markPeriod(act){
+  if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred('light');
+  try{await api('/api/period',{action:act});}catch(e){}
+  var d=await api('/api/data',{name:NAME});
+  if(d&&d.onboarded){D=d;renderToday();go('today');}
+}
 function renderToday(){
   var el=document.getElementById('scr-today');
-  if(D.cycle===false){el.innerHTML="<div class='eyebrow'>Сегодня</div><div class='greet'>Привет"+(NAME?",<span class='nm'> "+NAME+"</span>":"")+"</div><div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>Цикл сейчас не отслеживается. Я слежу за самочувствием и даю рекомендации с учётом возраста. Спроси меня о питании, движении или симптомах.</div></div></div></div>";blossom(document.getElementById('al'),34);return;}
+  if(D.cycle===false){el.innerHTML="<div class='eyebrow'>Сегодня</div><div class='greet'>Привет"+(NAME?",<span class='nm'> "+NAME+"</span>":"")+"</div><div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>Цикл сейчас не отслеживается. Я слежу за самочувствием и даю рекомендации с учётом возраста. Спроси меня о питании, движении или симптомах.</div></div></div></div><div class='prow' style='margin-top:14px'><button class='pbtn' onclick=\"markPeriod('start')\">Отметить месячные</button></div>";blossom(document.getElementById('al'),34);return;}
   var day=dayOfCycle(today),ph=phaseForDay(day,D.cycle_len),sub=subphase(day,ph,D.cycle_len),toNext=D.cycle_len-day+1;
   var PHMAP={menstrual:'men',follicular:'fol',ovulation:'ovu',luteal:'lut'};
   if(typeof D.day==='number'){day=D.day;ph=PHMAP[D.phase]||ph;sub=subphase(day,ph,D.cycle_len);if(typeof D.days_to_next==='number')toNext=D.days_to_next;}
@@ -132,6 +142,7 @@ function renderToday(){
   var tagHtml=delayed?("<span class='tag' style='color:#C25E76;background:#FBE4E9'>Задержка</span>"):("<span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span><span class='psub'>"+sub+" фаза</span>");
   var metaHtml=delayed?delayMsg:("из "+D.cycle_len+" · месячные через ~"+toNext+" дн.");
   html+="<div class='card'><div class='pl'>"+tagHtml+"</div><div class='pday'>День "+day+"</div><div class='pmeta'>"+metaHtml+"</div></div>";
+  html+="<div class='prow'><button class='pbtn' onclick=\"markPeriod('start')\">Месячные начались</button><button class='pbtn alt' onclick=\"markPeriod('end')\">Закончились</button></div>";
   html+="<div class='stats'><div class='stat'><div class='l'>День цикла</div><div class='v'>"+day+"</div><div class='s'>из "+D.cycle_len+"</div></div><div class='stat'><div class='l'>Фаза</div><div class='v'>"+RU[ph].slice(0,4)+".</div><div class='s'>"+sub+"</div></div><div class='stat'><div class='l'>До месячных</div><div class='v'>~"+toNext+"</div><div class='s'>дней</div></div></div>";
   html+="<div class='calhead'><button class='calnav' id='calPrev'>\u2039</button><div class='sec' id='calLabel' style='margin:0'></div><button class='calnav' id='calNext'>\u203A</button></div><div class='cal' id='cal'></div><div class='calhint' id='calHint'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:#C25E76'></span>Менструальная</div><div class='lg'><span class='dot' style='background:#94A97E'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:#E5A734'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:#E0879A'></span>Лютеиновая</div></div>";
