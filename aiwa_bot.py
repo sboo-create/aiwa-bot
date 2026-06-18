@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
 import os, io, re, time, html, asyncio, sqlite3, secrets, logging
+from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -21,6 +22,14 @@ except Exception as e:
     RPT = None; print("report off:", e)
 BOT_USERNAME = None
 BCAST_Q = None  # очередь утренней рассылки (троттлинг под лимиты Groq)
+CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
+def hist_get(cid): return list(CHAT_HIST.get(cid, []))
+def hist_push(cid, q, a):
+    dq = CHAT_HIST.setdefault(cid, deque(maxlen=6))
+    clean = a
+    try: clean = L.split_followups(a)[0]
+    except Exception: pass
+    dq.append({"role": "user", "content": q[:600]}); dq.append({"role": "assistant", "content": (clean or a)[:1200]})
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("aiwa")
@@ -339,7 +348,8 @@ def sym_kb(selected):
     rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in SYMPTOMS]
     rows.append([InlineKeyboardButton("Готово", callback_data="ci:done")]); return InlineKeyboardMarkup(rows)
 def sugg_kb(cid, items):
-    rows = [[B(t, f"q:{add_sugg(cid,t)}")] for t in items[:2]]
+    def _short(t): return t if len(t) <= 34 else t[:32].rstrip(" ,.-") + "…"
+    rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
     rows.append([B("Меню", "menu", KBS.PRIMARY)]); return InlineKeyboardMarkup(rows)
 def summary_kb():
     return InlineKeyboardMarkup([
@@ -984,16 +994,18 @@ async def handle_text(update, context, txt):
     if is_onboarded(u) and not is_cycle(u):
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=last_hint(cid), usage=usage)
+        ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=last_hint(cid), history=hist_get(cid), usage=usage)
         ev(cid, "answered", tokens=sum(usage), meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
+        hist_push(cid, txt, ans)
         return await context.bot.send_message(cid, ans, reply_markup=summary_kb())
     if is_onboarded(u):
         _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing")
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.answer_question, st, txt, usage=usage)
+        ans = await think_llm(context, cid, L.answer_question, st, txt, profile_of(u), hist_get(cid), usage=usage)
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
+        hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, st, txt, usage=usage)
     await need_onboard(update.message)
 
@@ -1081,11 +1093,13 @@ async def on_cb(update, context):
         question = get_sugg(int(data.split(":")[1])) or "Дай рекомендацию"
         await context.bot.send_chat_action(cid, "typing")
         if general:
-            usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), question, hint=last_hint(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), question, hint=last_hint(cid), history=hist_get(cid), usage=usage)
+            hist_push(cid, question, ans)
             body = f"<blockquote>{html.escape(question)}</blockquote>\n{html.escape(ans)}"
             await q.message.reply_text(body, reply_markup=summary_kb(), parse_mode="HTML"); ev(cid, "tokens", sum(usage))
         else:
-            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, profile_of(u), hist_get(cid), usage=usage)
+            hist_push(cid, question, ans)
             await send_answer(context, cid, ans, st, question, usage=usage, quote=question)
 
 async def on_error(update, context):

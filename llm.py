@@ -192,7 +192,7 @@ def _call_proxy(messages, max_tokens, temperature, usage):
         try:
             r = requests.post(PROXY_URL, headers=headers,
                 json={"model": PROXY_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
-                timeout=60, verify=False)
+                timeout=(10, 55), verify=False)
             if r.status_code == 429:
                 _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             r.raise_for_status(); data = r.json()
@@ -259,14 +259,32 @@ def generate_summary(st, modules, hint=None, usage=None):
     return _clean(out, fallback_summary(st, modules))
 
 
-def answer_question(st, question, usage=None):
-    msgs = [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": (f"Её фаза сейчас: {st['subphase']} {st['phase_ru'].lower()}, день {st['day']} из {st['cycle_len']}.\n\n"
-             "Ответь на вопрос по существу и КОНКРЕТНО: конкретные названия, продукты, числа, а не общие слова. "
-             "Если вопрос про цикл, питание, тренировки или самочувствие - свяжи с её фазой. "
-             "Если вопрос общий (фильмы, досуг, быт), ответь по теме конкретно; цикл упоминай только если это правда уместно и коротко. "
-             "Начни с уместного эмодзи. Перечни оформляй пунктами с «• », каждый с новой строки. Только обычный текст, без markdown. "
-             "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: короткий вопрос ;; короткий вопрос — два релевантных уточняющих вопроса от лица пользовательницы по теме ответа, по 3-6 слов. Вопрос: " + question)}]
+_ACT = {1: "минимальная", 2: "лёгкая", 3: "умеренная", 4: "высокая", 5: "очень высокая"}
+def _ctx_note(st, profile):
+    note = ""
+    if st:
+        note = f"Фаза цикла: {st['subphase']} {st['phase_ru'].lower()}, день {st['day']} из {st['cycle_len']}."
+    if profile:
+        bits = []
+        if profile.get("height"): bits.append(f"рост {profile['height']} см")
+        if profile.get("weight"): bits.append(f"вес {profile['weight']} кг")
+        if profile.get("age"): bits.append(f"возраст {profile['age']}")
+        a = _ACT.get(profile.get("activity"))
+        if a: bits.append(f"активность {a}")
+        d = profile.get("diet") or profile.get("diet_note")
+        if d: bits.append("есть пищевые ограничения")
+        if bits:
+            note += " Данные пользовательницы: " + ", ".join(bits) + ". Используй их для персональных расчётов (например калорий по формуле Миффлина-Сан Жеора для женщин)."
+    return note
+
+def answer_question(st, question, profile=None, history=None, usage=None):
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "system", "content": _ctx_note(st, profile)}]
+    if history: msgs += list(history)
+    msgs.append({"role": "user", "content": (
+        "Ответь по существу и КОНКРЕТНО (названия, продукты, числа), учитывай контекст диалога выше и данные пользовательницы. "
+        "Если вопрос про цикл, питание, тренировки или самочувствие - свяжи с фазой. Общий вопрос (фильмы, быт) - ответь по теме, цикл не притягивай. "
+        "Начни с уместного эмодзи, перечни с «• », только обычный текст без markdown. "
+        "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: вопрос ;; вопрос — два релевантных вопроса от лица пользовательницы, ОЧЕНЬ КОРОТКО, по 2-4 слова. Вопрос: " + question)})
     out = _call(msgs, max_tokens=650, temperature=0.3, usage=usage)
     return _clean(out, "Не получилось ответить с первого раза, попробуй переспросить чуть иначе или загляни в Меню.")
 
@@ -368,14 +386,14 @@ def general_summary(profile, mode, hint=None, usage=None):
     out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=600, temperature=0.3, usage=usage)
     return _clean(out, None)
 
-def general_answer(profile, mode, question, hint=None, usage=None):
+def general_answer(profile, mode, question, hint=None, history=None, usage=None):
     h = f" {hint}." if hint else ""
-    msgs = [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": (_gen_ctx(profile, mode) + h + "\n\n"
-             "Ответь на вопрос по существу и конкретно, с учётом возраста и режима, БЕЗ привязки к фазе цикла. "
-             "Если вопрос про питание, движение или симптомы, дай конкретные продукты, действия, числа. "
-             "Если уместно по возрасту (перименопауза, менопауза, аменерея), добавь, на что обратить внимание и когда к врачу. "
-             "Только русский, без markdown. Вопрос: " + question)}]
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "system", "content": _gen_ctx(profile, mode) + h}]
+    if history: msgs += list(history)
+    msgs.append({"role": "user", "content": (
+        "Ответь по существу и конкретно, с учётом возраста, режима и контекста диалога выше. "
+        "Про питание/движение/симптомы давай конкретные продукты, действия, числа (например калории по росту/весу/возрасту). "
+        "Если уместно по возрасту, добавь, на что обратить внимание и когда к врачу. Только русский, без markdown. Вопрос: " + question)})
     out = _call(msgs, max_tokens=650, temperature=0.3, usage=usage)
     return _clean(out, "Не получилось ответить с первого раза, попробуй переспросить чуть иначе или загляни в Меню.")
 
