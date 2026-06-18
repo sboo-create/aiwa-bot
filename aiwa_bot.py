@@ -266,6 +266,7 @@ def match_intent(t):
     if re.search(r"(выписк|выпуск|для врача|истори[яю]|отчёт|отчет|справк)", t): return "history"
     if re.search(r"(отметить симптом|записать симптом|чек.?ин|отметить самочувств)", t): return "checkin"
     if re.search(r"(отключить|отвязать|удалить)\s+партн", t): return "unlink"
+    if re.search(r"(стере|сотри|удали|обнул|снес|снос|очист)", t) and re.search(r"(вс[её]|\bвсе\b|данн|аккаунт|профил|себя|про меня|обо мне|информац)", t): return "wipe"
     if re.search(r"(партнёр|партнер|подключить (парня|мужа|партнёр))", t): return "partner"
     if re.search(r"(какие\s+команд|список\s+команд|что\s+ты\s+умеешь|твои\s+команд|покажи\s+команд|^\s*команды\s*$|^\s*помощь\s*$|^\s*help\s*$|меню\s+команд)", t): return "help"
     if re.search(r"(отметить месячн|внести измен\w*\s+(в\s+)?месячн|изменить\s+(дату\s+)?месячн|поменять\s+(дату\s+)?месячн|обновить\s+(дату\s+)?месячн|исправить\s+месячн|месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн)", t): return "period"
@@ -554,6 +555,8 @@ async def dispatch_intent(context, update, cid, u, intent):
         return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
     if intent == "unlink":
         return await msg.reply_text("Чтобы отключить партнёра, введи команду /unlink")
+    if intent == "wipe":
+        return await msg.reply_text("Чтобы стереть все свои данные и отключить бота, введи команду /stop")
     if intent == "help":
         return await help_cmd(update, context)
     if intent == "partner":
@@ -589,7 +592,10 @@ async def push_summary(context, cid, with_image=True):
 
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
-    h, m = map(int, hhmm.split(":")); app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
+    h, m = map(int, hhmm.split(":"))
+    m += abs(cid) % 15  # разброс 0..14 мин: у многих юзеров сводки не падают в одну минуту
+    h = (h + m // 60) % 24; m %= 60
+    app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
 async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
     task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
@@ -1153,8 +1159,26 @@ async def on_error(update, context):
                 reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     except Exception: pass
 
+async def load_logger(app):
+    """Раз в минуту пишет в лог сводку нагрузки: вызовы модели, средняя латентность, очередь рассылки, число юзеров."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            s = L.pop_stats(); calls = s["calls"]
+            avg = (s["ms"] // calls) if calls else 0
+            q = BCAST_Q.qsize() if BCAST_Q is not None else 0
+            wq = s.get("queued", 0); wms = (s.get("wait_ms", 0) // calls) if calls else 0
+            log.info("LOAD/60s llm_calls=%d avg_ms=%d wait_ms=%d queued=%d err=%d bcast_q=%d users=%d", calls, avg, wms, wq, s["err"], q, len(all_users()))
+        except Exception as e:
+            log.warning("load_logger: %s", e)
+
 async def on_startup(app):
     global BOT_USERNAME, BCAST_Q
+    try:
+        import concurrent.futures
+        asyncio.get_running_loop().set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=24))
+    except Exception as e:
+        log.warning("executor: %s", e)
     if AIWA_WEBAPP_URL:
         try:
             await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Айва", web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
@@ -1175,6 +1199,7 @@ async def on_startup(app):
     except Exception: BOT_USERNAME = None
     BCAST_Q = asyncio.Queue()
     asyncio.create_task(broadcast_worker(app))
+    asyncio.create_task(load_logger(app))
     n = 0
     for cid in all_users(): schedule_daily(app, cid, row(cid)["send_time"] or "08:00"); n += 1
     log.info("Rescheduled %d", n)

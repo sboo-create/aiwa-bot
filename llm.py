@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Сводка, ответы и динамические саджесты через OSS-модель на Groq. Брендинг: GigaChat (тестовый вариант)."""
-import os, re, json, requests, unicodedata
+import os, re, json, requests, unicodedata, threading
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = os.environ.get("AIWA_MODEL", "openai/gpt-oss-120b")
@@ -207,7 +207,7 @@ def _call_proxy(messages, max_tokens, temperature, usage):
             return None
     return None
 
-def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
+def _call_impl(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
     """Единая точка вызова модели. Движок выбирается переменной AIWA_PROVIDER."""
     if PROVIDER in ("litellm", "proxy"):
         return _call_proxy(messages, max_tokens, temperature, usage)
@@ -237,6 +237,29 @@ def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
             if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             return None
     return None
+
+
+# --- метрики нагрузки: считаем вызовы модели и латентность за интервал ---
+STATS = {"calls": 0, "ms": 0, "err": 0, "wait_ms": 0, "queued": 0}
+# семафор: не больше N одновременных обращений к модели, остальные ждут в очереди
+_LLM_SEM = threading.Semaphore(int(os.environ.get("AIWA_LLM_CONCURRENCY", "10")))
+def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
+    import time as _tt
+    t0 = _tt.time(); STATS["calls"] += 1
+    if not _LLM_SEM.acquire(blocking=False):
+        STATS["queued"] += 1
+        _LLM_SEM.acquire()  # ждём свободный слот
+    STATS["wait_ms"] += int((_tt.time() - t0) * 1000)
+    t1 = _tt.time(); out = None
+    try:
+        out = _call_impl(messages, max_tokens, temperature, usage, attempts)
+        return out
+    finally:
+        _LLM_SEM.release()
+        STATS["ms"] += int((_tt.time() - t1) * 1000)
+        if not out: STATS["err"] += 1
+def pop_stats():
+    s = dict(STATS); STATS["calls"] = STATS["ms"] = STATS["err"] = 0; return s
 
 
 def build_prompt(st, modules):
