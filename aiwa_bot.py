@@ -1167,9 +1167,11 @@ def _cors(resp):
     resp.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
     return resp
 async def _serve_index(request):
-    p = os.path.join(WEB_DIR, "index.html")
-    if not os.path.exists(p): return web.Response(text="webapp not found", status=404)
-    return web.FileResponse(p)
+    BD = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(WEB_DIR, "index.html"), os.path.join(BD, "index.html"),
+              os.path.join(BD, "webapp.html"), os.path.join(BD, "aiwa_webapp.html")):
+        if os.path.exists(p): return web.FileResponse(p)
+    return web.Response(text="webapp not found", status=404)
 async def _api_data(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
