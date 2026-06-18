@@ -348,7 +348,7 @@ def sym_kb(selected):
     rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in SYMPTOMS]
     rows.append([InlineKeyboardButton("Готово", callback_data="ci:done")]); return InlineKeyboardMarkup(rows)
 def sugg_kb(cid, items):
-    def _short(t): return t if len(t) <= 34 else t[:32].rstrip(" ,.-") + "…"
+    def _short(t): return t if len(t) <= 28 else t[:26].rstrip(" ,.-") + "…"
     rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
     rows.append([B("Меню", "menu", KBS.PRIMARY)]); return InlineKeyboardMarkup(rows)
 def summary_kb():

@@ -278,7 +278,8 @@ def _ctx_note(st, profile):
     return note
 
 def answer_question(st, question, profile=None, history=None, usage=None):
-    msgs = [{"role": "system", "content": SYSTEM}, {"role": "system", "content": _ctx_note(st, profile)}]
+    note = _ctx_note(st, profile)
+    msgs = [{"role": "system", "content": SYSTEM + (("\n\n" + note) if note else "")}]
     if history: msgs += list(history)
     msgs.append({"role": "user", "content": (
         "Ответь по существу и КОНКРЕТНО (названия, продукты, числа), учитывай контекст диалога выше и данные пользовательницы. "
@@ -304,7 +305,7 @@ def explain_section(st, key, usage=None):
         return section_text(st, key)
     msgs = [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": base + "\n\n" + q + " Развёрнуто и конкретно, с числами где уместно, но без воды. Только обычный текст без markdown. "
-            "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: короткий вопрос ;; короткий вопрос — два релевантных вопроса по теме, по 3-6 слов."}]
+            "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: вопрос ;; вопрос — два релевантных вопроса по теме, ОЧЕНЬ КОРОТКО, по 2-4 слова."}]
     out = _call(msgs, max_tokens=750, temperature=0.4, usage=usage)
     return _clean(out, _section_fallback(st, key))
 
@@ -387,7 +388,7 @@ def general_summary(profile, mode, hint=None, usage=None):
 
 def general_answer(profile, mode, question, hint=None, history=None, usage=None):
     h = f" {hint}." if hint else ""
-    msgs = [{"role": "system", "content": SYSTEM}, {"role": "system", "content": _gen_ctx(profile, mode) + h}]
+    msgs = [{"role": "system", "content": SYSTEM + "\n\n" + _gen_ctx(profile, mode) + h}]
     if history: msgs += list(history)
     msgs.append({"role": "user", "content": (
         "Ответь по существу и конкретно, с учётом возраста, режима и контекста диалога выше. "
