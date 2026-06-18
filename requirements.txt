@@ -1,4 +1,5 @@
 python-telegram-bot[job-queue]==22.8
+aiohttp>=3.9
 requests>=2.31
 Pillow>=10.0
 reportlab>=4.0

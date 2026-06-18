@@ -5,10 +5,13 @@ from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, WebAppInfo
 from telegram.constants import KeyboardButtonStyle as KBS
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
+from aiohttp import web
+import hmac as _hmac, hashlib as _hashlib
+from urllib.parse import parse_qsl as _pqsl
 
 import cycle as C
 import llm as L
@@ -38,6 +41,18 @@ DB = os.environ.get("AIWA_DB", "aiwa.db")
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
+AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
+def webapp_url(u):
+    if not AIWA_WEBAPP_URL: return None
+    if u and u.get("last_period") and u.get("cycle_len") and u.get("mode", "cycle") == "cycle":
+        sep = "&" if "?" in AIWA_WEBAPP_URL else "?"
+        return f"{AIWA_WEBAPP_URL}{sep}d={u['last_period']}&c={u['cycle_len']}"
+    return AIWA_WEBAPP_URL
+def menu_kb_for(u):
+    url = webapp_url(u)
+    if url:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("📅 Открыть приложение", web_app=WebAppInfo(url=url))]] + list(MENU_KB.inline_keyboard))
+    return MENU_KB
 EN = {1: "низкая", 2: "средняя", 3: "высокая"}
 SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), ("bloat", "вздутие"),
             ("sweet", "тяга к сладкому"), ("anx", "тревожность"), ("tired", "усталость")]
@@ -706,8 +721,9 @@ async def calendar_cmd(update, context):
     await send_infographic(context.bot, cid)
 async def menu(update, context):
     ev(update.effective_chat.id, "command")
-    if not is_onboarded(row(update.effective_chat.id)): return await need_onboard(update.message)
-    await update.message.reply_text("О чём рассказать сегодня?", reply_markup=MENU_KB)
+    u = row(update.effective_chat.id)
+    if not is_onboarded(u): return await need_onboard(update.message)
+    await update.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u))
 async def checkin_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
@@ -761,6 +777,15 @@ async def unlink_cmd(update, context):
     cid = update.effective_chat.id
     c = db(); c.execute("DELETE FROM partners WHERE partner_id=? OR woman_id=?", (cid, cid)); c.commit(); c.close()
     await update.message.reply_text("Партнёрская связь отключена.")
+async def app_cmd(update, context):
+    cid = update.effective_chat.id; ev(cid, "command")
+    u = row(cid)
+    if not is_onboarded(u): return await need_onboard(update.message)
+    url = webapp_url(u)
+    if not url:
+        return await update.message.reply_text("Приложение скоро подключим.")
+    await update.message.reply_text("Интерактивный экран цикла:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📅 Мой цикл", web_app=WebAppInfo(url=url))]]))
 async def stop(update, context):
     cid = update.effective_chat.id
     for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
@@ -1044,7 +1069,7 @@ async def on_cb(update, context):
     general = st is None
     today_s = date.today().isoformat()
     if data == "menu":
-        await q.message.reply_text("О чём рассказать сегодня?", reply_markup=(GENERAL_MENU_KB if general else MENU_KB))
+        await q.message.reply_text("О чём рассказать сегодня?", reply_markup=(GENERAL_MENU_KB if general else menu_kb_for(u)))
     elif data == "food":
         if general: await send_general(context, cid, "food")
         else: await send_section(context, cid, st, "food")
@@ -1122,17 +1147,103 @@ async def on_startup(app):
     for cid in all_users(): schedule_daily(app, cid, row(cid)["send_time"] or "08:00"); n += 1
     log.info("Rescheduled %d", n)
 
-def main():
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
+def _verify_init(init_data):
+    try:
+        pairs = dict(_pqsl(init_data, keep_blank_values=True))
+        rh = pairs.pop("hash", "")
+        if not rh: return None
+        dcs = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
+        secret = _hmac.new(b"WebAppData", os.environ["BOT_TOKEN"].encode(), _hashlib.sha256).digest()
+        calc = _hmac.new(secret, dcs.encode(), _hashlib.sha256).hexdigest()
+        if calc != rh: return None
+        import json as _j
+        return _j.loads(pairs.get("user", "{}")).get("id")
+    except Exception as e:
+        log.warning("init verify: %s", e); return None
+def _cors(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+    return resp
+async def _serve_index(request):
+    p = os.path.join(WEB_DIR, "index.html")
+    if not os.path.exists(p): return web.Response(text="webapp not found", status=404)
+    return web.FileResponse(p)
+async def _api_data(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
+    out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
+           "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
+           "mode": u.get("mode") or "cycle", "name": (body.get("name") or "")}
+    return _cors(web.json_response(out))
+async def _api_section(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid); _, st = status_of(cid); kind = body.get("kind", "food"); ev(cid, "button", meta="web_" + kind)
+    if st is None:
+        q = {"food": "Что мне есть сегодня под мой возраст?", "training": "Какая активность мне подходит и почему?"}.get(kind, kind)
+        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), q, None, None)
+        return _cors(web.json_response({"text": ans}))
+    if kind == "food":
+        prof = profile_of(u); target = profile_kcal(prof) if prof else None
+        menu = await asyncio.to_thread(L.menu_today, st, profile=prof, target=target)
+        if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
+        text = await asyncio.to_thread(L.explain_section, st, "food")
+        return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text}))
+    text = await asyncio.to_thread(L.explain_section, st, "training")
+    return _cors(web.json_response({"text": text}))
+async def _api_chat(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    msg = (body.get("message") or "").strip()
+    if not msg: return _cors(web.json_response({"answer": "Напиши вопрос.", "suggestions": []}))
+    u = row(cid); _, st = status_of(cid)
+    if st is not None:
+        ans = await asyncio.to_thread(L.answer_question, st, msg, profile_of(u), hist_get(cid))
+    else:
+        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), msg, None, hist_get(cid))
+    hist_push(cid, msg, ans)
+    clean, sugg = L.split_followups(ans)
+    if st is not None and len(sugg) < 2:
+        try:
+            for e in L.followups(st, msg, clean):
+                if e not in sugg and len(sugg) < 2: sugg.append(e)
+        except Exception: pass
+    ev(cid, "answered", meta="webapp", n=len(msg))
+    return _cors(web.json_response({"answer": clean, "suggestions": sugg[:2]}))
+async def _api_opts(request): return _cors(web.Response())
+def build_web():
+    aio = web.Application()
+    aio.router.add_get("/", _serve_index)
+    aio.router.add_get("/health", lambda r: web.Response(text="ok"))
+    aio.router.add_post("/api/data", _api_data)
+    aio.router.add_post("/api/section", _api_section)
+    aio.router.add_post("/api/chat", _api_chat)
+    aio.router.add_route("OPTIONS", "/api/{tail:.*}", _api_opts)
+    return aio
+
+async def run_all():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).post_init(on_startup).build()
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    log.info("AIWA bot starting..."); app.run_polling(allowed_updates=Update.ALL_TYPES)
+    runner = web.AppRunner(build_web()); await runner.setup()
+    port = int(os.environ.get("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port); await site.start()
+    await app.initialize(); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    log.info("AIWA bot + web on :%s", port)
+    await asyncio.Event().wait()
+
+def main():
+    asyncio.run(run_all())
 
 if __name__ == "__main__":
     main()
