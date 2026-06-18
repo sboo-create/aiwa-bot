@@ -115,11 +115,17 @@ function renderToday(){
   var el=document.getElementById('scr-today');
   if(D.cycle===false){el.innerHTML="<div class='eyebrow'>Сегодня</div><div class='greet'>Привет"+(NAME?",<span class='nm'> "+NAME+"</span>":"")+"</div><div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>Цикл сейчас не отслеживается. Я слежу за самочувствием и даю рекомендации с учётом возраста. Спроси меня о питании, движении или симптомах.</div></div></div></div>";blossom(document.getElementById('al'),34);return;}
   var day=dayOfCycle(today),ph=phaseForDay(day,D.cycle_len),sub=subphase(day,ph,D.cycle_len),toNext=D.cycle_len-day+1;
+  if(typeof D.day==='number'){day=D.day;ph=D.phase||ph;sub=subphase(day,ph,D.cycle_len);if(typeof D.days_to_next==='number')toNext=D.days_to_next;}
+  var delayed=!!(D.status&&D.status!=='normal');
+  var delayMsg=!delayed?'':(D.status==='due'?'месячные ожидаются примерно сейчас':(D.status==='delay'?('задержка '+(D.delay_days||0)+' дн., отметь когда начнутся'):'данные устарели, отметь последние месячные'));
+  var ayvaTxt=delayed?('Месячные пока не начались по прогнозу ('+delayMsg+'). При нерегулярном цикле это бывает: стресс, смена режима, вес. Отметь их, когда придут, и я пересчитаю прогноз.'):SUMM[ph];
   var h=today.getHours(),g=h<12?"Доброе утро":(h<18?"Добрый день":"Добрый вечер");
   var html="<div class='eyebrow'>"+WD[(today.getDay()+6)%7]+" · цикл "+D.cycle_len+" дней</div>";
   html+="<div class='greet'>"+g+(NAME?",<br><span class='nm'>"+NAME+"</span>":"")+"</div>";
-  html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+SUMM[ph]+"</div></div></div><div class='chips' id='tchips'></div></div>";
-  html+="<div class='card'><div class='pl'><span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span><span class='psub'>"+sub+" фаза</span></div><div class='pday'>День "+day+"</div><div class='pmeta'>из "+D.cycle_len+" · месячные через ~"+toNext+" дн.</div></div>";
+  html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+ayvaTxt+"</div></div></div><div class='chips' id='tchips'></div></div>";
+  var tagHtml=delayed?("<span class='tag' style='color:#C25E76;background:#FBE4E9'>Задержка</span>"):("<span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span><span class='psub'>"+sub+" фаза</span>");
+  var metaHtml=delayed?delayMsg:("из "+D.cycle_len+" · месячные через ~"+toNext+" дн.");
+  html+="<div class='card'><div class='pl'>"+tagHtml+"</div><div class='pday'>День "+day+"</div><div class='pmeta'>"+metaHtml+"</div></div>";
   html+="<div class='stats'><div class='stat'><div class='l'>День цикла</div><div class='v'>"+day+"</div><div class='s'>из "+D.cycle_len+"</div></div><div class='stat'><div class='l'>Фаза</div><div class='v'>"+RU[ph].slice(0,4)+".</div><div class='s'>"+sub+"</div></div><div class='stat'><div class='l'>До месячных</div><div class='v'>~"+toNext+"</div><div class='s'>дней</div></div></div>";
   html+="<div class='sec'>"+MNOM[today.getMonth()]+" "+today.getFullYear()+"</div><div class='cal' id='cal'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:#C25E76'></span>Менструальная</div><div class='lg'><span class='dot' style='background:#94A97E'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:#E5A734'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:#E0879A'></span>Лютеиновая</div></div>";
