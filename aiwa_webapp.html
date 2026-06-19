@@ -124,7 +124,7 @@ async function api(path,body){try{var r=await fetch(path,{method:'POST',headers:
 function phaseForDay(d,l){if(d<=5)return"men";var ov=Math.max(12,l-14);if(d<ov)return"fol";if(d<=ov+2)return"ovu";return"lut";}
 function subphase(d,ph,l){var ov=Math.max(12,l-14);var B={men:[1,5],fol:[6,ov-1],ovu:[ov,ov+2],lut:[ov+3,l]}[ph];var sp=Math.max(1,B[1]-B[0]);var p=(d-B[0])/sp;return p<0.34?"ранняя":(p<0.67?"средняя":"поздняя");}
 var D=null,today=new Date();today.setHours(0,0,0,0);
-var STARTS=[],calOffset=0,PREG_CAL_OFFSET=0,PA_SET={};
+var STARTS=[],calOffset=0,PREG_CAL_OFFSET=0,PA_SET={},CYCLE_SET={};
 function lastDate(){return D.last_period?new Date(D.last_period+"T00:00:00"):(function(){var d=new Date();d.setDate(d.getDate()-6);return d;})();}
 function dayOfCycle(dt){var L=lastDate();var diff=Math.floor((dt-L)/86400000);return((diff%D.cycle_len)+D.cycle_len)%D.cycle_len+1;}
 document.getElementById('date').textContent=today.getDate()+" "+MONTHS[today.getMonth()];
@@ -190,11 +190,12 @@ function renderToday(){
   html+="<div class='stats'><div class='stat'><div class='l'>День цикла</div><div class='v'>"+day+"</div><div class='s'>из "+D.cycle_len+"</div></div><div class='stat'><div class='l'>Фаза</div><div class='v'>"+RU[ph].slice(0,4)+".</div><div class='s'>"+sub+"</div></div><div class='stat'><div class='l'>До месячных</div><div class='v'>~"+toNext+"</div><div class='s'>дней</div></div></div>";
   html+="<div class='calhead'><button class='calnav' id='calPrev'>\u2039</button><div class='sec' id='calLabel' style='margin:0'></div><button class='calnav' id='calNext'>\u203A</button></div><div class='cal' id='cal'></div><div class='calhint' id='calHint'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Менструальная</div><div class='lg'><span class='dot' style='background:"+COL.fol+"'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:"+COL.ovu+"'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:"+COL.lut+"'></span>Лютеиновая</div></div>";
-  html+="<div class='nt' style='text-align:center;color:var(--inkSoft);margin-top:8px'>Нажми на день в календаре, чтобы отметить месячные или близость</div>";
+  html+="<div class='nt' style='text-align:center;color:var(--inkSoft);margin-top:8px'>Нажми на день в календаре: отметить или удалить месячные, отметить близость</div>";
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>\u{1F4F2} Добавить Айву на экран телефона</button>";html+="<div class='foot'>Айва не ставит диагнозы. Данные ориентировочные, при тревожных симптомах обратись к гинекологу.</div>";
   el.innerHTML=html;blossom(document.getElementById('al'),34);updateHomeBtn();
   var tc=document.getElementById('tchips');(CHIPS[ph]||[]).forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc.appendChild(b);});
   PA_SET={};(D.pa||[]).forEach(function(x){PA_SET[x]=true;});
+  CYCLE_SET={};(D.cycles||[]).forEach(function(x){CYCLE_SET[x]=true;});
   STARTS=buildStarts();calOffset=0;
   document.getElementById('calPrev').onclick=function(){calOffset--;drawCal();if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();};
   document.getElementById('calNext').onclick=function(){calOffset++;drawCal();if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();};
@@ -203,7 +204,13 @@ function renderToday(){
 function isoOf(dd){var mm=dd.getMonth()+1,da=dd.getDate();return dd.getFullYear()+"-"+(mm<10?"0":"")+mm+"-"+(da<10?"0":"")+da;}
 function paHeart(){var h=document.createElement("span");h.textContent="♥";h.style.cssText="position:absolute;bottom:-3px;right:0;font-size:9px;color:#E0556F;line-height:1";return h;}
 var DAYOP_ISO=null;
-function openDayOp(iso,dd){DAYOP_ISO=iso;document.getElementById("dayopTitle").textContent=dd.getDate()+" "+MONTHS[dd.getMonth()];document.getElementById("dopPA").textContent=(PA_SET[iso]?"Убрать близость ♥":"Отметить близость ♥");document.getElementById("dayop").style.display="flex";}
+function openDayOp(iso,dd){DAYOP_ISO=iso;document.getElementById("dayopTitle").textContent=dd.getDate()+" "+MONTHS[dd.getMonth()];
+  var pb=document.getElementById("dopPeriod");
+  if(CYCLE_SET[iso]){pb.textContent="Удалить отметку месячных";pb.onclick=function(){if(DAYOP_ISO)delPeriodDate(DAYOP_ISO);};}
+  else{pb.textContent="Месячные начались в этот день";pb.onclick=function(){if(DAYOP_ISO)markPeriodDate(DAYOP_ISO);};}
+  document.getElementById("dopPA").textContent=(PA_SET[iso]?"Убрать близость ♥":"Отметить близость ♥");
+  document.getElementById("dayop").style.display="flex";}
+async function delPeriodDate(iso){closeDayOp();if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("medium");try{await api("/api/period",{action:"delete",date:iso});var d=await api("/api/data",{name:NAME});if(d&&d.onboarded){D=d;PA_SET={};(D.pa||[]).forEach(function(x){PA_SET[x]=true;});CYCLE_SET={};(D.cycles||[]).forEach(function(x){CYCLE_SET[x]=true;});renderToday();go("today");}}catch(e){}}
 function closeDayOp(){document.getElementById("dayop").style.display="none";}
 async function markPeriodDate(iso){closeDayOp();if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("medium");try{await api("/api/period",{action:"start",date:iso});var d=await api("/api/data",{name:NAME});if(d&&d.onboarded){D=d;renderToday();go("today");}}catch(e){}}
 async function markPA(iso){if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("light");try{var r=await api("/api/pa",{date:iso});if(r&&!r.skip){if(r.marked)PA_SET[iso]=true;else delete PA_SET[iso];drawCal();}}catch(e){}}
@@ -305,7 +312,7 @@ var tabsEl=document.getElementById('tabs');
 TABS.forEach(function(x){var d=document.createElement('div');d.className='tab';d.setAttribute('data-t',x[0]);d.innerHTML=ICONS[x[0]]+"<span>"+x[1]+"</span>";d.onclick=function(){if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();go(x[0]);};tabsEl.appendChild(d);});
 document.getElementById("dopClose").onclick=closeDayOp;
 document.getElementById("dayop").onclick=function(ev){if(ev.target.id==="dayop")closeDayOp();};
-document.getElementById("dopPeriod").onclick=function(){if(DAYOP_ISO)markPeriodDate(DAYOP_ISO);};
+
 document.getElementById("dopPA").onclick=function(){if(DAYOP_ISO){markPA(DAYOP_ISO);closeDayOp();}};
 function showNeedOnboard(){
   document.getElementById('tabs').style.display='none';

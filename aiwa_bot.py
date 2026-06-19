@@ -1464,6 +1464,12 @@ async def _api_period(request):
     if action == "start":
         db_mark_period(cid, d.isoformat()); ev(cid, "manual", meta="web_period_start")
         return _cors(web.json_response({"ok": True}))
+    if action == "delete":
+        c = db(); c.execute("DELETE FROM cycles WHERE chat_id=? AND start_date=?", (cid, d.isoformat())); c.commit(); c.close()
+        cyc = cycles_of(cid)
+        upsert(cid, last_period=(max(cyc) if cyc else None))
+        ev(cid, "manual", meta="web_period_del")
+        return _cors(web.json_response({"ok": True}))
     if action == "end":
         u = row(cid); ok = False
         if is_cycle(u) and u.get("last_period"):
@@ -1504,6 +1510,9 @@ async def _api_chat(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     msg = (body.get("message") or "").strip()
     if not msg: return _cors(web.json_response({"answer": "Напиши вопрос.", "suggestions": []}))
+    if match_intent(msg) == "phases":
+        chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", PHASES_TEXT)
+        return _cors(web.json_response({"answer": PHASES_TEXT, "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}))
     u = row(cid); _, st = status_of(cid)
     if st is not None:
         ans = await asyncio.to_thread(L.answer_question, st, msg, profile_of(u), hist_get(cid))
