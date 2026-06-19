@@ -113,6 +113,7 @@ def db():
         state TEXT, pending_date TEXT, created TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS sugg(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, q TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS cycles(chat_id INTEGER, start_date TEXT, PRIMARY KEY(chat_id,start_date))")
+    c.execute("CREATE TABLE IF NOT EXISTS intimacy(chat_id INTEGER, d TEXT, PRIMARY KEY(chat_id,d))")
     c.execute("""CREATE TABLE IF NOT EXISTS logs(chat_id INTEGER, log_date TEXT, energy INTEGER, mood INTEGER,
         symptoms TEXT, PRIMARY KEY(chat_id,log_date))""")
     c.execute("""CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
@@ -151,6 +152,16 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0):
         (cid, datetime.now().isoformat(), action, int(tokens), meta, int(ms), int(n))); c.commit(); c.close()
 def cyc_add(cid, d):
     c = db(); c.execute("INSERT OR IGNORE INTO cycles(chat_id,start_date) VALUES(?,?)", (cid, d)); c.commit(); c.close()
+def pa_list(cid):
+    c = db(); r = c.execute("SELECT d FROM intimacy WHERE chat_id=? ORDER BY d", (cid,)).fetchall(); c.close(); return [x[0] for x in r]
+def pa_toggle(cid, iso):
+    c = db()
+    ex = c.execute("SELECT 1 FROM intimacy WHERE chat_id=? AND d=?", (cid, iso)).fetchone()
+    if ex:
+        c.execute("DELETE FROM intimacy WHERE chat_id=? AND d=?", (cid, iso)); marked = False
+    else:
+        c.execute("INSERT OR IGNORE INTO intimacy(chat_id,d) VALUES(?,?)", (cid, iso)); marked = True
+    c.commit(); c.close(); return marked
 def log_get(cid, d):
     c = db(); r = c.execute("SELECT energy,mood,symptoms FROM logs WHERE chat_id=? AND log_date=?", (cid, d)).fetchone(); c.close()
     return {"energy": r[0], "mood": r[1], "symptoms": (r[2].split(",") if r[2] else [])} if r else None
@@ -324,7 +335,7 @@ def match_guide(text):
 def is_cycle(u): return not (u and u.get("mode") in ("irregular", "none", "meno", "preg"))
 def is_onboarded(u):
     if not u: return False
-    if u.get("mode") in ("irregular", "none", "meno"): return True
+    if u.get("mode") in ("irregular", "none", "meno", "preg"): return True
     return bool(u.get("last_period") and u.get("cycle_len"))
 def status_of(cid):
     u = row(cid)
@@ -1116,6 +1127,17 @@ async def handle_text(update, context, txt):
             await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
             return await push_summary(context, cid)
         upsert(cid, state=None)
+    elif state == "await_preg_date":
+        mdt = _DATE_RE.search(txt); d = parse_date(mdt.group(0)) if mdt else None
+        if not d:
+            return await update.message.reply_text("Не разобрала дату. Напиши ДД.ММ.ГГГГ, например 25.05.2026.")
+        low = txt.lower()
+        lmp = (d - timedelta(days=280)) if ("пдр" in low or "род" in low) else d
+        upsert(cid, last_period=lmp.isoformat(), state="await_profile")
+        stp = C.preg_status(lmp.isoformat())
+        return await update.message.reply_text(
+            f"Записала. Срок: {stp['week']} нед {stp['day']} дн, ПДР примерно {date.fromisoformat(stp['due']).strftime('%d.%m.%Y')}.\n\n"
+            "Осталось пару данных для рекомендаций: рост (см), вес (кг), возраст. Например 168 60 30.", reply_markup=SKIP_KB)
     elif state == "await_cycle_len":
         mnum = re.search(r"\d{1,2}", txt)
         if mnum and 15 <= int(mnum.group()) <= 60:
@@ -1199,8 +1221,12 @@ async def on_cb(update, context):
     if data == "no_cycle":
         return await q.message.reply_text("Понимаю. Что ближе?", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
-        m = data.split(":")[1]; upsert(cid, mode=m, state="await_profile")
+        m = data.split(":")[1]; upsert(cid, mode=m)
         schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
+        if m == "preg":
+            upsert(cid, state="await_preg_date")
+            return await q.message.reply_text("Поздравляю! \U0001F930 Чтобы считать срок и неделю, напиши дату первого дня последних месячных (например 25.05.2026). Если знаешь ПДР (дату родов), напиши её и добавь слово ПДР.")
+        upsert(cid, state="await_profile")
         return await q.message.reply_text(
             "Поняла. Фазы цикла отслеживать не буду, но дам рекомендации по самочувствию, питанию и движению с учётом возраста и помогу следить за симптомами.\n\n"
             "Чтобы советы были точнее, напиши через пробел рост (см), вес (кг) и возраст. Например 168 60 30.", reply_markup=SKIP_KB)
@@ -1365,7 +1391,7 @@ async def _api_data(request):
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
-           "mode": u.get("mode") or "cycle", "name": (body.get("name") or "")}
+           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid)}
     if out["cycle"]:
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
@@ -1392,6 +1418,8 @@ async def _api_data(request):
             "regularity": reg,
             "history": history,
         }
+    elif out["mode"] == "preg" and u.get("last_period"):
+        out["preg"] = C.preg_status(u["last_period"])
     return _cors(web.json_response(out))
 async def _api_period(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -1411,6 +1439,15 @@ async def _api_period(request):
         ev(cid, "manual", meta="web_period_end")
         return _cors(web.json_response({"ok": ok}))
     return _cors(web.json_response({"error": "bad action"}, status=400))
+async def _api_pa(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    ds = body.get("date")
+    try: d = date.fromisoformat(ds)
+    except Exception: return _cors(web.json_response({"error": "bad date"}, status=400))
+    if d > date.today(): return _cors(web.json_response({"marked": False, "skip": True}))
+    marked = pa_toggle(cid, d.isoformat()); ev(cid, "manual", meta="web_pa")
+    return _cors(web.json_response({"marked": marked}))
 async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -1456,6 +1493,7 @@ def build_web():
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/chat", _api_chat)
     aio.router.add_post("/api/period", _api_period)
+    aio.router.add_post("/api/pa", _api_pa)
     aio.router.add_route("OPTIONS", "/api/{tail:.*}", _api_opts)
     aio.router.add_get("/{tail:.*}", _serve_index)
     return aio

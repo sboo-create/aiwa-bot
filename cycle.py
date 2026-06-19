@@ -51,3 +51,16 @@ def cycle_status(last_period, cycle_len, today=None):
             "phase": ph, "phase_ru": PHASE_RU[ph], "days_to_next": days_to_next,
             "days_since": days_since, "status": status, "delay_days": delay_days,
             "next_period": next_period, "content": PHASE_CONTENT[ph]}
+
+
+def preg_status(lmp_iso, today=None):
+    """Срок беременности по первому дню последних месячных (стандартный акушерский метод)."""
+    today = today or date.today()
+    lmp = date.fromisoformat(lmp_iso)
+    days = max(0, (today - lmp).days)
+    week = min(days // 7, 42); day = days % 7
+    due = lmp + timedelta(days=280)
+    left = (due - today).days
+    tri = 1 if week < 14 else (2 if week < 28 else 3)
+    return {"week": week, "day": day, "trimester": tri, "due": due.isoformat(),
+            "days_left": left, "lmp": lmp_iso}
