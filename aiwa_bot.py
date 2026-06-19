@@ -295,7 +295,7 @@ ADDCYCLES_TEXT = ("\U0001F4C5 История цикла вручную.\n\n"
     "Прямой импорт из Flo и других трекеров, к сожалению, невозможен: у них нет открытого доступа к данным для сторонних приложений, поэтому автоматически перенести цикл нельзя. Но историю можно быстро ввести руками.\n\n"
     "Напиши даты начала последних месячных, каждую с новой строки (по желанию через тире можно добавить дату окончания, но это не обязательно). Например:\n"
     "12.04.2026\n14.05.2026\n10.06.2026\n\n"
-    "Сколько хочешь, столько и добавляй. Я занесу их в календарь и точнее посчитаю цикл.")
+    "Этот список ПОЛНОСТЬЮ заменит твою историю циклов в календаре, поэтому пришли все нужные даты разом. Если ошиблась в дате раньше, просто пришли правильный список, и старые даты заменятся.")
 
 def match_intent(t):
     t = t.lower()
@@ -1151,13 +1151,13 @@ async def handle_text(update, context, txt):
         if not starts:
             upsert(cid, state=None)
             return await update.message.reply_text("Не нашла дат. Попробуй ещё раз: открой «Добавить историю циклов» в Меню и пришли даты начала месячных, по одной на строке, например 12.04.2026.")
+        c = db(); c.execute("DELETE FROM cycles WHERE chat_id=?", (cid,)); c.commit(); c.close()
         for iso in starts: cyc_add(cid, iso)
-        u2 = row(cid)
-        latest = max(starts + ([u2["last_period"]] if u2.get("last_period") else []))
+        u2 = row(cid); latest = max(starts)
         upsert(cid, last_period=latest, cycle_len=(u2.get("cycle_len") or 28), mode="cycle", state=None)
         schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
         word = "цикл" if len(starts)==1 else ("цикла" if len(starts)<5 else "циклов")
-        await update.message.reply_text(f"Добавила {len(starts)} {word} в историю. Теперь календарь показывает твою динамику.")
+        await update.message.reply_text(f"Готово, история заменена на {len(starts)} {word}. Последние месячные: {date.fromisoformat(latest).strftime('%d.%m.%Y')}. Календарь обновлён, ошибочные даты убраны.")
         return await push_summary(context, cid)
 
     m = match_meta(txt)
