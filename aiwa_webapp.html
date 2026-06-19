@@ -92,7 +92,7 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 </div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="csend">→</button></div>
 <div class="tabs" id="tabs"></div>
-<div id="dayop" class="hidden" style="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.38);display:flex;align-items:flex-end;justify-content:center">
+<div id="dayop" style="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.38);display:none;align-items:flex-end;justify-content:center">
   <div style="background:var(--paper);width:100%;max-width:480px;border-radius:22px 22px 0 0;padding:18px 18px calc(20px + env(safe-area-inset-bottom))">
     <div id="dayopTitle" style="font-family:var(--serif);font-size:18px;margin-bottom:14px;text-align:center"></div>
     <button class="pbtn" id="dopPeriod" style="width:100%;margin-bottom:10px">Месячные начались в этот день</button>
@@ -203,8 +203,8 @@ function renderToday(){
 function isoOf(dd){var mm=dd.getMonth()+1,da=dd.getDate();return dd.getFullYear()+"-"+(mm<10?"0":"")+mm+"-"+(da<10?"0":"")+da;}
 function paHeart(){var h=document.createElement("span");h.textContent="♥";h.style.cssText="position:absolute;bottom:-3px;right:0;font-size:9px;color:#E0556F;line-height:1";return h;}
 var DAYOP_ISO=null;
-function openDayOp(iso,dd){DAYOP_ISO=iso;document.getElementById("dayopTitle").textContent=dd.getDate()+" "+MONTHS[dd.getMonth()];document.getElementById("dopPA").textContent=(PA_SET[iso]?"Убрать близость ♥":"Отметить близость ♥");document.getElementById("dayop").classList.remove("hidden");}
-function closeDayOp(){document.getElementById("dayop").classList.add("hidden");}
+function openDayOp(iso,dd){DAYOP_ISO=iso;document.getElementById("dayopTitle").textContent=dd.getDate()+" "+MONTHS[dd.getMonth()];document.getElementById("dopPA").textContent=(PA_SET[iso]?"Убрать близость ♥":"Отметить близость ♥");document.getElementById("dayop").style.display="flex";}
+function closeDayOp(){document.getElementById("dayop").style.display="none";}
 async function markPeriodDate(iso){closeDayOp();if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("medium");try{await api("/api/period",{action:"start",date:iso});var d=await api("/api/data",{name:NAME});if(d&&d.onboarded){D=d;renderToday();go("today");}}catch(e){}}
 async function markPA(iso){if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("light");try{var r=await api("/api/pa",{date:iso});if(r&&!r.skip){if(r.marked)PA_SET[iso]=true;else delete PA_SET[iso];drawCal();}}catch(e){}}
 function buildStarts(){
