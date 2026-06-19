@@ -43,6 +43,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
+AIWA_VERSION = "2026-06-19-onb-quality"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
@@ -350,6 +351,11 @@ def match_intent(t):
     if re.search(r"(месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн|сегодня начал\w* месячн|снова месячн|опять месячн)", t): return "period"
     return None
 
+def is_question_like(txt):
+    t = (txt or "").strip().lower()
+    if len(t) < 5 or is_gibberish(t): return False
+    if re.sub(r"[ .,:/\\-]", "", t).isdigit(): return False
+    return ("?" in t) or (re.search(r"(^|\\b)(что|как|почему|зачем|когда|какой|какая|какие|каков|сколько|можно ли|нужно ли|стоит ли|значит|расскаж|объясн|правда ли|а если|это\\s)", t) is not None)
 def is_gibberish(t):
     s = t.strip(); low = s.lower()
     letters = re.sub(r"[^а-яёa-z]", "", low)
@@ -1106,6 +1112,24 @@ async def handle_text(update, context, txt):
     if cem:
         return await update.message.reply_text("ID кастомных эмодзи:\n" + "\n".join(cem))
 
+    VALUE_STATES = {
+        "await_date": "Когда начались последние месячные? Напиши дату, например 25.05.2026.",
+        "await_len": "Какая средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)",
+        "await_cycle_len": "Какая средняя длина цикла в днях? Напиши число 15-60.",
+        "await_preg_date": "Напиши дату первого дня последних месячных (например 25.05.2026), или ПДР со словом ПДР.",
+        "await_period_date": "Когда начались последние месячные? Напиши дату или нажми кнопку.",
+        "await_time": "Во сколько присылать сводку? Например 08:00.",
+        "await_profile": "Напиши рост (см), вес (кг), возраст. Например 168 60 30, или «Пропустить».",
+        "await_profile_edit": "Напиши рост (см), вес (кг), возраст. Например 168 60 30.",
+        "await_cycles": "Пришли даты начала месячных, по одной на строке.",
+    }
+    if state in VALUE_STATES and is_question_like(txt):
+        await context.bot.send_chat_action(cid, "typing")
+        _, _qst = status_of(cid)
+        a = await think_llm(context, cid, L.answer_question, _qst, txt, profile_of(u), None)
+        await update.message.reply_text(fit_tg(L.split_followups(a)[0]))
+        return await update.message.reply_text("А теперь вернёмся к настройке. " + VALUE_STATES[state])
+
     if is_partner(cid) and not is_onboarded(u):
         wid = woman_of_partner(cid); _, wst = status_of(wid)
         if not wst:
@@ -1124,7 +1148,7 @@ async def handle_text(update, context, txt):
     if state == "await_date":
         d = parse_date(txt)
         if not d:
-            if len(txt) > 6 and not is_gibberish(txt) and not any(ch.isdigit() for ch in txt):
+            if is_question_like(txt):
                 a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: когда начались последние месячные? Напиши дату, например 25.05.2026.")
             return await update.message.reply_text("Не разобрала дату. Напиши в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
@@ -1134,7 +1158,7 @@ async def handle_text(update, context, txt):
         try:
             n = int(txt); assert 20 <= n <= 60
         except (ValueError, AssertionError):
-            if len(txt) > 6 and not is_gibberish(txt) and not txt.strip().isdigit():
+            if is_question_like(txt):
                 a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
             return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь длину, напиши 28. Если цикл нерегулярный, начни заново через /start и выбери «Нет регулярного цикла».")
@@ -1167,6 +1191,9 @@ async def handle_text(update, context, txt):
             cm = float(nums[0]); kg = float(nums[1]); age = int(float(nums[2]))
             assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80
         except Exception:
+            if is_question_like(txt):
+                a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
+                return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
         upsert(cid, height=int(cm), weight=kg, age=age, state=None)
         return await update.message.reply_text("Принято. Оцени свой уровень физической активности:", reply_markup=ACT_KB)
@@ -1253,6 +1280,10 @@ async def handle_text(update, context, txt):
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, st, txt, usage=usage)
+    if is_question_like(txt):
+        await context.bot.send_chat_action(cid, "typing")
+        a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
+        await update.message.reply_text(fit_tg(L.split_followups(a)[0]))
     await need_onboard(update.message)
 
 # ---------- callbacks ----------
@@ -1554,7 +1585,7 @@ async def _api_opts(request): return _cors(web.Response())
 def build_web():
     aio = web.Application()
     aio.router.add_get("/", _serve_index)
-    aio.router.add_get("/health", lambda r: web.Response(text="ok"))
+    aio.router.add_get("/health", lambda r: web.Response(text="ok " + AIWA_VERSION))
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/chat", _api_chat)
