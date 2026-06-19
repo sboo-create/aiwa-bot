@@ -566,10 +566,26 @@ async def send_guide(context, cid, g):
         log.warning("guide: %s", e)
         with open(path, "rb") as fh: await context.bot.send_photo(cid, photo=fh, caption=g["title"])
 
+def fit_tg(text, limit=4000):
+    if not text or len(text) <= limit: return text
+    cut = text[:limit]
+    p = max(cut.rfind(". "), cut.rfind(".\n"), cut.rfind("!\n"), cut.rfind("\n\n"), cut.rfind("! "), cut.rfind("? "))
+    if p > limit * 0.6: cut = cut[:p + 1]
+    return cut.rstrip()
+def chat_hint(cid):
+    base = last_hint(cid) or ""
+    u = row(cid)
+    if u and u.get("mode") == "preg" and u.get("last_period"):
+        try:
+            stp = C.preg_status(u["last_period"])
+            base = (base + " " if base else "") + f"Беременность, срок примерно {stp['week']} недель, {stp['trimester']} триместр, до родов ~{max(0, stp['days_left'])} дн."
+        except Exception: pass
+    return base or None
 async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None):
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
     clean, sugg = sf(text) if sf else (text, [])
+    clean = fit_tg(clean)
     if len(sugg) < 2:
         try:
             for e in L.followups(st, basis_q, clean):
@@ -585,7 +601,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None):
 
 async def push_general(context, cid):
     u = row(cid); usage = []
-    body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=last_hint(cid), usage=usage)
+    body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
     if not body:
         body = "💛 Доброе утро! Отметь самочувствие через Симптомы, и подскажу, на что обратить внимание сегодня."
     await context.bot.send_message(cid, f"{body}\n\nДобавь сегодняшние симптомы через Симптомы, чтобы сводка была точнее.\n\nAIWA · {DISCLAIMER}", reply_markup=summary_kb())
@@ -596,7 +612,7 @@ async def send_general(context, cid, key):
     qmap = {"food": "Что мне есть сегодня под мой возраст и самочувствие? Дай конкретные продукты или меню на день.",
             "training": "Какая физическая активность мне сейчас подходит и почему? Дай конкретные варианты."}
     usage = []; q = qmap.get(key, key)
-    ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), q, hint=last_hint(cid), usage=usage)
+    ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), q, hint=chat_hint(cid), usage=usage)
     _, st = status_of(cid)
     await send_answer(context, cid, ans, st, q, usage=usage)
 
@@ -705,7 +721,7 @@ async def push_summary(context, cid, with_image=True):
     if st["status"] != "normal": return await send_delay(context, cid, st)
     if with_image: await send_infographic(context.bot, cid)
     usage = []
-    body = await asyncio.to_thread(L.generate_summary, st, u["modules"], hint=last_hint(cid), usage=usage)
+    body = await asyncio.to_thread(L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
     kb = summary_kb()
     await context.bot.send_message(cid, f"{body}\n\nДобавь сегодняшние симптомы через Симптомы, чтобы сводка была точнее.\n\nAIWA · {DISCLAIMER}", reply_markup=kb)
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
@@ -1107,14 +1123,21 @@ async def handle_text(update, context, txt):
 
     if state == "await_date":
         d = parse_date(txt)
-        if not d: return await update.message.reply_text("Не разобрала дату. Напиши в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
+        if not d:
+            if len(txt) > 6 and not is_gibberish(txt) and not any(ch.isdigit() for ch in txt):
+                a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
+                return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: когда начались последние месячные? Напиши дату, например 25.05.2026.")
+            return await update.message.reply_text("Не разобрала дату. Напиши в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
         upsert(cid, pending_date=d.isoformat(), state="await_len")
         return await update.message.reply_text("Поняла. Какая у тебя средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
     if state == "await_len":
         try:
             n = int(txt); assert 20 <= n <= 60
         except (ValueError, AssertionError):
-            return await update.message.reply_text("Нужно число от 20 до 60. Если цикла нет или он нерегулярный, начни заново через /start и выбери «Нет регулярного цикла». Если не знаешь длину, напиши 28.")
+            if len(txt) > 6 and not is_gibberish(txt) and not txt.strip().isdigit():
+                a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
+                return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
+            return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь длину, напиши 28. Если цикл нерегулярный, начни заново через /start и выбери «Нет регулярного цикла».")
         finish_onboarding(context, cid, u["pending_date"], n)
         note = ""
         if n > 40:
@@ -1217,7 +1240,7 @@ async def handle_text(update, context, txt):
     if is_onboarded(u) and not is_cycle(u):
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=last_hint(cid), history=hist_get(cid), usage=usage)
+        ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
         ev(cid, "answered", tokens=sum(usage), meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, None, txt, usage=usage)
@@ -1327,7 +1350,7 @@ async def on_cb(update, context):
         question = get_sugg(int(data.split(":")[1])) or "Дай рекомендацию"
         await context.bot.send_chat_action(cid, "typing")
         if general:
-            usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), question, hint=last_hint(cid), history=hist_get(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, None, question, usage=usage, quote=question)
         else:
@@ -1494,7 +1517,7 @@ async def _api_section(request):
     u = row(cid); _, st = status_of(cid); kind = body.get("kind", "food"); ev(cid, "button", meta="web_" + kind)
     if st is None:
         q = {"food": "Что мне есть сегодня под мой возраст?", "training": "Какая активность мне подходит и почему?"}.get(kind, kind)
-        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), q, None, None)
+        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), q, chat_hint(cid), None)
         return _cors(web.json_response({"text": ans}))
     if kind == "food":
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
@@ -1517,7 +1540,7 @@ async def _api_chat(request):
     if st is not None:
         ans = await asyncio.to_thread(L.answer_question, st, msg, profile_of(u), hist_get(cid))
     else:
-        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), msg, None, hist_get(cid))
+        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), msg, chat_hint(cid), hist_get(cid))
     hist_push(cid, msg, ans)
     clean, sugg = L.split_followups(ans)
     if st is not None and len(sugg) < 2:
