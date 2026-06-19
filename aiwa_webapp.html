@@ -92,6 +92,14 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 </div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="csend">→</button></div>
 <div class="tabs" id="tabs"></div>
+<div id="dayop" class="hidden" style="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.38);display:flex;align-items:flex-end;justify-content:center">
+  <div style="background:var(--paper);width:100%;max-width:480px;border-radius:22px 22px 0 0;padding:18px 18px calc(20px + env(safe-area-inset-bottom))">
+    <div id="dayopTitle" style="font-family:var(--serif);font-size:18px;margin-bottom:14px;text-align:center"></div>
+    <button class="pbtn" id="dopPeriod" style="width:100%;margin-bottom:10px">Месячные начались в этот день</button>
+    <button class="pbtn alt" id="dopPA" style="width:100%;margin-bottom:10px">Отметить близость ♥</button>
+    <button class="pbtn alt" id="dopClose" style="width:100%;background:transparent;border:none">Закрыть</button>
+  </div>
+</div>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp; if(tg){tg.ready();tg.expand();}
 const INIT=(tg&&tg.initData)||"";
@@ -182,7 +190,7 @@ function renderToday(){
   html+="<div class='stats'><div class='stat'><div class='l'>День цикла</div><div class='v'>"+day+"</div><div class='s'>из "+D.cycle_len+"</div></div><div class='stat'><div class='l'>Фаза</div><div class='v'>"+RU[ph].slice(0,4)+".</div><div class='s'>"+sub+"</div></div><div class='stat'><div class='l'>До месячных</div><div class='v'>~"+toNext+"</div><div class='s'>дней</div></div></div>";
   html+="<div class='calhead'><button class='calnav' id='calPrev'>\u2039</button><div class='sec' id='calLabel' style='margin:0'></div><button class='calnav' id='calNext'>\u203A</button></div><div class='cal' id='cal'></div><div class='calhint' id='calHint'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Менструальная</div><div class='lg'><span class='dot' style='background:"+COL.fol+"'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:"+COL.ovu+"'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:"+COL.lut+"'></span>Лютеиновая</div></div>";
-  html+="<div class='nt' style='text-align:center;color:var(--inkSoft);margin-top:8px'>Нажми на день в календаре, чтобы отметить близость ♥</div>";
+  html+="<div class='nt' style='text-align:center;color:var(--inkSoft);margin-top:8px'>Нажми на день в календаре, чтобы отметить месячные или близость</div>";
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>\u{1F4F2} Добавить Айву на экран телефона</button>";html+="<div class='foot'>Айва не ставит диагнозы. Данные ориентировочные, при тревожных симптомах обратись к гинекологу.</div>";
   el.innerHTML=html;blossom(document.getElementById('al'),34);updateHomeBtn();
   var tc=document.getElementById('tchips');(CHIPS[ph]||[]).forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc.appendChild(b);});
@@ -194,6 +202,10 @@ function renderToday(){
 }
 function isoOf(dd){var mm=dd.getMonth()+1,da=dd.getDate();return dd.getFullYear()+"-"+(mm<10?"0":"")+mm+"-"+(da<10?"0":"")+da;}
 function paHeart(){var h=document.createElement("span");h.textContent="♥";h.style.cssText="position:absolute;bottom:-3px;right:0;font-size:9px;color:#E0556F;line-height:1";return h;}
+var DAYOP_ISO=null;
+function openDayOp(iso,dd){DAYOP_ISO=iso;document.getElementById("dayopTitle").textContent=dd.getDate()+" "+MONTHS[dd.getMonth()];document.getElementById("dopPA").textContent=(PA_SET[iso]?"Убрать близость ♥":"Отметить близость ♥");document.getElementById("dayop").classList.remove("hidden");}
+function closeDayOp(){document.getElementById("dayop").classList.add("hidden");}
+async function markPeriodDate(iso){closeDayOp();if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("medium");try{await api("/api/period",{action:"start",date:iso});var d=await api("/api/data",{name:NAME});if(d&&d.onboarded){D=d;renderToday();go("today");}}catch(e){}}
 async function markPA(iso){if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("light");try{var r=await api("/api/pa",{date:iso});if(r&&!r.skip){if(r.marked)PA_SET[iso]=true;else delete PA_SET[iso];drawCal();}}catch(e){}}
 function buildStarts(){
   var arr=[];(D.cycles||[]).forEach(function(sd){var dt=new Date(sd+'T00:00:00');dt.setHours(0,0,0,0);arr.push(dt);});
@@ -226,7 +238,7 @@ function drawCal(){
       if(inf&&inf.ph){e.style.borderColor=COL[inf.ph];if(inf.day<=5)e.style.background=WASH[inf.ph];e.style.color=inf.fut?'var(--inkSoft)':'var(--ink)';}
       else{e.style.color='var(--inkSoft)';}}
     if(PA_SET[iso])e.appendChild(paHeart());
-    if(dd.getTime()<=today.getTime()){e.style.cursor='pointer';e.onclick=function(){markPA(iso);};}
+    if(dd.getTime()<=today.getTime()){e.style.cursor='pointer';e.onclick=function(){openDayOp(iso,dd);};}
     cal.appendChild(e);
   })(d);}
   var hint=document.getElementById('calHint');
@@ -278,7 +290,7 @@ function bubbleAI(text){var d=document.createElement('div');d.className='msg ai'
 function bubbleMe(text){var d=document.createElement('div');d.className='msg me';d.textContent=text;document.getElementById('chatlog').appendChild(d);}
 function scrollBottom(){window.scrollTo(0,document.body.scrollHeight);}
 async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML="<span class='think'>Айва думает<span></span><span></span><span></span></span>";scrollBottom();var r=await api('/api/chat',{message:text});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}scrollBottom();}
-function initChat(){if(chatInited)return;chatInited=true;bubbleAI("Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоей фазы и данных.");}
+function initChat(){if(chatInited)return;chatInited=true;var log=(D&&D.chatlog)||[];if(log.length){log.forEach(function(m){if(m.role==="user")bubbleMe(m.text);else bubbleAI(m.text);});scrollBottom();}else{bubbleAI("Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоей фазы и данных.");}}
 document.getElementById('csend').onclick=function(){send();};
 document.getElementById('cin').addEventListener('keydown',function(e){if(e.key==='Enter')send();});
 var ICONS={
@@ -291,6 +303,10 @@ var TABS=[["today","Сегодня"],["food","Питание"],["train","Наг�
 function go(t){TABS.forEach(function(x){document.getElementById('scr-'+x[0]).classList.toggle('hidden',x[0]!==t);document.querySelector('.tab[data-t="'+x[0]+'"]').classList.toggle('on',x[0]===t);});document.getElementById('composer').classList.toggle('hidden',t!=='chat');if(t==='food')renderFood();if(t==='train')renderTrain();if(t==='stats')renderStats();if(t==='chat'){initChat();scrollBottom();}window.scrollTo(0,0);}
 var tabsEl=document.getElementById('tabs');
 TABS.forEach(function(x){var d=document.createElement('div');d.className='tab';d.setAttribute('data-t',x[0]);d.innerHTML=ICONS[x[0]]+"<span>"+x[1]+"</span>";d.onclick=function(){if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();go(x[0]);};tabsEl.appendChild(d);});
+document.getElementById("dopClose").onclick=closeDayOp;
+document.getElementById("dayop").onclick=function(ev){if(ev.target.id==="dayop")closeDayOp();};
+document.getElementById("dopPeriod").onclick=function(){if(DAYOP_ISO)markPeriodDate(DAYOP_ISO);};
+document.getElementById("dopPA").onclick=function(){if(DAYOP_ISO){markPA(DAYOP_ISO);closeDayOp();}};
 function showNeedOnboard(){
   document.getElementById('tabs').style.display='none';
   document.getElementById('composer').classList.add('hidden');

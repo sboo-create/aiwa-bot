@@ -33,6 +33,8 @@ def hist_push(cid, q, a):
     try: clean = L.split_followups(a)[0]
     except Exception: pass
     dq.append({"role": "user", "content": q[:600]}); dq.append({"role": "assistant", "content": (clean or a)[:1200]})
+    try: chatlog_add(cid, "user", q[:1000]); chatlog_add(cid, "ai", (clean or a)[:1500])
+    except Exception: pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("aiwa")
@@ -114,6 +116,7 @@ def db():
     c.execute("CREATE TABLE IF NOT EXISTS sugg(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, q TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS cycles(chat_id INTEGER, start_date TEXT, PRIMARY KEY(chat_id,start_date))")
     c.execute("CREATE TABLE IF NOT EXISTS intimacy(chat_id INTEGER, d TEXT, PRIMARY KEY(chat_id,d))")
+    c.execute("CREATE TABLE IF NOT EXISTS chat_log(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, ts TEXT, role TEXT, text TEXT)")
     c.execute("""CREATE TABLE IF NOT EXISTS logs(chat_id INTEGER, log_date TEXT, energy INTEGER, mood INTEGER,
         symptoms TEXT, PRIMARY KEY(chat_id,log_date))""")
     c.execute("""CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
@@ -184,8 +187,17 @@ def all_users():
     c = db(); rows = c.execute("SELECT chat_id FROM users WHERE last_period IS NOT NULL").fetchall(); c.close(); return [x[0] for x in rows]
 def del_user(cid):
     c = db()
-    for t in ("users", "cycles", "logs"): c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))
+    for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg"): c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))
     c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid)); c.commit(); c.close()
+def chatlog_add(cid, role, text):
+    if not text: return
+    c = db()
+    c.execute("INSERT INTO chat_log(chat_id,ts,role,text) VALUES(?,?,?,?)", (cid, datetime.now().isoformat(), role, text[:1500]))
+    c.execute("DELETE FROM chat_log WHERE chat_id=? AND id NOT IN (SELECT id FROM chat_log WHERE chat_id=? ORDER BY id DESC LIMIT 120)", (cid, cid))
+    c.commit(); c.close()
+def chatlog_get(cid, limit=60):
+    c = db(); r = c.execute("SELECT role,text FROM chat_log WHERE chat_id=? ORDER BY id DESC LIMIT ?", (cid, limit)).fetchall(); c.close()
+    return [{"role": x[0], "text": x[1]} for x in reversed(r)]
 def set_partner_code(cid, code): upsert(cid, partner_code=code)
 def woman_by_code(code):
     c = db(); r = c.execute("SELECT chat_id FROM users WHERE partner_code=?", (code,)).fetchone(); c.close(); return r[0] if r else None
@@ -212,7 +224,26 @@ def logs_of(cid, since_iso=None):
     c.close(); return [{"date": r[0], "energy": r[1], "mood": r[2], "symptoms": (r[3].split(",") if r[3] else [])} for r in rows]
 
 # ---------- helpers ----------
+MONTHS_RU = {
+    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "мае": 5, "июн": 6, "июл": 7,
+    "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
+}
+def _month_ru(word):
+    w = word.lower().strip(".")
+    if w[:3] in MONTHS_RU: return MONTHS_RU[w[:3]]
+    if w in MONTHS_RU: return MONTHS_RU[w]
+    return None
 def parse_date(t):
+    ml = re.search(r"(\d{1,2})\s*([а-яё]{3,})\.?(?:\s*(\d{4}))?", t.lower())
+    if ml:
+        mon = _month_ru(ml.group(2))
+        if mon:
+            try:
+                day = int(ml.group(1)); yr = int(ml.group(3)) if ml.group(3) else date.today().year
+                d = date(yr, mon, day)
+                if not ml.group(3) and d > date.today(): d = d.replace(year=d.year - 1)
+                return d
+            except ValueError: pass
     t = t.strip().replace("/", ".").replace("-", ".").replace(" ", ".").replace(",", ".")
     while ".." in t: t = t.replace("..", ".")
     digits = t.replace(".", "")
@@ -273,7 +304,7 @@ def match_meta(text):
                             "что с данными", "безопасн", "удалить данные", "передаёте", "передаете данные", "данные в безопас")): return "privacy"
     return None
 
-_DATE_RE = re.compile(r"\d{1,2}[.\-/ ]\d{1,2}(?:[.\-/ ]\d{2,4})?")
+_DATE_RE = re.compile(r"\d{1,2}[.\-/ ]\d{1,2}(?:[.\-/ ]\d{2,4})?|\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?", re.I)
 def parse_cycle_starts(text):
     lines = [l for l in re.split(r"[\n;]+", text) if l.strip()]
     if len(lines) == 1 and len(_DATE_RE.findall(lines[0])) > 1 and not re.search(r"[-\u2013]|\bпо\b", lines[0].lower()):
@@ -302,6 +333,7 @@ def match_intent(t):
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
     if re.search(r"(добав|ввес|внес|загруз|импорт)\w*.{0,16}(истори\w*\s*цикл|цикл)|истори\w*\s*цикл\w*\s*вручную|(импорт|перенес\w*).{0,12}(flo|фло)", t): return "addcycles"
     if re.search(r"(ввес\w*|поменя\w*|измен\w*|обнов\w*|исправ\w*|задат\w*|укаж\w*|написа\w*|внес\w*|поправ\w*)\s*(свой|свои|мой|мои)?\s*(вес|рост|возраст|данные|параметр)|мой вес|новый вес|неправильн\w*.{0,18}(вес|рост|возраст|данные)", t): return "profile"
+    if re.search(r"фаз", t) and re.search(r"(что так|что значит|расскаж|объясн|не понима|не разбира|какие бывают|подробнее|про фаз)", t): return "phases"
     if re.search(r"месячн|менструац", t) and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t): return "period_end"
     if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
     if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|упражнени|фитнес|какая активн)", t): return "training"
@@ -616,6 +648,8 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         return await msg.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
     if intent == "history":
         return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
+    if intent == "phases":
+        return await msg.reply_text(PHASES_TEXT)
     if intent == "addcycles":
         return await addcycles_entry(context, cid, msg)
     if intent == "profile":
@@ -1391,7 +1425,7 @@ async def _api_data(request):
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
-           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid)}
+           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60)}
     if out["cycle"]:
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
