@@ -72,6 +72,17 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .pbtn{flex:1;border:none;border-radius:14px;padding:12px;font-family:var(--sans);font-weight:600;font-size:13px;cursor:pointer;background:var(--roseDeep);color:#fff}
 .pbtn.alt{background:var(--paper2);color:var(--roseDeep)}
 .pbtn:active{transform:scale(.97)}
+.minirow{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.seg{border:1px solid var(--line);background:#fff;color:var(--inkMid);border-radius:999px;padding:8px 12px;font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer}
+.seg.on{background:var(--roseDeep);border-color:var(--roseDeep);color:#fff}
+.kv{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
+.kv .stat{margin:0}
+.toast{position:fixed;left:12px;right:12px;bottom:calc(78px + env(safe-area-inset-bottom));max-width:456px;margin:0 auto;background:var(--ink);color:#fff;border-radius:16px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;z-index:80;font-size:13px;box-shadow:0 12px 30px rgba(0,0,0,.18)}
+.toast button{border:none;background:#fff;color:var(--ink);border-radius:999px;padding:7px 11px;font-weight:800}
+.editbar{display:flex;gap:8px;margin:12px 0}.editbar .pbtn{padding:11px 10px}
+.trainrow{display:grid;grid-template-columns:1fr;gap:7px;padding:12px 0;border-top:1px solid var(--line)}
+.trainrow .tn{font-weight:800;font-size:13.5px}.trainrow .tb{font-size:12px;color:var(--ink);line-height:1.45}.trainrow .th{font-size:11.5px;color:var(--inkSoft);line-height:1.45}
+.trainhead{display:grid;grid-template-columns:1fr;gap:4px;background:var(--paper2);border-radius:14px;padding:10px 12px;color:var(--inkSoft);font-size:10px;text-transform:uppercase;font-weight:800;letter-spacing:.04em}
 .homebtn{display:block;width:100%;margin:18px 0 2px;padding:13px;border:1px solid var(--roseLine);background:var(--roseWash);color:var(--roseDeep);border-radius:16px;font-family:var(--sans);font-weight:600;font-size:13.5px;cursor:pointer}
 .homebtn:active{transform:scale(.98)}
 .think{display:inline-flex;gap:4px;align-items:center;color:var(--roseDeep);font-size:13px;font-style:italic}
@@ -92,16 +103,7 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 </div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="csend">→</button></div>
 <div class="tabs" id="tabs"></div>
-<div id="dayop" style="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.38);display:none;align-items:flex-end;justify-content:center">
-  <div style="background:var(--paper);width:100%;max-width:480px;border-radius:22px 22px 0 0;padding:18px 18px calc(20px + env(safe-area-inset-bottom))">
-    <div id="dayopTitle" style="font-family:var(--serif);font-size:18px;margin-bottom:14px;text-align:center"></div>
-    <button class="pbtn" id="dopPeriod" style="width:100%;margin-bottom:10px">Месячные начались в этот день</button>
-    <button class="pbtn alt" id="dopEnd" style="width:100%;margin-bottom:10px">Месячные закончились в этот день</button>
-    <button class="pbtn alt" id="dopDelete" style="width:100%;margin-bottom:10px;color:#C25E76">Удалить период</button>
-    <button class="pbtn alt" id="dopPA" style="width:100%;margin-bottom:10px">Отметить близость ♥</button>
-    <button class="pbtn alt" id="dopClose" style="width:100%;background:transparent;border:none">Закрыть</button>
-  </div>
-</div>
+<div id="toast" class="toast hidden"></div>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp; if(tg){tg.ready();tg.expand();}
 const INIT=(tg&&tg.initData)||"";
@@ -116,7 +118,9 @@ const SUMM={men:"Идут месячные, эстроген и прогесте
 fol:"Эстроген растёт, энергия и настроение идут вверх. Хорошее окно для нагрузок и сложных задач.",
 ovu:"Пик эстрогена, максимум энергии и либидо. Короткое, но самое активное окно цикла.",
 lut:"Растёт прогестерон, ближе к месячным возможны ПМС, тяга к сладкому и усталость. Помогают магний, B6 и спокойный режим."};
-const CHIPS={men:["Что есть при месячных?","Можно тренироваться?"],fol:["Какая тренировка лучше?","Что есть сейчас?"],ovu:["Можно ли HIIT?","Что есть в овуляцию?"],lut:["Что съесть вечером?","Как пережить ПМС?"]};
+const CHIPS={men:["Что есть при месячных?","Можно тренироваться?"],fol:["Какая тренировка лучше?","Что есть сейчас?"],ovu:["Можно интенсивнее?","Что есть в овуляцию?"],lut:["Что съесть вечером?","Как пережить ПМС?"]};
+const SYMS=[["cramps","Спазмы"],["head","Голова"],["bloat","Вздутие"],["sweet","Тянет на сладкое"],["anx","Тревожно"],["tired","Усталость"]];
+const LVL={1:"низкая",2:"средняя",3:"высокая"};
 var DEMO_MENU={macros:{protein:"92 г",fat:"54 г",carbs:"180 г"},meals:[{time:"08:00",dish:"Омлет с овощами и сыром",note:"Белок и сытость",kcal:"370 ккал"},{time:"13:00",dish:"Курица с рисом и салатом",note:"Белок и сложные углеводы",kcal:"540 ккал"},{time:"16:00",dish:"Греческий йогурт с ягодами",note:"Белок и пробиотики",kcal:"200 ккал"},{time:"20:00",dish:"Рыба с картофелем",note:"Омега-3",kcal:"520 ккал"}]};
 var DEMO_FOODT="🍽 Питание сегодня. В фолликулярную фазу тело хорошо усваивает белок: яйца, рыба, курица, зелень. Сложные углеводы дают стабильную энергию.";
 var DEMO_TRAINT="🏋️ Нагрузка сегодня. Эстроген растёт, чувствительность к инсулину повышена, это лучшее окно для силовых и интенсивного кардио.\n• Силовая, средняя-высокая, 45-60 мин\n• Интервальный бег, 25-30 мин\n• Пилатес, 30-40 мин";
@@ -126,7 +130,7 @@ async function api(path,body){try{var r=await fetch(path,{method:'POST',headers:
 function phaseForDay(d,l){if(d<=5)return"men";var ov=Math.max(12,l-14);if(d<ov)return"fol";if(d<=ov+2)return"ovu";return"lut";}
 function subphase(d,ph,l){var ov=Math.max(12,l-14);var B={men:[1,5],fol:[6,ov-1],ovu:[ov,ov+2],lut:[ov+3,l]}[ph];var sp=Math.max(1,B[1]-B[0]);var p=(d-B[0])/sp;return p<0.34?"ранняя":(p<0.67?"средняя":"поздняя");}
 var D=null,today=new Date();today.setHours(0,0,0,0);
-var STARTS=[],calOffset=0,PREG_CAL_OFFSET=0,PA_SET={},CYCLE_SET={},PERIODS=[],PERIOD_DAY={},PERIOD_START={},PERIOD_END={};
+var STARTS=[],calOffset=0,PREG_CAL_OFFSET=0,PA_SET={},CYCLE_SET={},PERIODS=[],PERIOD_DAY={},PERIOD_START={},PERIOD_END={},EDIT_PERIODS=false,EDIT_DAYS={};
 function lastDate(){return D.last_period?new Date(D.last_period+"T00:00:00"):(function(){var d=new Date();d.setDate(d.getDate()-6);return d;})();}
 function dayOfCycle(dt){var L=lastDate();var diff=Math.floor((dt-L)/86400000);return((diff%D.cycle_len)+D.cycle_len)%D.cycle_len+1;}
 document.getElementById('date').textContent=today.getDate()+" "+MONTHS[today.getMonth()];
@@ -163,6 +167,7 @@ function renderPreg(el){var p=D.preg,w=p.week,dy=p.day,tri=p.trimester,fr=pregFr
   html+="<div class='ayva' style='background:#FBEFCB;border-color:#F2C9D3'><div class='ayva-lab'>Айва · неделя "+w+"</div><div class='ayva-txt'>"+tips[tri]+" Спроси меня про питание и безопасную активность на этой неделе.</div><div class='chips' id='pchips'></div></div>";
   html+="<div class='calhead'><button class='calnav' id='pPrev'>‹</button><div class='sec' id='pLabel' style='margin:0'></div><button class='calnav' id='pNext'>›</button></div><div class='cal' id='pcal'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:#F2D785'></span>1 триместр</div><div class='lg'><span class='dot' style='background:#AFC58E'></span>2 триместр</div><div class='lg'><span class='dot' style='background:#EFA9BC'></span>3 триместр</div></div>";
+  html+=renderCheckin();
   html+="<div class='foot'>Срок и ПДР ориентировочные, по дате последних месячных. При вопросах обратись к врачу.</div>";
   el.innerHTML=html;
   var pc=document.getElementById("pchips");["Что есть на "+w+" неделе?","Какая активность можно?"].forEach(function(c){var b=document.createElement("button");b.className="chip";b.textContent=c;b.onclick=function(){go("chat");setTimeout(function(){send(c);},120);};pc.appendChild(b);});
@@ -173,7 +178,7 @@ function renderPreg(el){var p=D.preg,w=p.week,dy=p.day,tri=p.trimester,fr=pregFr
 function renderToday(){
   var el=document.getElementById('scr-today');
   if(D.mode==='preg' && D.preg){return renderPreg(el);}
-  if(!D.cycle || ['irregular','none','meno','preg'].indexOf(D.mode)>=0){el.innerHTML="<div class='eyebrow'>Сегодня</div><div class='greet'>Привет"+(NAME?",<span class='nm'> "+NAME+"</span>":"")+"</div><div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>Цикл сейчас не отслеживается. Я слежу за самочувствием и даю рекомендации с учётом возраста. Спроси меня о питании, движении или симптомах.</div></div></div></div><div class='prow' style='margin-top:14px'><button class='pbtn' onclick=\"markPeriod('start')\">Отметить месячные</button></div>";blossom(document.getElementById('al'),34);return;}
+  if(!D.cycle || ['irregular','none','meno','preg'].indexOf(D.mode)>=0){el.innerHTML="<div class='eyebrow'>Сегодня</div><div class='greet'>Привет"+(NAME?",<span class='nm'> "+NAME+"</span>":"")+"</div><div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>Цикл сейчас не отслеживается. Я слежу за самочувствием и даю рекомендации с учётом возраста. Спроси меня о питании, движении или симптомах.</div></div></div></div><div class='prow' style='margin-top:14px'><button class='pbtn' onclick=\"markPeriod('start')\">Отметить месячные</button></div>"+renderCheckin();blossom(document.getElementById('al'),34);return;}
   var day=dayOfCycle(today),ph=phaseForDay(day,D.cycle_len),sub=subphase(day,ph,D.cycle_len),toNext=D.cycle_len-day+1;
   var PHMAP={menstrual:'men',follicular:'fol',ovulation:'ovu',luteal:'lut'};
   if(typeof D.day==='number'){day=D.day;ph=PHMAP[D.phase]||ph;sub=subphase(day,ph,D.cycle_len);if(typeof D.days_to_next==='number')toNext=D.days_to_next;}
@@ -187,11 +192,13 @@ function renderToday(){
   var tagHtml=delayed?("<span class='tag' style='color:#C25E76;background:#FBE4E9'>Задержка</span>"):("<span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span><span class='psub'>"+sub+" фаза</span>");
   var metaHtml=delayed?delayMsg:("из "+D.cycle_len+" · месячные через ~"+toNext+" дн.");
   html+="<div class='card'><div class='pl'>"+tagHtml+"</div><div class='pday'>День "+day+"</div><div class='pmeta'>"+metaHtml+"</div></div>";
-  html+="<div class='prow'><button class='pbtn' onclick=\"markPeriod('start')\">Месячные начались</button><button class='pbtn alt' onclick=\"markPeriod('end')\">Закончились</button></div>";
   html+="<div class='stats'><div class='stat'><div class='l'>День цикла</div><div class='v'>"+day+"</div><div class='s'>из "+D.cycle_len+"</div></div><div class='stat'><div class='l'>Фаза</div><div class='v'>"+RU[ph].slice(0,4)+".</div><div class='s'>"+sub+"</div></div><div class='stat'><div class='l'>До месячных</div><div class='v'>~"+toNext+"</div><div class='s'>дней</div></div></div>";
+  html+=EDIT_PERIODS?("<div class='editbar'><button class='pbtn' onclick='savePeriodEdit()'>Сохранить</button><button class='pbtn alt' onclick='cancelPeriodEdit()'>Отмена</button></div><div class='calhint'>Выбери на календаре все дни, когда были месячные.</div>"):("<div class='editbar'><button class='pbtn' onclick='beginPeriodEdit()'>Редактировать месячные</button></div>");
   html+="<div class='calhead'><button class='calnav' id='calPrev'>\u2039</button><div class='sec' id='calLabel' style='margin:0'></div><button class='calnav' id='calNext'>\u203A</button></div><div class='cal' id='cal'></div><div class='calhint' id='calHint'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Менструальная</div><div class='lg'><span class='dot' style='background:"+COL.fol+"'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:"+COL.ovu+"'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:"+COL.lut+"'></span>Лютеиновая</div></div>";
-  html+="<div class='nt' style='text-align:center;color:var(--inkSoft);margin-top:8px'>Нажми на день в календаре: отметить или удалить месячные, отметить близость</div>";
+  html+="<div class='nt' style='text-align:center;color:var(--inkSoft);margin-top:8px'>В обычном режиме нажми день, чтобы отметить близость сердечком. Для месячных включи редактирование.</div>";
+  html+="<div class='card'><div class='sec' style='margin-top:0'>Как читать фазы</div><div class='ayva-txt'>Менструальная - дни кровотечения и восстановление. Фолликулярная - рост эстрогена, больше энергии. Овуляторная - пик фертильности и энергии. Лютеиновая - больше прогестерона, перед месячными может быть ПМС.</div></div>";
+  html+=renderCheckin();
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>\u{1F4F2} Добавить Айву на экран телефона</button>";html+="<div class='foot'>Айва не ставит диагнозы. Данные ориентировочные, при тревожных симптомах обратись к гинекологу.</div>";
   el.innerHTML=html;blossom(document.getElementById('al'),34);updateHomeBtn();
   var tc=document.getElementById('tchips');(CHIPS[ph]||[]).forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc.appendChild(b);});
@@ -216,23 +223,36 @@ function syncMarks(){
   (D.cycles||[]).forEach(function(x){CYCLE_SET[x]=true;if(!PERIOD_DAY[x]){PERIOD_DAY[x]=x;PERIOD_START[x]=true;PERIOD_END[x]=true;}});
 }
 async function reloadAfterEdit(){var d=await api("/api/data",{name:NAME});if(d&&d.onboarded){D=d;loadedFood=false;loadedTrain=false;syncMarks();renderToday();go("today");}}
-var DAYOP_ISO=null;
-function latestStartBefore(iso){var d=new Date(iso+"T00:00:00"),best=null;PERIODS.forEach(function(p){var s=new Date(p.start+"T00:00:00");if(s<=d&&(!best||s>new Date(best+"T00:00:00"))&&((d-s)/86400000)<10)best=p.start;});return best;}
-function openDayOp(iso,dd){DAYOP_ISO=iso;document.getElementById("dayopTitle").textContent=dd.getDate()+" "+MONTHS[dd.getMonth()];
-  var pb=document.getElementById("dopPeriod"), eb=document.getElementById("dopEnd"), del=document.getElementById("dopDelete");
-  var inPeriod=!!PERIOD_DAY[iso], canEnd=!!latestStartBefore(iso);
-  pb.textContent="Месячные начались в этот день";
-  pb.style.display=inPeriod?"none":"block";
-  pb.onclick=function(){if(DAYOP_ISO)markPeriodDate(DAYOP_ISO);};
-  eb.style.display=canEnd?"block":"none";eb.onclick=function(){if(DAYOP_ISO)endPeriodDate(DAYOP_ISO);};
-  del.style.display=inPeriod?"block":"none";del.onclick=function(){if(DAYOP_ISO)delPeriodDate(DAYOP_ISO);};
-  document.getElementById("dopPA").textContent=(PA_SET[iso]?"Убрать близость ♥":"Отметить близость ♥");
-  document.getElementById("dayop").style.display="flex";}
-async function delPeriodDate(iso){closeDayOp();if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("medium");try{await api("/api/period",{action:"delete",date:iso});await reloadAfterEdit();}catch(e){}}
-function closeDayOp(){document.getElementById("dayop").style.display="none";}
-async function markPeriodDate(iso){closeDayOp();if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("medium");try{await api("/api/period",{action:"start",date:iso});await reloadAfterEdit();}catch(e){}}
-async function endPeriodDate(iso){closeDayOp();if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("medium");try{await api("/api/period",{action:"end",date:iso,start:latestStartBefore(iso)});await reloadAfterEdit();}catch(e){}}
+var UNDO_PERIOD=null,TOAST_TIMER=null;
+function toast(msg,action){
+  var el=document.getElementById("toast");clearTimeout(TOAST_TIMER);
+  el.innerHTML="<span>"+msg+"</span>"+(action?"<button id='toastAct'>"+action.label+"</button>":"");
+  el.classList.remove("hidden");
+  if(action)document.getElementById("toastAct").onclick=action.fn;
+  TOAST_TIMER=setTimeout(function(){el.classList.add("hidden");},5200);
+}
+function seedEditDays(){EDIT_DAYS={};Object.keys(PERIOD_DAY||{}).forEach(function(x){EDIT_DAYS[x]=true;});}
+function beginPeriodEdit(){EDIT_PERIODS=true;seedEditDays();drawCal();if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();}
+function cancelPeriodEdit(){EDIT_PERIODS=false;EDIT_DAYS={};drawCal();}
+function togglePeriodDay(iso){if(EDIT_DAYS[iso])delete EDIT_DAYS[iso];else EDIT_DAYS[iso]=true;drawCal();}
+function rangesFromEditDays(){
+  var days=Object.keys(EDIT_DAYS).sort(),out=[],cur=null,last=null;
+  days.forEach(function(iso){var d=new Date(iso+"T00:00:00");if(!cur){cur={start:iso,end:iso};last=d;return;}var diff=(d-last)/86400000;if(diff===1){cur.end=iso;}else{out.push(cur);cur={start:iso,end:iso};}last=d;});
+  if(cur)out.push(cur);return out;
+}
+async function savePeriodEdit(){if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("medium");try{await api("/api/period",{action:"replace",periods:rangesFromEditDays()});EDIT_PERIODS=false;EDIT_DAYS={};await reloadAfterEdit();toast("Календарь обновлён");}catch(e){}}
+async function undoPeriod(){var p=UNDO_PERIOD;if(!p)return;document.getElementById("toast").classList.add("hidden");try{await api("/api/period",{action:"start",date:p.start});if(p.end&&p.end!==p.start)await api("/api/period",{action:"end",date:p.end,start:p.start});UNDO_PERIOD=null;await reloadAfterEdit();}catch(e){}}
 async function markPA(iso){if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("light");try{var r=await api("/api/pa",{date:iso});if(r&&!r.skip){if(r.marked)PA_SET[iso]=true;else delete PA_SET[iso];drawCal();}}catch(e){}}
+async function setCheckin(kind,val){var body={date:isoOf(today)};body[kind]=val;var r=await api("/api/checkin",body);D.today_log=(r&&r.log)||D.today_log||{};renderToday();}
+async function toggleSym(code){var r=await api("/api/checkin",{date:isoOf(today),symptom:code});D.today_log=(r&&r.log)||D.today_log||{};renderToday();}
+function renderCheckin(){
+  var lg=D.today_log||{},ss=lg.symptoms||[];
+  var html="<div class='card'><div class='sec' style='margin-top:0'>Самочувствие сегодня</div><div class='pmeta'>Отметки попадут в сводку и статистику.</div>";
+  html+="<div class='ayva-lab' style='margin-top:12px'>Энергия</div><div class='minirow'>";[1,2,3].forEach(function(v){html+="<button class='seg "+(lg.energy==v?"on":"")+"' onclick='setCheckin(\"energy\","+v+")'>"+LVL[v]+"</button>";});html+="</div>";
+  html+="<div class='ayva-lab' style='margin-top:12px'>Настроение</div><div class='minirow'>";[1,2,3].forEach(function(v){html+="<button class='seg "+(lg.mood==v?"on":"")+"' onclick='setCheckin(\"mood\","+v+")'>"+LVL[v]+"</button>";});html+="</div>";
+  html+="<div class='ayva-lab' style='margin-top:12px'>Симптомы</div><div class='minirow'>";SYMS.forEach(function(s){html+="<button class='seg "+(ss.indexOf(s[0])>=0?"on":"")+"' onclick='toggleSym(\""+s[0]+"\")'>"+s[1]+"</button>";});html+="</div></div>";
+  return html;
+}
 function buildStarts(){
   var arr=[];(D.cycles||[]).forEach(function(sd){var dt=new Date(sd+'T00:00:00');dt.setHours(0,0,0,0);arr.push(dt);});
   var L=lastDate();if(!arr.some(function(x){return x.getTime()===L.getTime();}))arr.push(L);
@@ -262,22 +282,37 @@ function drawCal(){
     var isToday=dd.getTime()===today.getTime(),inf=dayInfo(dd);
     if(inf&&inf.ph){e.style.borderColor=COL[inf.ph];if(inf.day<=5)e.style.background=WASH[inf.ph];e.style.color=inf.fut?'var(--inkSoft)':'var(--ink)';}
     else{e.style.color='var(--inkSoft)';}
-    if(PERIOD_DAY[iso]){
+    var marked=EDIT_PERIODS?!!EDIT_DAYS[iso]:!!PERIOD_DAY[iso];
+    var prev=isoOf(addDays(dd,-1)),next=isoOf(addDays(dd,1));
+    var start=marked&&!(EDIT_PERIODS?EDIT_DAYS[prev]:PERIOD_DAY[prev]);
+    var end=marked&&!(EDIT_PERIODS?EDIT_DAYS[next]:PERIOD_DAY[next]);
+    if(marked){
       e.style.background=WASH.men;e.style.borderColor=COL.men;e.style.color=COL.men;e.style.fontWeight='800';
-      e.style.borderRadius=(PERIOD_START[iso]&&PERIOD_END[iso])?'50%':(PERIOD_START[iso]?'16px 8px 8px 16px':(PERIOD_END[iso]?'8px 16px 16px 8px':'9px'));
+      e.style.borderRadius=(start&&end)?'50%':(start?'16px 8px 8px 16px':(end?'8px 16px 16px 8px':'9px'));
     } else if(isToday){e.classList.add('today');}
-    if(isToday&&PERIOD_DAY[iso])e.style.boxShadow='0 0 0 2px var(--ink) inset';
+    if(EDIT_PERIODS&&dd>today){e.style.opacity='.35';}
+    if(isToday&&marked)e.style.boxShadow='0 0 0 2px var(--ink) inset';
     if(PA_SET[iso])e.appendChild(paHeart());
-    if(dd.getTime()<=today.getTime()){e.style.cursor='pointer';e.onclick=function(){openDayOp(iso,dd);};}
+    if(dd.getTime()<=today.getTime()){e.style.cursor='pointer';e.onclick=function(){if(EDIT_PERIODS)togglePeriodDay(iso);else markPA(iso);};}
     cal.appendChild(e);
   })(d);}
   var hint=document.getElementById('calHint');
-  hint.textContent=calOffset>0?'Прогноз на основе твоего цикла':(calOffset<0?'История по отмеченным месячным':'');
+  hint.textContent=EDIT_PERIODS?'Режим редактирования месячных':(calOffset>0?'Прогноз на основе твоего цикла':(calOffset<0?'История по отмеченным месячным':''));
 }
 function ayvaCard(text){return "<div class='ayva'><div class='ayva-top'><span class='blossom' id='sl'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+(text||"")+"</div></div></div></div>";}
 var loadedFood=false,loadedTrain=false;
 async function renderFood(){var el=document.getElementById('scr-food');if(loadedFood)return;el.innerHTML="<div class='h'>Питание</div><div class='think'>Айва собирает меню<span></span><span></span><span></span></div>";var r=await api('/api/section',{kind:'food'});if(!(r&&r.menu&&r.menu.meals)){r={menu:DEMO_MENU,kcal:1850,text:DEMO_FOODT};}var html="<div class='h'>Питание</div>";if(r.menu&&r.menu.meals){var mk=r.menu.macros||{};html+="<div class='card'>"+(r.kcal?"<div style='font-size:12px;color:var(--roseDeep);font-weight:700;float:right'>~"+r.kcal+" ккал/день</div>":"")+"<div class='sec' style='margin-top:0'>Меню на сегодня</div><div class='macros'><div class='mac'><div class='l'>Белок</div><div class='v'>"+(mk.protein||"-")+"</div></div><div class='mac'><div class='l'>Жиры</div><div class='v'>"+(mk.fat||"-")+"</div></div><div class='mac'><div class='l'>Углеводы</div><div class='v'>"+(mk.carbs||"-")+"</div></div></div>";var tints=["#FBE4E9","#E6EBDD","#FBEFCB","#F4ECE7"];r.menu.meals.forEach(function(mm,i){html+="<div class='meal'><div class='sw' style='background:"+tints[i%4]+"'></div><div><div class='tm'>"+(mm.time||"")+"</div><div class='ds'>"+(mm.dish||"")+"</div><div class='nt'>"+(mm.note||"")+(mm.kcal?(" · "+mm.kcal):"")+"</div></div></div>";});html+="</div>";}html+=ayvaCard(r.text);html+="<div class='foot'>Не нравится блюдо — напиши Айве «замени обед».</div>";el.innerHTML=html;blossom(document.getElementById('sl'),34);loadedFood=true;}
-async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div class='think'>Айва подбирает нагрузку<span></span><span></span><span></span></div>";var r=await api('/api/section',{kind:'training'});if(!(r&&r.text)){r={text:DEMO_TRAINT};}el.innerHTML="<div class='h'>Нагрузка</div>"+ayvaCard(r.text)+"<div class='foot'>Спроси Айву подробнее в чате.</div>";blossom(document.getElementById('sl'),34);loadedTrain=true;}
+async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div class='think'>Айва подбирает нагрузку<span></span><span></span><span></span></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"Умеренно",duration:"25-40 мин",summary:"Ориентируйся на самочувствие.",phase:"",day:"",cycle_len:"",why:DEMO_TRAINT,options:[{name:"Ходьба",benefit:"мягко поддерживает энергию",how:"20-30 мин"},{name:"Растяжка",benefit:"снимает напряжение",how:"10-15 мин"},{name:"Лёгкая силовая",benefit:"поддерживает тонус",how:"спокойный темп"}],avoid:"тренировки через боль",recovery:"сон, вода, нормальная еда"};}
+  var html="<div class='h'>Нагрузка</div>";
+  html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='sl'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+p.level+"</div><div class='pmeta'>"+p.duration+(p.day?(" · день "+p.day+" из "+p.cycle_len):"")+"</div><div class='ayva-txt' style='margin-top:9px'>"+(p.summary||"")+"</div></div></div></div>";
+  html+="<div class='card'><div class='sec' style='margin-top:0'>Почему именно так</div><div class='ayva-txt'>"+p.why+"</div></div>";
+  html+="<div class='card'><div class='sec' style='margin-top:0'>Что выбрать</div><div class='trainhead'><div>нагрузка · чем полезна · как делать</div></div>";
+  (p.options||[]).forEach(function(o){html+="<div class='trainrow'><div class='tn'>"+o.name+"</div><div class='tb'>"+(o.benefit||"")+"</div><div class='th'>"+(o.how||o.detail||"")+"</div></div>";});
+  html+="</div>";
+  html+="<div class='card'><div class='ayva-lab'>Сегодня лучше не делать</div><div class='ayva-txt'>"+(p.avoid||p.reduce||"тренировку через боль")+"</div><div class='ayva-lab' style='margin-top:12px'>После нагрузки</div><div class='ayva-txt'>"+p.recovery+"</div></div>";
+  html+="<div class='chips'><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"А если мало сил?\");},120)'>А если мало сил?</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Что после тренировки?\");},120)'>Что после тренировки?</button></div>";
+  html+="<div class='foot'>Если есть сильная боль, головокружение, обильное кровотечение или беременность, нагрузку лучше обсудить с врачом.</div>";
+  el.innerHTML=html;blossom(document.getElementById('sl'),34);loadedTrain=true;}
 function fmtD(iso){var p=iso.split('-');return parseInt(p[2],10)+' '+MONTHS[parseInt(p[1],10)-1];}
 function cycleChart(hist){
   var items=hist.filter(function(h){return h.len!=null;}).slice(-7);
@@ -297,13 +332,19 @@ function cycleChart(hist){
     "<path d='"+path+"' fill='none' stroke='#C4BAB3' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/>"+dots+"</svg>";
 }
 function renderStats(){
-  var el=document.getElementById('scr-stats');var s=(D&&D.stats)||{};
+  var el=document.getElementById('scr-stats');var s=(D&&D.stats)||{},p=(D&&D.profile)||{};
   var html="<div class='h'>Статистика</div>";
   html+="<div class='stats'>";
   html+="<div class='stat'><div class='l'>Прошлый цикл</div><div class='v'>"+(s.last_cycle_len||'\u2014')+"</div><div class='s'>дней</div></div>";
   html+="<div class='stat'><div class='l'>Средний цикл</div><div class='v'>"+(s.avg_cycle||'\u2014')+"</div><div class='s'>дней</div></div>";
   html+="<div class='stat'><div class='l'>Месячные</div><div class='v'>"+(s.period_len||'\u2014')+"</div><div class='s'>дней</div></div>";
   html+="</div>";
+  html+="<div class='card'><div class='sec' style='margin-top:0'>Мои данные</div><div class='kv'>";
+  html+="<div class='stat'><div class='l'>Цикл</div><div class='v'>"+(D.cycle_len||'\u2014')+"</div><div class='s'>дней</div></div>";
+  html+="<div class='stat'><div class='l'>Сводка</div><div class='v' style='font-size:18px'>"+(D.send_time||"08:00")+"</div><div class='s'>МСК</div></div>";
+  html+="<div class='stat'><div class='l'>Рост</div><div class='v'>"+(p.height||'\u2014')+"</div><div class='s'>см</div></div>";
+  html+="<div class='stat'><div class='l'>Вес</div><div class='v'>"+(p.weight||'\u2014')+"</div><div class='s'>кг</div></div>";
+  html+="</div><div class='chips'><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как изменить вес?\");},120)'>Изменить вес</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как поменять время рассылки?\");},120)'>Время сводки</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как добавить историю циклов?\");},120)'>История циклов</button></div></div>";
   var graph=cycleChart(s.history||[]);
   if(graph){html+="<div class='card'><div class='sec' style='margin-top:0'>Динамика цикла</div>"+graph+"<div class='nt' style='margin-top:8px;color:var(--inkSoft)'>Серая зона: 21-35 дней. Числа на точках показывают длину цикла.</div></div>";}
   if(s.regularity){html+="<div class='card'><div class='pl'><span class='tag' style='color:var(--roseDeep);background:var(--roseWash)'>"+s.regularity+"</span></div>"+(s.spread!=null?("<div class='pmeta'>разброс длины цикла "+s.min_cycle+"-"+s.max_cycle+" дней</div>"):"")+"</div>";}
@@ -336,10 +377,6 @@ var TABS=[["today","Сегодня"],["food","Питание"],["train","Наг�
 function go(t){TABS.forEach(function(x){document.getElementById('scr-'+x[0]).classList.toggle('hidden',x[0]!==t);document.querySelector('.tab[data-t="'+x[0]+'"]').classList.toggle('on',x[0]===t);});document.getElementById('composer').classList.toggle('hidden',t!=='chat');if(t==='food')renderFood();if(t==='train')renderTrain();if(t==='stats')renderStats();if(t==='chat'){initChat();scrollBottom();}window.scrollTo(0,0);}
 var tabsEl=document.getElementById('tabs');
 TABS.forEach(function(x){var d=document.createElement('div');d.className='tab';d.setAttribute('data-t',x[0]);d.innerHTML=ICONS[x[0]]+"<span>"+x[1]+"</span>";d.onclick=function(){if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();go(x[0]);};tabsEl.appendChild(d);});
-document.getElementById("dopClose").onclick=closeDayOp;
-document.getElementById("dayop").onclick=function(ev){if(ev.target.id==="dayop")closeDayOp();};
-
-document.getElementById("dopPA").onclick=function(){if(DAYOP_ISO){markPA(DAYOP_ISO);closeDayOp();}};
 function showNeedOnboard(){
   document.getElementById('tabs').style.display='none';
   document.getElementById('composer').classList.add('hidden');

@@ -46,7 +46,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-21-period-ranges-onboarding"
+AIWA_VERSION = "2026-06-21-flo-calendar-training-table"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
@@ -96,7 +96,7 @@ PHASES_TEXT = (
  "Пик эстрогена, максимум энергии и либидо.\n"
  "• Самочувствие: уверенность, общительность\n"
  "• Еда: антиоксиданты и клетчатка, ягоды, зелень, брокколи\n"
- "• Спорт: самое интенсивное, HIIT, спринты\n\n"
+ "• Спорт: интенсивнее обычного, если хорошее самочувствие\n\n"
  "🌙 Лютеиновая, дни 17 и до месячных\n"
  "Растёт прогестерон, ближе к концу ПМС и тяга к сладкому.\n"
  "• Самочувствие: спад энергии, перепады настроения\n"
@@ -456,7 +456,8 @@ def B(text, cb, style=None):
 MENU_KB = InlineKeyboardMarkup([
     [B("🍽 Питание", "food"), B("🏋️ Нагрузка", "sec:training")],
     [B("📅 Календарь", "calendar"), B("💛 Симптомы", "checkin")],
-    [B("⚙️ Изменить данные", "edit"), B("⋯ Ещё", "more")],
+    [B("👫 Партнёр", "partner"), B("⚙️ Изменить данные", "edit")],
+    [B("⋯ Ещё", "more")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([
@@ -471,12 +472,13 @@ NOCYCLE_KB = InlineKeyboardMarkup([
 ])
 GENERAL_MENU_KB = InlineKeyboardMarkup([
     [B("🍽 Питание", "food"), B("🏋️ Нагрузка", "sec:training")],
-    [B("💛 Симптомы", "checkin"), B("⚙️ Изменить данные", "edit")],
+    [B("💛 Симптомы", "checkin"), B("👫 Партнёр", "partner")],
+    [B("⚙️ Изменить данные", "edit")],
     [B("⋯ Ещё", "more")],
 ])
 MORE_KB = InlineKeyboardMarkup([
     [B("📄 История и выписка", "history"), B("📘 Гид", "guides")],
-    [B("👫 Партнёр", "partner"), B("⏰ Время сводки", "set:time")],
+    [B("⏰ Время сводки", "set:time")],
     [B("← Назад", "menu")],
 ])
 EDIT_KB = InlineKeyboardMarkup([
@@ -1553,7 +1555,11 @@ async def _api_data(request):
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
-           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60)}
+           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
+           "today_log": log_get(cid, date.today().isoformat()) or {"symptoms": []},
+           "send_time": u.get("send_time") or "08:00",
+           "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
+                       "activity": u.get("activity"), "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or ""}}
     if out["cycle"]:
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
@@ -1606,6 +1612,30 @@ async def _api_period(request):
     if action == "start":
         db_mark_period(cid, d.isoformat()); ev(cid, "manual", meta="web_period_start")
         return _cors(web.json_response({"ok": True}))
+    if action == "replace":
+        periods = body.get("periods") or []
+        clean = []
+        for p in periods:
+            try:
+                s = date.fromisoformat(p.get("start"))
+                e = date.fromisoformat(p.get("end") or p.get("start"))
+                if e < s: e = s
+                if 1 <= (e - s).days + 1 <= 10:
+                    clean.append((s.isoformat(), e.isoformat()))
+            except Exception:
+                continue
+        c = db(); c.execute("DELETE FROM cycles WHERE chat_id=?", (cid,)); c.commit(); c.close()
+        for s, e in clean: cyc_add(cid, s, e)
+        starts = [s for s, _ in clean]
+        latest = max(starts) if starts else None
+        if latest:
+            latest_end = next((e for s, e in clean if s == latest), latest)
+            ln = (date.fromisoformat(latest_end) - date.fromisoformat(latest)).days + 1
+            upsert(cid, last_period=latest, mode="cycle", period_end=latest_end, period_len=ln)
+        else:
+            upsert(cid, last_period=None, period_end=None, period_len=None)
+        ev(cid, "manual", meta="web_period_replace")
+        return _cors(web.json_response({"ok": True}))
     if action == "delete":
         period_delete_at(cid, d.isoformat())
         cyc = cycles_of(cid)
@@ -1634,6 +1664,25 @@ async def _api_pa(request):
     if d > date.today(): return _cors(web.json_response({"marked": False, "skip": True}))
     marked = pa_toggle(cid, d.isoformat()); ev(cid, "manual", meta="web_pa")
     return _cors(web.json_response({"marked": marked}))
+async def _api_checkin(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    ds = body.get("date") or date.today().isoformat()
+    try: date.fromisoformat(ds)
+    except Exception: ds = date.today().isoformat()
+    log_ensure(cid, ds)
+    if body.get("energy"):
+        try: log_set(cid, ds, energy=max(1, min(3, int(body["energy"]))))
+        except Exception: pass
+    if body.get("mood"):
+        try: log_set(cid, ds, mood=max(1, min(3, int(body["mood"]))))
+        except Exception: pass
+    if body.get("symptom"):
+        code = str(body.get("symptom"))
+        if code in SYM:
+            log_toggle(cid, ds, code)
+    ev(cid, "manual", meta="web_checkin")
+    return _cors(web.json_response({"ok": True, "log": log_get(cid, ds) or {"symptoms": []}}))
 async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -1650,7 +1699,8 @@ async def _api_section(request):
         return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text}))
     text = await asyncio.to_thread(L.explain_section, st, "training")
     text = L.split_followups(text)[0]
-    return _cors(web.json_response({"text": text}))
+    plan = await asyncio.to_thread(L.training_plan, st, profile_of(u))
+    return _cors(web.json_response({"text": text, "training": plan}))
 async def _api_chat(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -1669,7 +1719,7 @@ async def _api_chat(request):
             "time": "Время утренней сводки меняется в боте командой /time.",
             "wipe": "Чтобы стереть все данные и отключить бота, введи в Telegram команду /stop.",
             "unlink": "Чтобы отключить партнёра, введи в Telegram команду /unlink.",
-            "partner": "Партнёра можно подключить в боте: /partner или Меню → Ещё → Партнёр.",
+            "partner": "Партнёра можно подключить в боте: /partner или Меню → Партнёр.",
             "checkin": "Симптомы отмечаются в боте: /checkin или Меню → Симптомы.",
         }[intent]
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
@@ -1698,6 +1748,7 @@ def build_web():
     aio.router.add_post("/api/chat", _api_chat)
     aio.router.add_post("/api/period", _api_period)
     aio.router.add_post("/api/pa", _api_pa)
+    aio.router.add_post("/api/checkin", _api_checkin)
     aio.router.add_route("OPTIONS", "/api/{tail:.*}", _api_opts)
     aio.router.add_get("/{tail:.*}", _serve_index)
     return aio
