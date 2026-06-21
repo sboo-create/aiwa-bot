@@ -649,6 +649,50 @@ def menu_today(st, profile=None, target=None, usage=None):
     return copy.deepcopy(CURATED_MENU.get(st["phase"], CURATED_MENU["follicular"]))
 
 
+def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
+    slots = ("b", "l", "s", "d")
+    times = {"b": "08:00", "l": "13:00", "s": "16:00", "d": "20:00"}
+    try:
+        idx = max(0, min(3, int(slot)))
+    except Exception:
+        idx = 0
+    k = slots[idx]
+    has_diet = bool(profile and (profile.get("diet") or profile.get("diet_note")))
+    if has_diet:
+        extra = ""
+        parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
+        if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
+        if parts: extra += f" Ограничения: {', '.join(parts)}."
+        if target:
+            extra += f" Ориентир дня: {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, углеводы {target[3]} г."
+        prompt = (f"Замени один приём пищи в меню femtech-приложения: слот {times[k]}, "
+                  f"{st.get('subphase','')} {st.get('phase_ru','').lower()} фаза, день {st.get('day','')} цикла. "
+                  f"Не повторяй блюдо: {avoid or 'нет'}." + extra +
+                  " Блюдо должно быть обычным для России, простым, белковым, без тофу, батата, киноа, протеиновых порошков и странных сочетаний. "
+                  'Ответь строго JSON: {"time":"08:00","dish":"...","note":"нутриент","kcal":"NNN ккал"}')
+        out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
+                     {"role": "user", "content": prompt}], max_tokens=220, temperature=0.2, usage=usage)
+        if out:
+            try:
+                data = json.loads(out[out.find("{"):out.rfind("}") + 1])
+                if data.get("dish"):
+                    data["time"] = data.get("time") or times[k]
+                    return data
+            except Exception:
+                pass
+    import datetime as _dt
+    phase = st["phase"] if st and st.get("phase") in MEAL_POOLS else "follicular"
+    pool = MEAL_POOLS[phase][k]
+    seed = _dt.date.today().toordinal() + idx + 1
+    avoid_s = (avoid or "").strip().lower()
+    for off in range(len(pool)):
+        opt = pool[(seed + off) % len(pool)]
+        if opt[0].strip().lower() != avoid_s:
+            return {"time": times[k], "dish": opt[0], "note": opt[1], "kcal": opt[2]}
+    opt = pool[seed % len(pool)]
+    return {"time": times[k], "dish": opt[0], "note": opt[1], "kcal": opt[2]}
+
+
 
 def menu_text(st, menu, target=None):
     """Текст питания строго из того же меню, что на картинке (картинка и текст совпадают)."""
