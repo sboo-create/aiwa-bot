@@ -3,7 +3,12 @@
 import os, io, re, time, html, asyncio, sqlite3, secrets, logging
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from datetime import timezone
+    def ZoneInfo(name):
+        return timezone(timedelta(hours=3)) if name == "Europe/Moscow" else timezone.utc
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import (Application, CommandHandler, MessageHandler,
@@ -16,7 +21,9 @@ import cycle as C
 import llm as L
 
 class KBS:
-    PRIMARY = SUCCESS = DANGER = None
+    PRIMARY = "primary"
+    SUCCESS = "success"
+    DANGER = "danger"
 
 try:
     import image as IMG
@@ -46,7 +53,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-21-miniapp-calendar-stats-food-train"
+AIWA_VERSION = "2026-06-21-ux-audit-menu-onboarding"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
@@ -65,9 +72,9 @@ SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), (
             ("sweet", "тяга к сладкому"), ("anx", "тревожность"), ("tired", "усталость")]
 SYM = dict(SYMPTOMS)
 
-START_TEXT = ("🌸 Привет! Я AIWA, ассистент по циклу и женскому здоровью на базе GigaChat.\n\n"
- "Я помогу вести календарь месячных, считать прогноз, подбирать питание и нагрузку, отмечать симптомы, готовить выписку для врача и отвечать на вопросы в чате.\n\n"
- "Для настройки нужно 2 главные вещи: первый день последних месячных и средняя длина цикла. Остальное можно пропустить и добавить позже.")
+START_TEXT = ("🌸 Привет, я Айва.\n\n"
+ "Я веду календарь месячных, показываю прогноз, подбираю питание и нагрузку под твой цикл, помогаю отмечать симптомы, отвечаю на вопросы и могу собрать выписку для врача.\n\n"
+ "Настройка короткая: нужен первый день последних месячных и средняя длина цикла. Если цикл нерегулярный, сейчас беременность или менопауза, выбери второй вариант. Остальное можно пропустить и добавить позже.")
 ABOUT_TEXT = ("🌸 Я AIWA, ИИ-ассистент по женскому здоровью на базе GigaChat.\n\n"
  "Умею: утренние сводки по фазе цикла, персональное питание и тренировки, ответы на вопросы про здоровье, "
  "отслеживание симптомов, выписку для врача и партнёрский режим. Персонализируюсь под тебя.\n\n"
@@ -451,6 +458,12 @@ ICONS = {  # набор Goodluck_sasha (@goodluck_alex): подобраны ра
     "profile_edit": "5359307659927364818",  # 🌸 цветок
 }
 def B(text, cb, style=None):
+    if style is None and cb == "menu":
+        style = KBS.PRIMARY
+    if style:
+        pref = {KBS.PRIMARY: "🔵", KBS.SUCCESS: "🟢", KBS.DANGER: "🔴"}.get(style)
+        if pref and not text.startswith(pref):
+            text = pref + " " + text.lstrip("← ").strip()
     return InlineKeyboardButton(text, callback_data=cb)
 
 MENU_KB = InlineKeyboardMarkup([
@@ -461,14 +474,14 @@ MENU_KB = InlineKeyboardMarkup([
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
-    [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
+    [InlineKeyboardButton("🩸 Отслеживать цикл", callback_data="onb_cycle")],
+    [InlineKeyboardButton("🌿 Другой режим", callback_data="no_cycle")],
 ])
 NOCYCLE_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Нерегулярный / не знаю", callback_data="mode:irregular")],
-    [InlineKeyboardButton("Сейчас нет месячных", callback_data="mode:none")],
-    [InlineKeyboardButton("Менопауза", callback_data="mode:meno")],
-    [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
+    [InlineKeyboardButton("〰️ Нерегулярный цикл", callback_data="mode:irregular")],
+    [InlineKeyboardButton("🌙 Сейчас нет месячных", callback_data="mode:none")],
+    [InlineKeyboardButton("🌤 Менопауза", callback_data="mode:meno")],
+    [InlineKeyboardButton("🤰 Беременность", callback_data="mode:preg")],
 ])
 GENERAL_MENU_KB = InlineKeyboardMarkup([
     [B("🍽 Питание", "food"), B("🏋️ Нагрузка", "sec:training")],
@@ -528,7 +541,7 @@ async def need_onboard(t):
         return await t.reply_text(PARTNER_INFO)
     if cid and not row(cid): ev(cid, "signup")
     if cid: upsert(cid, state=None)
-    await t.reply_text("Чтобы начать, выбери режим. Если месячные есть или могут вернуться, лучше выбрать «Веду цикл»: календарь всегда можно поправить позже.", reply_markup=ONB_KB)
+    await t.reply_text("Давай настроим Айву. Выбери, что сейчас ближе: отслеживать цикл или другой режим.", reply_markup=ONB_KB)
 _last_start = {}
 async def begin_onboard(cid, msg):
     now = time.time()
@@ -663,7 +676,7 @@ async def push_general(context, cid):
     u = row(cid); usage = []
     body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
     if not body:
-        body = "💛 Доброе утро! Отметь самочувствие через Симптомы, и подскажу, на что обратить внимание сегодня."
+        body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
     await context.bot.send_message(cid, f"{body}\n\nДобавь сегодняшние симптомы через Симптомы, чтобы сводка была точнее.\n\nAIWA · {DISCLAIMER}", reply_markup=summary_kb())
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
 
@@ -1026,7 +1039,15 @@ async def help_cmd(update, context):
         "Команды AIWA:\n"
         "/menu: открыть меню\n"
         "/today: сводка за день\n"
+        "/checkin: отметить самочувствие\n"
         "/period: отметить месячные\n"
+        "/calendar: календарь цикла\n"
+        "/report: выписка для врача\n"
+        "/partner: подключить партнёра\n"
+        "/unlink: отключить партнёра\n"
+        "/profile: изменить рост, вес и возраст\n"
+        "/time: время утренней сводки\n"
+        "/addcycles: добавить историю циклов\n"
         "/app: открыть мини-эпп\n"
         "/stop: стереть все данные и отключить бота\n\n"
         "Ещё можно написать словами: «изменить вес», «поменять время рассылки», «подключить партнёра», «отключить партнёра», «добавить историю циклов»."
@@ -1223,7 +1244,7 @@ async def handle_text(update, context, txt):
             if is_question_like(txt):
                 a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
-            return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь точно, напиши примерное значение. Если цикл нерегулярный, начни заново через /start и выбери «Нет регулярного цикла».")
+            return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь точно, напиши примерное значение. Если цикл нерегулярный, начни заново через /start и выбери «Другой режим».")
         finish_onboarding(context, cid, u["pending_date"], n)
         note = ""
         if n > 40:
@@ -1361,10 +1382,12 @@ async def handle_text(update, context, txt):
 async def on_cb(update, context):
     q = update.callback_query; await q.answer(); cid = q.message.chat.id; data = q.data
     if data == "go_start": return await begin_onboard(cid, q.message)
-    if data == "keep": return await q.message.reply_text("О чём рассказать сегодня?", reply_markup=MENU_KB)
+    if data == "keep":
+        u_keep = row(cid)
+        return await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u_keep, not is_cycle(u_keep)))
     if data == "onb_cycle":
         upsert(cid, state="await_date", pending_date=None)
-        return await q.message.reply_text("Когда начались последние месячные? Нужен первый день кровотечения, не последний. Напиши дату, например 25.05.2026 или 26 мая 2026.")
+        return await q.message.reply_text("Когда начались последние месячные? Нужен первый день кровотечения. Напиши дату, например 25.05.2026 или 26 мая 2026.")
     if data == "prof_skip":
         upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
     if data.startswith("act:"):
@@ -1378,7 +1401,7 @@ async def on_cb(update, context):
     if data == "diet:done":
         upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
     if data == "no_cycle":
-        return await q.message.reply_text("Понимаю. Что ближе?", reply_markup=NOCYCLE_KB)
+        return await q.message.reply_text("Ок, тогда выбери режим. Его можно поменять позже, если ситуация изменится.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
         m = data.split(":")[1]; upsert(cid, mode=m)
         schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
@@ -1502,7 +1525,15 @@ async def on_startup(app):
             BotCommand("start", "Старт"),
             BotCommand("menu", "Меню"),
             BotCommand("today", "Сводка за день"),
+            BotCommand("checkin", "Отметить самочувствие"),
             BotCommand("period", "Отметить месячные"),
+            BotCommand("calendar", "Календарь цикла"),
+            BotCommand("report", "Выписка для врача"),
+            BotCommand("partner", "Подключить партнёра"),
+            BotCommand("unlink", "Отключить партнёра"),
+            BotCommand("profile", "Изменить рост, вес и возраст"),
+            BotCommand("time", "Время сводки"),
+            BotCommand("addcycles", "История циклов"),
             BotCommand("app", "Открыть приложение"),
             BotCommand("help", "Команды"),
             BotCommand("stop", "Удалить данные")])
@@ -1687,6 +1718,8 @@ async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid); _, st = status_of(cid); kind = body.get("kind", "food"); ev(cid, "button", meta="web_" + kind)
+    if not is_onboarded(u):
+        return _cors(web.json_response({"error": "onboard", "text": "Сначала настрой Айву в боте."}, status=403))
     if st is None:
         q = {"food": "Что мне есть сегодня под мой возраст?", "training": "Какая активность мне подходит и почему?"}.get(kind, kind)
         ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), q, chat_hint(cid), None)
@@ -1704,6 +1737,9 @@ async def _api_section(request):
 async def _api_chat(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u):
+        return _cors(web.json_response({"answer": "Сначала настрой Айву в боте: /start.", "suggestions": []}, status=403))
     msg = (body.get("message") or "").strip()
     if not msg: return _cors(web.json_response({"answer": "Напиши вопрос.", "suggestions": []}))
     intent = match_intent(msg)
@@ -1724,7 +1760,7 @@ async def _api_chat(request):
         }[intent]
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
         return _cors(web.json_response({"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}))
-    u = row(cid); _, st = status_of(cid)
+    _, st = status_of(cid)
     if st is not None:
         ans = await asyncio.to_thread(L.answer_question, st, msg, profile_of(u), hist_get(cid))
     else:
