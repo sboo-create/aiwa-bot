@@ -6,7 +6,6 @@ from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, WebAppInfo, MenuButtonWebApp, BotCommand
-from telegram.constants import KeyboardButtonStyle as KBS
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
 from aiohttp import web
@@ -15,6 +14,10 @@ from urllib.parse import parse_qsl as _pqsl
 
 import cycle as C
 import llm as L
+
+class KBS:
+    PRIMARY = SUCCESS = DANGER = None
+
 try:
     import image as IMG
 except Exception as e:
@@ -43,7 +46,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-19-onb-quality"
+AIWA_VERSION = "2026-06-21-period-ranges-onboarding"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
@@ -55,18 +58,16 @@ def menu_kb_for(u, general=False):
     base = GENERAL_MENU_KB if general else MENU_KB
     rows = [list(r) for r in base.inline_keyboard]
     if AIWA_WEBAPP_URL:
-        rows.append([InlineKeyboardButton("Открыть приложение", web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL), icon_custom_emoji_id="5343944274146764032")])
+        rows.append([InlineKeyboardButton("📱 Открыть приложение", web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
     return InlineKeyboardMarkup(rows)
 EN = {1: "низкая", 2: "средняя", 3: "высокая"}
 SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), ("bloat", "вздутие"),
             ("sweet", "тяга к сладкому"), ("anx", "тревожность"), ("tired", "усталость")]
 SYM = dict(SYMPTOMS)
 
-START_TEXT = ("🌸 Привет! Я AIWA, ИИ-ассистент по женскому здоровью на базе GigaChat.\n\n"
- "Умею: считать фазу цикла и присылать утреннюю сводку, подбирать питание и тренировки под фазу и под тебя, "
- "отслеживать симптомы, собирать выписку для врача и держать в курсе партнёра. Персонализируюсь под твои данные.\n\n"
- "Полный функционал в разделе Меню. Можешь писать или наговаривать вопросы прямо в чат, я отвечу.\n\n"
- "Для начала выбери: отслеживаешь ли ты цикл? Если есть регулярные месячные, нажми «Веду цикл» и отметишь дату последних. Если цикла нет, он нерегулярный, менопауза или беременность, нажми «Нет регулярного цикла».")
+START_TEXT = ("🌸 Привет! Я AIWA, ассистент по циклу и женскому здоровью на базе GigaChat.\n\n"
+ "Я помогу вести календарь месячных, считать прогноз, подбирать питание и нагрузку, отмечать симптомы, готовить выписку для врача и отвечать на вопросы в чате.\n\n"
+ "Для настройки нужно 2 главные вещи: первый день последних месячных и средняя длина цикла. Остальное можно пропустить и добавить позже.")
 ABOUT_TEXT = ("🌸 Я AIWA, ИИ-ассистент по женскому здоровью на базе GigaChat.\n\n"
  "Умею: утренние сводки по фазе цикла, персональное питание и тренировки, ответы на вопросы про здоровье, "
  "отслеживание симптомов, выписку для врача и партнёрский режим. Персонализируюсь под тебя.\n\n"
@@ -99,7 +100,7 @@ PHASES_TEXT = (
  "🌙 Лютеиновая, дни 17 и до месячных\n"
  "Растёт прогестерон, ближе к концу ПМС и тяга к сладкому.\n"
  "• Самочувствие: спад энергии, перепады настроения\n"
- "• Еда: магний и B6, тёмный шоколад 85%, орехи, киноа\n"
+ "• Еда: магний и B6, тёмный шоколад 70-85%, орехи, гречка, рыба\n"
  "• Спорт: средняя нагрузка, ближе к месячным восстановление\n\n"
  "Дни даны для цикла около 28 дней и сдвигаются под твою длину.")
 
@@ -126,6 +127,9 @@ def db():
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0"):
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
+    for col in ("end_date TEXT",):
+        try: c.execute(f"ALTER TABLE cycles ADD COLUMN {col}")
+        except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
                 "period_end TEXT", "period_len INTEGER"):
@@ -134,11 +138,12 @@ def db():
     return c
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
             "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
-            "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12], "mode": r[13] or "cycle", "diet_note": r[14] or ""}
+            "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12],
+            "mode": r[13] or "cycle", "diet_note": r[14] or "", "period_end": r[15], "period_len": r[16]}
 
 def upsert(cid, **kw):
     c = db()
@@ -154,8 +159,13 @@ def get_sugg(sid):
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0):
     c = db(); c.execute("INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n) VALUES(?,?,?,?,?,?,?)",
         (cid, datetime.now().isoformat(), action, int(tokens), meta, int(ms), int(n))); c.commit(); c.close()
-def cyc_add(cid, d):
-    c = db(); c.execute("INSERT OR IGNORE INTO cycles(chat_id,start_date) VALUES(?,?)", (cid, d)); c.commit(); c.close()
+def cyc_add(cid, d, end=None):
+    c = db()
+    c.execute("INSERT OR IGNORE INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?)", (cid, d, end))
+    if end: c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end, cid, d))
+    c.commit(); c.close()
+def cyc_set_end(cid, start_iso, end_iso):
+    c = db(); c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end_iso, cid, start_iso)); c.commit(); c.close()
 def pa_list(cid):
     c = db(); r = c.execute("SELECT d FROM intimacy WHERE chat_id=? ORDER BY d", (cid,)).fetchall(); c.close(); return [x[0] for x in r]
 def pa_toggle(cid, iso):
@@ -185,7 +195,9 @@ def last_hint(cid):
     if r[1]: parts.append("симптомы: " + ", ".join(SYM.get(x, x) for x in r[1].split(",") if x))
     return "; ".join(parts) or None
 def all_users():
-    c = db(); rows = c.execute("SELECT chat_id FROM users WHERE last_period IS NOT NULL").fetchall(); c.close(); return [x[0] for x in rows]
+    c = db(); rows = c.execute("""SELECT chat_id FROM users
+        WHERE (last_period IS NOT NULL AND cycle_len IS NOT NULL)
+           OR mode IN ('irregular','none','meno','preg')""").fetchall(); c.close(); return [x[0] for x in rows]
 def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg"): c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))
@@ -216,6 +228,34 @@ def cycles_of(cid, since_iso=None):
     else:
         rows = c.execute("SELECT start_date FROM cycles WHERE chat_id=? ORDER BY start_date", (cid,)).fetchall()
     c.close(); return [x[0] for x in rows]
+def periods_of(cid, since_iso=None):
+    c = db()
+    if since_iso:
+        rows = c.execute("SELECT start_date,end_date FROM cycles WHERE chat_id=? AND start_date>=? ORDER BY start_date", (cid, since_iso)).fetchall()
+    else:
+        rows = c.execute("SELECT start_date,end_date FROM cycles WHERE chat_id=? ORDER BY start_date", (cid,)).fetchall()
+    c.close()
+    return [{"start": x[0], "end": x[1]} for x in rows]
+def period_start_at_or_before(cid, iso, max_days=10):
+    d = date.fromisoformat(iso)
+    best = None
+    for p in periods_of(cid):
+        s = date.fromisoformat(p["start"])
+        e = date.fromisoformat(p["end"]) if p.get("end") else s
+        if s <= d <= e: return p["start"]
+        if s <= d and (d - s).days < max_days and (best is None or s > date.fromisoformat(best)):
+            best = p["start"]
+    return best
+def period_delete_at(cid, iso):
+    d = date.fromisoformat(iso); start = None
+    for p in periods_of(cid):
+        s = date.fromisoformat(p["start"])
+        e = date.fromisoformat(p["end"]) if p.get("end") else s
+        if s <= d <= e:
+            start = p["start"]; break
+    if not start: return False
+    c = db(); c.execute("DELETE FROM cycles WHERE chat_id=? AND start_date=?", (cid, start)); c.commit(); c.close()
+    return True
 def logs_of(cid, since_iso=None):
     c = db()
     if since_iso:
@@ -307,6 +347,8 @@ def match_meta(text):
 
 _DATE_RE = re.compile(r"\d{1,2}[.\-/ ]\d{1,2}(?:[.\-/ ]\d{2,4})?|\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?", re.I)
 def parse_cycle_starts(text):
+    return [x["start"] for x in parse_cycle_ranges(text)]
+def parse_cycle_ranges(text):
     lines = [l for l in re.split(r"[\n;]+", text) if l.strip()]
     if len(lines) == 1 and len(_DATE_RE.findall(lines[0])) > 1 and not re.search(r"[-\u2013]|\bпо\b", lines[0].lower()):
         segs = [x for x in re.split(r"[,]+", lines[0]) if x.strip()]
@@ -314,19 +356,29 @@ def parse_cycle_starts(text):
         segs = lines
     out = []
     for seg in segs:
-        m = _DATE_RE.search(seg)
-        if not m: continue
-        d = parse_date(m.group(0))
-        if d: out.append(d.isoformat())
+        found = _DATE_RE.findall(seg)
+        if not found: continue
+        d = parse_date(found[0])
+        if not d: continue
+        end = None
+        if len(found) > 1:
+            e = parse_date(found[1])
+            if e and e < d and not re.search(r"\d{4}", found[1]):
+                try: e = e.replace(year=d.year)
+                except ValueError: pass
+            if e and d <= e and 1 <= (e - d).days + 1 <= 10:
+                end = e
+        out.append({"start": d.isoformat(), "end": (end.isoformat() if end else None)})
     seen = set(); res = []
-    for x in sorted(out):
-        if x not in seen: seen.add(x); res.append(x)
+    for x in sorted(out, key=lambda z: z["start"]):
+        if x["start"] not in seen:
+            seen.add(x["start"]); res.append(x)
     return res
 
 ADDCYCLES_TEXT = ("\U0001F4C5 История цикла вручную.\n\n"
     "Прямой импорт из Flo и других трекеров, к сожалению, невозможен: у них нет открытого доступа к данным для сторонних приложений, поэтому автоматически перенести цикл нельзя. Но историю можно быстро ввести руками.\n\n"
-    "Напиши даты начала последних месячных, каждую с новой строки (по желанию через тире можно добавить дату окончания, но это не обязательно). Например:\n"
-    "12.04.2026\n14.05.2026\n10.06.2026\n\n"
+    "Напиши даты начала последних месячных, каждую с новой строки. Если помнишь окончание, добавь через тире. Например:\n"
+    "12.04.2026 - 16.04.2026\n14.05.2026 - 18.05.2026\n10.06.2026\n\n"
     "Этот список ПОЛНОСТЬЮ заменит твою историю циклов в календаре, поэтому пришли все нужные даты разом. Если ошиблась в дате раньше, просто пришли правильный список, и старые даты заменятся.")
 
 def match_intent(t):
@@ -355,7 +407,7 @@ def is_question_like(txt):
     t = (txt or "").strip().lower()
     if len(t) < 5 or is_gibberish(t): return False
     if re.sub(r"[ .,:/\\-]", "", t).isdigit(): return False
-    return ("?" in t) or (re.search(r"(^|\\b)(что|как|почему|зачем|когда|какой|какая|какие|каков|сколько|можно ли|нужно ли|стоит ли|значит|расскаж|объясн|правда ли|а если|это\\s)", t) is not None)
+    return ("?" in t) or (re.search(r"(^|\b)(что|как|почему|зачем|когда|какой|какая|какие|каков|сколько|можно ли|нужно ли|стоит ли|значит|расскаж|объясн|правда ли|а если|это\s)", t) is not None)
 def is_gibberish(t):
     s = t.strip(); low = s.lower()
     letters = re.sub(r"[^а-яёa-z]", "", low)
@@ -399,17 +451,12 @@ ICONS = {  # набор Goodluck_sasha (@goodluck_alex): подобраны ра
     "profile_edit": "5359307659927364818",  # 🌸 цветок
 }
 def B(text, cb, style=None):
-    kw = {"callback_data": cb}
-    if style is not None: kw["style"] = style
-    icon = ICONS.get(cb)
-    if icon: kw["icon_custom_emoji_id"] = icon
-    return InlineKeyboardButton(text, **kw)
+    return InlineKeyboardButton(text, callback_data=cb)
 
 MENU_KB = InlineKeyboardMarkup([
-    [B("Питание", "food"), B("Нагрузка", "sec:training")],
-    [B("Календарь", "calendar"), B("Симптомы", "checkin", KBS.SUCCESS)],
-    [B("История и выписка", "history"), B("Гид: норма цикла", "guides")],
-    [B("Партнёр", "partner"), B("Изменить данные", "edit")],
+    [B("🍽 Питание", "food"), B("🏋️ Нагрузка", "sec:training")],
+    [B("📅 Календарь", "calendar"), B("💛 Симптомы", "checkin")],
+    [B("⚙️ Изменить данные", "edit"), B("⋯ Ещё", "more")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([
@@ -423,16 +470,21 @@ NOCYCLE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
 ])
 GENERAL_MENU_KB = InlineKeyboardMarkup([
-    [B("Питание", "food"), B("Нагрузка", "sec:training")],
-    [B("Симптомы", "checkin", KBS.SUCCESS), B("История и выписка", "history")],
-    [B("Партнёр", "partner"), B("Изменить данные", "edit")],
+    [B("🍽 Питание", "food"), B("🏋️ Нагрузка", "sec:training")],
+    [B("💛 Симптомы", "checkin"), B("⚙️ Изменить данные", "edit")],
+    [B("⋯ Ещё", "more")],
+])
+MORE_KB = InlineKeyboardMarkup([
+    [B("📄 История и выписка", "history"), B("📘 Гид", "guides")],
+    [B("👫 Партнёр", "partner"), B("⏰ Время сводки", "set:time")],
+    [B("← Назад", "menu")],
 ])
 EDIT_KB = InlineKeyboardMarkup([
-    [B("Отметить месячные", "period", KBS.DANGER)],
-    [B("Длина цикла", "cyclelen"), B("Рост, вес, возраст", "profile_edit")],
-    [B("История циклов", "addcycles")],
-    [B("Время рассылки", "set:time")],
-    [B("Назад", "menu", KBS.PRIMARY)],
+    [B("🩸 Отметить месячные", "period")],
+    [B("🔁 Длина цикла", "cyclelen"), B("🌸 Рост, вес, возраст", "profile_edit")],
+    [B("📌 История циклов", "addcycles")],
+    [B("⏰ Время рассылки", "set:time")],
+    [B("← Назад", "menu")],
 ])
 PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
 SKIP_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Пропустить", callback_data="prof_skip")]])
@@ -463,8 +515,8 @@ def sugg_kb(cid, items):
     rows.append([B("Меню", "menu", KBS.PRIMARY)]); return InlineKeyboardMarkup(rows)
 def summary_kb():
     return InlineKeyboardMarkup([
-        [B("Питание", "food"), B("Нагрузка", "sec:training")],
-        [B("Меню", "menu", KBS.PRIMARY), B("Симптомы", "checkin", KBS.SUCCESS)],
+        [B("🍽 Питание", "food"), B("🏋️ Нагрузка", "sec:training")],
+        [B("💛 Симптомы", "checkin"), B("Меню", "menu")],
     ])
 
 # ---------- senders ----------
@@ -474,7 +526,7 @@ async def need_onboard(t):
         return await t.reply_text(PARTNER_INFO)
     if cid and not row(cid): ev(cid, "signup")
     if cid: upsert(cid, state=None)
-    await t.reply_text("Чтобы начать, выбери: отслеживаешь ли ты цикл? Если есть регулярные месячные, нажми «Веду цикл». Если нет, выбери «Нет регулярного цикла».", reply_markup=ONB_KB)
+    await t.reply_text("Чтобы начать, выбери режим. Если месячные есть или могут вернуться, лучше выбрать «Веду цикл»: календарь всегда можно поправить позже.", reply_markup=ONB_KB)
 _last_start = {}
 async def begin_onboard(cid, msg):
     now = time.time()
@@ -685,6 +737,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         end = (parse_date(mdt.group(0)) if mdt else None) or date.today()
         ln = (end - date.fromisoformat(u2["last_period"])).days + 1
         if 1 <= ln <= 10:
+            cyc_set_end(cid, u2["last_period"], end.isoformat())
             upsert(cid, period_end=end.isoformat(), period_len=ln)
             return await msg.reply_text(f"Записала: месячные длились {ln} дн. Учту это в прогнозе и выписке для врача.")
         return await msg.reply_text("Поняла, месячные закончились. Чтобы посчитать длину, отметь ещё и дату их начала кнопкой «Отметить месячные».")
@@ -741,9 +794,10 @@ def schedule_daily(app, cid, hhmm):
 
 def db_mark_period(cid, iso):
     """Записывает старт месячных в БД и включает трекинг цикла. Без планировщика, безопасно из веб-обработчика."""
-    u = row(cid); cl = u.get("cycle_len") or 28
+    u = row(cid) or {}; cl = u.get("cycle_len") or 28
     cyc_add(cid, iso)
-    upsert(cid, last_period=iso, cycle_len=cl, mode="cycle", state=None)
+    latest = max(cycles_of(cid) or [iso])
+    upsert(cid, last_period=latest, cycle_len=cl, mode="cycle", state=None)
 def mark_period(context, cid, iso):
     db_mark_period(cid, iso)
     schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
@@ -786,14 +840,9 @@ def finish_onboarding(context, cid, last_period_iso, n):
 
 async def welcome_finish(context, cid, msg):
     ev(cid, "activated", meta=(row(cid).get("mode") or "cycle"))
-    await msg.reply_text("Всё готово! Утреннюю сводку буду присылать автоматически каждый день в 08:00 (МСК), время меняется в Меню.",
+    await msg.reply_text("Готово. Утреннюю сводку буду присылать каждый день в 08:00 (МСК), время меняется в Меню. Историю прошлых циклов можно добавить позже командой /addcycles.",
         reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     await push_summary(context, cid)
-    await context.bot.send_message(cid, "Хочешь сразу видеть историю в календаре? Можно ввести прошлые циклы вручную.",
-        reply_markup=InlineKeyboardMarkup([[B("Добавить историю циклов", "addcycles")]]))
-    if is_cycle(row(cid)):
-        await context.bot.send_message(cid, "📘 Есть гид про норму цикла: длина, фазы и когда к врачу.",
-            reply_markup=InlineKeyboardMarkup([[B("Гид: норма цикла", "guides")]]))
 
 async def send_report(context, cid, period):
     u = row(cid)
@@ -971,7 +1020,15 @@ async def stop(update, context):
     for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     del_user(cid); await update.message.reply_text("Отключила сводки и удалила данные. Вернуться: /start")
 async def help_cmd(update, context):
-    await update.message.reply_text("AIWA, помощник по циклу. Команды:\n/menu меню\n/today сводка за день\n/checkin отметить симптомы\n/period отметить месячные\n/calendar календарь цикла\n/report выписка для врача\n/partner подключить партнёра\n/unlink отключить партнёра\n/profile мои данные\n/app открыть приложение\n/time время сводки\n/about о боте\n/stop удалить данные")
+    await update.message.reply_text(
+        "Команды AIWA:\n"
+        "/menu: открыть меню\n"
+        "/today: сводка за день\n"
+        "/period: отметить месячные\n"
+        "/app: открыть мини-эпп\n"
+        "/stop: стереть все данные и отключить бота\n\n"
+        "Ещё можно написать словами: «изменить вес», «поменять время рассылки», «подключить партнёра», «отключить партнёра», «добавить историю циклов»."
+    )
 
 # ---------- stats ----------
 def aggregate_stats():
@@ -1003,7 +1060,7 @@ def aggregate_stats():
         elif action == "manual" and n: reqlens.append(n)
 
     n_users = len(users)
-    onboarded = sum(1 for _, _, lp, cl, md in users if (lp and cl) or md in ("irregular", "none", "meno"))
+    onboarded = sum(1 for _, _, lp, cl, md in users if (lp and cl) or md in ("irregular", "none", "meno", "preg"))
     signups = len(set(r[0] for r in rows if r[2] == "signup")) or n_users
     activated = len(set(r[0] for r in rows if r[2] == "activated"))
     act_rate = activated / signups * 100 if signups else 0
@@ -1114,7 +1171,7 @@ async def handle_text(update, context, txt):
 
     VALUE_STATES = {
         "await_date": "Когда начались последние месячные? Напиши дату, например 25.05.2026.",
-        "await_len": "Какая средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)",
+        "await_len": "Напиши среднюю длину цикла числом. Это дни от первого дня одних месячных до первого дня следующих. Обычно 21-35, если не знаешь, можно 28.",
         "await_cycle_len": "Какая средняя длина цикла в днях? Напиши число 15-60.",
         "await_preg_date": "Напиши дату первого дня последних месячных (например 25.05.2026), или ПДР со словом ПДР.",
         "await_period_date": "Когда начались последние месячные? Напиши дату или нажми кнопку.",
@@ -1153,7 +1210,10 @@ async def handle_text(update, context, txt):
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: когда начались последние месячные? Напиши дату, например 25.05.2026.")
             return await update.message.reply_text("Не разобрала дату. Напиши в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
         upsert(cid, pending_date=d.isoformat(), state="await_len")
-        return await update.message.reply_text("Поняла. Какая у тебя средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
+        return await update.message.reply_text(
+            "Поняла. Теперь длина цикла.\n\n"
+            "Это количество дней от первого дня одних месячных до первого дня следующих. Например, если месячные начались 1 мая, а следующие 29 мая, длина цикла 28 дней.\n\n"
+            "Напиши число. Норма обычно 21-35 дней. Если не знаешь точно, напиши примерное значение, потом его можно поправить.")
     if state == "await_len":
         try:
             n = int(txt); assert 20 <= n <= 60
@@ -1161,7 +1221,7 @@ async def handle_text(update, context, txt):
             if is_question_like(txt):
                 a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? (обычно 21-35, по умолчанию 28)")
-            return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь длину, напиши 28. Если цикл нерегулярный, начни заново через /start и выбери «Нет регулярного цикла».")
+            return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь точно, напиши примерное значение. Если цикл нерегулярный, начни заново через /start и выбери «Нет регулярного цикла».")
         finish_onboarding(context, cid, u["pending_date"], n)
         note = ""
         if n > 40:
@@ -1231,18 +1291,27 @@ async def handle_text(update, context, txt):
         upsert(cid, state=None)
         return await update.message.reply_text("Нужно число от 15 до 60. Открой «Длина цикла» в Меню и попробуй ещё раз.")
     elif state == "await_cycles":
-        starts = parse_cycle_starts(txt)
-        if not starts:
+        ranges = parse_cycle_ranges(txt)
+        if not ranges:
             upsert(cid, state=None)
             return await update.message.reply_text("Не нашла дат. Попробуй ещё раз: открой «Добавить историю циклов» в Меню и пришли даты начала месячных, по одной на строке, например 12.04.2026.")
         c = db(); c.execute("DELETE FROM cycles WHERE chat_id=?", (cid,)); c.commit(); c.close()
-        for iso in starts: cyc_add(cid, iso)
-        u2 = row(cid); latest = max(starts)
+        for p in ranges: cyc_add(cid, p["start"], p.get("end"))
+        starts = [p["start"] for p in ranges]; u2 = row(cid); latest = max(starts)
+        last_range = next((p for p in ranges if p["start"] == latest), None)
+        if last_range and last_range.get("end"):
+            ln = (date.fromisoformat(last_range["end"]) - date.fromisoformat(latest)).days + 1
+            upsert(cid, period_end=last_range["end"], period_len=ln)
         upsert(cid, last_period=latest, cycle_len=(u2.get("cycle_len") or 28), mode="cycle", state=None)
         schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
         word = "цикл" if len(starts)==1 else ("цикла" if len(starts)<5 else "циклов")
         await update.message.reply_text(f"Готово, история заменена на {len(starts)} {word}. Последние месячные: {date.fromisoformat(latest).strftime('%d.%m.%Y')}. Календарь обновлён, ошибочные даты убраны.")
         return await push_summary(context, cid)
+
+    if is_onboarded(u):
+        pre_intent = match_intent(txt)
+        if pre_intent in ("wipe", "unlink", "help"):
+            return await dispatch_intent(context, update, cid, u, pre_intent, txt)
 
     m = match_meta(txt)
     if m:
@@ -1293,7 +1362,7 @@ async def on_cb(update, context):
     if data == "keep": return await q.message.reply_text("О чём рассказать сегодня?", reply_markup=MENU_KB)
     if data == "onb_cycle":
         upsert(cid, state="await_date", pending_date=None)
-        return await q.message.reply_text("Когда начались последние месячные? Напиши дату, например 25.05.2026.")
+        return await q.message.reply_text("Когда начались последние месячные? Нужен первый день кровотечения, не последний. Напиши дату, например 25.05.2026 или 26 мая 2026.")
     if data == "prof_skip":
         upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
     if data.startswith("act:"):
@@ -1326,6 +1395,8 @@ async def on_cb(update, context):
     today_s = date.today().isoformat()
     if data == "menu":
         await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u, general))
+    elif data == "more":
+        await q.message.reply_text("Ещё возможности:", reply_markup=MORE_KB)
     elif data == "edit":
         await q.message.reply_text("Что изменить?", reply_markup=EDIT_KB)
     elif data == "profile_edit":
@@ -1426,17 +1497,20 @@ async def on_startup(app):
             log.warning("menu button: %s", e)
     try:
         await app.bot.set_my_commands([
-            BotCommand("menu", "Меню"), BotCommand("today", "Сводка за день"),
-            BotCommand("checkin", "Отметить симптомы"), BotCommand("period", "Отметить месячные"),
-            BotCommand("calendar", "Календарь цикла"), BotCommand("report", "Выписка для врача"),
-            BotCommand("partner", "Подключить партнёра"), BotCommand("unlink", "Отключить партнёра"),
-            BotCommand("profile", "Мои данные"), BotCommand("app", "Открыть приложение"),
-            BotCommand("time", "Время сводки"), BotCommand("about", "О боте"),
-            BotCommand("help", "Команды"), BotCommand("stop", "Удалить данные")])
+            BotCommand("start", "Старт"),
+            BotCommand("menu", "Меню"),
+            BotCommand("today", "Сводка за день"),
+            BotCommand("period", "Отметить месячные"),
+            BotCommand("app", "Открыть приложение"),
+            BotCommand("help", "Команды"),
+            BotCommand("stop", "Удалить данные")])
     except Exception as e:
         log.warning("set commands: %s", e)
-    try: BOT_USERNAME = app.bot.username
-    except Exception: BOT_USERNAME = None
+    try:
+        me = await app.bot.get_me()
+        BOT_USERNAME = getattr(me, "username", None)
+    except Exception:
+        BOT_USERNAME = None
     BCAST_Q = asyncio.Queue()
     asyncio.create_task(broadcast_worker(app))
     asyncio.create_task(load_logger(app))
@@ -1484,17 +1558,30 @@ async def _api_data(request):
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
                     "days_since": stt["days_since"], "status": stt["status"], "delay_days": stt["delay_days"]})
-        cyc = cycles_of(cid)
+        periods = periods_of(cid)
+        if u.get("period_end"):
+            for p in periods:
+                if p["start"] == u.get("last_period") and not p.get("end"):
+                    p["end"] = u["period_end"]
+        cyc = [p["start"] for p in periods]
         out["cycles"] = cyc
+        out["periods"] = periods
         lens = []
         for i in range(1, len(cyc)):
             dd = (date.fromisoformat(cyc[i]) - date.fromisoformat(cyc[i - 1])).days
             if 10 <= dd <= 90: lens.append(dd)
+        plens = []
+        for p in periods:
+            if p.get("end"):
+                ln = (date.fromisoformat(p["end"]) - date.fromisoformat(p["start"])).days + 1
+                if 1 <= ln <= 10: plens.append(ln)
         reg = None
         if len(lens) >= 2:
             mlen = sum(lens) / len(lens); sd = (sum((x - mlen) ** 2 for x in lens) / len(lens)) ** 0.5
             reg = "регулярный" if sd <= 2.5 else ("умеренный разброс" if sd <= 5 else "нерегулярный")
-        history = [{"start": cyc[i], "len": ((date.fromisoformat(cyc[i + 1]) - date.fromisoformat(cyc[i])).days if i + 1 < len(cyc) else None)} for i in range(len(cyc))]
+        history = [{"start": periods[i]["start"], "end": periods[i].get("end"),
+                    "period_len": ((date.fromisoformat(periods[i]["end"]) - date.fromisoformat(periods[i]["start"])).days + 1) if periods[i].get("end") else None,
+                    "len": ((date.fromisoformat(cyc[i + 1]) - date.fromisoformat(cyc[i])).days if i + 1 < len(cyc) else None)} for i in range(len(cyc))]
         out["stats"] = {
             "cycles_count": len(cyc),
             "last_cycle_len": lens[-1] if lens else None,
@@ -1502,7 +1589,8 @@ async def _api_data(request):
             "min_cycle": min(lens) if lens else None,
             "max_cycle": max(lens) if lens else None,
             "spread": (max(lens) - min(lens)) if lens else None,
-            "period_len": u.get("period_len"),
+            "period_len": (plens[-1] if plens else u.get("period_len")),
+            "avg_period": round(sum(plens) / len(plens)) if plens else None,
             "regularity": reg,
             "history": history,
         }
@@ -1519,17 +1607,21 @@ async def _api_period(request):
         db_mark_period(cid, d.isoformat()); ev(cid, "manual", meta="web_period_start")
         return _cors(web.json_response({"ok": True}))
     if action == "delete":
-        c = db(); c.execute("DELETE FROM cycles WHERE chat_id=? AND start_date=?", (cid, d.isoformat())); c.commit(); c.close()
+        period_delete_at(cid, d.isoformat())
         cyc = cycles_of(cid)
         upsert(cid, last_period=(max(cyc) if cyc else None))
         ev(cid, "manual", meta="web_period_del")
         return _cors(web.json_response({"ok": True}))
     if action == "end":
         u = row(cid); ok = False
-        if is_cycle(u) and u.get("last_period"):
-            ln = (d - date.fromisoformat(u["last_period"])).days + 1
+        start_iso = body.get("start") or period_start_at_or_before(cid, d.isoformat())
+        if is_cycle(u) and start_iso:
+            ln = (d - date.fromisoformat(start_iso)).days + 1
             if 1 <= ln <= 10:
-                upsert(cid, period_end=d.isoformat(), period_len=ln); ok = True
+                cyc_set_end(cid, start_iso, d.isoformat())
+                if start_iso == u.get("last_period"):
+                    upsert(cid, period_end=d.isoformat(), period_len=ln)
+                ok = True
         ev(cid, "manual", meta="web_period_end")
         return _cors(web.json_response({"ok": ok}))
     return _cors(web.json_response({"error": "bad action"}, status=400))
@@ -1564,9 +1656,24 @@ async def _api_chat(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     msg = (body.get("message") or "").strip()
     if not msg: return _cors(web.json_response({"answer": "Напиши вопрос.", "suggestions": []}))
-    if match_intent(msg) == "phases":
+    intent = match_intent(msg)
+    if intent == "phases":
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", PHASES_TEXT)
         return _cors(web.json_response({"answer": PHASES_TEXT, "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}))
+    if intent in ("period", "addcycles", "profile", "cyclelen", "time", "wipe", "unlink", "partner", "checkin"):
+        guide = {
+            "period": "Через чат я не меняю календарь, чтобы случайно не записать ошибку. Открой экран «Сегодня», нажми нужную дату в календаре и выбери «Месячные начались в этот день» или «Удалить отметку месячных». В боте можно ещё написать /period.",
+            "addcycles": "Историю циклов сейчас надёжнее добавлять через бота: /addcycles. Пришли даты начала месячных списком, и я заменю историю календаря.",
+            "profile": "Рост, вес и возраст меняются в боте командой /profile или через Меню → Изменить данные.",
+            "cyclelen": "Длину цикла меняй в боте: Меню → Изменить данные → Длина цикла.",
+            "time": "Время утренней сводки меняется в боте командой /time.",
+            "wipe": "Чтобы стереть все данные и отключить бота, введи в Telegram команду /stop.",
+            "unlink": "Чтобы отключить партнёра, введи в Telegram команду /unlink.",
+            "partner": "Партнёра можно подключить в боте: /partner или Меню → Ещё → Партнёр.",
+            "checkin": "Симптомы отмечаются в боте: /checkin или Меню → Симптомы.",
+        }[intent]
+        chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
+        return _cors(web.json_response({"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}))
     u = row(cid); _, st = status_of(cid)
     if st is not None:
         ans = await asyncio.to_thread(L.answer_question, st, msg, profile_of(u), hist_get(cid))
@@ -1596,7 +1703,7 @@ def build_web():
     return aio
 
 async def run_all():
-    app = Application.builder().token(os.environ["BOT_TOKEN"]).post_init(on_startup).build()
+    app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("menutoday", menutoday_cmd),
                     ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd)):
@@ -1608,7 +1715,7 @@ async def run_all():
     runner = web.AppRunner(build_web()); await runner.setup()
     port = int(os.environ.get("PORT", "8080"))
     site = web.TCPSite(runner, "0.0.0.0", port); await site.start()
-    await app.initialize(); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    await app.initialize(); await on_startup(app); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     log.info("AIWA bot + web on :%s", port)
     await asyncio.Event().wait()
 
