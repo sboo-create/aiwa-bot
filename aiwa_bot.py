@@ -46,7 +46,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-21-flo-calendar-training-table"
+AIWA_VERSION = "2026-06-21-miniapp-calendar-stats-food-train"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
@@ -1712,7 +1712,7 @@ async def _api_chat(request):
         return _cors(web.json_response({"answer": PHASES_TEXT, "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}))
     if intent in ("period", "addcycles", "profile", "cyclelen", "time", "wipe", "unlink", "partner", "checkin"):
         guide = {
-            "period": "Через чат я не меняю календарь, чтобы случайно не записать ошибку. Открой экран «Сегодня», нажми нужную дату в календаре и выбери «Месячные начались в этот день» или «Удалить отметку месячных». В боте можно ещё написать /period.",
+            "period": "Через чат я не меняю календарь, чтобы случайно не записать ошибку. Открой в мини-эппе экран «Сегодня», нажми «Редактировать месячные», отметь нужные дни прямо на календаре и нажми «Сохранить». В боте можно ещё написать /period.",
             "addcycles": "Историю циклов сейчас надёжнее добавлять через бота: /addcycles. Пришли даты начала месячных списком, и я заменю историю календаря.",
             "profile": "Рост, вес и возраст меняются в боте командой /profile или через Меню → Изменить данные.",
             "cyclelen": "Длину цикла меняй в боте: Меню → Изменить данные → Длина цикла.",
@@ -1720,7 +1720,7 @@ async def _api_chat(request):
             "wipe": "Чтобы стереть все данные и отключить бота, введи в Telegram команду /stop.",
             "unlink": "Чтобы отключить партнёра, введи в Telegram команду /unlink.",
             "partner": "Партнёра можно подключить в боте: /partner или Меню → Партнёр.",
-            "checkin": "Симптомы отмечаются в боте: /checkin или Меню → Симптомы.",
+            "checkin": "Симптомы можно отметить в мини-эппе на экране «Сегодня» или в боте: /checkin, Меню → Симптомы.",
         }[intent]
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
         return _cors(web.json_response({"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}))

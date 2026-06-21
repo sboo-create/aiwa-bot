@@ -80,9 +80,27 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .toast{position:fixed;left:12px;right:12px;bottom:calc(78px + env(safe-area-inset-bottom));max-width:456px;margin:0 auto;background:var(--ink);color:#fff;border-radius:16px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;z-index:80;font-size:13px;box-shadow:0 12px 30px rgba(0,0,0,.18)}
 .toast button{border:none;background:#fff;color:var(--ink);border-radius:999px;padding:7px 11px;font-weight:800}
 .editbar{display:flex;gap:8px;margin:12px 0}.editbar .pbtn{padding:11px 10px}
+.delaychip{color:#6E635C;background:#EFEAE6}
+.phasegrid{display:grid;grid-template-columns:1fr;gap:10px;margin-top:10px}
+.phasecard{border:1px solid var(--line);border-radius:18px;padding:13px 14px;background:#fff}
+.phasecard.on{box-shadow:0 0 0 2px currentColor inset}
+.phasecard .pt{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:7px}
+.phasecard .pn{font-family:var(--serif);font-size:18px;font-weight:600}
+.phasecard .pd{font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+.phasecard .pb{font-size:12.5px;line-height:1.5;color:var(--inkMid)}
+.phasecard .plst{display:grid;gap:4px;margin-top:8px;font-size:12px;line-height:1.42}
+.foodhero{background:linear-gradient(135deg,#FBEFCB 0%,#FBE4E9 86%);border-color:#F2D7B5}
+.foodchips,.trainchips{display:flex;flex-wrap:wrap;gap:7px;margin:11px 0 4px}
+.nutrichip{border-radius:999px;padding:7px 10px;font-size:11px;font-weight:800;background:#fff;color:var(--inkMid);border:1px solid rgba(33,28,26,.07)}
+.mealcard{display:grid;grid-template-columns:38px 1fr;gap:11px;align-items:start;padding:12px 0;border-top:1px solid var(--line)}
+.mealico{width:38px;height:38px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:19px;background:var(--paper2)}
+.mealwhy{font-size:11px;line-height:1.45;color:var(--inkMid);margin-top:4px}
 .trainrow{display:grid;grid-template-columns:1fr;gap:7px;padding:12px 0;border-top:1px solid var(--line)}
 .trainrow .tn{font-weight:800;font-size:13.5px}.trainrow .tb{font-size:12px;color:var(--ink);line-height:1.45}.trainrow .th{font-size:11.5px;color:var(--inkSoft);line-height:1.45}
+.trainrow.rich{grid-template-columns:38px 1fr;gap:11px;align-items:start}
+.trainico{width:38px;height:38px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:19px;background:var(--sageWash)}
 .trainhead{display:grid;grid-template-columns:1fr;gap:4px;background:var(--paper2);border-radius:14px;padding:10px 12px;color:var(--inkSoft);font-size:10px;text-transform:uppercase;font-weight:800;letter-spacing:.04em}
+.emptygraph{min-height:132px;border-radius:16px;background:linear-gradient(180deg,#fff 0%,#F4ECE7 100%);display:flex;align-items:center;justify-content:center;text-align:center;color:var(--inkSoft);font-size:12px;line-height:1.5;padding:18px}
 .homebtn{display:block;width:100%;margin:18px 0 2px;padding:13px;border:1px solid var(--roseLine);background:var(--roseWash);color:var(--roseDeep);border-radius:16px;font-family:var(--sans);font-weight:600;font-size:13.5px;cursor:pointer}
 .homebtn:active{transform:scale(.98)}
 .think{display:inline-flex;gap:4px;align-items:center;color:var(--roseDeep);font-size:13px;font-style:italic}
@@ -118,6 +136,12 @@ const SUMM={men:"Идут месячные, эстроген и прогесте
 fol:"Эстроген растёт, энергия и настроение идут вверх. Хорошее окно для нагрузок и сложных задач.",
 ovu:"Пик эстрогена, максимум энергии и либидо. Короткое, но самое активное окно цикла.",
 lut:"Растёт прогестерон, ближе к месячным возможны ПМС, тяга к сладкому и усталость. Помогают магний, B6 и спокойный режим."};
+const PHASE_GUIDE={
+men:{days:"обычно 1-5 день",body:"Эстроген и прогестерон низкие, матка отторгает эндометрий. Могут быть спазмы, слабость, сонливость, тянущая боль в пояснице.",food:"Белок, железо и тёплая еда: яйца, говядина, печень, гречка, рыба, зелень.",move:"Мягко: ходьба, растяжка, йога. Если больно или обильно, отдых нормален."},
+fol:{days:"после месячных",body:"Эстроген растёт, фолликул созревает. Часто легче думать, двигаться, учиться новому и возвращаться к активному режиму.",food:"Белок в каждый приём, сложные углеводы и клетчатка: яйца, курица, рыба, рис, гречка, овощи.",move:"Хорошее окно для силовых, пилатеса, техники и бодрого кардио."},
+ovu:{days:"примерно середина цикла",body:"Пик эстрогена и ЛГ, фертильное окно. Может быть больше энергии, либидо, прозрачные выделения, лёгкая тянущая боль сбоку.",food:"Белок, омега-3, овощи и вода: рыба, индейка, яйца, зелень, ягоды.",move:"Можно интенсивнее, но с разминкой: связки могут ощущаться мягче."},
+lut:{days:"после овуляции",body:"Прогестерон растёт, тело готовится к месячным. Возможны ПМС, отёки, грудь чувствительнее, тяга к сладкому и усталость.",food:"Белок, магний, B6 и стабильные углеводы: рыба, индейка, яйца, картофель, гречка, орехи.",move:"Умеренно: силовая легче обычного, ходьба, плавание, пилатес, растяжка."}
+};
 const CHIPS={men:["Что есть при месячных?","Можно тренироваться?"],fol:["Какая тренировка лучше?","Что есть сейчас?"],ovu:["Можно интенсивнее?","Что есть в овуляцию?"],lut:["Что съесть вечером?","Как пережить ПМС?"]};
 const SYMS=[["cramps","Спазмы"],["head","Голова"],["bloat","Вздутие"],["sweet","Тянет на сладкое"],["anx","Тревожно"],["tired","Усталость"]];
 const LVL={1:"низкая",2:"средняя",3:"высокая"};
@@ -130,10 +154,21 @@ async function api(path,body){try{var r=await fetch(path,{method:'POST',headers:
 function phaseForDay(d,l){if(d<=5)return"men";var ov=Math.max(12,l-14);if(d<ov)return"fol";if(d<=ov+2)return"ovu";return"lut";}
 function subphase(d,ph,l){var ov=Math.max(12,l-14);var B={men:[1,5],fol:[6,ov-1],ovu:[ov,ov+2],lut:[ov+3,l]}[ph];var sp=Math.max(1,B[1]-B[0]);var p=(d-B[0])/sp;return p<0.34?"ранняя":(p<0.67?"средняя":"поздняя");}
 var D=null,today=new Date();today.setHours(0,0,0,0);
-var STARTS=[],calOffset=0,PREG_CAL_OFFSET=0,PA_SET={},CYCLE_SET={},PERIODS=[],PERIOD_DAY={},PERIOD_START={},PERIOD_END={},EDIT_PERIODS=false,EDIT_DAYS={};
+var STARTS=[],calOffset=0,PREG_CAL_OFFSET=0,PA_SET={},CYCLE_SET={},PERIODS=[],PERIOD_DAY={},PERIOD_START={},PERIOD_END={},EDIT_PERIODS=false,EDIT_DAYS={},CHECKIN_SEQ=0;
 function lastDate(){return D.last_period?new Date(D.last_period+"T00:00:00"):(function(){var d=new Date();d.setDate(d.getDate()-6);return d;})();}
 function dayOfCycle(dt){var L=lastDate();var diff=Math.floor((dt-L)/86400000);return((diff%D.cycle_len)+D.cycle_len)%D.cycle_len+1;}
 document.getElementById('date').textContent=today.getDate()+" "+MONTHS[today.getMonth()];
+function phaseGuide(active){
+  var html="<div class='card'><div class='sec' style='margin-top:0'>Фазы цикла</div><div class='phasegrid'>";
+  ["men","fol","ovu","lut"].forEach(function(k){
+    var g=PHASE_GUIDE[k];
+    html+="<div class='phasecard "+(k===active?"on":"")+"' style='background:"+WASH[k]+";color:"+COL[k]+"'><div class='pt'><div class='pn'>"+RU[k]+"</div><div class='pd'>"+g.days+"</div></div><div class='pb'>"+g.body+"</div><div class='plst'><div><b>Питание:</b> "+g.food+"</div><div><b>Нагрузка:</b> "+g.move+"</div></div></div>";
+  });
+  return html+"</div></div>";
+}
+function mealIcon(mm,i){var s=((mm&&mm.dish)||"").toLowerCase();if(s.indexOf("яй")>=0||s.indexOf("омлет")>=0)return"🍳";if(s.indexOf("рыб")>=0||s.indexOf("лосос")>=0)return"🐟";if(s.indexOf("гов")>=0||s.indexOf("печен")>=0)return"🥩";if(s.indexOf("йогур")>=0||s.indexOf("сыр")>=0)return"🥛";return["🍳","🍗","🥛","🐟"][i%4];}
+function trainIcon(o,i){var s=((o&&o.name)||"").toLowerCase();if(s.indexOf("ход")>=0||s.indexOf("прогул")>=0)return"🚶";if(s.indexOf("раст")>=0||s.indexOf("йог")>=0)return"🧘";if(s.indexOf("пилат")>=0)return"🌿";if(s.indexOf("кардио")>=0||s.indexOf("интервал")>=0)return"⚡";if(s.indexOf("сил")>=0)return"🏋️";return["🚶","🧘","🏋️"][i%3];}
+function foodFocus(ph){return {men:["железо","B12","тёплая еда","белок"],fol:["белок","клетчатка","сложные углеводы","энергия"],ovu:["омега-3","антиоксиданты","вода","белок"],lut:["магний","B6","сытость","стабильный сахар"]}[ph]||["белок","овощи","вода"];}
 
 async function markPeriod(act){
   if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred('light');
@@ -185,19 +220,19 @@ function renderToday(){
   var delayed=!!(D.status&&D.status!=='normal');
   var delayMsg=!delayed?'':(D.status==='due'?'месячные ожидаются примерно сейчас':(D.status==='delay'?('задержка '+(D.delay_days||0)+' дн., отметь когда начнутся'):'данные устарели, отметь последние месячные'));
   var ayvaTxt=delayed?('Месячные пока не начались по прогнозу ('+delayMsg+'). При нерегулярном цикле это бывает: стресс, смена режима, вес. Отметь их, когда придут, и я пересчитаю прогноз.'):SUMM[ph];
-  var h=new Date().getHours(),g=h<5?"Доброй ночи":(h<12?"Доброе утро":(h<18?"Добрый день":"Добрый вечер"));
+  var g="Привет";
   var html="<div class='eyebrow'>"+WD[(today.getDay()+6)%7]+" · цикл "+D.cycle_len+" дней</div>";
   html+="<div class='greet'>"+g+(NAME?",<br><span class='nm'>"+NAME+"</span>":"")+"</div>";
   html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+ayvaTxt+"</div></div></div><div class='chips' id='tchips'></div></div>";
-  var tagHtml=delayed?("<span class='tag' style='color:#C25E76;background:#FBE4E9'>Задержка</span>"):("<span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span><span class='psub'>"+sub+" фаза</span>");
+  var phaseChip="<span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span>";
+  var tagHtml=delayed?(phaseChip+"<span class='tag delaychip'>Задержка</span>"):(phaseChip+"<span class='psub'>"+sub+" фаза</span>");
   var metaHtml=delayed?delayMsg:("из "+D.cycle_len+" · месячные через ~"+toNext+" дн.");
   html+="<div class='card'><div class='pl'>"+tagHtml+"</div><div class='pday'>День "+day+"</div><div class='pmeta'>"+metaHtml+"</div></div>";
   html+="<div class='stats'><div class='stat'><div class='l'>День цикла</div><div class='v'>"+day+"</div><div class='s'>из "+D.cycle_len+"</div></div><div class='stat'><div class='l'>Фаза</div><div class='v'>"+RU[ph].slice(0,4)+".</div><div class='s'>"+sub+"</div></div><div class='stat'><div class='l'>До месячных</div><div class='v'>~"+toNext+"</div><div class='s'>дней</div></div></div>";
-  html+=EDIT_PERIODS?("<div class='editbar'><button class='pbtn' onclick='savePeriodEdit()'>Сохранить</button><button class='pbtn alt' onclick='cancelPeriodEdit()'>Отмена</button></div><div class='calhint'>Выбери на календаре все дни, когда были месячные.</div>"):("<div class='editbar'><button class='pbtn' onclick='beginPeriodEdit()'>Редактировать месячные</button></div>");
+  html+=EDIT_PERIODS?("<div class='editbar'><button class='pbtn' onclick='savePeriodEdit()'>Сохранить</button><button class='pbtn alt' onclick='cancelPeriodEdit()'>Отмена</button></div>"):("<div class='editbar'><button class='pbtn' onclick='beginPeriodEdit()'>Редактировать месячные</button></div>");
   html+="<div class='calhead'><button class='calnav' id='calPrev'>\u2039</button><div class='sec' id='calLabel' style='margin:0'></div><button class='calnav' id='calNext'>\u203A</button></div><div class='cal' id='cal'></div><div class='calhint' id='calHint'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Менструальная</div><div class='lg'><span class='dot' style='background:"+COL.fol+"'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:"+COL.ovu+"'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:"+COL.lut+"'></span>Лютеиновая</div></div>";
-  html+="<div class='nt' style='text-align:center;color:var(--inkSoft);margin-top:8px'>В обычном режиме нажми день, чтобы отметить близость сердечком. Для месячных включи редактирование.</div>";
-  html+="<div class='card'><div class='sec' style='margin-top:0'>Как читать фазы</div><div class='ayva-txt'>Менструальная - дни кровотечения и восстановление. Фолликулярная - рост эстрогена, больше энергии. Овуляторная - пик фертильности и энергии. Лютеиновая - больше прогестерона, перед месячными может быть ПМС.</div></div>";
+  html+=phaseGuide(ph);
   html+=renderCheckin();
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>\u{1F4F2} Добавить Айву на экран телефона</button>";html+="<div class='foot'>Айва не ставит диагнозы. Данные ориентировочные, при тревожных симптомах обратись к гинекологу.</div>";
   el.innerHTML=html;blossom(document.getElementById('al'),34);updateHomeBtn();
@@ -232,8 +267,8 @@ function toast(msg,action){
   TOAST_TIMER=setTimeout(function(){el.classList.add("hidden");},5200);
 }
 function seedEditDays(){EDIT_DAYS={};Object.keys(PERIOD_DAY||{}).forEach(function(x){EDIT_DAYS[x]=true;});}
-function beginPeriodEdit(){EDIT_PERIODS=true;seedEditDays();drawCal();if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();}
-function cancelPeriodEdit(){EDIT_PERIODS=false;EDIT_DAYS={};drawCal();}
+function beginPeriodEdit(){EDIT_PERIODS=true;seedEditDays();renderToday();if(tg&&tg.HapticFeedback)tg.HapticFeedback.selectionChanged();}
+function cancelPeriodEdit(){EDIT_PERIODS=false;EDIT_DAYS={};renderToday();}
 function togglePeriodDay(iso){if(EDIT_DAYS[iso])delete EDIT_DAYS[iso];else EDIT_DAYS[iso]=true;drawCal();}
 function rangesFromEditDays(){
   var days=Object.keys(EDIT_DAYS).sort(),out=[],cur=null,last=null;
@@ -243,8 +278,9 @@ function rangesFromEditDays(){
 async function savePeriodEdit(){if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("medium");try{await api("/api/period",{action:"replace",periods:rangesFromEditDays()});EDIT_PERIODS=false;EDIT_DAYS={};await reloadAfterEdit();toast("Календарь обновлён");}catch(e){}}
 async function undoPeriod(){var p=UNDO_PERIOD;if(!p)return;document.getElementById("toast").classList.add("hidden");try{await api("/api/period",{action:"start",date:p.start});if(p.end&&p.end!==p.start)await api("/api/period",{action:"end",date:p.end,start:p.start});UNDO_PERIOD=null;await reloadAfterEdit();}catch(e){}}
 async function markPA(iso){if(tg&&tg.HapticFeedback)tg.HapticFeedback.impactOccurred("light");try{var r=await api("/api/pa",{date:iso});if(r&&!r.skip){if(r.marked)PA_SET[iso]=true;else delete PA_SET[iso];drawCal();}}catch(e){}}
-async function setCheckin(kind,val){var body={date:isoOf(today)};body[kind]=val;var r=await api("/api/checkin",body);D.today_log=(r&&r.log)||D.today_log||{};renderToday();}
-async function toggleSym(code){var r=await api("/api/checkin",{date:isoOf(today),symptom:code});D.today_log=(r&&r.log)||D.today_log||{};renderToday();}
+function ensureTodayLog(){D.today_log=D.today_log||{};D.today_log.symptoms=D.today_log.symptoms||[];return D.today_log;}
+async function setCheckin(kind,val){var seq=++CHECKIN_SEQ,lg=ensureTodayLog();lg[kind]=val;renderToday();var body={date:isoOf(today)};body[kind]=val;var r=await api("/api/checkin",body);if(seq===CHECKIN_SEQ&&r&&r.log){D.today_log=r.log;renderToday();toast("Сохранено");}}
+async function toggleSym(code){var seq=++CHECKIN_SEQ,lg=ensureTodayLog(),ss=lg.symptoms||[],i=ss.indexOf(code);if(i>=0)ss.splice(i,1);else ss.push(code);lg.symptoms=ss;renderToday();var r=await api("/api/checkin",{date:isoOf(today),symptom:code});if(seq===CHECKIN_SEQ&&r&&r.log){D.today_log=r.log;renderToday();toast("Сохранено");}}
 function renderCheckin(){
   var lg=D.today_log||{},ss=lg.symptoms||[];
   var html="<div class='card'><div class='sec' style='margin-top:0'>Самочувствие сегодня</div><div class='pmeta'>Отметки попадут в сводку и статистику.</div>";
@@ -297,22 +333,43 @@ function drawCal(){
     cal.appendChild(e);
   })(d);}
   var hint=document.getElementById('calHint');
-  hint.textContent=EDIT_PERIODS?'Режим редактирования месячных':(calOffset>0?'Прогноз на основе твоего цикла':(calOffset<0?'История по отмеченным месячным':''));
+  hint.textContent=calOffset>0?'Прогноз на основе твоего цикла':(calOffset<0?'История по отмеченным месячным':'');
 }
 function ayvaCard(text){return "<div class='ayva'><div class='ayva-top'><span class='blossom' id='sl'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+(text||"")+"</div></div></div></div>";}
 var loadedFood=false,loadedTrain=false;
-async function renderFood(){var el=document.getElementById('scr-food');if(loadedFood)return;el.innerHTML="<div class='h'>Питание</div><div class='think'>Айва собирает меню<span></span><span></span><span></span></div>";var r=await api('/api/section',{kind:'food'});if(!(r&&r.menu&&r.menu.meals)){r={menu:DEMO_MENU,kcal:1850,text:DEMO_FOODT};}var html="<div class='h'>Питание</div>";if(r.menu&&r.menu.meals){var mk=r.menu.macros||{};html+="<div class='card'>"+(r.kcal?"<div style='font-size:12px;color:var(--roseDeep);font-weight:700;float:right'>~"+r.kcal+" ккал/день</div>":"")+"<div class='sec' style='margin-top:0'>Меню на сегодня</div><div class='macros'><div class='mac'><div class='l'>Белок</div><div class='v'>"+(mk.protein||"-")+"</div></div><div class='mac'><div class='l'>Жиры</div><div class='v'>"+(mk.fat||"-")+"</div></div><div class='mac'><div class='l'>Углеводы</div><div class='v'>"+(mk.carbs||"-")+"</div></div></div>";var tints=["#FBE4E9","#E6EBDD","#FBEFCB","#F4ECE7"];r.menu.meals.forEach(function(mm,i){html+="<div class='meal'><div class='sw' style='background:"+tints[i%4]+"'></div><div><div class='tm'>"+(mm.time||"")+"</div><div class='ds'>"+(mm.dish||"")+"</div><div class='nt'>"+(mm.note||"")+(mm.kcal?(" · "+mm.kcal):"")+"</div></div></div>";});html+="</div>";}html+=ayvaCard(r.text);html+="<div class='foot'>Не нравится блюдо — напиши Айве «замени обед».</div>";el.innerHTML=html;blossom(document.getElementById('sl'),34);loadedFood=true;}
-async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div class='think'>Айва подбирает нагрузку<span></span><span></span><span></span></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"Умеренно",duration:"25-40 мин",summary:"Ориентируйся на самочувствие.",phase:"",day:"",cycle_len:"",why:DEMO_TRAINT,options:[{name:"Ходьба",benefit:"мягко поддерживает энергию",how:"20-30 мин"},{name:"Растяжка",benefit:"снимает напряжение",how:"10-15 мин"},{name:"Лёгкая силовая",benefit:"поддерживает тонус",how:"спокойный темп"}],avoid:"тренировки через боль",recovery:"сон, вода, нормальная еда"};}
+async function renderFood(){
+  var el=document.getElementById('scr-food');if(loadedFood)return;
+  el.innerHTML="<div class='h'>Питание</div><div class='think'>Айва собирает меню<span></span><span></span><span></span></div>";
+  var r=await api('/api/section',{kind:'food'});
+  if(!(r&&r.menu&&r.menu.meals)){r=(!INIT||r&&r.error==='net')?{menu:DEMO_MENU,kcal:1850,text:DEMO_FOODT}:{text:(r&&r.text)||"Выбираем простую еду с белком в каждом приёме и нормальной сытостью."};}
+  var hasCycle=!!(D&&D.cycle&&(!D.mode||D.mode==="cycle"));
+  var ph=hasCycle?((D&&D.phase)?({menstrual:"men",follicular:"fol",ovulation:"ovu",luteal:"lut"}[D.phase]||"fol"):"fol"):null;
+  if(hasCycle&&D&&D.day&&D.cycle_len)ph=phaseForDay(D.day,D.cycle_len);
+  var mk=(r.menu&&r.menu.macros)||{},chips=hasCycle?foodFocus(ph):["белок","железо","клетчатка","вода"],html="<div class='h'>Питание</div>";
+  var phaseTag=hasCycle?("<span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span>"):"<span class='tag delaychip'>без фазы цикла</span>";
+  html+="<div class='card foodhero'><div class='pl'>"+phaseTag+(r.kcal?"<span class='tag' style='color:var(--quinceDeep);background:#fff'>~"+r.kcal+" ккал</span>":"")+"</div><div class='sec' style='margin-top:10px'>Меню на сегодня</div><div class='ayva-txt'>"+(r.text||"Выбираем простую еду с белком в каждом приёме и нормальной сытостью.")+"</div><div class='foodchips'>";
+  chips.forEach(function(c){html+="<span class='nutrichip'>"+c+"</span>";});
+  html+="</div></div>";
+  if(r.menu&&r.menu.meals){
+    html+="<div class='card'><div class='sec' style='margin-top:0'>БЖУ и приёмы</div><div class='macros'><div class='mac'><div class='l'>Белок</div><div class='v'>"+(mk.protein||"-")+"</div></div><div class='mac'><div class='l'>Жиры</div><div class='v'>"+(mk.fat||"-")+"</div></div><div class='mac'><div class='l'>Углеводы</div><div class='v'>"+(mk.carbs||"-")+"</div></div></div>";
+    r.menu.meals.forEach(function(mm,i){html+="<div class='mealcard'><div class='mealico' style='background:"+["#FBE4E9","#E6EBDD","#FBEFCB","#DCEAFB"][i%4]+"'>"+mealIcon(mm,i)+"</div><div><div class='tm'>"+(mm.time||"")+"</div><div class='ds'>"+(mm.dish||"")+"</div><div class='mealwhy'>"+(mm.note||"белок и сытость")+(mm.kcal?(" · "+mm.kcal):"")+"</div></div></div>";});
+    html+="</div>";
+  }
+  html+="<div class='chips'><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Замени обед\");},120)'>Замени обед</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Что купить сегодня?\");},120)'>Что купить?</button></div>";
+  html+="<div class='foot'>Меню меняется каждый день и держится на обычных продуктах: яйца, рыба, мясо, крупы, овощи, молочные продукты, если они тебе подходят.</div>";
+  el.innerHTML=html;loadedFood=true;
+}
+async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div class='think'>Айва подбирает нагрузку<span></span><span></span><span></span></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",options:[{name:"Ходьба",benefit:"мягко поддерживает энергию и сон",how:"20-40 мин, темп разговорный"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине и тазу",how:"10-20 мин, без боли"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и настроение",how:"25-35 мин, запас 2-3 повтора"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка"};}
   var html="<div class='h'>Нагрузка</div>";
-  html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='sl'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+p.level+"</div><div class='pmeta'>"+p.duration+(p.day?(" · день "+p.day+" из "+p.cycle_len):"")+"</div><div class='ayva-txt' style='margin-top:9px'>"+(p.summary||"")+"</div></div></div></div>";
+  html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trainBlossom'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+p.level+"</div><div class='pmeta'>"+p.duration+(p.day?(" · день "+p.day+" из "+p.cycle_len):"")+"</div><div class='trainchips'><span class='nutrichip'>"+(p.phase||"по самочувствию")+"</span><span class='nutrichip'>"+p.duration+"</span><span class='nutrichip'>без боли</span></div><div class='ayva-txt' style='margin-top:9px'>"+(p.summary||"")+"</div></div></div></div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Почему именно так</div><div class='ayva-txt'>"+p.why+"</div></div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Что выбрать</div><div class='trainhead'><div>нагрузка · чем полезна · как делать</div></div>";
-  (p.options||[]).forEach(function(o){html+="<div class='trainrow'><div class='tn'>"+o.name+"</div><div class='tb'>"+(o.benefit||"")+"</div><div class='th'>"+(o.how||o.detail||"")+"</div></div>";});
+  (p.options||[]).forEach(function(o,i){html+="<div class='trainrow rich'><div class='trainico' style='background:"+["#E6EBDD","#FBEFCB","#FBE4E9","#DCEAFB"][i%4]+"'>"+trainIcon(o,i)+"</div><div><div class='tn'>"+o.name+"</div><div class='tb'>"+(o.benefit||"")+"</div><div class='th'>"+(o.how||o.detail||"")+"</div></div></div>";});
   html+="</div>";
   html+="<div class='card'><div class='ayva-lab'>Сегодня лучше не делать</div><div class='ayva-txt'>"+(p.avoid||p.reduce||"тренировку через боль")+"</div><div class='ayva-lab' style='margin-top:12px'>После нагрузки</div><div class='ayva-txt'>"+p.recovery+"</div></div>";
   html+="<div class='chips'><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"А если мало сил?\");},120)'>А если мало сил?</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Что после тренировки?\");},120)'>Что после тренировки?</button></div>";
   html+="<div class='foot'>Если есть сильная боль, головокружение, обильное кровотечение или беременность, нагрузку лучше обсудить с врачом.</div>";
-  el.innerHTML=html;blossom(document.getElementById('sl'),34);loadedTrain=true;}
+  el.innerHTML=html;blossom(document.getElementById('trainBlossom'),34);loadedTrain=true;}
 function fmtD(iso){var p=iso.split('-');return parseInt(p[2],10)+' '+MONTHS[parseInt(p[1],10)-1];}
 function cycleChart(hist){
   var items=hist.filter(function(h){return h.len!=null;}).slice(-7);
@@ -335,26 +392,34 @@ function renderStats(){
   var el=document.getElementById('scr-stats');var s=(D&&D.stats)||{},p=(D&&D.profile)||{};
   var html="<div class='h'>Статистика</div>";
   html+="<div class='stats'>";
-  html+="<div class='stat'><div class='l'>Прошлый цикл</div><div class='v'>"+(s.last_cycle_len||'\u2014')+"</div><div class='s'>дней</div></div>";
-  html+="<div class='stat'><div class='l'>Средний цикл</div><div class='v'>"+(s.avg_cycle||'\u2014')+"</div><div class='s'>дней</div></div>";
-  html+="<div class='stat'><div class='l'>Месячные</div><div class='v'>"+(s.period_len||'\u2014')+"</div><div class='s'>дней</div></div>";
+  html+="<div class='stat'><div class='l'>Прошлый цикл</div><div class='v'>"+(s.last_cycle_len||'нет')+"</div><div class='s'>дней</div></div>";
+  html+="<div class='stat'><div class='l'>Средний цикл</div><div class='v'>"+(s.avg_cycle||'нет')+"</div><div class='s'>дней</div></div>";
+  html+="<div class='stat'><div class='l'>Месячные</div><div class='v'>"+(s.period_len||'нет')+"</div><div class='s'>дней</div></div>";
+  html+="</div>";
+  var graph=cycleChart(s.history||[]);
+  html+="<div class='card'><div class='sec' style='margin-top:0'>Динамика цикла</div>";
+  html+=graph||"<div class='emptygraph'>Добавь ещё один завершённый цикл, и здесь появится линия динамики по дням.</div>";
+  html+="<div class='nt' style='margin-top:8px;color:var(--inkSoft)'>Серая зона: 21-35 дней. Числа на точках показывают длину цикла.</div></div>";
+  var hist=(s.history||[]).slice().reverse();
+  html+="<div class='card'><div class='sec' style='margin-top:0'>История циклов</div>";
+  if(hist.length){
+    hist.forEach(function(h){
+      var main="с "+fmtD(h.start)+(h.end?(" по "+fmtD(h.end)):"");
+      var meta=h.len?("цикл "+h.len+" дней"):"текущий цикл";
+      if(h.period_len)meta+=", месячные "+h.period_len+" дн";
+      html+="<div class='mealcard'><div class='mealico' style='background:#FBE4E9'>🩸</div><div><div class='ds'>"+main+"</div><div class='mealwhy'>"+meta+"</div></div></div>";
+    });
+  } else {
+    html+="<div class='emptygraph'>Пока нет сохранённых циклов. Отметь месячные на календаре или добавь прошлые циклы вручную в боте.</div>";
+  }
   html+="</div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Мои данные</div><div class='kv'>";
-  html+="<div class='stat'><div class='l'>Цикл</div><div class='v'>"+(D.cycle_len||'\u2014')+"</div><div class='s'>дней</div></div>";
+  html+="<div class='stat'><div class='l'>Цикл</div><div class='v'>"+(D.cycle_len||'нет')+"</div><div class='s'>дней</div></div>";
   html+="<div class='stat'><div class='l'>Сводка</div><div class='v' style='font-size:18px'>"+(D.send_time||"08:00")+"</div><div class='s'>МСК</div></div>";
-  html+="<div class='stat'><div class='l'>Рост</div><div class='v'>"+(p.height||'\u2014')+"</div><div class='s'>см</div></div>";
-  html+="<div class='stat'><div class='l'>Вес</div><div class='v'>"+(p.weight||'\u2014')+"</div><div class='s'>кг</div></div>";
+  html+="<div class='stat'><div class='l'>Рост</div><div class='v'>"+(p.height||'нет')+"</div><div class='s'>см</div></div>";
+  html+="<div class='stat'><div class='l'>Вес</div><div class='v'>"+(p.weight||'нет')+"</div><div class='s'>кг</div></div>";
   html+="</div><div class='chips'><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как изменить вес?\");},120)'>Изменить вес</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как поменять время рассылки?\");},120)'>Время сводки</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как добавить историю циклов?\");},120)'>История циклов</button></div></div>";
-  var graph=cycleChart(s.history||[]);
-  if(graph){html+="<div class='card'><div class='sec' style='margin-top:0'>Динамика цикла</div>"+graph+"<div class='nt' style='margin-top:8px;color:var(--inkSoft)'>Серая зона: 21-35 дней. Числа на точках показывают длину цикла.</div></div>";}
   if(s.regularity){html+="<div class='card'><div class='pl'><span class='tag' style='color:var(--roseDeep);background:var(--roseWash)'>"+s.regularity+"</span></div>"+(s.spread!=null?("<div class='pmeta'>разброс длины цикла "+s.min_cycle+"-"+s.max_cycle+" дней</div>"):"")+"</div>";}
-  var hist=(s.history||[]).filter(function(h){return h.len!=null;}).reverse();
-  if(hist.length){
-    html+="<div class='sec'>История циклов</div>";
-    hist.forEach(function(h){html+="<div class='meal'><div><div class='ds'>с "+fmtD(h.start)+(h.end?(" по "+fmtD(h.end)):"")+"</div><div class='nt'>цикл "+h.len+" дней"+(h.period_len?(", месячные "+h.period_len+" дн"):"")+"</div></div></div>";});
-  } else {
-    html+="<div class='card'><div class='ayva-txt'>Пока мало данных для статистики. Добавь прошлые циклы (в чате с Айвой кнопка «Добавить историю циклов») или отмечай начало месячных, и здесь появятся средние значения и история.</div></div>";
-  }
   html+="<div class='foot'>Данные ориентировочные, считаются по твоим отметкам.</div>";
   el.innerHTML=html;
 }
