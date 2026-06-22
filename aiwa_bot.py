@@ -53,8 +53,10 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-22-bot-food-training-fallback"
+AIWA_VERSION = "2026-06-22-app-cta"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
+APP_BUTTON_TEXT = "📱 Приложение"
+APP_CTA_HTML = "📱 <b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
     if u and u.get("last_period") and u.get("cycle_len") and u.get("mode", "cycle") == "cycle":
@@ -65,7 +67,7 @@ def menu_kb_for(u, general=False):
     base = GENERAL_MENU_KB if general else MENU_KB
     rows = [list(r) for r in base.inline_keyboard]
     if AIWA_WEBAPP_URL:
-        rows.append([InlineKeyboardButton("Открыть приложение", web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
+        rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
     return InlineKeyboardMarkup(rows)
 EN = {1: "низкая", 2: "средняя", 3: "высокая"}
 SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), ("bloat", "вздутие"),
@@ -519,12 +521,12 @@ def sugg_kb(cid, items, app_user=None, app_label=None):
     def _short(t): return t if len(t) <= 28 else t[:26].rstrip(" ,.-") + "…"
     rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
     if app_user and AIWA_WEBAPP_URL:
-        rows.append([InlineKeyboardButton(app_label or "Открыть приложение", web_app=WebAppInfo(url=webapp_url(app_user) or AIWA_WEBAPP_URL))])
+        rows.append([InlineKeyboardButton(app_label or APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(app_user) or AIWA_WEBAPP_URL))])
     rows.append([B("Меню", "menu", KBS.PRIMARY)]); return InlineKeyboardMarkup(rows)
 def summary_kb(u=None):
     rows = []
     if AIWA_WEBAPP_URL:
-        rows.append([InlineKeyboardButton("Открыть приложение", web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
+        rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
     rows.append([B("Меню", "menu")])
     return InlineKeyboardMarkup(rows)
 
@@ -650,7 +652,9 @@ async def send_delay(context, cid, st):
             "• Возможные причины: беременность, СПКЯ, щитовидная железа, резкая потеря веса, стресс, перименопауза."
         )}
     u = row(cid)
-    await context.bot.send_message(cid, msgs.get(st["status"], "") + "\n\nОткрой приложение Айвы: там можно поправить календарь и отметить симптомы.", reply_markup=summary_kb(u))
+    body = msgs.get(st["status"], "")
+    await context.bot.send_message(cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
+        reply_markup=summary_kb(u), parse_mode="HTML")
 
 async def send_guide(context, cid, g):
     path = os.path.join(GUIDE_DIR, g["file"])
@@ -707,7 +711,8 @@ async def push_general(context, cid):
     body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
     if not body:
         body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
-    await context.bot.send_message(cid, f"{body}\n\nОткрой приложение Айвы: там можно отметить симптомы, посмотреть питание, нагрузку и статистику.", reply_markup=summary_kb(u))
+    await context.bot.send_message(cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
+        reply_markup=summary_kb(u), parse_mode="HTML")
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
 
 async def send_general(context, cid, key):
@@ -832,8 +837,11 @@ async def push_summary(context, cid, with_image=True):
     if with_image: await send_infographic(context.bot, cid)
     usage = []
     body = await asyncio.to_thread(L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
+    if not body:
+        body = "💛 Сводка на сегодня готова. Открой приложение, чтобы посмотреть календарь, симптомы, питание и нагрузку."
     kb = summary_kb(u)
-    await context.bot.send_message(cid, f"{body}\n\nОткрой приложение Айвы: там можно отметить симптомы, посмотреть питание, нагрузку и статистику.", reply_markup=kb)
+    await context.bot.send_message(cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
+        reply_markup=kb, parse_mode="HTML")
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
 
 def schedule_daily(app, cid, hhmm):
@@ -1064,8 +1072,8 @@ async def app_cmd(update, context):
     url = webapp_url(u)
     if not url:
         return await update.message.reply_text("Приложение скоро подключим.")
-    await update.message.reply_text("Интерактивный экран Айвы:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Открыть приложение", web_app=WebAppInfo(url=url))]]))
+    await update.message.reply_text("📱 Приложение Айвы:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=url))]]))
 async def stop(update, context):
     cid = update.effective_chat.id
     for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
@@ -1561,7 +1569,7 @@ async def on_startup(app):
         log.warning("executor: %s", e)
     if AIWA_WEBAPP_URL:
         try:
-            await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Айва", web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
+            await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=APP_BUTTON_TEXT, web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
         except Exception as e:
             log.warning("menu button: %s", e)
     try:
@@ -1569,7 +1577,7 @@ async def on_startup(app):
             BotCommand("start", "Старт"),
             BotCommand("menu", "Меню"),
             BotCommand("today", "Сводка за день"),
-            BotCommand("app", "Открыть приложение"),
+            BotCommand("app", "Приложение"),
             BotCommand("report", "Выписка для врача"),
             BotCommand("partner", "Подключить партнёра"),
             BotCommand("unlink", "Отключить партнёра"),
