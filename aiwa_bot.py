@@ -522,6 +522,27 @@ def diet_kb(selected):
 def time_kb():
     times = ["07:00", "08:00", "09:00", "10:00", "21:00", "22:00"]
     return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=f"tm:{t}") for t in times[i:i + 3]] for i in (0, 3)])
+
+def schedule_jitter_min():
+    try:
+        return max(0, int(os.environ.get("AIWA_SCHEDULE_JITTER_MIN", "15")))
+    except (TypeError, ValueError):
+        return 15
+
+def scheduled_hhmm(cid, hhmm):
+    h, m = map(int, hhmm.split(":"))
+    jitter = schedule_jitter_min()
+    offset = abs(int(cid)) % jitter if jitter else 0
+    m += offset
+    h = (h + m // 60) % 24
+    return f"{h:02d}:{m % 60:02d}", offset, jitter
+
+def schedule_text(cid, hhmm):
+    actual, offset, jitter = scheduled_hhmm(cid, hhmm)
+    if not offset:
+        return f"Время сводки: {hhmm} (МСК)."
+    return (f"Время сводки: {hhmm} (МСК). Для тебя фактически около {actual}.\n\n"
+            f"Разброс до {jitter - 1} минут нужен, чтобы сводки у всех пользователей не уходили в одну секунду.")
 def en_kb(p):
     return InlineKeyboardMarkup([[InlineKeyboardButton(EN[i].capitalize(), callback_data=f"ci:{p}:{i}") for i in (1, 2, 3)]])
 def sym_kb(selected):
@@ -856,9 +877,8 @@ async def push_summary(context, cid, with_image=True):
 
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
-    h, m = map(int, hhmm.split(":"))
-    m += abs(cid) % 15  # разброс 0..14 мин: у многих юзеров сводки не падают в одну минуту
-    h = (h + m // 60) % 24; m %= 60
+    actual, _, _ = scheduled_hhmm(cid, hhmm)
+    h, m = map(int, actual.split(":"))
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
 
 def db_mark_period(cid, iso):
@@ -909,7 +929,7 @@ def finish_onboarding(context, cid, last_period_iso, n):
 
 async def welcome_finish(context, cid, msg):
     ev(cid, "activated", meta=(row(cid).get("mode") or "cycle"))
-    await msg.reply_text("Готово. Утреннюю сводку буду присылать каждый день в 08:00 (МСК), время меняется в Меню. Историю прошлых циклов можно добавить позже командой /addcycles.",
+    await msg.reply_text("Готово. " + schedule_text(cid, "08:00") + "\n\nВремя меняется в Меню. Историю прошлых циклов можно добавить позже командой /addcycles.",
         reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     await push_summary(context, cid)
 
@@ -988,12 +1008,124 @@ def partner_text(st, hint):
         f"Это подсказка для поддержки, не диагноз."
     )
 
+def partner_delay_text(st, hint):
+    extra = f"\n• Сегодня она отмечала: {hint}." if hint else ""
+    status = st.get("status")
+    delay_days = int(st.get("delay_days") or 0)
+    if status == "due":
+        title = "месячные ожидаются примерно сейчас"
+        body = ("Прогноз подошёл к окну месячных. Сдвиг на 1-3 дня бывает даже при регулярном цикле: "
+                "на него влияют сон, стресс, перелёты, болезнь, питание и нагрузка.")
+        watch = "Если была незащищённая близость, тест на ХГЧ можно делать с первого дня задержки, точнее через 3-5 дней."
+    elif status == "stale":
+        title = "данные цикла устарели"
+        body = (f"С последних отмеченных месячных прошло {st.get('days_since')} дн., поэтому прогноз может быть неточным. "
+                "Ей нужно спокойно обновить календарь, когда будет удобно.")
+        watch = "Если месячных действительно нет так долго, лучше обсудить это с гинекологом: причины бывают от беременности до СПКЯ, щитовидной железы, стресса или перименопаузы."
+    else:
+        title = f"задержка {delay_days} дн."
+        body = ("Месячные пока не начались в прогнозное окно. Частая причина задержки - поздняя овуляция: "
+                "если овуляция сдвинулась, весь цикл становится длиннее. Также влияют стресс, недосып, болезнь, "
+                "резкие изменения веса, интенсивные тренировки и перелёты.")
+        watch = "Если была незащищённая близость, сначала исключают беременность: тест на ХГЧ информативен с первого дня задержки, точнее через 3-5 дней."
+    return (
+        f"💛 Апдейт Айвы: {title}\n\n"
+        f"💛 Что с ней сегодня\n"
+        f"• {body}{extra}\n"
+        f"• В конце цикла прогестерон обычно снижается, поэтому могут быть ПМС, отёки, чувствительность груди, усталость, тревожность или тяга к сладкому.\n\n"
+        f"🤝 Как поддержать\n"
+        f"• Не дави вопросами и не пугай её. Лучше спроси: «Хочешь, я помогу с тестом, едой или просто побуду рядом?»\n"
+        f"• Возьми на себя одну бытовую задачу: ужин, аптеку, воду, прогулку, такси или спокойный вечер.\n"
+        f"• Если она тревожится, помоги действовать по шагам: тест, повтор через несколько дней, запись к врачу при необходимости.\n\n"
+        f"🍽 Что предложить\n"
+        f"• Белок и сложные углеводы: яйца, рыба, курица, гречка, картофель, овощи, йогурт или творог, если ей подходит.\n"
+        f"• Вода, тёплый напиток, магний из еды: гречка, орехи, какао, тёмный шоколад в небольшом количестве.\n\n"
+        f"🧠 Факт дня\n"
+        f"«Лютеиновая фаза после овуляции обычно длится примерно 11-17 дней. Поэтому задержка часто означает не “сбой месячных”, а то, что овуляция была позже обычного.»\n\n"
+        f"📌 На что обратить внимание\n"
+        f"• {watch} Сильная боль, температура, необычные выделения или очень обильное кровотечение - повод обратиться за медицинской помощью.\n\n"
+        f"Это подсказка для поддержки, не диагноз."
+    )
+
+PREG_FRUIT = {
+    4: ("маковое зёрнышко", "~2 мм", "🌱"), 5: ("кунжутное семечко", "~3 мм", "🌱"), 6: ("горошина", "~6 мм", "🫛"),
+    7: ("черника", "~1.3 см", "🫐"), 8: ("малина", "~1.6 см", "🍓"), 9: ("виноградина", "~2.3 см", "🍇"),
+    10: ("клубника", "~3 см", "🍓"), 11: ("инжир", "~4 см", "🫒"), 12: ("лайм", "~5 см", "🍋"),
+    13: ("стручок гороха", "~7 см", "🫛"), 14: ("лимон", "~8.5 см", "🍋"), 15: ("яблоко", "~10 см", "🍎"),
+    16: ("авокадо", "~11.5 см", "🥑"), 17: ("репа", "~13 см", "🥔"), 18: ("болгарский перец", "~14 см", "🫑"),
+    19: ("манго", "~15 см", "🥭"), 20: ("банан", "~16 см", "🍌"), 21: ("морковь", "~26 см", "🥕"),
+    22: ("кабачок", "~28 см", "🥒"), 23: ("грейпфрут", "~29 см", "🍊"), 24: ("кукуруза", "~30 см", "🌽"),
+    25: ("цветная капуста", "~34 см", "🥦"), 26: ("кочан салата", "~35 см", "🥬"), 27: ("брокколи", "~36 см", "🥦"),
+    28: ("баклажан", "~37 см", "🍆"), 29: ("тыква", "~38 см", "🎃"), 30: ("капуста", "~39 см", "🥬"),
+    31: ("кокос", "~41 см", "🥥"), 32: ("большой кабачок", "~42 см", "🥒"), 33: ("ананас", "~43 см", "🍍"),
+    34: ("дыня", "~45 см", "🍈"), 35: ("медовая дыня", "~46 см", "🍈"), 36: ("салат романо", "~47 см", "🥬"),
+    37: ("сельдерей", "~48 см", "🥬"), 38: ("лук-порей", "~49 см", "🧅"), 39: ("мини-арбуз", "~50 см", "🍉"), 40: ("небольшая тыква", "~51 см", "🎃"),
+}
+
+def preg_fruit(w):
+    if w < 4:
+        return ("крошечный зародыш", "ещё очень рано", "🌱")
+    w = min(int(w or 4), 40)
+    while w > 4 and w not in PREG_FRUIT:
+        w -= 1
+    return PREG_FRUIT.get(w, ("малыш", "растёт", "🌸"))
+
+def partner_preg_text(preg, hint):
+    week = int(preg.get("week") or 0)
+    day = int(preg.get("day") or 0)
+    tri = int(preg.get("trimester") or 1)
+    due = date.fromisoformat(preg["due"]).strftime("%d.%m.%Y")
+    left = int(preg.get("days_left") or 0)
+    fruit, size, icon = preg_fruit(week)
+    extra = f"\n• Сегодня она отмечала: {hint}." if hint else ""
+    tri_body = {
+        1: "В первом триместре активно закладываются органы и плацента. Часто бывают усталость, тошнота, сонливость, чувствительность к запахам и эмоциональные качели.",
+        2: "Во втором триместре у многих становится больше энергии, растёт объём крови, увеличивается нагрузка на спину и таз. Малыш активно растёт, могут появляться первые или более заметные шевеления.",
+        3: "В третьем триместре малыш набирает вес, матка сильнее давит на диафрагму, желудок и мочевой пузырь. Может быть одышка, изжога, отёки, хуже сон и быстрее усталость.",
+    }.get(tri, "Беременность меняет нагрузку на сердце, сосуды, сон, пищеварение и эмоциональное состояние.")
+    food = {
+        1: "простая еда маленькими порциями: яйца, йогурт или творог, крупа, суп, рыба или курица, вода. При тошноте часто легче заходят сухари, банан, тёплый чай.",
+        2: "белок, железо и кальций: мясо или рыба, яйца, гречка, овощи, молочные продукты, если подходят. Плюс вода и перекус, чтобы не проваливаться по энергии.",
+        3: "лёгкая, но питательная еда: белок, овощи, крупа или картофель, кисломолочные продукты, если подходят. Большие тяжёлые ужины могут усиливать изжогу.",
+    }.get(tri, "доступная еда с белком, сложными углеводами, овощами и водой.")
+    watch = "Кровотечение, сильная боль, температура, выраженные отёки, сильная головная боль, мушки перед глазами или заметное снижение шевелений после того, как они уже стали регулярными, это повод связаться с врачом."
+    return (
+        f"💛 Апдейт Айвы: беременность\n\n"
+        f"💛 Что с ней сегодня\n"
+        f"• Срок примерно {week} нед {day} дн., {tri} триместр. ПДР: {due}, до родов около {max(0, left)} дн.\n"
+        f"• {icon} Малыш сейчас ориентировочно как {fruit}, {size}. Это не точное измерение, а понятный ориентир по акушерскому сроку.\n"
+        f"• {tri_body}{extra}\n\n"
+        f"🤝 Как поддержать\n"
+        f"• Спроси конкретно: «Что тебе сейчас облегчить: еду, воду, сон, прогулку, аптеку или тишину?»\n"
+        f"• Возьми на себя быт без торговли: продукты, ужин, дорога, напоминание про воду, спокойный вечер.\n"
+        f"• Не обесценивай усталость. Во время беременности растёт объём крови, меняется работа сосудов и гормонов, поэтому «устала» часто буквально физиология.\n\n"
+        f"🍽 Что предложить\n"
+        f"• {food}\n"
+        f"• Без алкоголя, сырого мяса и рыбы, непастеризованных продуктов. С кофеином аккуратно, лучше сверяться с врачом по её ситуации.\n\n"
+        f"🧠 Факт дня\n"
+        f"«Акушерский срок считают от первого дня последних месячных, поэтому первые две недели срока формально идут ещё до зачатия. Так врачам проще считать ПДР и недели наблюдения.»\n\n"
+        f"📌 На что обратить внимание\n"
+        f"• {watch}\n\n"
+        f"Это подсказка для поддержки, не диагноз."
+    )
+
 async def push_partner(context, woman_cid):
     pid = partner_of(woman_cid)
     if not pid: return
+    u = row(woman_cid)
+    hint = last_hint(woman_cid)
+    if u and u.get("mode") == "preg" and u.get("last_period"):
+        try:
+            return await context.bot.send_message(pid, partner_preg_text(C.preg_status(u["last_period"]), hint))
+        except Exception as e:
+            return log.warning("partner preg push: %s", e)
     u, st = status_of(woman_cid)
     if not st: return
-    hint = last_hint(woman_cid)
+    if st.get("status") != "normal":
+        try:
+            return await context.bot.send_message(pid, partner_delay_text(st, hint))
+        except Exception as e:
+            return log.warning("partner delay push: %s", e)
     text = None
     try: text = await asyncio.to_thread(L.partner_brief, st, hint)
     except Exception as e: log.warning("partner_brief: %s", e)
@@ -1057,6 +1189,8 @@ async def today(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
     await push_summary(context, cid)
+async def id_cmd(update, context):
+    await update.message.reply_text(f"Твой chat id: {update.effective_chat.id}")
 async def calendar_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command"); u, st = status_of(cid)
     if not is_onboarded(u): return await need_onboard(update.message)
@@ -1092,7 +1226,7 @@ async def set_time_cmd(update, context):
         upsert(cid, state="await_time")
         return await update.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
     upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
-    await update.message.reply_text(f"Время сводки: {hhmm} (МСК).")
+    await update.message.reply_text(schedule_text(cid, hhmm))
 async def menutoday_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command"); u, st = status_of(cid)
     if not is_onboarded(u): return await need_onboard(update.message)
@@ -1319,9 +1453,7 @@ async def handle_text(update, context, txt):
         return await update.message.reply_text("А теперь вернёмся к настройке. " + VALUE_STATES[state])
 
     if is_partner(cid) and not is_onboarded(u):
-        wid = woman_of_partner(cid); _, wst = status_of(wid)
-        if not wst:
-            return await update.message.reply_text(PARTNER_INFO)
+        wid = woman_of_partner(cid); wu = row(wid); _, wst = status_of(wid)
         mt = match_meta(txt)
         if mt:
             return await update.message.reply_text({"about": ABOUT_TEXT, "privacy": PRIVACY_TEXT, "tech": TECH_TEXT}[mt])
@@ -1329,7 +1461,12 @@ async def handle_text(update, context, txt):
             return await update.message.reply_text("Не поняла вопрос. Напиши словами, например: «как её поддержать сегодня» или «что ей купить».")
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = await asyncio.to_thread(L.partner_answer, wst, txt, last_hint(wid), usage=usage)
+        if wu and wu.get("mode") == "preg" and wu.get("last_period"):
+            ans = await asyncio.to_thread(L.partner_preg_answer, C.preg_status(wu["last_period"]), txt, last_hint(wid), usage=usage)
+        elif wst:
+            ans = await asyncio.to_thread(L.partner_answer, wst, txt, last_hint(wid), usage=usage)
+        else:
+            return await update.message.reply_text(PARTNER_INFO)
         ev(cid, "answered", tokens=sum(usage), meta="partner_q", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         return await context.bot.send_message(cid, ans)
 
@@ -1393,7 +1530,7 @@ async def handle_text(update, context, txt):
         hhmm = parse_time(txt)
         if hhmm:
             upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
-            return await update.message.reply_text(f"Время сводки: {hhmm} (МСК).")
+            return await update.message.reply_text(schedule_text(cid, hhmm))
         upsert(cid, state=None)
     elif state == "await_period_date":
         d = parse_date(txt)
@@ -1578,7 +1715,7 @@ async def on_cb(update, context):
         await q.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
     elif data.startswith("tm:"):
         hhmm = data.split(":", 1)[1]; upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
-        await q.message.reply_text(f"Время сводки: {hhmm} (МСК).")
+        await q.message.reply_text(schedule_text(cid, hhmm))
     elif data.startswith("ci:e:"):
         log_set(cid, today_s, energy=int(data.split(":")[2])); await q.edit_message_text("Настроение?", reply_markup=en_kb("m"))
     elif data.startswith("ci:m:"):
@@ -1996,7 +2133,7 @@ def build_web():
 
 async def run_all():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
-    for cmd, fn in (("start", start), ("today", today), ("summary", today), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
+    for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("menutoday", menutoday_cmd),
                     ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
