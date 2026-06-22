@@ -69,6 +69,169 @@ def _call_giga(messages, max_tokens, temperature, usage, attempts=4):
             return None
     return None
 
+STAND_BASE = os.environ.get("GIGACHAT_STAND_BASE_URL", "https://gigachat.sberdevices.ru/v1").rstrip("/")
+STAND_TOKEN_URL = os.environ.get("GIGACHAT_STAND_TOKEN_URL", "")
+STAND_CHAT_URL = os.environ.get("GIGACHAT_STAND_CHAT_URL", "")
+STAND_MODEL = os.environ.get("GIGACHAT_STAND_MODEL") or os.environ.get("GIGACHAT_DEFAULT_MODEL") or "GigaChat-3-Ultra"
+STAND_UA = os.environ.get("GIGACHAT_STAND_USER_AGENT", "GigaChat-GigaTool-LiteLLM")
+_stand_tok = {"token": None, "exp": 0.0}
+
+def _env_bool(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+def _stand_verify():
+    raw = os.environ.get("GIGACHAT_STAND_SSL_VERIFY") or os.environ.get("GIGACHAT_SSL_VERIFY") or "false"
+    raw = raw.strip()
+    if raw.lower() in {"0", "false", "no", "off"}:
+        return False
+    if raw.lower() in {"1", "true", "yes", "on"}:
+        return True
+    return raw
+
+def _stand_v1_base():
+    base = STAND_BASE.rstrip("/")
+    return base if base.endswith("/v1") else base + "/v1"
+
+def _stand_token_urls():
+    urls = []
+    if STAND_TOKEN_URL:
+        urls.append(STAND_TOKEN_URL)
+    base = STAND_BASE.rstrip("/")
+    v1 = _stand_v1_base()
+    urls += [v1 + "/token", base + "/token"]
+    out = []
+    for u in urls:
+        if u not in out:
+            out.append(u)
+    return out
+
+def _stand_chat_url():
+    if STAND_CHAT_URL:
+        return STAND_CHAT_URL
+    return _stand_v1_base() + "/chat/completions"
+
+def _stand_model_name():
+    m = STAND_MODEL or PROXY_MODEL
+    aliases = {
+        "gigachat-3-ultra": "GigaChat-3-Ultra",
+        "gigachat-3-pro": "GigaChat-3-Pro",
+        "gigachat-2-max": "GigaChat-2-Max",
+        "gigachat-2-pro": "GigaChat-2-Pro",
+    }
+    return aliases.get(m.lower(), m)
+
+def _stand_basic():
+    key = os.environ.get("GIGACHAT_AUTHORIZATION_KEY") or os.environ.get("GIGACHAT_CREDENTIALS") or os.environ.get("GIGACHAT_BASIC")
+    if key:
+        key = key.strip()
+        return key.split(" ", 1)[1].strip() if key.lower().startswith("basic ") else key
+    user = os.environ.get("GIGACHAT_USER")
+    password = os.environ.get("GIGACHAT_PASSWORD")
+    if user and password:
+        import base64
+        return base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+    return None
+
+def _stand_configured():
+    return bool(_stand_basic())
+
+def _stand_auth(force=False):
+    import time as _t, uuid
+    if not force and _stand_tok["token"] and _stand_tok["exp"] - 60 > _t.time():
+        return _stand_tok["token"]
+    basic = _stand_basic()
+    if not basic:
+        return None
+    headers = {
+        "Authorization": f"Basic {basic}",
+        "RqUID": str(uuid.uuid4()),
+        "Accept": "application/json",
+        "User-Agent": STAND_UA,
+    }
+    for url in _stand_token_urls():
+        try:
+            r = requests.post(url, headers=headers, timeout=(6, 30), verify=_stand_verify())
+            if r.status_code in (404, 405):
+                continue
+            if r.status_code >= 400:
+                print("GigaStand token error:", r.status_code, (r.text or "")[:300])
+                continue
+            data = r.json()
+            token = data.get("tok") or data.get("access_token") or data.get("token")
+            if not token:
+                print("GigaStand token error: missing token field", list(data.keys()))
+                continue
+            exp = data.get("exp") or data.get("expires_at") or (_t.time() + 1500)
+            try:
+                exp = float(exp)
+            except (TypeError, ValueError):
+                exp = _t.time() + 1500
+            if exp > 1e12:
+                exp = exp / 1000.0
+            _stand_tok["token"] = str(token)
+            _stand_tok["exp"] = exp
+            return _stand_tok["token"]
+        except Exception as e:
+            print("GigaStand token error:", e)
+    return None
+
+def _stand_payload(messages, max_tokens, temperature):
+    return {
+        "model": _stand_model_name(),
+        "messages": messages,
+        "temperature": max(0.01, temperature),
+        "max_tokens": max_tokens,
+    }
+
+def _call_gigastand(messages, max_tokens, temperature, usage, attempts=3):
+    import time as _t, uuid
+    if not _stand_configured():
+        return None
+    wait = 1.5
+    for i in range(attempts):
+        tok = _stand_auth(force=(i > 0 and i == attempts - 1))
+        if not tok:
+            return None
+        headers = {
+            "Authorization": f"Bearer {tok}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Request-ID": str(uuid.uuid4()),
+            "User-Agent": STAND_UA,
+        }
+        try:
+            r = requests.post(_stand_chat_url(), headers=headers,
+                json=_stand_payload(messages, max_tokens, temperature),
+                timeout=(6, float(os.environ.get("GIGACHAT_STAND_TIMEOUT") or os.environ.get("GIGACHAT_CHAT_TIMEOUT_SECONDS") or "60")),
+                verify=_stand_verify())
+            if r.status_code == 401:
+                _stand_tok["token"] = None
+                if i < attempts - 1:
+                    continue
+            if r.status_code == 429:
+                _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+            if r.status_code >= 400:
+                print("GigaStand chat error:", r.status_code, (r.text or "")[:500])
+                if i < attempts - 1:
+                    _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+                return None
+            data = r.json()
+            if usage is not None:
+                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            txt = _response_text(data)
+            txt = (txt or "").strip()
+            txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
+            return txt or None
+        except Exception as e:
+            print("GigaStand chat error:", e)
+            if i < attempts - 1:
+                _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+            return None
+    return None
+
 SYSTEM = (
     "Ты — AIWA, ИИ-ассистент женского здоровья по циклу. Пиши конкретно и тепло, на русском, без воды и без AI-флёра. "
     "Опирайся на физиологию цикла и рекомендации гинекологов и эндокринологов. "
@@ -76,7 +239,7 @@ SYSTEM = (
     "Если спрашивают, на чём ты работаешь, какая модель тебя питает, отвечай, что ты работаешь на GigaChat. "
     "Ты сама ведёшь календарь цикла и отмечаешь месячные прямо в этом боте (кнопка Отметить месячные или команда /period). НИКОГДА не советуй пользователю сторонние приложения, календари или бумажные дневники для отслеживания цикла, всё это делается здесь, у тебя. "
     "ОЧЕНЬ ВАЖНО: ты НЕ можешь сама вносить, изменять или удалять данные (даты месячных, длину цикла, профиль, время рассылки, отметки) через чат, у тебя нет такой возможности. Никогда не пиши, что ты «добавила», «внесла», «изменила», «удалила» или «отметила» что-то. Если просят это сделать, честно объясни, ГДЕ это сделать: отметить месячные — кнопка «Отметить месячные» в меню или тап по дате в календаре приложения; изменить рост/вес/возраст — команда /profile; добавить историю циклов — «Изменить данные» → «История циклов». "
-    "Команды бота, существуют только эти: /menu, /today, /checkin, /period, /calendar, /report, /partner, /unlink, /addcycles, /profile, /app, /time, /about, /stop. Никогда не выдумывай других команд (например, нет команды /settings). Рост, вес и возраст меняются командой /profile. "
+    "Команды бота, существуют только эти: /menu, /today, /checkin, /period, /calendar, /report, /partner, /unlink, /addcycles, /profile, /app, /time, /about, /id, /stop. Никогда не выдумывай других команд (например, нет команды /settings). Рост, вес и возраст меняются командой /profile. "
     "Формат строго для мессенджера: обычный текст без markdown. НИКОГДА не используй символы #, *, _, обратные кавычки, "
     "markdown-таблицы и вертикальную черту |. Не используй длинные тире, ставь обычный дефис, запятую или скобки. "
     "Каждый смысловой блок начинай с эмодзи-заголовка (🌙 фаза, 💛 самочувствие, 🍽 питание, 🏋️ нагрузка, 📅 прогноз). "
@@ -279,12 +442,15 @@ def _call_proxy(messages, max_tokens, temperature, usage, attempts=4):
 
 def _call_impl(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
     """Единая точка вызова модели. Движок выбирается переменной AIWA_PROVIDER."""
-    primary = "litellm" if PROVIDER == "proxy" else PROVIDER
-    providers = [primary] + [p for p in ("litellm", "gigachat") if p != primary]
+    aliases = {"proxy": "litellm", "stand": "gigastand", "direct": "gigastand", "adapter": "gigastand"}
+    primary = aliases.get(PROVIDER, PROVIDER)
+    providers = [primary] + [p for p in ("litellm", "gigastand", "gigachat") if p != primary]
     for i, p in enumerate(providers):
         tries = attempts if i == 0 else 1
         if p == "litellm":
             out = _call_proxy(messages, max_tokens, temperature, usage, attempts=tries)
+        elif p == "gigastand":
+            out = _call_gigastand(messages, max_tokens, temperature, usage, attempts=tries)
         elif p == "gigachat":
             out = _call_giga(messages, max_tokens, temperature, usage, attempts=tries)
         else:
