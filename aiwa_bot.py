@@ -356,6 +356,14 @@ def match_meta(text):
                             "что с данными", "безопасн", "удалить данные", "передаёте", "передаете данные", "данные в безопас")): return "privacy"
     return None
 
+AIWA_ADDR_RE = re.compile(r"^\s*(?:эй\s+)?(?:айва+|айвочка|aiwa)\s*[,!?:;\-–—]*\s*", re.I)
+def strip_aiwa_address(text):
+    raw = (text or "").strip()
+    m = AIWA_ADDR_RE.match(raw)
+    if not m:
+        return raw, False
+    return raw[m.end():].strip(), True
+
 _DATE_RE = re.compile(r"\d{1,2}[.\-/ ]\d{1,2}(?:[.\-/ ]\d{2,4})?|\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?", re.I)
 def parse_cycle_starts(text):
     return [x["start"] for x in parse_cycle_ranges(text)]
@@ -1238,6 +1246,9 @@ async def handle_text(update, context, txt):
     cem = [e.custom_emoji_id for e in (update.message.entities or []) if getattr(e, "custom_emoji_id", None)]
     if cem:
         return await update.message.reply_text("ID кастомных эмодзи:\n" + "\n".join(cem))
+    txt, addressed = strip_aiwa_address(txt)
+    if addressed and not txt:
+        return await update.message.reply_text("Я тут. Напиши вопрос или открой меню, и я помогу с циклом, питанием, нагрузкой или самочувствием.")
 
     VALUE_STATES = {
         "await_date": "Напиши дату начала последних месячных, например 25.05.2026 или 26 мая 2026. Потом даты можно редактировать в приложении.",
@@ -1833,6 +1844,9 @@ async def _api_chat(request):
         return _cors(web.json_response({"answer": "Сначала настрой Айву в боте: /start.", "suggestions": []}, status=403))
     msg = (body.get("message") or "").strip()
     if not msg: return _cors(web.json_response({"answer": "Напиши вопрос.", "suggestions": []}))
+    msg, addressed = strip_aiwa_address(msg)
+    if addressed and not msg:
+        return _cors(web.json_response({"answer": "Я тут. Напиши вопрос про цикл, питание, нагрузку или самочувствие.", "suggestions": ["Когда овуляция?", "Что есть сегодня?"]}))
     intent = match_intent(msg)
     if intent == "phases":
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", PHASES_TEXT)
