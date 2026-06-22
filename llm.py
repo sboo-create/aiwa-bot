@@ -334,7 +334,17 @@ def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2):
         STATS["ms"] += int((_tt.time() - t1) * 1000)
         if not out: STATS["err"] += 1
 def pop_stats():
-    s = dict(STATS); STATS["calls"] = STATS["ms"] = STATS["err"] = 0; return s
+    s = dict(STATS)
+    for k in STATS:
+        STATS[k] = 0
+    return s
+
+def health_check(usage=None):
+    out = _call([
+        {"role": "system", "content": "Ты AIWA. Ответь только одним словом на русском."},
+        {"role": "user", "content": "Служебная проверка. Ответь: работает"}
+    ], max_tokens=16, temperature=0.1, usage=usage, attempts=1)
+    return bool(out and out.strip()), (out or "").strip()
 
 
 def build_prompt(st, modules):

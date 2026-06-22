@@ -35,6 +35,7 @@ except Exception as e:
     RPT = None; print("report off:", e)
 BOT_USERNAME = None
 BCAST_Q = None  # очередь утренней рассылки (троттлинг под лимиты Groq)
+ALERT_LAST = {}
 CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
 def hist_get(cid): return list(CHAT_HIST.get(cid, []))
 def hist_push(cid, q, a):
@@ -1606,7 +1607,26 @@ async def on_error(update, context):
             await context.bot.send_message(update.effective_chat.id,
                 "Упс, что-то пошло не так. Попробуй ещё раз.",
                 reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
+        await admin_alert(context.application, "handler_error",
+            f"⚠️ Ошибка обработчика: {type(context.error).__name__}\nПроверь Railway logs.")
     except Exception: pass
+
+async def admin_alert(app, key, text, cooldown=900):
+    if not AIWA_ADMIN:
+        return
+    now = time.time()
+    if now - ALERT_LAST.get(key, 0) < cooldown:
+        return
+    ALERT_LAST[key] = now
+    chat_id = str(AIWA_ADMIN).strip()
+    try:
+        chat_id = int(chat_id)
+    except Exception:
+        pass
+    try:
+        await app.bot.send_message(chat_id, "🚨 AIWA alert\n\n" + text)
+    except Exception as e:
+        log.warning("admin_alert: %s", e)
 
 async def load_logger(app):
     """Раз в минуту пишет в лог сводку нагрузки: вызовы модели, средняя латентность, очередь рассылки, число юзеров."""
@@ -1618,8 +1638,35 @@ async def load_logger(app):
             q = BCAST_Q.qsize() if BCAST_Q is not None else 0
             wq = s.get("queued", 0); wms = (s.get("wait_ms", 0) // calls) if calls else 0
             log.info("LOAD/60s llm_calls=%d avg_ms=%d wait_ms=%d queued=%d err=%d bcast_q=%d users=%d", calls, avg, wms, wq, s["err"], q, len(all_users()))
+            err_threshold = int(os.environ.get("AIWA_ALERT_LLM_ERRS", "2"))
+            if calls and s["err"] >= err_threshold and (s["err"] / calls) >= 0.5:
+                await admin_alert(app, "llm_errors",
+                    f"Модель отвечает нестабильно: ошибок {s['err']} из {calls} вызовов за последнюю минуту.\n"
+                    f"Средняя задержка: {avg} мс, очередь модели: {wq}.", cooldown=600)
+            q_threshold = int(os.environ.get("AIWA_ALERT_BCAST_Q", "20"))
+            if q >= q_threshold:
+                await admin_alert(app, "broadcast_queue",
+                    f"Очередь рассылки выросла до {q}. Возможно, модель или Telegram тормозит.", cooldown=600)
         except Exception as e:
             log.warning("load_logger: %s", e)
+
+async def model_probe(app):
+    """Опциональная активная проверка модели. Включается AIWA_MODEL_PROBE_SEC, например 300."""
+    interval = int(os.environ.get("AIWA_MODEL_PROBE_SEC", "0") or "0")
+    if interval <= 0:
+        return
+    await asyncio.sleep(30)
+    while True:
+        usage = []
+        ok = False; out = ""
+        try:
+            ok, out = await asyncio.to_thread(L.health_check, usage)
+        except Exception as e:
+            out = type(e).__name__
+        if not ok:
+            await admin_alert(app, "model_probe",
+                f"Служебная проверка модели не получила ответ.\nОтвет/ошибка: {out or 'пусто'}", cooldown=600)
+        await asyncio.sleep(interval)
 
 async def on_startup(app):
     global BOT_USERNAME, BCAST_Q
@@ -1653,6 +1700,7 @@ async def on_startup(app):
     BCAST_Q = asyncio.Queue()
     asyncio.create_task(broadcast_worker(app))
     asyncio.create_task(load_logger(app))
+    asyncio.create_task(model_probe(app))
     n = 0
     for cid in all_users(): schedule_daily(app, cid, row(cid)["send_time"] or "08:00"); n += 1
     log.info("Rescheduled %d", n)
