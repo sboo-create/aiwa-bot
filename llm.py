@@ -1,12 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Сводка, ответы и динамические саджесты через OSS-модель на Groq. Брендинг: GigaChat (тестовый вариант)."""
+"""Сводка, ответы и динамические саджесты через GigaChat/LiteLLM."""
 import os, re, json, requests, unicodedata, threading
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = os.environ.get("AIWA_MODEL", "openai/gpt-oss-120b")
-
-# ---- выбор движка: groq (по умолчанию) или gigachat ----
-PROVIDER = os.environ.get("AIWA_PROVIDER", "groq").lower()
+PROVIDER = os.environ.get("AIWA_PROVIDER", "litellm").lower()
 GIGA_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat-2")
 GIGA_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 GIGA_OAUTH = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
@@ -43,18 +39,18 @@ def _giga_auth():
     except Exception as e:
         print("Giga auth error:", e); return None
 
-def _call_giga(messages, max_tokens, temperature, usage):
+def _call_giga(messages, max_tokens, temperature, usage, attempts=4):
     import time as _t
     tok = _giga_auth()
     if not tok:
         return None
     wait = 1.5
-    for i in range(4):
+    for i in range(attempts):
         try:
             r = requests.post(GIGA_CHAT,
                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"},
                 json={"model": GIGA_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
-                timeout=60, verify=_GIGA_VERIFY)
+                timeout=(6, 30), verify=_GIGA_VERIFY)
             if r.status_code == 401:
                 _giga_tok["token"] = None; tok = _giga_auth()
                 if not tok: return None
@@ -69,7 +65,7 @@ def _call_giga(messages, max_tokens, temperature, usage):
             return txt or None
         except Exception as e:
             print("Giga error:", e)
-            if i < 3: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+            if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             return None
     return None
 
@@ -182,71 +178,140 @@ def _focus(st):
 
 PROXY_URL = os.environ.get("LITELLM_URL", "https://94.139.253.119:8002/litellm/v1/chat/completions")
 PROXY_MODEL = os.environ.get("LITELLM_MODEL", "gigachat-3-ultra")
-def _call_proxy(messages, max_tokens, temperature, usage):
-    import time as _t
+def _proxy_is_messages(url=None):
+    return "/messages" in ((url or PROXY_URL) or "")
+
+def _proxy_payload(messages, max_tokens, temperature, url=None, model=None):
+    model = model or PROXY_MODEL
+    if not _proxy_is_messages(url):
+        return {"model": model, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
+    system = "\n\n".join((m.get("content") or "") for m in messages if m.get("role") == "system").strip()
+    mm = []
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            continue
+        if role not in ("user", "assistant"):
+            role = "user"
+        mm.append({"role": role, "content": m.get("content") or ""})
+    payload = {"model": model, "messages": mm, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
+    if system:
+        payload["system"] = system
+    return payload
+
+def _response_text(data):
+    try:
+        txt = data["choices"][0]["message"]["content"]
+    except Exception:
+        txt = None
+    if isinstance(txt, str) and txt.strip():
+        return txt.strip()
+    c = data.get("content") if isinstance(data, dict) else None
+    if isinstance(c, str):
+        return c.strip()
+    if isinstance(c, list):
+        parts = []
+        for item in c:
+            if isinstance(item, dict):
+                val = item.get("text") or item.get("content")
+                if isinstance(val, str): parts.append(val)
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts).strip()
+    return None
+
+def _proxy_configs():
     key = os.environ.get("LITELLM_KEY"); xkey = os.environ.get("LITELLM_XKEY")
-    if not (key or xkey):
-        return None
+    cfgs = [{"name": "litellm", "url": PROXY_URL, "model": PROXY_MODEL, "key": key, "xkey": xkey}]
+    fb_url = os.environ.get("LITELLM_FALLBACK_URL") or os.environ.get("AIWA_LLM_FALLBACK_URL")
+    if fb_url:
+        cfgs.append({
+            "name": "litellm_fallback",
+            "url": fb_url,
+            "model": os.environ.get("LITELLM_FALLBACK_MODEL") or os.environ.get("AIWA_LLM_FALLBACK_MODEL") or PROXY_MODEL,
+            "key": os.environ.get("LITELLM_FALLBACK_KEY") or os.environ.get("AIWA_LLM_FALLBACK_KEY") or key,
+            "xkey": os.environ.get("LITELLM_FALLBACK_XKEY") or os.environ.get("AIWA_LLM_FALLBACK_XKEY") or xkey,
+        })
+    return [c for c in cfgs if c.get("url") and (c.get("key") or c.get("xkey"))]
+
+def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
+    import time as _t
     headers = {"Content-Type": "application/json"}
-    if key: headers["Authorization"] = f"Bearer {key}"
-    if xkey: headers["X-API-Key"] = xkey
+    if cfg.get("key"): headers["Authorization"] = f"Bearer {cfg['key']}"
+    if cfg.get("xkey"): headers["X-API-Key"] = cfg["xkey"]
     wait = 1.5
-    for i in range(4):
+    for i in range(attempts):
         try:
-            r = requests.post(PROXY_URL, headers=headers,
-                json={"model": PROXY_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
-                timeout=(10, 55), verify=False)
+            r = requests.post(cfg["url"], headers=headers,
+                json=_proxy_payload(messages, max_tokens, temperature, cfg["url"], cfg.get("model")),
+                timeout=(6, 30), verify=False)
             if r.status_code == 429:
                 _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
-            r.raise_for_status(); data = r.json()
+            if r.status_code >= 400:
+                print("Proxy error:", cfg.get("name"), r.status_code, (r.text or "")[:500])
+                if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+                return None
+            data = r.json()
             if usage is not None:
                 usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
-            txt = (data["choices"][0]["message"]["content"] or "").strip()
+            txt = _response_text(data)
+            txt = (txt or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
             return txt or None
         except Exception as e:
-            print("Proxy error:", e)
-            if i < 3: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
+            print("Proxy error:", cfg.get("name"), e)
+            if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             return None
+    return None
+
+def _call_proxy(messages, max_tokens, temperature, usage, attempts=4):
+    for i, cfg in enumerate(_proxy_configs()):
+        out = _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts if i == 0 else 1)
+        if out:
+            if i:
+                print("LLM fallback proxy used:", cfg.get("name"))
+            return out
     return None
 
 def _call_impl(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
     """Единая точка вызова модели. Движок выбирается переменной AIWA_PROVIDER."""
-    if PROVIDER in ("litellm", "proxy"):
-        return _call_proxy(messages, max_tokens, temperature, usage)
-    if PROVIDER == "gigachat":
-        return _call_giga(messages, max_tokens, temperature, usage)
-    key = os.environ.get("GROQ_API_KEY")
-    if not key:
-        return None
-    import time as _t
-    wait = 1.5
-    for i in range(attempts):
-        try:
-            r = requests.post(GROQ_URL, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": MODEL, "max_tokens": max_tokens, "temperature": temperature, "messages": messages}, timeout=60)
-            if r.status_code == 429:
-                ra = r.headers.get("retry-after", "")
-                delay = float(ra) if ra.replace(".", "", 1).isdigit() else wait
-                _t.sleep(min(delay, 12)); wait = min(wait * 2, 12); continue
-            r.raise_for_status(); data = r.json()
-            if usage is not None:
-                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
-            txt = (data["choices"][0]["message"]["content"] or "").strip()
-            txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
-            return txt or None
-        except Exception as e:
-            print("LLM error:", e)
-            if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
-            return None
+    primary = "litellm" if PROVIDER == "proxy" else PROVIDER
+    providers = [primary] + [p for p in ("litellm", "gigachat") if p != primary]
+    for i, p in enumerate(providers):
+        tries = attempts if i == 0 else 1
+        if p == "litellm":
+            out = _call_proxy(messages, max_tokens, temperature, usage, attempts=tries)
+        elif p == "gigachat":
+            out = _call_giga(messages, max_tokens, temperature, usage, attempts=tries)
+        else:
+            out = None
+        if out:
+            if i:
+                print(f"LLM fallback provider used: {p}")
+            return out
     return None
+
+def _compact_messages(messages):
+    user = ""
+    for m in reversed(messages or []):
+        if m.get("role") == "user":
+            user = m.get("content") or ""
+            break
+    return [
+        {"role": "system", "content": (
+            "Ты AIWA, ИИ-ассистент женского здоровья. Отвечай на русском, конкретно, медицински аккуратно, "
+            "без markdown и без длинных тире. Если вопрос про цикл, беременность, питание или тренировки, дай практичный ответ. "
+            "Если нужно менять данные, честно скажи, что это делается через меню или приложение."
+        )},
+        {"role": "user", "content": user[-1800:]},
+    ]
 
 
 # --- метрики нагрузки: считаем вызовы модели и латентность за интервал ---
 STATS = {"calls": 0, "ms": 0, "err": 0, "wait_ms": 0, "queued": 0}
 # семафор: не больше N одновременных обращений к модели, остальные ждут в очереди
 _LLM_SEM = threading.Semaphore(int(os.environ.get("AIWA_LLM_CONCURRENCY", "10")))
-def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
+def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2):
     import time as _tt
     t0 = _tt.time(); STATS["calls"] += 1
     if not _LLM_SEM.acquire(blocking=False):
@@ -256,6 +321,9 @@ def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
     t1 = _tt.time(); out = None
     try:
         out = _call_impl(messages, max_tokens, temperature, usage, attempts)
+        if not out and len(str(messages)) > 3000:
+            print("LLM compact retry")
+            out = _call_impl(_compact_messages(messages), min(max_tokens, 650), min(temperature, 0.35), usage, 1)
         return out
     finally:
         _LLM_SEM.release()
@@ -318,7 +386,7 @@ def answer_question(st, question, profile=None, history=None, usage=None):
         "Пиши живо и тепло, без воды и канцелярита. Уложись примерно в 3000 знаков и ОБЯЗАТЕЛЬНО заверши мысль, не обрывай предложение на полуслове. Только русский, без markdown. "
         "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: вопрос ;; вопрос — два релевантных вопроса от лица пользовательницы, ОЧЕНЬ КОРОТКО, по 2-4 слова. Вопрос: " + question)})
     out = _call(msgs, max_tokens=1100, temperature=0.35, usage=usage)
-    return _clean(out, "Не получилось ответить с первого раза, попробуй переспросить чуть иначе или загляни в Меню.")
+    return _clean(out, "Я вижу вопрос, но модель сейчас не вернула ответ. Попробуй ещё раз через минуту.")
 
 
 def training_plan(st, profile=None):
@@ -459,10 +527,16 @@ def training_text(st, profile=None):
         f"День {p['day']} из {p['cycle_len']}, {st['subphase']} {st['phase_ru'].lower()} фаза.",
         p["summary"],
         "",
-        "🧬 Почему так",
+        "🧬 Гормоны и физиология",
+    ]
+    for h in p.get("hormones", []):
+        lines.append(f"• {h}")
+    lines += [
+        "",
+        "📌 Почему такая нагрузка",
         p["why"],
         "",
-        "✅ Что подойдёт",
+        "✅ Что выбрать",
     ]
     for o in p["options"]:
         lines.append(f"• {o['name']}: {o['benefit']}. Как: {o['how']}.")
@@ -578,7 +652,7 @@ def general_answer(profile, mode, question, hint=None, history=None, usage=None)
         "ВАЖНО: у этого человека фаза цикла НЕ отслеживается, поэтому НЕ упоминай фазы менструального цикла (фолликулярную, лютеиновую, овуляторную, менструальную) и не привязывай советы к дню цикла. "
         "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: вопрос ;; вопрос — два релевантных вопроса от лица пользовательницы, ОЧЕНЬ КОРОТКО, по 2-4 слова. Вопрос: " + question)})
     out = _call(msgs, max_tokens=1100, temperature=0.35, usage=usage)
-    return _clean(out, "Не получилось ответить с первого раза, попробуй переспросить чуть иначе или загляни в Меню.")
+    return _clean(out, "Я вижу вопрос, но модель сейчас не вернула ответ. Попробуй ещё раз через минуту.")
 
 CURATED_MENU = {
     "menstrual": {"macros": {"protein": "100 г", "fat": "55 г", "carbs": "170 г"}, "meals": [
@@ -720,18 +794,54 @@ def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
 
 
 
+FOOD_PHASE_NOTE = {
+    "menstrual": [
+        "В менструальные дни эстроген и прогестерон низкие, а простагландины могут усиливать спазмы.",
+        "Задача питания: белок для сытости, железо и B12 для восполнения потерь, тёплая еда и вода для мягкой поддержки ЖКТ.",
+        "Если месячные обильные, особенно важны продукты с железом: говядина, печень, рыба, яйца, гречка, зелень."
+    ],
+    "follicular": [
+        "В фолликулярную фазу эстроген постепенно растёт, часто становится больше энергии и лучше переносится активность.",
+        "Обычно лучше заходит белок плюс сложные углеводы: они поддерживают мышцы, насыщение и стабильную энергию.",
+        "Хорошая база: яйца, курица, рыба, говядина, рис, гречка, картофель, овощи, молочные продукты, если они подходят."
+    ],
+    "ovulation": [
+        "В овуляцию эстроген близок к пику, повышается ЛГ, у многих больше энергии и аппетит может быть ровнее.",
+        "Полезны белок, омега-3, антиоксиданты и вода: они поддерживают восстановление, кожу, слизистые и воспалительный баланс.",
+        "Ставка на простые продукты: яйца, рыба, индейка, курица, зелень, овощи, ягоды, крупы."
+    ],
+    "luteal": [
+        "В лютеиновой фазе выше прогестерон, температура тела может слегка расти, чаще появляются отёки, тяга к сладкому и ПМС.",
+        "Питание лучше делать более стабильным: белок в каждый приём, сложные углеводы, магний и B6.",
+        "Подойдут яйца, рыба, индейка, говядина, гречка, картофель, орехи, тыквенные семечки, тёмный шоколад в небольшом количестве."
+    ],
+}
+
 def menu_text(st, menu, target=None):
-    """Текст питания строго из того же меню, что на картинке (картинка и текст совпадают)."""
-    lines = [f"\U0001F37D Питание под {st['phase_ru'].lower()} фазу.", st["content"]["food"], "", "Меню на день:"]
+    """Подробный текст питания из того же меню, что в приложении."""
+    lines = [f"🍽 Питание сегодня: {st['subphase']} {st['phase_ru'].lower()} фаза",
+             f"День {st['day']} из {st['cycle_len']}, до месячных примерно {st['days_to_next']} дн.",
+             "",
+             "🧬 Почему именно так"]
+    for x in FOOD_PHASE_NOTE.get(st.get("phase"), FOOD_PHASE_NOTE["follicular"]):
+        lines.append(f"• {x}")
+    lines += ["", "🥗 Меню на день"]
     for m in menu.get("meals", []):
         k = m.get("kcal", "")
-        lines.append(f"\u2022 {m.get('time','')} {m.get('dish','')}" + (f" - {k}" if k else ""))
+        note = m.get("note", "")
+        tail = " - " + ", ".join([x for x in (note, k) if x])
+        lines.append(f"• {m.get('time','')} {m.get('dish','')}{tail if tail.strip(' -') else ''}")
     mk = menu.get("macros", {})
     if mk:
         lines.append("")
-        lines.append(f"За день: белок {mk.get('protein','-')}, жиры {mk.get('fat','-')}, углеводы {mk.get('carbs','-')}.")
+        lines.append("⚖️ БЖУ на день")
+        lines.append(f"• Белок: {mk.get('protein','-')} - нужен для сытости, мышц и восстановления.")
+        lines.append(f"• Жиры: {mk.get('fat','-')} - важны для гормонов и желчного оттока.")
+        lines.append(f"• Углеводы: {mk.get('carbs','-')} - поддерживают энергию и снижают риск тяги к сладкому.")
     if target:
-        lines.append(f"Ориентир ~{target[0]} ккал в день под твои параметры.")
+        lines.append(f"• Ориентир по калориям: примерно {target[0]} ккал в день под твои параметры.")
+    lines.append("")
+    lines.append("СЛЕДУЮЩИЕ: Что купить? ;; Заменить блюдо?")
     return "\n".join(lines)
 
 def section_text(st, key):

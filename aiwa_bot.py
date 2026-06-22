@@ -53,7 +53,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-21-slim-bot-menu-web-food-partner"
+AIWA_VERSION = "2026-06-22-bot-food-training-adapter"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
@@ -397,7 +397,7 @@ def match_intent(t):
     if re.search(r"фаз", t) and re.search(r"(что так|что значит|расскаж|объясн|не понима|не разбира|какие бывают|подробнее|про фаз)", t): return "phases"
     if re.search(r"месячн|менструац", t) and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t): return "period_end"
     if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
-    if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|упражнени|фитнес|какая активн)", t): return "training"
+    if re.search(r"(нагрузк|трениров|какой спорт|каким спортом|позанима|чем заня|упражнени|фитнес|какая активн)", t): return "training"
     if re.search(r"(что (мне )?(съесть|поесть|есть)|что приготов|какое питани|меню (на )?сегодня|что покушать|еда на сегодня|рацион|что поедим)", t): return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
     if re.search(r"(проанализир|сделай анализ|^\s*анализ|разбер|оцени мой цикл|что (говор|показыв)\w*.*(данн|цикл|выписк)|анализ (выписк|цикл|данн))", t): return "analysis"
@@ -515,9 +515,11 @@ def en_kb(p):
 def sym_kb(selected):
     rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in SYMPTOMS]
     rows.append([InlineKeyboardButton("Готово", callback_data="ci:done")]); return InlineKeyboardMarkup(rows)
-def sugg_kb(cid, items):
+def sugg_kb(cid, items, app_user=None, app_label=None):
     def _short(t): return t if len(t) <= 28 else t[:26].rstrip(" ,.-") + "…"
     rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
+    if app_user and AIWA_WEBAPP_URL:
+        rows.append([InlineKeyboardButton(app_label or "Открыть приложение", web_app=WebAppInfo(url=webapp_url(app_user) or AIWA_WEBAPP_URL))])
     rows.append([B("Меню", "menu", KBS.PRIMARY)]); return InlineKeyboardMarkup(rows)
 def summary_kb(u=None):
     rows = []
@@ -562,15 +564,18 @@ async def send_training_card(context, cid, st):
     except Exception as e:
         log.warning("training img: %s", e)
 
-async def send_menu(context, cid):
+async def send_menu(context, cid, with_image=False):
     u, st = status_of(cid)
     if not st: return None
-    await context.bot.send_chat_action(cid, "upload_photo")
+    if with_image:
+        await context.bot.send_chat_action(cid, "upload_photo")
     prof = profile_of(u); target = profile_kcal(prof) if prof else None
     usage = []; mdata = await asyncio.to_thread(L.menu_today, st, profile=prof, target=target, usage=usage); ev(cid, "tokens", sum(usage))
     if target:
         mdata["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
     note = st["content"]["food"]
+    if not with_image:
+        return mdata, target
     try:
         bio = io.BytesIO(IMG.render_menu(mdata, st["phase_ru"], target_kcal=(target[0] if target else None))); bio.name = "menu.png"
         cap = f"🍽 Меню под {st['phase_ru'].lower()} фазу"
@@ -584,21 +589,24 @@ async def send_menu(context, cid):
         return None
 
 async def send_section(context, cid, st, key):
-    """Нагрузка и питание: живой ответ с мед-обоснованием. Для нагрузки картинка цикла идёт над текстом, для питания сверху карточка-меню."""
+    """Нагрузка и питание: подробный текст с мед-обоснованием и переходом в приложение."""
     await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
     usage = []
     if key == "training":
-        await send_training_card(context, cid, st)
         text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
-        return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage)
+        text += "\n\n📱 В приложении Айвы можно посмотреть нагрузку рядом с календарём, симптомами и фазой цикла. Открой приложение кнопкой ниже."
+        return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage,
+            app_user=row(cid), app_label="Открыть нагрузку")
     if key == "food":
-        res = await send_menu(context, cid)
+        res = await send_menu(context, cid, with_image=False)
         if res:
             mdata, target = res
             text = L.menu_text(st, mdata, target)
         else:
             text = L.section_text(st, "food")
-        return await send_answer(context, cid, text, st, "питание сегодня", usage=usage)
+        text += "\n\n📱 В приложении Айвы меню удобнее: рядом с каждым блюдом есть кнопка «Заменить», можно быстро выбрать другой вариант без пересборки всего дня. Открой приложение кнопкой ниже."
+        return await send_answer(context, cid, text, st, "питание сегодня", usage=usage,
+            app_user=row(cid), app_label="Открыть питание")
     text = L.section_text(st, key)
     await send_answer(context, cid, text, st, text, usage=usage)
 
@@ -676,7 +684,7 @@ def chat_hint(cid):
             base = (base + " " if base else "") + f"Беременность, срок примерно {stp['week']} недель, {stp['trimester']} триместр, до родов ~{max(0, stp['days_left'])} дн."
         except Exception: pass
     return base or None
-async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None):
+async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None):
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
     clean, sugg = sf(text) if sf else (text, [])
@@ -686,7 +694,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None):
             for e in L.followups(st, basis_q, clean):
                 if e not in sugg and len(sugg) < 2: sugg.append(e)
         except Exception: pass
-    kb = sugg_kb(cid, sugg)
+    kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label)
     if quote:
         body = f"<blockquote>{html.escape(quote)}</blockquote>\n{html.escape(clean)}"
         await context.bot.send_message(cid, body, reply_markup=kb, parse_mode="HTML")
@@ -709,6 +717,12 @@ async def send_general(context, cid, key):
     usage = []; q = qmap.get(key, key)
     ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), q, hint=chat_hint(cid), usage=usage)
     _, st = status_of(cid)
+    if key == "food":
+        ans += "\n\n📱 В приложении Айвы можно открыть питание и заменить блюдо кнопкой «Заменить»."
+        return await send_answer(context, cid, ans, st, q, usage=usage, app_user=u, app_label="Открыть питание")
+    if key == "training":
+        ans += "\n\n📱 В приложении Айвы можно смотреть нагрузку рядом с календарём, симптомами и статистикой."
+        return await send_answer(context, cid, ans, st, q, usage=usage, app_user=u, app_label="Открыть нагрузку")
     await send_answer(context, cid, ans, st, q, usage=usage)
 
 def cycle_text_analysis(cid):
@@ -1021,7 +1035,7 @@ async def menutoday_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command"); u, st = status_of(cid)
     if not is_onboarded(u): return await need_onboard(update.message)
     if st is None: return await send_general(context, cid, "food")
-    await send_menu(context, cid)
+    await send_section(context, cid, st, "food")
 async def profile_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
@@ -1186,7 +1200,15 @@ async def stats_cmd(update, context):
 
 # ---------- text ----------
 async def on_text(update, context):
-    await handle_text(update, context, update.message.text.strip())
+    cid = update.effective_chat.id
+    try:
+        await handle_text(update, context, update.message.text.strip())
+    except Exception as e:
+        log.exception("text handler failed for %s", cid)
+        ev(cid, "error", meta=type(e).__name__)
+        await update.message.reply_text(
+            "Я вижу сообщение, но сейчас не смогла собрать ответ. Попробуй ещё раз через минуту или открой Меню.",
+            reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
 
 async def on_voice(update, context):
     cid = update.effective_chat.id; txt = None
@@ -1362,7 +1384,7 @@ async def handle_text(update, context, txt):
         ev(cid, "manual", meta="summary_intent", n=len(txt)); return await push_summary(context, cid)
     if is_onboarded(u) and is_cycle(u) and re.search(r"(замен\w*|друго[ей]\w*\s+блюд\w*|другое на (завтрак|обед|ужин|перекус)|не нравит\w* блюд\w*|обнови\w* меню|пересобер\w* меню)", low):
         _, st = status_of(cid); ev(cid, "manual", meta="menu_replace", n=len(txt))
-        return await send_menu(context, cid)
+        return await send_section(context, cid, st, "food")
     if is_onboarded(u) and is_gibberish(txt):
         ev(cid, "fallback", meta="gibberish", n=len(txt))
         return await update.message.reply_text("Не поняла запрос. Напиши вопрос словами, например: «почему тянет на сладкое» или «какая тренировка сегодня».")
