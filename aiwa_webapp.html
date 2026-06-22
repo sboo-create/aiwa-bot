@@ -86,6 +86,8 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .toast{position:fixed;left:12px;right:12px;bottom:calc(106px + env(safe-area-inset-bottom));max-width:456px;margin:0 auto;background:var(--ink);color:#fff;border-radius:16px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;z-index:80;font-size:13px;box-shadow:0 12px 30px rgba(0,0,0,.18)}
 .toast button{border:none;background:#fff;color:var(--ink);border-radius:999px;padding:7px 11px;font-weight:800}
 .editbar{display:flex;gap:8px;margin:12px 0}.editbar .pbtn{padding:11px 10px}
+.editnote{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--roseLine);background:rgba(251,228,233,.58);border-radius:18px;padding:12px 13px;margin:10px 0 12px;color:var(--inkMid);font-size:12px;line-height:1.45}
+.editnote b{color:var(--roseDeep)}
 .delaychip{color:#6E635C;background:#EFEAE6}
 .phasegrid{display:grid;grid-template-columns:1fr;gap:10px;margin-top:10px}
 .phasecard{border:1px solid var(--line);border-radius:18px;padding:13px 14px;background:#fff}
@@ -274,7 +276,7 @@ function renderToday(){
   html+="<div class='card'><div class='pl'>"+tagHtml+"</div><div class='pday'>День "+day+"</div><div class='pmeta'>"+metaHtml+"</div></div>";
   if(delayed)html+=delayCard(D.status,D.delay_days||0);
   html+="<div class='stats'><div class='stat'><div class='l'>День цикла</div><div class='v'>"+day+"</div><div class='s'>из "+D.cycle_len+"</div></div><div class='stat'><div class='l'>Фаза</div><div class='v'>"+RU[ph].slice(0,4)+".</div><div class='s'>"+sub+"</div></div><div class='stat'><div class='l'>До месячных</div><div class='v'>~"+toNext+"</div><div class='s'>дней</div></div></div>";
-  html+=EDIT_PERIODS?("<div class='editbar'><button class='pbtn' onclick='savePeriodEdit()'>Сохранить</button><button class='pbtn alt' onclick='cancelPeriodEdit()'>Отмена</button></div>"):("<div class='editbar'><button class='pbtn' onclick='beginPeriodEdit()'>Редактировать месячные</button></div>");
+  html+=EDIT_PERIODS?("<div class='editnote'><span>🩸</span><div><b>Редактирование месячных</b><br>Выбери все дни кровотечения, не только первый день. Повторный тап по отмеченному дню убирает его. «Очистить» снимает отметки в этом месяце.</div></div><div class='editbar'><button class='pbtn' onclick='savePeriodEdit()'>Сохранить</button><button class='pbtn alt' onclick='clearPeriodEditMonth()'>Очистить</button><button class='pbtn alt' onclick='cancelPeriodEdit()'>Отмена</button></div>"):("<div class='editbar'><button class='pbtn' onclick='beginPeriodEdit()'>Редактировать месячные</button></div>");
   html+="<div class='calhead'><button class='calnav' id='calPrev'>\u2039</button><div class='sec' id='calLabel' style='margin:0'></div><button class='calnav' id='calNext'>\u203A</button></div><div class='cal' id='cal'></div><div class='calhint' id='calHint'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Менструальная</div><div class='lg'><span class='dot' style='background:"+COL.fol+"'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:"+COL.ovu+"'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:"+COL.lut+"'></span>Лютеиновая</div><div class='lg'><span style='color:#E0556F;font-size:13px;line-height:1'>♥</span>близость</div></div>";
   html+=phaseGuide(ph);
@@ -324,15 +326,20 @@ function toast(msg,action){
   TOAST_TIMER=setTimeout(function(){el.classList.add("hidden");},5200);
 }
 function seedEditDays(){EDIT_DAYS={};Object.keys(PERIOD_DAY||{}).forEach(function(x){EDIT_DAYS[x]=true;});}
-function beginPeriodEdit(){EDIT_PERIODS=true;seedEditDays();renderToday();haptic("selection");}
+function beginPeriodEdit(){EDIT_PERIODS=true;seedEditDays();renderToday();haptic("selection");toast("Выбери все дни месячных, не только первый");}
 function cancelPeriodEdit(){EDIT_PERIODS=false;EDIT_DAYS={};renderToday();}
-function togglePeriodDay(iso){if(EDIT_DAYS[iso])delete EDIT_DAYS[iso];else EDIT_DAYS[iso]=true;drawCal();}
+function clearPeriodEditMonth(){
+  var base=new Date(today.getFullYear(),today.getMonth()+calOffset,1),y=base.getFullYear(),m=base.getMonth(),dim=new Date(y,m+1,0).getDate();
+  for(var d=1;d<=dim;d++)delete EDIT_DAYS[isoOf(new Date(y,m,d))];
+  drawCal();haptic("impact","light");toast("Отметки в этом месяце сняты. Нажми «Сохранить», чтобы применить.");
+}
+function togglePeriodDay(iso){if(EDIT_DAYS[iso]){delete EDIT_DAYS[iso];toast("День убран из месячных");}else{EDIT_DAYS[iso]=true;toast("День добавлен к месячным");}haptic("impact","light");drawCal();}
 function rangesFromEditDays(){
   var days=Object.keys(EDIT_DAYS).sort(),out=[],cur=null,last=null;
   days.forEach(function(iso){var d=new Date(iso+"T00:00:00");if(!cur){cur={start:iso,end:iso};last=d;return;}var diff=(d-last)/86400000;if(diff===1){cur.end=iso;}else{out.push(cur);cur={start:iso,end:iso};}last=d;});
   if(cur)out.push(cur);return out;
 }
-async function savePeriodEdit(){haptic("impact","medium");try{await api("/api/period",{action:"replace",periods:rangesFromEditDays()});EDIT_PERIODS=false;EDIT_DAYS={};await reloadAfterEdit();toast("Календарь обновлён");}catch(e){}}
+async function savePeriodEdit(){haptic("impact","medium");try{var ranges=rangesFromEditDays();await api("/api/period",{action:"replace",periods:ranges});EDIT_PERIODS=false;EDIT_DAYS={};await reloadAfterEdit();toast(ranges.length?"Календарь обновлён":"Месячные удалены из календаря");}catch(e){}}
 async function undoPeriod(){var p=UNDO_PERIOD;if(!p)return;document.getElementById("toast").classList.add("hidden");try{await api("/api/period",{action:"start",date:p.start});if(p.end&&p.end!==p.start)await api("/api/period",{action:"end",date:p.end,start:p.start});UNDO_PERIOD=null;await reloadAfterEdit();}catch(e){}}
 async function markPA(iso){haptic("impact","light");try{var r=await api("/api/pa",{date:iso});if(r&&!r.skip){if(r.marked)PA_SET[iso]=true;else delete PA_SET[iso];drawCal();}}catch(e){}}
 function ensureTodayLog(){D.today_log=D.today_log||{};D.today_log.symptoms=D.today_log.symptoms||[];return D.today_log;}
@@ -373,14 +380,16 @@ function drawCal(){
     var dd=new Date(y,m,d);dd.setHours(0,0,0,0);var iso=isoOf(dd);
     var e=document.createElement('button');e.className='day';e.type='button';e.textContent=d;e.style.position='relative';
     var isToday=dd.getTime()===today.getTime(),inf=dayInfo(dd);
-    if(inf&&inf.ph){e.style.borderColor=COL[inf.ph];if(inf.day<=5)e.style.background=WASH[inf.ph];e.style.color=inf.fut?'var(--inkSoft)':'var(--ink)';}
+    if(inf&&inf.ph&&!EDIT_PERIODS){e.style.borderColor=COL[inf.ph];if(inf.day<=5)e.style.background=WASH[inf.ph];e.style.color=inf.fut?'var(--inkSoft)':'var(--ink)';}
+    else if(inf&&inf.ph&&EDIT_PERIODS){e.style.borderColor='rgba(33,28,26,.08)';e.style.color=inf.fut?'var(--inkSoft)':'var(--inkMid)';}
     else{e.style.color='var(--inkSoft)';}
     var marked=EDIT_PERIODS?!!EDIT_DAYS[iso]:!!PERIOD_DAY[iso];
     var prev=isoOf(addDays(dd,-1)),next=isoOf(addDays(dd,1));
     var start=marked&&!(EDIT_PERIODS?EDIT_DAYS[prev]:PERIOD_DAY[prev]);
     var end=marked&&!(EDIT_PERIODS?EDIT_DAYS[next]:PERIOD_DAY[next]);
     if(marked){
-      e.style.background=WASH.men;e.style.borderColor=COL.men;e.style.color=COL.men;e.style.fontWeight='800';
+      e.style.background=EDIT_PERIODS?'#fff':WASH.men;e.style.borderColor=COL.men;e.style.color=COL.men;e.style.fontWeight='800';
+      if(EDIT_PERIODS)e.style.boxShadow='0 0 0 3px rgba(194,94,118,.18) inset';
       e.style.borderRadius=(start&&end)?'50%':(start?'16px 8px 8px 16px':(end?'8px 16px 16px 8px':'9px'));
     } else if(isToday){e.classList.add('today');}
     if(EDIT_PERIODS&&dd>today){e.style.opacity='.35';}
@@ -391,7 +400,7 @@ function drawCal(){
     cal.appendChild(e);
   })(d);}
   var hint=document.getElementById('calHint');
-  hint.textContent=EDIT_PERIODS?'Выбери дни месячных и нажми «Сохранить»':'нажми на день, чтобы отметить близость';
+  hint.textContent=EDIT_PERIODS?'выбирай все дни месячных · повторный тап удаляет день · затем Сохранить':'нажми на день, чтобы отметить близость';
 }
 function ayvaCard(text){return "<div class='ayva'><div class='ayva-top'><span class='blossom' id='sl'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+esc(text||"")+"</div></div></div></div>";}
 var loadedFood=false,loadedTrain=false,FOOD_DATA=null;
