@@ -178,6 +178,7 @@ def _focus(st):
 
 PROXY_URL = os.environ.get("LITELLM_URL", "https://94.139.253.119:8002/litellm/v1/chat/completions")
 PROXY_MODEL = os.environ.get("LITELLM_MODEL", "gigachat-3-ultra")
+FALLBACK_PROXY_URL = "https://104.168.54.196:4000/litellm/v1/messages?beta=true"
 def _proxy_is_messages(url=None):
     return "/messages" in ((url or PROXY_URL) or "")
 
@@ -223,14 +224,16 @@ def _response_text(data):
 def _proxy_configs():
     key = os.environ.get("LITELLM_KEY"); xkey = os.environ.get("LITELLM_XKEY")
     cfgs = [{"name": "litellm", "url": PROXY_URL, "model": PROXY_MODEL, "key": key, "xkey": xkey}]
-    fb_url = os.environ.get("LITELLM_FALLBACK_URL") or os.environ.get("AIWA_LLM_FALLBACK_URL")
-    if fb_url:
+    fb_key = os.environ.get("LITELLM_FALLBACK_KEY") or os.environ.get("AIWA_LLM_FALLBACK_KEY")
+    fb_xkey = os.environ.get("LITELLM_FALLBACK_XKEY") or os.environ.get("AIWA_LLM_FALLBACK_XKEY")
+    fb_url = os.environ.get("LITELLM_FALLBACK_URL") or os.environ.get("AIWA_LLM_FALLBACK_URL") or FALLBACK_PROXY_URL
+    if fb_key or fb_xkey:
         cfgs.append({
             "name": "litellm_fallback",
             "url": fb_url,
             "model": os.environ.get("LITELLM_FALLBACK_MODEL") or os.environ.get("AIWA_LLM_FALLBACK_MODEL") or PROXY_MODEL,
-            "key": os.environ.get("LITELLM_FALLBACK_KEY") or os.environ.get("AIWA_LLM_FALLBACK_KEY") or key,
-            "xkey": os.environ.get("LITELLM_FALLBACK_XKEY") or os.environ.get("AIWA_LLM_FALLBACK_XKEY") or xkey,
+            "key": fb_key,
+            "xkey": fb_xkey,
         })
     return [c for c in cfgs if c.get("url") and (c.get("key") or c.get("xkey"))]
 
