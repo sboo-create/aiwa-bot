@@ -56,6 +56,7 @@ DISCLAIMER = "AIWA не ставит диагнозы; при тревожных
 AIWA_VERSION = "2026-06-22-app-cta"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
+APP_MENU_BUTTON_TEXT = "Айва"
 APP_CTA_HTML = "📱 <b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
@@ -1569,7 +1570,7 @@ async def on_startup(app):
         log.warning("executor: %s", e)
     if AIWA_WEBAPP_URL:
         try:
-            await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=APP_BUTTON_TEXT, web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
+            await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT, web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
         except Exception as e:
             log.warning("menu button: %s", e)
     try:
