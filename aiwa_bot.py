@@ -69,7 +69,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-23-dashboard-symptoms"
+AIWA_VERSION = "2026-06-23-admin-dashboard-30d"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
 APP_MENU_BUTTON_TEXT = "Айва"
@@ -2192,34 +2192,63 @@ def _admin_key_ok(request):
     got = request.query.get("key") or request.headers.get("X-Admin-Key") or ""
     return _hmac.compare_digest(str(got), str(expected))
 
-def admin_dashboard_data():
+def admin_dashboard_data(days=30):
     from collections import Counter, defaultdict
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 30
+    days = max(7, min(180, days))
+    today = datetime.now(TZ).date()
+    since = today - timedelta(days=days - 1)
+    since_ts = datetime.combine(since, dtime.min).isoformat()
     c = db()
     users = c.execute("SELECT chat_id, created, last_period, cycle_len, mode FROM users").fetchall()
-    events = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, n FROM events ORDER BY ts DESC LIMIT 5000").fetchall()
+    events = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, n FROM events WHERE ts>=? ORDER BY ts",
+                       (since_ts,)).fetchall()
     partners = c.execute("SELECT partner_id, woman_id, created FROM partners").fetchall()
     logs = c.execute("SELECT log_date, symptoms FROM logs WHERE log_date>=? ORDER BY log_date DESC",
-                     ((date.today() - timedelta(days=14)).isoformat(),)).fetchall()
+                     (since.isoformat(),)).fetchall()
     c.close()
-    today = date.today()
     def dparse(ts):
         try: return datetime.fromisoformat(ts).date()
         except Exception: return today
-    active_by_day = defaultdict(set); signups_by_day = Counter(); bcast = Counter(); actions = Counter(); modes = Counter()
-    answers = errors = tokens = 0; lat = []
+    def pct(a, p):
+        a = sorted(a)
+        return a[min(len(a) - 1, int(len(a) * p))] if a else 0
+    def in_period(ts):
+        return bool(ts) and dparse(ts) >= since
+
+    active_by_day = defaultdict(set)
+    signups_by_day = Counter(); answers_by_day = Counter(); errors_by_day = Counter()
+    bcast_by_day = defaultdict(Counter)
+    bcast = Counter(); bcast_today = Counter(); actions = Counter(); goals = Counter(); modes = Counter()
+    answers = fallback = errors = tokens = reqs = 0; lat = []; input_lens = []
     for _, _, _, _, mode in users: modes[mode or "cycle"] += 1
     for cid, ts, action, tok, meta, ms, n in events:
         d = dparse(ts)
+        iso = d.isoformat()
         if action in ("manual", "button", "suggest", "command", "answered", "fallback"):
-            active_by_day[d.isoformat()].add(cid)
+            active_by_day[iso].add(cid)
+            if n: input_lens.append(n)
         if action == "signup": signups_by_day[d.isoformat()] += 1
-        if action == "broadcast" and d == today: bcast[meta or "unknown"] += 1
+        if action == "broadcast":
+            key = meta or "unknown"; bcast[key] += 1; bcast_by_day[iso][key] += 1
+            if d == today: bcast_today[key] += 1
         if action == "answered":
-            answers += 1
+            answers += 1; answers_by_day[iso] += 1
             if ms: lat.append(ms)
-        if action == "error": errors += 1
+        if action == "fallback":
+            fallback += 1
+        if action == "error":
+            errors += 1; errors_by_day[iso] += 1
         if tok: tokens += tok
-        actions[meta or action] += 1
+        if action in ("answered", "fallback", "command", "button", "manual", "suggest", "voice"):
+            reqs += 1
+        if action == "goal":
+            goals[meta or "goal"] += 1
+        label = (action + ":" + meta) if meta and action in ("manual", "goal", "broadcast") else (meta or action)
+        actions[label] += 1
     def active(days):
         cut = today - timedelta(days=days - 1)
         return len(set().union(*[s for ds, s in active_by_day.items() if date.fromisoformat(ds) >= cut]) if active_by_day else set())
@@ -2227,48 +2256,73 @@ def admin_dashboard_data():
     for _, ss in logs:
         for s in (ss or "").split(","):
             if s: symptom_counts[symptom_label(s)] += 1
-    days = []
-    for i in range(13, -1, -1):
+    series = []
+    for i in range(days - 1, -1, -1):
         d = today - timedelta(days=i); iso = d.isoformat()
-        days.append({"date": iso[5:], "active": len(active_by_day.get(iso, set())), "signups": signups_by_day[iso]})
+        series.append({
+            "date": iso[5:],
+            "active": len(active_by_day.get(iso, set())),
+            "signups": signups_by_day[iso],
+            "answers": answers_by_day[iso],
+            "errors": errors_by_day[iso],
+            "broadcast_sent": bcast_by_day[iso]["sent"],
+            "broadcast_error": bcast_by_day[iso]["error"],
+        })
     lat.sort()
-    p95 = lat[min(len(lat) - 1, int(len(lat) * 0.95))] if lat else 0
+    p50 = pct(lat, 0.5); p95 = pct(lat, 0.95)
     onboarded = sum(1 for _, _, lp, cl, md in users if (lp and cl) or md in ("irregular", "none", "meno", "preg"))
+    new_users = sum(1 for _, created, _, _, _ in users if in_period(created))
+    active_period = len(set().union(*active_by_day.values()) if active_by_day else set())
+    app_users = len(set(cid for cid, _, action, _, meta, _, _ in events
+                        if meta in ("webapp", "web_checkin", "web_period", "web_pa", "web_profile", "web_meal")))
+    got_summary = len(set(cid for cid, _, action, _, meta, _, _ in events if action == "goal" and meta == "summary"))
+    partner_new = sum(1 for _, _, created in partners if in_period(created))
+    ans_tot = answers + fallback + errors
+    success_rate = round(answers / ans_tot * 100) if ans_tot else 0
+    avg_input = round(sum(input_lens) / len(input_lens)) if input_lens else 0
     return {
         "updated": datetime.now().strftime("%d.%m %H:%M"),
-        "users": len(users), "onboarded": onboarded,
+        "period_days": days, "since": since.isoformat(), "until": today.isoformat(),
+        "users": len(users), "onboarded": onboarded, "new_users": new_users, "active_period": active_period,
         "dau": active(1), "wau": active(7), "mau": active(30),
-        "partners": len(partners), "partner_women": len(set(p[1] for p in partners)),
-        "broadcast": {"scheduled": len(all_users()), "queued": bcast["queued"], "sent": bcast["sent"], "error": bcast["error"]},
-        "model": {"answers": answers, "errors": errors, "tokens": tokens, "p95_ms": p95},
-        "modes": modes.most_common(), "actions": actions.most_common(12), "symptoms": symptom_counts.most_common(10),
-        "days": days,
+        "partners": len(partners), "partner_new": partner_new, "partner_women": len(set(p[1] for p in partners)),
+        "broadcast": {
+            "scheduled": len(all_users()), "queued": bcast["queued"], "sent": bcast["sent"], "error": bcast["error"],
+            "today_queued": bcast_today["queued"], "today_sent": bcast_today["sent"], "today_error": bcast_today["error"],
+        },
+        "model": {
+            "answers": answers, "fallback": fallback, "errors": errors, "tokens": tokens,
+            "p50_ms": p50, "p95_ms": p95, "success_rate": success_rate, "avg_input": avg_input,
+        },
+        "funnel": {"new_users": new_users, "onboarded_total": onboarded, "active_period": active_period,
+                   "got_summary": got_summary, "app_users": app_users, "partner_new": partner_new},
+        "modes": modes.most_common(), "actions": actions.most_common(14), "goals": goals.most_common(10),
+        "symptoms": symptom_counts.most_common(12), "days": series,
     }
 
 async def _admin_stats(request):
     if not _admin_key_ok(request):
         return web.json_response({"error": "forbidden"}, status=403)
-    return web.json_response(admin_dashboard_data())
+    return web.json_response(admin_dashboard_data(request.query.get("days", 30)))
 
 async def _admin_page(request):
     if not _admin_key_ok(request):
         return web.Response(text="forbidden", status=403)
     html_text = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AIWA dashboard</title><style>
-body{margin:0;background:#FAF5F2;color:#211C1A;font-family:-apple-system,BlinkMacSystemFont,Inter,Arial,sans-serif}.wrap{max-width:1120px;margin:0 auto;padding:24px}h1{font-size:30px;margin:0 0 4px;font-family:Georgia,serif;font-weight:500}.muted{color:#7D746E}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0}.card{background:#fff;border:1px solid #E8DED8;border-radius:16px;padding:16px;box-shadow:0 10px 24px rgba(33,28,26,.04)}.k{font-size:11px;text-transform:uppercase;color:#A89C93;font-weight:800;letter-spacing:.05em}.v{font-size:30px;font-family:Georgia,serif;margin-top:6px}.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}.bar{height:9px;background:#FBE4E9;border-radius:9px;overflow:hidden;margin-top:8px}.bar span{display:block;height:100%;background:#C25E76}.row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #F0E8E3;padding:8px 0;font-size:14px}.row:last-child{border-bottom:0}.chart{display:flex;align-items:end;gap:5px;height:120px;margin-top:12px}.b{flex:1;min-width:12px;background:#C25E76;border-radius:6px 6px 0 0;position:relative}.b i{position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:10px;color:#A89C93;font-style:normal}@media(max-width:800px){.grid,.cols{grid-template-columns:1fr 1fr}}@media(max-width:520px){.grid,.cols{grid-template-columns:1fr}.wrap{padding:16px}}
-</style><div class="wrap"><h1>AIWA dashboard</h1><div class="muted" id="up">loading</div><div class="grid" id="cards"></div><div class="cols"><div class="card"><div class="k">Активность 14 дней</div><div class="chart" id="chart"></div></div><div class="card"><div class="k">Рассылки сегодня</div><div id="bcast"></div></div><div class="card"><div class="k">Топ действий</div><div id="actions"></div></div><div class="card"><div class="k">Симптомы 14 дней</div><div id="symptoms"></div></div><div class="card"><div class="k">Режимы</div><div id="modes"></div></div><div class="card"><div class="k">Модель</div><div id="model"></div></div></div></div>
+:root{--paper:#FAF5F2;--ink:#211C1A;--muted:#8E8179;--line:#E8DED8;--card:#FFFDFC;--rose:#C25E76;--rose2:#F8DDE5;--green:#4FAB73;--blue:#2F84DD;--amber:#E4A93A;--bad:#A94D5A}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#FFFDFC 0,#FAF5F2 42%,#F6EEE9 100%);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Manrope","Segoe UI",Arial,sans-serif}.wrap{max-width:1240px;margin:0 auto;padding:28px 24px 40px}.top{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}.brand{display:flex;gap:12px;align-items:center}.mark{width:42px;height:42px;border-radius:16px;background:radial-gradient(circle at 35% 30%,#fff 0 14%,#F8C9D6 15% 45%,#C25E76 46% 100%);box-shadow:0 14px 30px rgba(194,94,118,.18)}h1{font-family:Georgia,"Times New Roman",serif;font-size:36px;line-height:1;margin:0;font-weight:500}.sub,.muted{color:var(--muted)}.sub{font-size:14px;margin-top:7px}.tabs{display:flex;gap:8px;background:#fff;border:1px solid var(--line);padding:6px;border-radius:999px;box-shadow:0 10px 26px rgba(33,28,26,.05)}.tabs button{border:0;border-radius:999px;background:transparent;padding:10px 14px;color:#6F625B;font-weight:800;cursor:pointer}.tabs button.on{background:var(--rose);color:white}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}.card{background:rgba(255,253,252,.92);border:1px solid var(--line);border-radius:18px;padding:17px;box-shadow:0 12px 28px rgba(33,28,26,.05)}.k{font-size:11px;text-transform:uppercase;color:#A79A91;font-weight:850;letter-spacing:.06em}.v{font-size:32px;line-height:1.05;font-family:Georgia,"Times New Roman",serif;margin-top:7px}.hint{font-size:13px;color:var(--muted);margin-top:5px}.cols{display:grid;grid-template-columns:1.35fr .85fr;gap:14px}.stack{display:grid;gap:14px}.chart{display:flex;align-items:end;gap:5px;height:180px;margin-top:16px;padding:0 2px 24px;border-bottom:1px solid var(--line)}.b{flex:1;min-width:5px;border-radius:7px 7px 0 0;background:linear-gradient(180deg,var(--rose),#E9A6B6);position:relative}.b.signup{background:linear-gradient(180deg,var(--green),#BEE4C7)}.b.answer{background:linear-gradient(180deg,var(--blue),#BBD8F5)}.b.err{background:linear-gradient(180deg,var(--bad),#F0BBC2)}.b i{position:absolute;bottom:-21px;left:50%;transform:translateX(-50%) rotate(-35deg);font-size:10px;color:#A79A91;font-style:normal;white-space:nowrap}.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:13px;font-size:13px;color:#6F625B}.dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px;background:var(--rose)}.dot.g{background:var(--green)}.dot.blu{background:var(--blue)}.dot.bad{background:var(--bad)}.row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #F0E8E3;padding:9px 0;font-size:14px}.row:last-child{border-bottom:0}.row span{color:#6F625B}.row b{text-align:right}.pillgrid{display:grid;gap:9px;margin-top:10px}.pill{display:grid;grid-template-columns:minmax(90px,1fr) 70px;gap:10px;align-items:center}.track{height:10px;border-radius:99px;background:#F2EAE5;overflow:hidden}.fill{display:block;height:100%;border-radius:99px;background:var(--rose)}.fill.green{background:var(--green)}.fill.blue{background:var(--blue)}.fill.amber{background:var(--amber)}.split{display:grid;grid-template-columns:1fr 1fr;gap:14px}.wide{grid-column:1/-1}.status{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:7px 10px;background:#fff;color:#6F625B;font-size:13px}.loading{padding:28px;border:1px dashed var(--line);border-radius:18px;color:var(--muted)}@media(max-width:980px){.grid{grid-template-columns:repeat(2,1fr)}.cols,.split{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}@media(max-width:560px){.wrap{padding:18px 14px}.grid{grid-template-columns:1fr}.tabs{width:100%;justify-content:space-between}.tabs button{flex:1;padding:9px 8px}h1{font-size:31px}.chart{gap:3px}.b i{display:none}}
+</style><div class="wrap"><div class="top"><div class="brand"><div class="mark"></div><div><h1>AIWA dashboard</h1><div class="sub" id="up">загрузка</div></div></div><div class="tabs" id="tabs"><button data-days="7">7 дней</button><button data-days="30">30 дней</button><button data-days="90">90 дней</button></div></div><div id="root" class="loading">Собираю статистику...</div></div>
 <script>
-const key=new URLSearchParams(location.search).get('key')||'';function row(k,v){return `<div class=row><span>${k}</span><b>${v}</b></div>`}
-fetch('/api/admin_stats?key='+encodeURIComponent(key)).then(r=>r.json()).then(d=>{
-up.textContent='обновлено '+d.updated;
-cards.innerHTML=[['Пользователи',d.users],['Онбординг',d.onboarded],['DAU',d.dau],['WAU',d.wau],['MAU',d.mau],['Партнёры',d.partners],['Женщин с партнёром',d.partner_women],['Ответов',d.model.answers]].map(x=>`<div class=card><div class=k>${x[0]}</div><div class=v>${x[1]}</div></div>`).join('');
-let mx=Math.max(1,...d.days.map(x=>x.active));chart.innerHTML=d.days.map(x=>`<div class=b style="height:${Math.max(3,x.active/mx*100)}%"><i>${x.date}</i></div>`).join('');
-bcast.innerHTML=row('запланировано',d.broadcast.scheduled)+row('в очереди',d.broadcast.queued)+row('отправлено',d.broadcast.sent)+row('ошибок',d.broadcast.error);
-actions.innerHTML=(d.actions||[]).map(x=>row(x[0],x[1])).join('')||'<div class=muted>нет данных</div>';
-symptoms.innerHTML=(d.symptoms||[]).map(x=>row(x[0],x[1])).join('')||'<div class=muted>нет данных</div>';
-modes.innerHTML=(d.modes||[]).map(x=>row(x[0],x[1])).join('');
-model.innerHTML=row('ответов',d.model.answers)+row('ошибок',d.model.errors)+row('токенов',d.model.tokens)+row('p95',d.model.p95_ms+' мс');
-});
+const q=new URLSearchParams(location.search),key=q.get('key')||'';let period=Number(q.get('days')||30);if(![7,30,90].includes(period))period=30;const rootEl=document.getElementById('root'),upEl=document.getElementById('up');
+const labels={cycle:'цикл',irregular:'нерегулярный',none:'без цикла',meno:'менопауза',preg:'беременность',answered:'ответы',fallback:'фолбэк',error:'ошибка',command:'команды',button:'кнопки',suggest:'саджесты','manual:web_checkin':'чек-ин','manual:web_period':'месячные','manual:web_pa':'близость','goal:summary':'сводка','goal:report':'выписка','goal:partner_link':'партнёр','broadcast:sent':'рассылка ушла','broadcast:error':'ошибка рассылки','broadcast:queued':'рассылка в очереди'};
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function name(x){return labels[x]||x||'пусто'}function fmt(n){return Number(n||0).toLocaleString('ru-RU')}function row(k,v){return `<div class=row><span>${esc(k)}</span><b>${esc(v)}</b></div>`}
+function card(k,v,h){return `<div class=card><div class=k>${esc(k)}</div><div class=v>${esc(v)}</div>${h?`<div class=hint>${esc(h)}</div>`:''}</div>`}
+function list(items,cls){let mx=Math.max(1,...(items||[]).map(x=>x[1]||0));return `<div class=pillgrid>${(items||[]).map((x,i)=>`<div class=pill><div><b>${esc(name(x[0]))}</b><div class=track><span class="fill ${cls||''}" style="width:${Math.max(4,(x[1]||0)/mx*100)}%"></span></div></div><b>${fmt(x[1])}</b></div>`).join('')||'<div class=muted>нет данных</div>'}</div>`}
+function bars(days,field,cls){let mx=Math.max(1,...days.map(x=>x[field]||0));return days.map((x,i)=>`<div class="b ${cls||''}" title="${x.date}: ${x[field]||0}" style="height:${Math.max(3,(x[field]||0)/mx*100)}%">${(i%Math.ceil(days.length/8)===0)?`<i>${x.date}</i>`:''}</div>`).join('')}
+function setTabs(){document.querySelectorAll('#tabs button').forEach(b=>{b.classList.toggle('on',Number(b.dataset.days)===period);b.onclick=()=>{period=Number(b.dataset.days);q.set('days',period);history.replaceState(null,'','?'+q.toString());load();}})}
+async function load(){setTabs();rootEl.className='loading';rootEl.textContent='Собираю статистику...';let r=await fetch('/api/admin_stats?key='+encodeURIComponent(key)+'&days='+period);let d=await r.json();if(d.error){rootEl.textContent='Нет доступа';return}upEl.textContent=`${d.since} - ${d.until}, обновлено ${d.updated}`;rootEl.className='';rootEl.innerHTML=`<div class=grid>${card('Всего пользователей',fmt(d.users),`новых за период: ${fmt(d.new_users)}`)}${card('Онбординг',fmt(d.onboarded),'всего прошли настройку')}${card('Активные за период',fmt(d.active_period),`DAU ${fmt(d.dau)} · WAU ${fmt(d.wau)} · MAU ${fmt(d.mau)}`)}${card('Партнёры',fmt(d.partners),`новых: ${fmt(d.partner_new)}, женщин: ${fmt(d.partner_women)}`)}${card('Ответы модели',fmt(d.model.answers),`успешность ${d.model.success_rate}%`)}${card('Ошибки модели',fmt(d.model.errors),`p95 ${fmt(d.model.p95_ms)} мс`)}${card('Рассылки',fmt(d.broadcast.sent),`ошибок: ${fmt(d.broadcast.error)}`)}${card('Токены',fmt(d.model.tokens),`средний ввод ${fmt(d.model.avg_input)} симв.`)}</div><div class=cols><div class=stack><div class=card><div class=k>Активность за ${d.period_days} дней</div><div class=chart>${bars(d.days,'active','')}</div><div class=legend><span><i class=dot></i>активные пользователи по дням</span></div></div><div class=split><div class=card><div class=k>Регистрации</div><div class=chart>${bars(d.days,'signups','signup')}</div><div class=legend><span><i class="dot g"></i>новые пользователи</span></div></div><div class=card><div class=k>Ответы и ошибки</div><div class=chart>${bars(d.days,'answers','answer')}</div><div class=legend><span><i class="dot blu"></i>ответы</span><span><i class="dot bad"></i>ошибки: ${fmt(d.model.errors)}</span></div></div></div></div><div class=stack><div class=card><div class=k>Рассылки</div>${row('запланировано сейчас',fmt(d.broadcast.scheduled))+row('ушло за период',fmt(d.broadcast.sent))+row('ошибок за период',fmt(d.broadcast.error))+row('сегодня ушло',fmt(d.broadcast.today_sent))+row('сегодня ошибок',fmt(d.broadcast.today_error))}</div><div class=card><div class=k>Воронка</div>${row('новые пользователи',fmt(d.funnel.new_users))+row('активные за период',fmt(d.funnel.active_period))+row('получили сводку',fmt(d.funnel.got_summary))+row('пользовались приложением',fmt(d.funnel.app_users))+row('новые партнёры',fmt(d.funnel.partner_new))}</div><div class=card><div class=k>Модель</div>${row('ответы',fmt(d.model.answers))+row('фолбэки',fmt(d.model.fallback))+row('ошибки',fmt(d.model.errors))+row('успешность',d.model.success_rate+'%')+row('p50 / p95',fmt(d.model.p50_ms)+' / '+fmt(d.model.p95_ms)+' мс')}</div></div><div class="card wide"><div class=k>Топ действий</div>${list(d.actions)}</div><div class=card><div class=k>Симптомы</div>${list(d.symptoms,'amber')}</div><div class=card><div class=k>Режимы</div>${list(d.modes,'green')}</div><div class=card><div class=k>Целевые действия</div>${list(d.goals,'blue')}</div></div>`}
+load().catch(e=>{rootEl.className='loading';rootEl.textContent='Ошибка загрузки: '+e.message});
 </script>"""
     return web.Response(text=html_text, content_type="text/html")
 
