@@ -35,6 +35,7 @@ except Exception as e:
     RPT = None; print("report off:", e)
 BOT_USERNAME = None
 BCAST_Q = None  # очередь утренней рассылки (троттлинг под лимиты Groq)
+BCAST_PENDING = set()
 ALERT_LAST = {}
 CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
 def hist_get(cid):
@@ -69,7 +70,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-23-admin-dashboard-30d"
+AIWA_VERSION = "2026-06-23-broadcast-catchup"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
 APP_MENU_BUTTON_TEXT = "Айва"
@@ -578,6 +579,44 @@ def schedule_text(cid, hhmm):
         return f"Время сводки: {hhmm} (МСК)."
     return (f"Время сводки: {hhmm} (МСК). Для тебя фактически около {actual}.\n\n"
             f"Разброс до {jitter - 1} минут нужен, чтобы сводки у всех пользователей не уходили в одну секунду.")
+
+def today_start_iso():
+    return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
+
+def summary_sent_today(cid):
+    c = db()
+    r = c.execute("""SELECT 1 FROM events
+        WHERE chat_id=? AND ts>=? AND (
+            (action='goal' AND meta='summary') OR
+            (action='broadcast' AND meta='sent')
+        ) LIMIT 1""", (cid, today_start_iso())).fetchone()
+    c.close()
+    return bool(r)
+
+def should_catchup_broadcast(cid, hhmm):
+    actual, _, _ = scheduled_hhmm(cid, hhmm)
+    h, m = map(int, actual.split(":"))
+    now = datetime.now(TZ)
+    due = datetime.combine(now.date(), dtime(h, m), tzinfo=TZ)
+    try:
+        hours = max(1, int(os.environ.get("AIWA_BROADCAST_CATCHUP_HOURS", "16")))
+    except (TypeError, ValueError):
+        hours = 16
+    return due <= now <= due + timedelta(hours=hours) and not summary_sent_today(cid)
+
+async def enqueue_broadcast(cid, meta="queued"):
+    if summary_sent_today(cid):
+        return False
+    if cid in BCAST_PENDING:
+        return False
+    BCAST_PENDING.add(cid)
+    ev(cid, "broadcast", meta=meta)
+    if BCAST_Q is not None:
+        await BCAST_Q.put(cid)
+        return True
+    BCAST_PENDING.discard(cid)
+    return False
+
 def en_kb(p):
     return InlineKeyboardMarkup([[InlineKeyboardButton(EN[i].capitalize(), callback_data=f"ci:{p}:{i}") for i in (1, 2, 3)]])
 def sym_kb(selected):
@@ -941,8 +980,7 @@ class _BCtx:
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     cid = context.job.chat_id
     if BCAST_Q is not None:
-        ev(cid, "broadcast", meta="queued")
-        return await BCAST_Q.put(cid)          # в очередь, обработает воркер с паузами
+        return await enqueue_broadcast(cid)    # в очередь, обработает воркер с паузами
     try:
         await push_summary(context, cid); await push_partner(context, cid)
         ev(cid, "broadcast", meta="sent")
@@ -952,7 +990,7 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def broadcast_worker(app):
     """Шлёт утренние сводки по одной с паузой, чтобы не превышать лимит токенов/мин Groq."""
-    delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "15"))
+    delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "6"))
     while True:
         cid = await BCAST_Q.get()
         try:
@@ -965,6 +1003,7 @@ async def broadcast_worker(app):
             except Exception: pass
             log.warning("broadcast %s: %s", cid, e)
         finally:
+            BCAST_PENDING.discard(cid)
             BCAST_Q.task_done()
         await asyncio.sleep(delay)
 
@@ -1449,6 +1488,29 @@ async def stats_cmd(update, context):
         return await update.message.reply_text("Эта команда доступна только администратору.")
     await update.message.reply_text(aggregate_stats())
 
+async def broadcast_today_cmd(update, context):
+    cid = update.effective_chat.id
+    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
+        return await update.message.reply_text("Эта команда доступна только администратору.")
+    users = all_users()
+    queued = skipped = 0
+    for uid in users:
+        if summary_sent_today(uid):
+            skipped += 1
+            continue
+        if await enqueue_broadcast(uid):
+            queued += 1
+        else:
+            skipped += 1
+    qsize = BCAST_Q.qsize() if BCAST_Q is not None else 0
+    await update.message.reply_text(
+        f"Запустила рассылку на сегодня.\n\n"
+        f"В очереди: {queued}\n"
+        f"Уже была сводка или уже стоят в очереди: {skipped}\n"
+        f"Размер очереди сейчас: {qsize}\n\n"
+        f"Сводки уйдут по очереди, чтобы не положить модель и Telegram."
+    )
+
 # ---------- text ----------
 async def on_text(update, context):
     cid = update.effective_chat.id
@@ -1903,9 +1965,15 @@ async def on_startup(app):
     asyncio.create_task(broadcast_worker(app))
     asyncio.create_task(load_logger(app))
     asyncio.create_task(model_probe(app))
-    n = 0
-    for cid in all_users(): schedule_daily(app, cid, row(cid)["send_time"] or "08:00"); n += 1
-    log.info("Rescheduled %d", n)
+    n = catchup = 0
+    for cid in all_users():
+        u = row(cid) or {}
+        hhmm = u.get("send_time") or "08:00"
+        schedule_daily(app, cid, hhmm); n += 1
+        if should_catchup_broadcast(cid, hhmm):
+            if await enqueue_broadcast(cid):
+                catchup += 1
+    log.info("Rescheduled %d, broadcast catchup queued %d", n, catchup)
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
 def _verify_init(init_data):
@@ -2349,7 +2417,7 @@ async def run_all():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("broadcast_today", broadcast_today_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
