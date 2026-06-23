@@ -37,7 +37,22 @@ BOT_USERNAME = None
 BCAST_Q = None  # очередь утренней рассылки (троттлинг под лимиты Groq)
 ALERT_LAST = {}
 CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
-def hist_get(cid): return list(CHAT_HIST.get(cid, []))
+def hist_get(cid):
+    mem = list(CHAT_HIST.get(cid, []))
+    if mem:
+        return mem
+    try:
+        out = []
+        for m in chatlog_get(cid, 8):
+            role = "assistant" if m.get("role") in ("ai", "assistant") else "user"
+            out.append({"role": role, "content": (m.get("text") or "")[:1200]})
+        if out:
+            dq = CHAT_HIST.setdefault(cid, deque(maxlen=6))
+            for x in out[-6:]: dq.append(x)
+            return list(dq)
+    except Exception:
+        pass
+    return []
 def hist_push(cid, q, a):
     dq = CHAT_HIST.setdefault(cid, deque(maxlen=6))
     clean = a
@@ -54,7 +69,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-23-delay-fix"
+AIWA_VERSION = "2026-06-23-dashboard-symptoms"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
 APP_MENU_BUTTON_TEXT = "Айва"
@@ -75,6 +90,20 @@ EN = {1: "низкая", 2: "средняя", 3: "высокая"}
 SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), ("bloat", "вздутие"),
             ("sweet", "тяга к сладкому"), ("anx", "тревожность"), ("tired", "усталость")]
 SYM = dict(SYMPTOMS)
+def clean_custom_symptom(text):
+    s = re.sub(r"\s+", " ", (text or "").strip().lower())
+    s = re.sub(r"[^0-9a-zа-яё ,.+()/-]", "", s, flags=re.I).strip(" ,.-")
+    return s[:40]
+def symptom_code(text):
+    s = clean_custom_symptom(text)
+    return ("custom:" + s) if s else None
+def symptom_label(code):
+    if not code: return ""
+    if code in SYM: return SYM[code]
+    if code.startswith("custom:"): return code.split(":", 1)[1]
+    return code
+def symptoms_labels(items):
+    return [symptom_label(x) for x in (items or []) if symptom_label(x)]
 
 START_TEXT = ("🌸 Привет, я Айва, персональный ИИ-ассистент по циклу и женскому здоровью.\n\n"
  "Я помогаю понимать цикл и получать персональные рекомендации по питанию, нагрузке и симптомам.\n\n"
@@ -199,12 +228,18 @@ def log_set(cid, d, **kw):
     c.commit(); c.close()
 def log_toggle(cid, d, code):
     lg = log_get(cid, d) or {"symptoms": []}; s = set(lg["symptoms"]); s.symmetric_difference_update({code}); log_set(cid, d, symptoms=",".join(sorted(s)))
+def log_add_symptom(cid, d, code):
+    if not code: return
+    lg = log_get(cid, d) or {"symptoms": []}
+    s = set(x for x in lg.get("symptoms", []) if x)
+    s.add(code)
+    log_set(cid, d, symptoms=",".join(sorted(s)))
 def last_hint(cid):
     c = db(); r = c.execute("SELECT energy,symptoms FROM logs WHERE chat_id=? AND energy IS NOT NULL ORDER BY log_date DESC LIMIT 1", (cid,)).fetchone(); c.close()
     if not r: return None
     parts = []
     if r[0]: parts.append(f"энергия {EN.get(r[0],'')}")
-    if r[1]: parts.append("симптомы: " + ", ".join(SYM.get(x, x) for x in r[1].split(",") if x))
+    if r[1]: parts.append("симптомы: " + ", ".join(symptoms_labels(x for x in r[1].split(",") if x)))
     return "; ".join(parts) or None
 def all_users():
     c = db(); rows = c.execute("""SELECT chat_id FROM users
@@ -547,6 +582,7 @@ def en_kb(p):
     return InlineKeyboardMarkup([[InlineKeyboardButton(EN[i].capitalize(), callback_data=f"ci:{p}:{i}") for i in (1, 2, 3)]])
 def sym_kb(selected):
     rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in SYMPTOMS]
+    rows.append([InlineKeyboardButton("Свой симптом", callback_data="ci:custom")])
     rows.append([InlineKeyboardButton("Готово", callback_data="ci:done")]); return InlineKeyboardMarkup(rows)
 def sugg_kb(cid, items, app_user=None, app_label=None):
     def _short(t): return t if len(t) <= 28 else t[:26].rstrip(" ,.-") + "…"
@@ -905,8 +941,14 @@ class _BCtx:
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     cid = context.job.chat_id
     if BCAST_Q is not None:
+        ev(cid, "broadcast", meta="queued")
         return await BCAST_Q.put(cid)          # в очередь, обработает воркер с паузами
-    await push_summary(context, cid); await push_partner(context, cid)
+    try:
+        await push_summary(context, cid); await push_partner(context, cid)
+        ev(cid, "broadcast", meta="sent")
+    except Exception as e:
+        ev(cid, "broadcast", meta="error")
+        raise
 
 async def broadcast_worker(app):
     """Шлёт утренние сводки по одной с паузой, чтобы не превышать лимит токенов/мин Groq."""
@@ -917,7 +959,10 @@ async def broadcast_worker(app):
             ctx = _BCtx(app)
             await push_summary(ctx, cid)
             await push_partner(ctx, cid)
+            ev(cid, "broadcast", meta="sent")
         except Exception as e:
+            try: ev(cid, "broadcast", meta="error")
+            except Exception: pass
             log.warning("broadcast %s: %s", cid, e)
         finally:
             BCAST_Q.task_done()
@@ -1294,8 +1339,11 @@ def aggregate_stats():
     ev_by_user = defaultdict(list); active_days = defaultdict(set); first_day = {}
     tokens_total = 0; answered = 0; fallback = 0; errors = 0
     goals = Counter(); intents = Counter(); lat = []; reqlens = []
+    bcast_today = Counter()
     for cid, ts, action, tok, meta, ms, n in rows:
         t = datetime.fromisoformat(ts); d = t.date(); tokens_total += (tok or 0)
+        if action == "broadcast" and d == today:
+            bcast_today[meta or "unknown"] += 1
         if action in ACT:
             ev_by_user[cid].append(t); active_days[cid].add(d)
             if cid not in first_day or d < first_day[cid]: first_day[cid] = d
@@ -1376,6 +1424,8 @@ def aggregate_stats():
         "ВОВЛЕЧЕНИЕ\n"
         f"Сессий: {sessions}, на юзера {spu:.1f}, средняя длина {avg_slen:.1f} мин, событий/сессия {avg_sev:.1f}\n"
         f"Запросов: {requests}, на сессию {rps:.1f}, средняя длина ввода {avg_reqlen:.0f} симв.\n\n"
+        "РАССЫЛКИ СЕГОДНЯ\n"
+        f"Запланировано пользователей: {len(all_users())}, в очереди: {bcast_today['queued']}, отправлено: {bcast_today['sent']}, ошибок: {bcast_today['error']}\n\n"
         "УДЕРЖАНИЕ (rolling)\n"
         f"D1 {fr(r1)}, D7 {fr(r7)}, D30 {fr(r30)}; активных дней за 7: {avg_l7:.1f}\n\n"
         "УСПЕШНОСТЬ\n"
@@ -1444,6 +1494,7 @@ async def handle_text(update, context, txt):
         "await_profile": "Напиши рост, вес и возраст через пробел. Например 168 60 30. Можно написать «Пропустить».",
         "await_profile_edit": "Напиши рост, вес и возраст через пробел. Например 168 60 30.",
         "await_cycles": "Пришли даты начала месячных, по одной на строке. Можно добавить последние несколько циклов.",
+        "await_symptom_custom": "Напиши симптом коротко, например «тошнота», «ломота», «боль в груди».",
     }
     if state in VALUE_STATES and is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
@@ -1525,6 +1576,17 @@ async def handle_text(update, context, txt):
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
         upsert(cid, height=int(cm), weight=kg, age=age, state=None)
         return await update.message.reply_text("Принято. Оцени свой уровень физической активности:", reply_markup=ACT_KB)
+
+    if state == "await_symptom_custom":
+        code = symptom_code(txt)
+        if not code:
+            return await update.message.reply_text("Напиши симптом коротко, например «тошнота» или «ломота».")
+        today_s = date.today().isoformat()
+        log_add_symptom(cid, today_s, code)
+        upsert(cid, state=None)
+        ev(cid, "manual", meta="custom_symptom", n=len(txt))
+        sel = set((log_get(cid, today_s) or {}).get("symptoms", []))
+        return await update.message.reply_text(f"Записала: {symptom_label(code)}. Можно добавить ещё или нажать Готово.", reply_markup=sym_kb(sel))
 
     if state == "await_time":
         hhmm = parse_time(txt)
@@ -1722,6 +1784,9 @@ async def on_cb(update, context):
         log_set(cid, today_s, mood=int(data.split(":")[2])); await q.edit_message_text("Что беспокоит сегодня? Можно несколько, потом Готово.", reply_markup=sym_kb(set()))
     elif data.startswith("ci:s:"):
         log_toggle(cid, today_s, data.split(":")[2]); sel = set((log_get(cid, today_s) or {}).get("symptoms", [])); await q.edit_message_reply_markup(reply_markup=sym_kb(sel))
+    elif data == "ci:custom":
+        upsert(cid, state="await_symptom_custom")
+        await q.message.reply_text("Напиши свой симптом коротко, например «тошнота», «ломота», «боль в груди».")
     elif data == "ci:done":
         ev(cid, "goal", meta="checkin"); await q.edit_message_text("Записала. Учту в завтрашней сводке.")
     elif data.startswith("q:"):
@@ -1878,6 +1943,7 @@ async def _api_data(request):
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
+           "partner_linked": bool(partner_of(cid)),
            "today_log": log_get(cid, date.today().isoformat()) or {"symptoms": []},
            "send_time": u.get("send_time") or "08:00",
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
@@ -2001,8 +2067,12 @@ async def _api_checkin(request):
         except Exception: pass
     if body.get("symptom"):
         code = str(body.get("symptom"))
-        if code in SYM:
+        if code in SYM or code.startswith("custom:"):
             log_toggle(cid, ds, code)
+    if body.get("custom_symptom"):
+        code = symptom_code(str(body.get("custom_symptom")))
+        if code:
+            log_add_symptom(cid, ds, code)
     ev(cid, "manual", meta="web_checkin")
     return _cors(web.json_response({"ok": True, "log": log_get(cid, ds) or {"symptoms": []}}))
 async def _api_profile(request):
@@ -2114,10 +2184,100 @@ async def _api_chat(request):
     ev(cid, "answered", meta="webapp", n=len(msg))
     return _cors(web.json_response({"answer": clean, "suggestions": sugg[:2]}))
 async def _api_opts(request): return _cors(web.Response())
+
+def _admin_key_ok(request):
+    expected = os.environ.get("AIWA_ADMIN_KEY") or AIWA_ADMIN
+    if not expected:
+        return False
+    got = request.query.get("key") or request.headers.get("X-Admin-Key") or ""
+    return _hmac.compare_digest(str(got), str(expected))
+
+def admin_dashboard_data():
+    from collections import Counter, defaultdict
+    c = db()
+    users = c.execute("SELECT chat_id, created, last_period, cycle_len, mode FROM users").fetchall()
+    events = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, n FROM events ORDER BY ts DESC LIMIT 5000").fetchall()
+    partners = c.execute("SELECT partner_id, woman_id, created FROM partners").fetchall()
+    logs = c.execute("SELECT log_date, symptoms FROM logs WHERE log_date>=? ORDER BY log_date DESC",
+                     ((date.today() - timedelta(days=14)).isoformat(),)).fetchall()
+    c.close()
+    today = date.today()
+    def dparse(ts):
+        try: return datetime.fromisoformat(ts).date()
+        except Exception: return today
+    active_by_day = defaultdict(set); signups_by_day = Counter(); bcast = Counter(); actions = Counter(); modes = Counter()
+    answers = errors = tokens = 0; lat = []
+    for _, _, _, _, mode in users: modes[mode or "cycle"] += 1
+    for cid, ts, action, tok, meta, ms, n in events:
+        d = dparse(ts)
+        if action in ("manual", "button", "suggest", "command", "answered", "fallback"):
+            active_by_day[d.isoformat()].add(cid)
+        if action == "signup": signups_by_day[d.isoformat()] += 1
+        if action == "broadcast" and d == today: bcast[meta or "unknown"] += 1
+        if action == "answered":
+            answers += 1
+            if ms: lat.append(ms)
+        if action == "error": errors += 1
+        if tok: tokens += tok
+        actions[meta or action] += 1
+    def active(days):
+        cut = today - timedelta(days=days - 1)
+        return len(set().union(*[s for ds, s in active_by_day.items() if date.fromisoformat(ds) >= cut]) if active_by_day else set())
+    symptom_counts = Counter()
+    for _, ss in logs:
+        for s in (ss or "").split(","):
+            if s: symptom_counts[symptom_label(s)] += 1
+    days = []
+    for i in range(13, -1, -1):
+        d = today - timedelta(days=i); iso = d.isoformat()
+        days.append({"date": iso[5:], "active": len(active_by_day.get(iso, set())), "signups": signups_by_day[iso]})
+    lat.sort()
+    p95 = lat[min(len(lat) - 1, int(len(lat) * 0.95))] if lat else 0
+    onboarded = sum(1 for _, _, lp, cl, md in users if (lp and cl) or md in ("irregular", "none", "meno", "preg"))
+    return {
+        "updated": datetime.now().strftime("%d.%m %H:%M"),
+        "users": len(users), "onboarded": onboarded,
+        "dau": active(1), "wau": active(7), "mau": active(30),
+        "partners": len(partners), "partner_women": len(set(p[1] for p in partners)),
+        "broadcast": {"scheduled": len(all_users()), "queued": bcast["queued"], "sent": bcast["sent"], "error": bcast["error"]},
+        "model": {"answers": answers, "errors": errors, "tokens": tokens, "p95_ms": p95},
+        "modes": modes.most_common(), "actions": actions.most_common(12), "symptoms": symptom_counts.most_common(10),
+        "days": days,
+    }
+
+async def _admin_stats(request):
+    if not _admin_key_ok(request):
+        return web.json_response({"error": "forbidden"}, status=403)
+    return web.json_response(admin_dashboard_data())
+
+async def _admin_page(request):
+    if not _admin_key_ok(request):
+        return web.Response(text="forbidden", status=403)
+    html_text = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIWA dashboard</title><style>
+body{margin:0;background:#FAF5F2;color:#211C1A;font-family:-apple-system,BlinkMacSystemFont,Inter,Arial,sans-serif}.wrap{max-width:1120px;margin:0 auto;padding:24px}h1{font-size:30px;margin:0 0 4px;font-family:Georgia,serif;font-weight:500}.muted{color:#7D746E}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0}.card{background:#fff;border:1px solid #E8DED8;border-radius:16px;padding:16px;box-shadow:0 10px 24px rgba(33,28,26,.04)}.k{font-size:11px;text-transform:uppercase;color:#A89C93;font-weight:800;letter-spacing:.05em}.v{font-size:30px;font-family:Georgia,serif;margin-top:6px}.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}.bar{height:9px;background:#FBE4E9;border-radius:9px;overflow:hidden;margin-top:8px}.bar span{display:block;height:100%;background:#C25E76}.row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #F0E8E3;padding:8px 0;font-size:14px}.row:last-child{border-bottom:0}.chart{display:flex;align-items:end;gap:5px;height:120px;margin-top:12px}.b{flex:1;min-width:12px;background:#C25E76;border-radius:6px 6px 0 0;position:relative}.b i{position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:10px;color:#A89C93;font-style:normal}@media(max-width:800px){.grid,.cols{grid-template-columns:1fr 1fr}}@media(max-width:520px){.grid,.cols{grid-template-columns:1fr}.wrap{padding:16px}}
+</style><div class="wrap"><h1>AIWA dashboard</h1><div class="muted" id="up">loading</div><div class="grid" id="cards"></div><div class="cols"><div class="card"><div class="k">Активность 14 дней</div><div class="chart" id="chart"></div></div><div class="card"><div class="k">Рассылки сегодня</div><div id="bcast"></div></div><div class="card"><div class="k">Топ действий</div><div id="actions"></div></div><div class="card"><div class="k">Симптомы 14 дней</div><div id="symptoms"></div></div><div class="card"><div class="k">Режимы</div><div id="modes"></div></div><div class="card"><div class="k">Модель</div><div id="model"></div></div></div></div>
+<script>
+const key=new URLSearchParams(location.search).get('key')||'';function row(k,v){return `<div class=row><span>${k}</span><b>${v}</b></div>`}
+fetch('/api/admin_stats?key='+encodeURIComponent(key)).then(r=>r.json()).then(d=>{
+up.textContent='обновлено '+d.updated;
+cards.innerHTML=[['Пользователи',d.users],['Онбординг',d.onboarded],['DAU',d.dau],['WAU',d.wau],['MAU',d.mau],['Партнёры',d.partners],['Женщин с партнёром',d.partner_women],['Ответов',d.model.answers]].map(x=>`<div class=card><div class=k>${x[0]}</div><div class=v>${x[1]}</div></div>`).join('');
+let mx=Math.max(1,...d.days.map(x=>x.active));chart.innerHTML=d.days.map(x=>`<div class=b style="height:${Math.max(3,x.active/mx*100)}%"><i>${x.date}</i></div>`).join('');
+bcast.innerHTML=row('запланировано',d.broadcast.scheduled)+row('в очереди',d.broadcast.queued)+row('отправлено',d.broadcast.sent)+row('ошибок',d.broadcast.error);
+actions.innerHTML=(d.actions||[]).map(x=>row(x[0],x[1])).join('')||'<div class=muted>нет данных</div>';
+symptoms.innerHTML=(d.symptoms||[]).map(x=>row(x[0],x[1])).join('')||'<div class=muted>нет данных</div>';
+modes.innerHTML=(d.modes||[]).map(x=>row(x[0],x[1])).join('');
+model.innerHTML=row('ответов',d.model.answers)+row('ошибок',d.model.errors)+row('токенов',d.model.tokens)+row('p95',d.model.p95_ms+' мс');
+});
+</script>"""
+    return web.Response(text=html_text, content_type="text/html")
+
 def build_web():
     aio = web.Application()
     aio.router.add_get("/", _serve_index)
     aio.router.add_get("/health", lambda r: web.Response(text="ok " + AIWA_VERSION))
+    aio.router.add_get("/admin", _admin_page)
+    aio.router.add_get("/api/admin_stats", _admin_stats)
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/chat", _api_chat)

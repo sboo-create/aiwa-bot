@@ -40,6 +40,10 @@ MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", 
 def _ru(d): return f"{d.day} {MONTHS[d.month-1]} {d.year}"
 SYM_RU = {"cramps": "спазмы", "head": "головная боль", "bloat": "вздутие",
           "sweet": "тяга к сладкому", "anx": "тревожность", "tired": "усталость"}
+def _sym_label(code):
+    if code in SYM_RU: return SYM_RU[code]
+    if isinstance(code, str) and code.startswith("custom:"): return code.split(":", 1)[1]
+    return code
 ENR = {1: "низкая", 2: "средняя", 3: "высокая"}
 
 
@@ -119,7 +123,7 @@ def _summary_box(cycles, logs, st, w):
     for lg in logs:
         for s in lg.get("symptoms", []): cnt[s] += 1
     if cnt:
-        top = ", ".join(SYM_RU.get(c, c) for c, _ in cnt.most_common(3))
+        top = ", ".join(_sym_label(c) for c, _ in cnt.most_common(3))
         lines.append(f"<b>Симптомы:</b> чаще всего отмечаются {top}.")
     en = [lg["energy"] for lg in logs if lg.get("energy")]
     if en:
@@ -173,7 +177,7 @@ def _symptom_table(logs, w):
     rows = []; mx = max(cnt.values())
     for code, n in cnt.most_common():
         bar = "█" * max(1, round(12*n/mx))
-        rows.append([Paragraph(SYM_RU.get(code, code), ParagraphStyle("s", fontName=_FONT, fontSize=10, textColor=INK)),
+        rows.append([Paragraph(_sym_label(code), ParagraphStyle("s", fontName=_FONT, fontSize=10, textColor=INK)),
                      Paragraph(f'<font color="#C25E76">{bar}</font>', ParagraphStyle("b", fontName=_FONT, fontSize=10)),
                      Paragraph(f"{n}", ParagraphStyle("n", fontName=_FONT, fontSize=10, textColor=INKMID))])
     t = Table(rows, colWidths=[w*0.38, w*0.50, w*0.12])

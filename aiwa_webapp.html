@@ -81,6 +81,7 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .minirow{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .seg{border:1px solid var(--line);background:#fff;color:var(--inkMid);border-radius:999px;padding:8px 12px;font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer}
 .seg.on{background:var(--roseDeep);border-color:var(--roseDeep);color:#fff}
+.symadd{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:9px}.symadd input{min-width:0;border:1px solid var(--line);border-radius:14px;background:#fff;padding:0 12px;font-family:var(--sans);font-size:13px;color:var(--ink);height:38px}.symadd button{border:none;border-radius:14px;background:var(--roseDeep);color:#fff;font-family:var(--sans);font-weight:800;font-size:12px;padding:0 12px}
 .kv{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
 .kv .stat{margin:0}
 .toast{position:fixed;left:12px;right:12px;bottom:calc(106px + env(safe-area-inset-bottom));max-width:456px;margin:0 auto;background:var(--ink);color:#fff;border-radius:16px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;z-index:80;font-size:13px;box-shadow:0 12px 30px rgba(0,0,0,.18)}
@@ -133,8 +134,9 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .emptygraph{min-height:132px;border-radius:16px;background:linear-gradient(180deg,#fff 0%,#F4ECE7 100%);display:flex;align-items:center;justify-content:center;text-align:center;color:var(--inkSoft);font-size:12px;line-height:1.5;padding:18px}
 .homebtn{display:block;width:100%;margin:18px 0 2px;padding:13px;border:1px solid var(--roseLine);background:var(--roseWash);color:var(--roseDeep);border-radius:16px;font-family:var(--sans);font-weight:600;font-size:13.5px;cursor:pointer}
 .homebtn:active{transform:scale(.98)}
-.partnerbox{border-radius:16px;border:1px solid var(--line);background:#fff;padding:12px;margin-top:10px;word-break:break-word}
-.partnerbox .ln{font-size:12.5px;line-height:1.5;color:var(--inkMid)}
+.partnerbox{border-radius:16px;border:1px solid var(--line);background:#fff;padding:12px;margin-top:10px;word-break:break-word;font-family:var(--sans)}
+.partnerbox .ln,.partnernote{font-family:var(--sans);font-size:13px;line-height:1.5;color:var(--inkMid)}
+.partnerstatus{font-family:var(--sans);font-size:13.5px;line-height:1.5;color:var(--ink);margin-top:8px}
 .copylink{width:100%;margin-top:10px;border:none;border-radius:14px;background:var(--roseDeep);color:#fff;padding:11px 12px;font-family:var(--sans);font-weight:800;cursor:pointer}
 .copylink.danger{background:#EFEAE6;color:#6E635C;border:1px solid var(--line)}
 .copylink:active{transform:scale(.98)}
@@ -350,12 +352,14 @@ async function markPA(iso){haptic("impact","light");try{var r=await api("/api/pa
 function ensureTodayLog(){D.today_log=D.today_log||{};D.today_log.symptoms=D.today_log.symptoms||[];return D.today_log;}
 async function setCheckin(kind,val){var seq=++CHECKIN_SEQ,lg=ensureTodayLog();lg[kind]=val;renderToday();var body={date:isoOf(today)};body[kind]=val;var r=await api("/api/checkin",body);if(seq===CHECKIN_SEQ&&r&&r.log){D.today_log=r.log;renderToday();toast("Сохранено");}}
 async function toggleSym(code){var seq=++CHECKIN_SEQ,lg=ensureTodayLog(),ss=lg.symptoms||[],i=ss.indexOf(code);if(i>=0)ss.splice(i,1);else ss.push(code);lg.symptoms=ss;renderToday();var r=await api("/api/checkin",{date:isoOf(today),symptom:code});if(seq===CHECKIN_SEQ&&r&&r.log){D.today_log=r.log;renderToday();toast("Сохранено");}}
+function symLabel(code){if(!code)return"";if(code.indexOf("custom:")===0)return code.slice(7);var m={cramps:"Спазмы",head:"Голова",bloat:"Вздутие",sweet:"Тянет на сладкое",anx:"Тревожно",tired:"Усталость"};return m[code]||code;}
+async function addCustomSym(){var inp=document.getElementById("customSym");if(!inp)return;var raw=(inp.value||"").trim();var val=raw.toLowerCase().replace(/[^0-9a-zа-яё ,.+()\/-]/gi,"").replace(/\s+/g," ").trim().slice(0,40);if(!val){toast("Напиши симптом");return;}var seq=++CHECKIN_SEQ,lg=ensureTodayLog(),code="custom:"+val;if((lg.symptoms||[]).indexOf(code)<0)lg.symptoms.push(code);inp.value="";renderToday();var r=await api("/api/checkin",{date:isoOf(today),custom_symptom:val});if(seq===CHECKIN_SEQ&&r&&r.log){D.today_log=r.log;renderToday();toast("Сохранено");}}
 function renderCheckin(){
   var lg=D.today_log||{},ss=lg.symptoms||[];
   var html="<div class='card'><div class='sec' style='margin-top:0'>Самочувствие сегодня</div><div class='pmeta'>Отметки попадут в сводку и статистику.</div>";
   html+="<div class='ayva-lab' style='margin-top:12px'>Энергия</div><div class='minirow'>";[1,2,3].forEach(function(v){html+="<button class='seg "+(lg.energy==v?"on":"")+"' onclick='setCheckin(\"energy\","+v+")'>"+LVL[v]+"</button>";});html+="</div>";
   html+="<div class='ayva-lab' style='margin-top:12px'>Настроение</div><div class='minirow'>";[1,2,3].forEach(function(v){html+="<button class='seg "+(lg.mood==v?"on":"")+"' onclick='setCheckin(\"mood\","+v+")'>"+LVL[v]+"</button>";});html+="</div>";
-  html+="<div class='ayva-lab' style='margin-top:12px'>Симптомы</div><div class='minirow'>";SYMS.forEach(function(s){html+="<button class='seg "+(ss.indexOf(s[0])>=0?"on":"")+"' onclick='toggleSym(\""+s[0]+"\")'>"+s[1]+"</button>";});html+="</div></div>";
+  html+="<div class='ayva-lab' style='margin-top:12px'>Симптомы</div><div class='minirow'>";SYMS.forEach(function(s){html+="<button class='seg "+(ss.indexOf(s[0])>=0?"on":"")+"' onclick='toggleSym(\""+s[0]+"\")'>"+s[1]+"</button>";});ss.filter(function(x){return x.indexOf('custom:')===0;}).forEach(function(x){html+="<button class='seg on' onclick='toggleSym(\""+esc(x)+"\")'>"+esc(symLabel(x))+"</button>";});html+="</div><div class='symadd'><input id='customSym' placeholder='Другой симптом'><button onclick='addCustomSym()'>Добавить</button></div></div>";
   return html;
 }
 function buildStarts(){
@@ -485,13 +489,14 @@ async function loadPartner(){
   var box=document.getElementById("partnerOut");if(!box)return;
   box.innerHTML="<div class='ln'>Готовлю ссылку<span class='think'><span></span><span></span><span></span></span></div>";
   var r=await api("/api/partner",{});
+  D.partner_linked=!!r.linked;
+  if(r.linked){box.innerHTML="<div class='partnerbox'><div class='partnerstatus'>Партнёр подключён и получает апдейты в Telegram.</div><button class='copylink danger' onclick='unlinkPartner()'>Отключить партнёра</button></div>";return;}
   if(!(r&&r.link)){box.innerHTML="<div class='ln'>Ссылка будет доступна после запуска приложения из Telegram. В боте можно открыть командой /partner.</div>";return;}
-  var status=r.linked?"Партнёр уже подключён. Он получает апдейты в Telegram. Доступ можно отключить в любой момент.":"Партнёр пока не подключён. Перешли ему ссылку, он откроет бота и подтвердит подключение.";
-  box.innerHTML="<div class='ayva-lab'>Ссылка для партнёра</div><div class='ln'>"+status+"</div><div class='partnerbox'><div class='ln' id='plink'>"+esc(r.link)+"</div><button class='copylink' onclick='copyPartnerLink()'>Скопировать ссылку</button>"+(r.linked?"<button class='copylink danger' onclick='unlinkPartner()'>Отключить партнёра</button>":"")+"</div>";
+  box.innerHTML="<div class='ayva-lab'>Ссылка для партнёра</div><div class='partnernote'>Перешли ссылку партнёру. Он откроет бота и подтвердит подключение.</div><div class='partnerbox'><div class='ln' id='plink'>"+esc(r.link)+"</div><button class='copylink' onclick='copyPartnerLink()'>Скопировать ссылку</button></div>";
 }
 async function unlinkPartner(){
   var r=await api("/api/partner",{action:"unlink"});
-  if(r&&r.ok){toast("Партнёр отключён");loadPartner();}
+  if(r&&r.ok){D.partner_linked=false;toast("Партнёр отключён");renderStats();}
   else toast("Не получилось отключить");
 }
 function copyPartnerLink(){
@@ -542,7 +547,7 @@ function renderStats(){
   html+="<div class='stat'><div class='l'>Вес</div><div class='v'>"+(p.weight||'нет')+"</div><div class='s'>кг</div></div>";
   html+="</div><div class='chips'><button class='chip' onclick='showProfileEditor()'>Изменить рост и вес</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как поменять время рассылки?\");},120)'>Время сводки</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как добавить историю циклов?\");},120)'>История циклов</button></div>";
   html+="<div id='profileEditor' class='hidden'><div class='profileform'><label>Рост<input id='profHeight' inputmode='decimal' value='"+esc(p.height||"")+"' placeholder='168'></label><label>Вес<input id='profWeight' inputmode='decimal' value='"+esc(p.weight||"")+"' placeholder='60'></label><label>Возраст<input id='profAge' inputmode='numeric' value='"+esc(p.age||"")+"' placeholder='30'></label></div><div class='profileactions'><button class='pbtn' onclick='saveProfileApp()'>Сохранить</button><button class='pbtn alt' onclick='showProfileEditor()'>Отмена</button></div></div></div>";
-  html+="<div class='card'><div class='sec' style='margin-top:0'>Партнёр</div><div class='ayva-txt'>Партнёр будет видеть не твой календарь, а короткую сводку в Telegram: день цикла, общее состояние и несколько подсказок, как поддержать. Доступ можно отключить в любой момент.</div><button class='copylink' onclick='loadPartner()'>Получить ссылку</button><div id='partnerOut'></div></div>";
+  html+="<div class='card'><div class='sec' style='margin-top:0'>Партнёр</div><div class='partnernote'>Партнёр будет видеть не твой календарь, а короткую сводку в Telegram: день цикла, общее состояние и подсказки, как поддержать.</div>"+(D.partner_linked?"<button class='copylink danger' onclick='unlinkPartner()'>Отключить партнёра</button>":"<button class='copylink' onclick='loadPartner()'>Получить ссылку</button>")+"<div id='partnerOut'></div></div>";
   if(s.regularity){html+="<div class='card'><div class='pl'><span class='tag' style='color:var(--roseDeep);background:var(--roseWash)'>"+s.regularity+"</span></div>"+(s.spread!=null?("<div class='pmeta'>разброс длины цикла "+s.min_cycle+"-"+s.max_cycle+" дней</div>"):"")+"</div>";}
   html+="<div class='foot'>Статистика строится по твоим отметкам: циклы, симптомы и история изменений.</div>";
   el.innerHTML=html;
