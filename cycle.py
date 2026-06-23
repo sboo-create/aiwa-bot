@@ -41,12 +41,12 @@ def cycle_status(last_period, cycle_len, today=None):
         days_to_next = cycle_len - day + 1
         status = "normal"; delay_days = 0
     else:
-        day = cycle_len; ph = "luteal"; days_to_next = 0
+        day = days_since + 1; ph = "luteal"; days_to_next = 0
         delay_days = days_since - cycle_len
         if days_since <= cycle_len + 7: status = "due"
         elif days_since <= cycle_len + 21: status = "delay"
         else: status = "stale"
-    next_period = last_period + timedelta(days=((days_since // cycle_len) + 1) * cycle_len)
+    next_period = last_period + timedelta(days=cycle_len)
     return {"subphase": _subphase(day, ph, cycle_len), "day": day, "cycle_len": cycle_len,
             "phase": ph, "phase_ru": PHASE_RU[ph], "days_to_next": days_to_next,
             "days_since": days_since, "status": status, "delay_days": delay_days,
