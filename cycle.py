@@ -43,7 +43,7 @@ def cycle_status(last_period, cycle_len, today=None):
     else:
         day = days_since + 1; ph = "luteal"; days_to_next = 0
         delay_days = days_since - cycle_len
-        if days_since <= cycle_len + 7: status = "due"
+        if days_since <= cycle_len + 2: status = "due"
         elif days_since <= cycle_len + 21: status = "delay"
         else: status = "stale"
     next_period = last_period + timedelta(days=cycle_len)

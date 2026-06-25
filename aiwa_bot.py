@@ -70,11 +70,19 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-06-23-history-current-question"
+AIWA_VERSION = "2026-06-25-meno-delay-summary-suggestions"
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
 APP_MENU_BUTTON_TEXT = "Айва"
 APP_CTA_HTML = "📱 <b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
+MENO_UPDATE_TEXT = (
+    "🌸 Обновила экран для менопаузы в приложении Айвы.\n\n"
+    "Теперь там есть отдельный режим без фаз цикла: самочувствие сегодня, симптомы менопаузы, научный факт дня, "
+    "чекапы и красные флаги.\n\n"
+    "Почему важно отмечать симптомы: приливы, сон, тревожность, сухость, сердцебиение, суставы и вес помогают увидеть паттерны. "
+    "Так проще понять, что влияет на состояние, что обсудить с врачом и когда стоит проверить МГТ, негормональные варианты или профилактику.\n\n"
+    "Открой приложение кнопкой ниже."
+)
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
     if u and u.get("last_period") and u.get("cycle_len") and u.get("mode", "cycle") == "cycle":
@@ -90,7 +98,10 @@ def menu_kb_for(u, general=False):
 EN = {1: "низкая", 2: "средняя", 3: "высокая"}
 SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), ("bloat", "вздутие"),
             ("sweet", "тяга к сладкому"), ("anx", "тревожность"), ("tired", "усталость")]
-SYM = dict(SYMPTOMS)
+MENO_SYMPTOMS = [("meno_hot", "приливы"), ("meno_night", "ночная потливость"), ("meno_sleep", "плохой сон"),
+                 ("meno_mood", "тревожность"), ("meno_dry", "сухость"), ("meno_heart", "сердцебиение"),
+                 ("meno_joint", "суставы"), ("meno_brain", "туман в голове"), ("meno_weight", "изменение веса")]
+SYM = dict(SYMPTOMS + MENO_SYMPTOMS)
 def clean_custom_symptom(text):
     s = re.sub(r"\s+", " ", (text or "").strip().lower())
     s = re.sub(r"[^0-9a-zа-яё ,.+()/-]", "", s, flags=re.I).strip(" ,.-")
@@ -246,6 +257,8 @@ def all_users():
     c = db(); rows = c.execute("""SELECT chat_id FROM users
         WHERE (last_period IS NOT NULL AND cycle_len IS NOT NULL)
            OR mode IN ('irregular','none','meno','preg')""").fetchall(); c.close(); return [x[0] for x in rows]
+def meno_users():
+    c = db(); rows = c.execute("SELECT chat_id FROM users WHERE mode='meno'").fetchall(); c.close(); return [x[0] for x in rows]
 def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg"): c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))
@@ -635,6 +648,44 @@ def summary_kb(u=None):
         rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
     rows.append([B("Меню", "menu")])
     return InlineKeyboardMarkup(rows)
+def summary_suggestions(st):
+    if not st:
+        return ["Что важно сегодня?", "Что отметить?"]
+    if st.get("status") == "due":
+        return ["Тест уже делать?", "Почему сдвигается?"]
+    if st.get("status") == "delay":
+        d = int(st.get("delay_days") or 0)
+        if d >= 10:
+            return ["Когда к врачу?", "Что проверить?"]
+        return ["Тест на ХГЧ?", "Почему задержка?"]
+    if st.get("status") == "stale":
+        return ["Как обновить календарь?", "Что проверить?"]
+    ph = st.get("phase")
+    return {
+        "menstrual": ["Как снизить боль?", "Что есть при месячных?"],
+        "follicular": ["Какая тренировка?", "Что есть сегодня?"],
+        "ovulation": ["Когда фертильное окно?", "Можно интенсивнее?"],
+        "luteal": ["Как пережить ПМС?", "Что съесть вечером?"],
+    }.get(ph, ["Что важно сегодня?", "Что отметить?"])
+def general_summary_suggestions(u):
+    mode = (u or {}).get("mode")
+    if mode == "meno":
+        return ["Почему приливы?", "Какие чекапы?"]
+    if mode == "preg":
+        return ["Что есть сейчас?", "Какая активность?"]
+    if mode == "irregular":
+        return ["Почему цикл скачет?", "Что отмечать?"]
+    return ["Что важно сегодня?", "Что отметить?"]
+def summary_sugg_kb(cid, u=None, st=None, app_label=None):
+    items = summary_suggestions(st) if st is not None else general_summary_suggestions(u)
+    return sugg_kb(cid, items, app_user=u, app_label=app_label or APP_BUTTON_TEXT)
+def merge_summary_suggestions(u=None, st=None, extra=None):
+    items = [x for x in (extra or []) if x]
+    fallback = summary_suggestions(st) if st is not None else general_summary_suggestions(u)
+    for x in fallback:
+        if len(items) >= 2: break
+        if x not in items: items.append(x)
+    return items[:2]
 
 # ---------- senders ----------
 async def need_onboard(t):
@@ -760,7 +811,7 @@ async def send_delay(context, cid, st):
     u = row(cid)
     body = msgs.get(st["status"], "")
     await context.bot.send_message(cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
-        reply_markup=summary_kb(u), parse_mode="HTML")
+        reply_markup=summary_sugg_kb(cid, u, st, app_label="Открыть календарь"), parse_mode="HTML")
 
 async def send_guide(context, cid, g):
     path = os.path.join(GUIDE_DIR, g["file"])
@@ -817,8 +868,10 @@ async def push_general(context, cid):
     body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
     if not body:
         body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
-    await context.bot.send_message(cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
-        reply_markup=summary_kb(u), parse_mode="HTML")
+    clean, extra = L.split_followups(body)
+    kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u, app_label=APP_BUTTON_TEXT)
+    await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
+        reply_markup=kb, parse_mode="HTML")
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
 
 async def send_general(context, cid, key):
@@ -945,8 +998,9 @@ async def push_summary(context, cid, with_image=True):
     body = await asyncio.to_thread(L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
     if not body:
         body = "💛 Сводка на сегодня готова. Открой приложение, чтобы посмотреть календарь, симптомы, питание и нагрузку."
-    kb = summary_kb(u)
-    await context.bot.send_message(cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
+    clean, extra = L.split_followups(body)
+    kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u, app_label=APP_BUTTON_TEXT)
+    await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
         reply_markup=kb, parse_mode="HTML")
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
 
@@ -1510,6 +1564,26 @@ async def broadcast_today_cmd(update, context):
         f"Размер очереди сейчас: {qsize}\n\n"
         f"Сводки уйдут по очереди, чтобы не положить модель и Telegram."
     )
+
+async def meno_update_cmd(update, context):
+    cid = update.effective_chat.id
+    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
+        return await update.message.reply_text("Эта команда доступна только администратору.")
+    users = meno_users()
+    sent = failed = 0
+    for uid in users:
+        u = row(uid)
+        try:
+            await context.bot.send_message(uid, html.escape(MENO_UPDATE_TEXT),
+                reply_markup=summary_sugg_kb(uid, u), parse_mode="HTML")
+            ev(uid, "broadcast", meta="meno_update_sent")
+            sent += 1
+            await asyncio.sleep(0.25)
+        except Exception as e:
+            failed += 1
+            ev(uid, "broadcast", meta="meno_update_error")
+            log.warning("meno update %s: %s", uid, e)
+    await update.message.reply_text(f"Пуш про мено-экран отправлен.\n\nУшло: {sent}\nОшибок: {failed}")
 
 # ---------- text ----------
 async def on_text(update, context):
@@ -2417,7 +2491,7 @@ async def run_all():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("broadcast_today", broadcast_today_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
