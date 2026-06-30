@@ -65,8 +65,9 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .tabs:before{content:"";position:absolute;inset:1px;border-radius:31px;border:1px solid rgba(33,28,26,.035);pointer-events:none}
 .tab{position:relative;flex:1;min-width:0;height:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:6px 2px;cursor:pointer;color:#7D746E;font-size:9.8px;font-weight:700;letter-spacing:0;line-height:1;transition:color .22s ease,transform .22s ease}
 .tab.on{color:var(--roseDeep);transform:translateY(-1px)}
-.tab:before{content:"";position:absolute;inset:0;border-radius:28px;background:rgba(255,255,255,.88);box-shadow:0 8px 18px rgba(33,28,26,.10),inset 0 1px 0 rgba(255,255,255,.96);z-index:-1;opacity:0;transform:scale(.78);transition:opacity .26s ease,transform .26s cubic-bezier(.2,.85,.25,1)}
-.tab.on:before{opacity:1;transform:scale(1)}
+.tab:before{display:none}
+.tabglow{position:absolute;top:6px;bottom:6px;left:0;width:0;border-radius:28px;background:rgba(255,255,255,.92);box-shadow:0 8px 18px rgba(33,28,26,.10),inset 0 1px 0 rgba(255,255,255,.96);z-index:0;pointer-events:none;transition:transform .44s var(--spring),width .44s var(--spring)}
+.tab{z-index:1}
 .tab svg{width:22px;height:22px;display:block;stroke-width:2.15;transition:transform .24s cubic-bezier(.2,.8,.2,1)}.tab.on svg{filter:drop-shadow(0 2px 4px rgba(194,94,118,.18));transform:scale(1.08)}
 .chatwrap{display:flex;flex-direction:column;gap:10px;min-height:40vh;padding:8px 0 calc(180px + env(safe-area-inset-bottom))}
 .msg{max-width:86%;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
@@ -214,7 +215,7 @@ body{padding-top:var(--safe-top,0px)}
 .nutrichip,.phasepill{font-size:11.5px}
 /* === DESIGN UPGRADE: spring buttons, mesh bg, skeleton, bloom, stagger === */
 :root{--spring:cubic-bezier(.34,1.56,.64,1);--ease:cubic-bezier(.22,.61,.36,1)}
-.mesh{position:fixed;inset:0;z-index:0;pointer-events:none;filter:blur(46px) saturate(1.15);opacity:.42;background:radial-gradient(40% 35% at 18% 10%,#F6C9B4 0,transparent 60%),radial-gradient(45% 40% at 86% 6%,#F1B0BF 0,transparent 60%),radial-gradient(50% 45% at 82% 82%,#E7D6A8 0,transparent 60%),radial-gradient(45% 40% at 10% 90%,#CFC2E8 0,transparent 60%);animation:meshmove 20s ease-in-out infinite alternate}
+.mesh{position:fixed;inset:-12%;z-index:0;pointer-events:none;opacity:.55;background:radial-gradient(36% 30% at 18% 10%,#F6C9B4 0,transparent 64%),radial-gradient(40% 36% at 86% 6%,#F1B0BF 0,transparent 64%),radial-gradient(44% 40% at 82% 82%,#E7D6A8 0,transparent 64%),radial-gradient(40% 36% at 10% 90%,#CFC2E8 0,transparent 64%);transform:translateZ(0);will-change:transform;animation:meshmove 26s ease-in-out infinite alternate}
 @keyframes meshmove{to{transform:translate3d(0,-16px,0) scale(1.07)}}
 .pbtn,.chip,.swapbtn,.copylink{position:relative;overflow:hidden}
 .pbtn{transition:transform .15s var(--spring),box-shadow .2s var(--ease),filter .2s ease}
@@ -230,6 +231,20 @@ body{padding-top:var(--safe-top,0px)}
 .stagger>*:nth-child(1){animation-delay:.02s}.stagger>*:nth-child(2){animation-delay:.07s}.stagger>*:nth-child(3){animation-delay:.12s}.stagger>*:nth-child(4){animation-delay:.17s}.stagger>*:nth-child(5){animation-delay:.22s}.stagger>*:nth-child(6){animation-delay:.27s}.stagger>*:nth-child(n+7){animation-delay:.31s}
 .bloomanim .core{animation:corepop .5s var(--spring) .22s both}
 @keyframes corepop{0%{transform:scale(0)}100%{transform:scale(1)}}
+.mealmain{min-width:0}
+.mealtop>div:first-child{min-width:0}
+.swapbtn{flex-shrink:0}
+.bload{display:inline-block;position:relative;width:46px;height:46px;animation:bspin 3.4s linear infinite}
+@keyframes bspin{to{transform:rotate(360deg)}}
+.bload .bp{position:absolute;left:50%;top:50%;width:15px;height:21px;margin-left:-7.5px;margin-top:-19px;border-radius:50% 50% 46% 46%/62% 62% 38% 38%;background:radial-gradient(120% 95% at 50% 14%,#fff,#FBE4E9 30%,#F2B3A6 62%,#E2879B 100%);transform-origin:50% 86%;box-shadow:inset 0 -3px 6px rgba(194,94,118,.22),inset 0 2px 4px rgba(255,255,255,.5);animation:bbreathe 1.7s ease-in-out infinite}
+.bload .bc{position:absolute;left:50%;top:50%;width:13px;height:13px;margin:-6.5px;border-radius:50%;background:radial-gradient(circle at 38% 32%,#F6CB63,#D69A33);box-shadow:0 0 0 3px rgba(229,167,52,.14)}
+@keyframes bbreathe{0%,100%{transform:rotate(var(--r)) scale(.66)}50%{transform:rotate(var(--r)) scale(1.06)}}
+.bloadwrap{display:flex;flex-direction:column;align-items:center;gap:14px;padding:46px 0}
+.thinkrow{display:inline-flex;align-items:center;gap:9px}
+.bload.sm{width:24px;height:24px}
+.bload.sm .bp{width:8px;height:11px;margin-left:-4px;margin-top:-10px;box-shadow:inset 0 -2px 4px rgba(194,94,118,.22)}
+.bload.sm .bc{width:7px;height:7px;margin:-3.5px;box-shadow:0 0 0 2px rgba(229,167,52,.14)}
+.thinkrow{display:inline-flex;align-items:center;gap:8px}
 .hidden{display:none}
 </style>
 </head>
@@ -606,7 +621,7 @@ async function replaceMeal(i){
 }
 async function renderFood(){
   var el=document.getElementById('scr-food');if(loadedFood)return;
-  el.innerHTML="<div class='h'>Питание</div><div class='card'><div class='skel' style='width:52%;height:20px'></div><div class='skel' style='width:90%;margin-top:12px'></div><div class='skel' style='width:74%;margin-top:8px'></div></div><div class='card'><div class='skel' style='width:42%;height:18px'></div><div class='skel' style='width:92%;margin-top:12px'></div><div class='skel' style='width:80%;margin-top:8px'></div></div>";
+  el.innerHTML="<div class='h'>Питание</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва собирает меню")+"</div><div class='card'><div class='skel' style='width:52%;height:20px'></div><div class='skel' style='width:90%;margin-top:12px'></div><div class='skel' style='width:74%;margin-top:8px'></div></div>";
   var r=await api('/api/section',{kind:'food'});
   if(!(r&&r.menu&&r.menu.meals)){r=(!INIT||r&&r.error==='net')?{menu:DEMO_MENU,kcal:1850,text:DEMO_FOODT}:{text:(r&&r.text)||"Выбираем простую еду с белком в каждом приёме и нормальной сытостью."};}
   FOOD_DATA=r;
@@ -627,7 +642,7 @@ async function renderFood(){
   html+="<div class='foot'>Меню рассчитывается каждый день с учётом фазы цикла, твоих пожеланий, пищевых ограничений и медицинских рекомендаций.</div>";
   el.innerHTML=html;el.classList.add('stagger');loadedFood=true;
 }
-async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div><div class='card'><div class='skel' style='width:44%;height:18px'></div><div class='skel' style='width:90%;margin-top:12px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",hormones:["Без данных о цикле Айва не делает выводы о фазе.","Главные ориентиры: боль, кровотечение, слабость, сон и восстановление.","При беременности, сильной боли, головокружении или обильном кровотечении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли, рывков и глубокого пресса"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости, боли или обильного кровотечения",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка"};}
+async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",hormones:["Без данных о цикле Айва не делает выводы о фазе.","Главные ориентиры: боль, кровотечение, слабость, сон и восстановление.","При беременности, сильной боли, головокружении или обильном кровотечении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли, рывков и глубокого пресса"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости, боли или обильного кровотечения",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка"};}
   var html="<div class='h'>Нагрузка</div>";
   html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trainBlossom'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+esc(p.level)+"</div><div class='pmeta'>"+esc(p.duration)+(p.day?(" · день "+esc(p.day)):"")+"</div><div class='ayva-txt' style='margin-top:8px'>"+esc(p.summary||"")+"</div></div></div></div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Что выбрать</div>";
@@ -687,7 +702,7 @@ async function saveProfileApp(){
 }
 function renderStats(){
   var el=document.getElementById('scr-stats');
-  if(D&&(D.mode==='meno'||D.mode==='preg')){el.innerHTML="<div class='h'>Дневник</div><div class='card'><div class='sec' style='margin-top:0'>Дневник симптомов</div>"+symptomDiary()+"</div><div class='foot'>Дневник строится по твоим отметкам энергии, настроения и симптомов. Профиль и партнёр — в кружке профиля сверху.</div>";return;}
+  if(D&&(D.mode==='meno'||D.mode==='preg')){el.innerHTML="<div class='h'>Дневник</div><div class='card'><div class='sec' style='margin-top:0'>Дневник симптомов</div>"+symptomDiary()+"</div>"+periodHistory()+"<div class='foot'>Дневник строится по твоим отметкам. Прошлые циклы сохранены и вернутся при переключении на «Цикл». Профиль и партнёр — в кружке профиля сверху.</div>";return;}
   var s=(D&&D.stats)||{},p=(D&&D.profile)||{};
   var html="<div class='h'>Статистика</div>";
   html+="<div class='stats'>";
@@ -729,7 +744,7 @@ var chatInited=false;
 function bubbleAI(text){var d=document.createElement('div');d.className='msg ai';d.textContent=text;document.getElementById('chatlog').appendChild(d);return d;}
 function bubbleMe(text){var d=document.createElement('div');d.className='msg me';d.textContent=text;document.getElementById('chatlog').appendChild(d);}
 function scrollBottom(){window.scrollTo(0,document.body.scrollHeight);}
-async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML();var _tk=startThink();scrollBottom();var r=await api('/api/chat',{message:text});clearInterval(_tk);t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}scrollBottom();}
+async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML("Айва думает");scrollBottom();var r=await api('/api/chat',{message:text});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}scrollBottom();}
 function initChat(){
   if(chatInited)return;chatInited=true;var log=(D&&D.chatlog)||[];
   if(log.length){log.forEach(function(m){if(m.role==="user")bubbleMe(m.text);else bubbleAI(m.text);});scrollBottom();}
@@ -750,9 +765,9 @@ train:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="
 chat:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 11.5a8 7 0 0 1-11.6 6.3L4 19l1.2-4.2A7.5 7 0 1 1 20.5 11.5z"/></svg>',
 stats:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20V12M12 20V5M19 20v-9M3 20h18"/></svg>'};
 var TABS=[["today","Сегодня"],["food","Питание"],["chat","Айва"],["train","Нагрузка"],["stats","Статистика"]];
-function go(t){TABS.forEach(function(x){document.getElementById('scr-'+x[0]).classList.toggle('hidden',x[0]!==t);document.querySelector('.tab[data-t="'+x[0]+'"]').classList.toggle('on',x[0]===t);});document.getElementById('composer').classList.toggle('hidden',t!=='chat');if(t==='food')renderFood();if(t==='train')renderTrain();if(t==='stats')renderStats();if(t==='chat'){initChat();scrollBottom();}var _c=document.getElementById('scr-'+t);if(_c){_c.style.animation='none';void _c.offsetWidth;_c.style.animation='scrin .34s cubic-bezier(.22,.61,.36,1)';}window.scrollTo(0,0);}
+function go(t){TABS.forEach(function(x){document.getElementById('scr-'+x[0]).classList.toggle('hidden',x[0]!==t);document.querySelector('.tab[data-t="'+x[0]+'"]').classList.toggle('on',x[0]===t);});document.getElementById('composer').classList.toggle('hidden',t!=='chat');if(t==='food')renderFood();if(t==='train')renderTrain();if(t==='stats')renderStats();if(t==='chat'){initChat();scrollBottom();}try{moveGlow(t);}catch(e){}var _c=document.getElementById('scr-'+t);if(_c){_c.style.animation='none';void _c.offsetWidth;_c.style.animation='scrin .34s cubic-bezier(.22,.61,.36,1)';}window.scrollTo(0,0);}
 var tabsEl=document.getElementById('tabs');
-TABS.forEach(function(x){var d=document.createElement('div');d.className='tab';d.setAttribute('data-t',x[0]);d.innerHTML=ICONS[x[0]]+"<span>"+x[1]+"</span>";d.onclick=function(){if(!d.classList.contains("on")){haptic("selection");haptic("impact","light");}go(x[0]);};tabsEl.appendChild(d);});
+TABS.forEach(function(x){var d=document.createElement('div');d.className='tab';d.setAttribute('data-t',x[0]);d.innerHTML=ICONS[x[0]]+"<span>"+x[1]+"</span>";d.onclick=function(){if(!d.classList.contains("on")){haptic("selection");haptic("impact","light");}go(x[0]);};tabsEl.appendChild(d);});var _glow=document.createElement('div');_glow.className='tabglow';_glow.id='tabglow';tabsEl.insertBefore(_glow,tabsEl.firstChild);function moveGlow(t){var el=tabsEl.querySelector('.tab[data-t="'+t+'"]'),g=document.getElementById('tabglow');if(el&&g&&el.offsetWidth){g.style.width=el.offsetWidth+'px';g.style.transform='translateX('+el.offsetLeft+'px)';}}
 function showNeedOnboard(){
   document.getElementById('tabs').style.display='none';
   document.getElementById('composer').classList.add('hidden');
@@ -800,9 +815,11 @@ function copyHubLink(){var t=document.getElementById('hubPlink');if(!t)return;va
 
 const MLVL={1:"плохое",2:"нормальное",3:"хорошее"};
 const THINKS=["Айва думает","подбирает рекомендации","сверяет с твоей фазой","проверяет твои данные","собирает ответ"];
-function thinkHTML(label){return "<span class='think'><span class='tt'>"+(label||THINKS[0])+"</span><span></span><span></span><span></span></span>";}
+function bloaderHTML(cls){var p="";for(var i=0;i<5;i++){p+="<span class='bp' style='--r:"+(i*72)+"deg;transform:rotate("+(i*72)+"deg);animation-delay:"+(i*0.12)+"s'></span>";}return "<span class='bload "+(cls||"")+"'>"+p+"<span class='bc'></span></span>";}
+function thinkHTML(label){return "<span class='thinkrow'>"+bloaderHTML('sm')+"<span class='think'>"+(label||"Айва думает")+"<span></span><span></span><span></span></span></span>";}
 function startThink(){var i=0;return setInterval(function(){i=(i+1)%THINKS.length;var ns=document.querySelectorAll('.think .tt');for(var k=0;k<ns.length;k++){(function(e){e.style.opacity='0';setTimeout(function(){e.textContent=THINKS[i];e.style.opacity='1';},230);})(ns[k]);}},2700);}
 function placeAvatar(){var g=document.querySelector('#scr-today .greet');if(!g)return;if(g.parentNode&&g.parentNode.classList&&g.parentNode.classList.contains('greetrow'))return;var wrap=document.createElement('div');wrap.className='greetrow';g.parentNode.insertBefore(wrap,g);wrap.appendChild(g);var av=document.createElement('div');av.className='avatar';av.id='avatar';av.textContent=(NAME&&NAME.trim())?NAME.trim().charAt(0):'•';av.onclick=openHub;wrap.appendChild(av);}
+function periodHistory(){var pp=(D&&D.past_periods)||[];if(!pp.length)return "";var rows="";for(var i=pp.length-1;i>=0;i--){var p=pp[i];var len=(i<pp.length-1)?Math.round((new Date(pp[i+1].start+"T00:00:00")-new Date(pp[i].start+"T00:00:00"))/86400000):null;rows+="<div class='mealcard'><div class='mealico'>🩸</div><div style='min-width:0'><div class='ds'>с "+fmtD(p.start)+(p.end?(" по "+fmtD(p.end)):"")+"</div><div class='mealwhy'>"+((len&&len>=15&&len<=90)?("цикл "+len+" дней"):"отмеченные месячные")+"</div></div></div>";}return "<div class='card'><div class='sec' style='margin-top:0'>История месячных</div>"+rows+"</div>";}
 function symptomDiary(){var logs=(D&&D.sym_log)||[];logs=logs.filter(function(l){return (l.symptoms&&l.symptoms.length)||l.energy||l.mood;});if(!logs.length)return "<div class='emptygraph'>Пока нет отметок. Отмечай самочувствие и симптомы на экране «Сегодня» — здесь появится дневник.</div>";logs=logs.slice().reverse().slice(0,40);var h="";logs.forEach(function(l){var syms=(l.symptoms||[]).map(symLabel).filter(Boolean);var meta=[];if(l.energy)meta.push("энергия "+(LVL[l.energy]||""));if(l.mood)meta.push("настроение "+(MLVL[l.mood]||""));var chips=syms.map(function(s){return "<span class='nutrichip'>"+esc(s)+"</span>";}).join("");h+="<div class='mealcard'><div class='mealico'>📝</div><div style='min-width:0'><div class='ds'>"+fmtD(l.date)+"</div>"+(meta.length?"<div class='mealwhy'>"+meta.join(" · ")+"</div>":"")+(chips?"<div class='foodchips' style='margin-top:6px'>"+chips+"</div>":"")+"</div></div>";});return h;}
 function applyViewport(){if(!tg)return;try{var sa=(tg.safeAreaInset&&tg.safeAreaInset.top)||0;var ca=(tg.contentSafeAreaInset&&tg.contentSafeAreaInset.top)||0;var t=sa+ca;if(tg.isFullscreen&&t<44)t=56;document.documentElement.style.setProperty('--safe-top',t+'px');}catch(e){}}
 if(tg){try{tg.onEvent&&tg.onEvent('viewportChanged',applyViewport);tg.onEvent&&tg.onEvent('safeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('contentSafeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('fullscreenChanged',applyViewport);}catch(e){}applyViewport();setTimeout(applyViewport,800);}

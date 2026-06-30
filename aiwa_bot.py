@@ -2129,6 +2129,7 @@ async def _api_data(request):
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
                        "activity": u.get("activity"), "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or ""}}
     out["sym_log"] = logs_of(cid, (date.today() - timedelta(days=45)).isoformat())
+    out["past_periods"] = periods_of(cid)
     if out["cycle"]:
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
