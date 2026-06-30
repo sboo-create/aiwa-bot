@@ -954,7 +954,7 @@ def menu_today(st, profile=None, target=None, usage=None):
               "Завтрак обязательно белковый (яйца, омлет, сыр, греческий йогурт, рыба), а не сладкая каша как основа. "
               "Только обычные, доступные в России продукты и простые блюда. Не предлагай тофу, батат, киноа, булгур, протеиновые порошки и экзотику. Никаких странных сочетаний вроде яблока с маслом. "
               "Учитывай нутриенты под фазу." + extra +
-              " Блюда короткие, до 5 слов. Ответь строго JSON без обрамления: "
+              " Все четыре блюда разные, без повторов и без дублей между приёмами. Блюда короткие, до 5 слов. Ответь строго JSON без обрамления: "
               '{"macros":{"protein":"NN г","fat":"NN г","carbs":"NNN г"},'
               '"meals":[{"time":"08:00","dish":"...","note":"нутриент","kcal":"NNN ккал"}]}')
     out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
@@ -962,7 +962,9 @@ def menu_today(st, profile=None, target=None, usage=None):
     if out:
         try:
             data = json.loads(out[out.find("{"):out.rfind("}") + 1])
-            if data.get("meals"):
+            meals = data.get("meals") or []
+            dishes = [(m.get("dish") or "").strip().lower() for m in meals]
+            if len(meals) >= 4 and len(set(d for d in dishes if d)) >= 3:
                 return data
         except Exception:
             pass
@@ -986,7 +988,7 @@ def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
         if parts: extra += f" Ограничения: {', '.join(parts)}."
         if target:
             extra += f" Ориентир дня: {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, углеводы {target[3]} г."
-        prompt = (f"Замени один приём пищи в меню femtech-приложения: слот {times[k]}, "
+        prompt = (f"Замени один приём пищи. Это {('завтрак' if k=='b' else 'обед' if k=='l' else 'перекус' if k=='s' else 'ужин')} около {times[k]}. "
                   f"{st.get('subphase','')} {st.get('phase_ru','').lower()} фаза, день {st.get('day','')} цикла. "
                   f"Не повторяй блюдо: {avoid or 'нет'}." + extra +
                   " Блюдо должно быть обычным для России, простым, белковым, без тофу, батата, киноа, протеиновых порошков и странных сочетаний. "
@@ -1106,7 +1108,9 @@ def general_menu(profile, mode, target=None, usage=None):
     if out:
         try:
             data = json.loads(out[out.find("{"):out.rfind("}") + 1])
-            if data.get("meals"):
+            meals = data.get("meals") or []
+            dishes = [(m.get("dish") or "").strip().lower() for m in meals]
+            if len(meals) >= 4 and len(set(d for d in dishes if d)) >= 3:
                 return data
         except Exception:
             pass
