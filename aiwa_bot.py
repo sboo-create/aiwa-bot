@@ -97,6 +97,7 @@ def menu_kb_for(u, general=False):
         rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
     return InlineKeyboardMarkup(rows)
 EN = {1: "низкая", 2: "средняя", 3: "высокая"}
+MOOD = {1: "плохое", 2: "нормальное", 3: "хорошее"}
 SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), ("bloat", "вздутие"),
             ("sweet", "тяга к сладкому"), ("anx", "тревожность"), ("tired", "усталость")]
 MENO_SYMPTOMS = [("meno_hot", "приливы"), ("meno_night", "ночная потливость"), ("meno_sleep", "плохой сон"),
@@ -634,8 +635,9 @@ async def enqueue_broadcast(cid, meta="queued"):
     BCAST_PENDING.discard(cid)
     return False
 
-def en_kb(p):
-    return InlineKeyboardMarkup([[InlineKeyboardButton(EN[i].capitalize(), callback_data=f"ci:{p}:{i}") for i in (1, 2, 3)]])
+def en_kb(p, labels=None):
+    L = labels or EN
+    return InlineKeyboardMarkup([[InlineKeyboardButton(L[i].capitalize(), callback_data=f"ci:{p}:{i}") for i in (1, 2, 3)]])
 def sym_kb(selected):
     rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in SYMPTOMS]
     rows.append([InlineKeyboardButton("Свой симптом", callback_data="ci:custom")])
@@ -1945,7 +1947,7 @@ async def on_cb(update, context):
         hhmm = data.split(":", 1)[1]; upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
         await q.message.reply_text(schedule_text(cid, hhmm))
     elif data.startswith("ci:e:"):
-        log_set(cid, today_s, energy=int(data.split(":")[2])); await q.edit_message_text("Настроение?", reply_markup=en_kb("m"))
+        log_set(cid, today_s, energy=int(data.split(":")[2])); await q.edit_message_text("Настроение?", reply_markup=en_kb("m", MOOD))
     elif data.startswith("ci:m:"):
         log_set(cid, today_s, mood=int(data.split(":")[2])); await q.edit_message_text("Что беспокоит сегодня? Можно несколько, потом Готово.", reply_markup=sym_kb(set()))
     elif data.startswith("ci:s:"):
@@ -2120,6 +2122,7 @@ async def _api_data(request):
            "send_time": u.get("send_time") or "08:00",
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
                        "activity": u.get("activity"), "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or ""}}
+    out["sym_log"] = logs_of(cid, (date.today() - timedelta(days=45)).isoformat())
     if out["cycle"]:
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
