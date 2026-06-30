@@ -39,9 +39,9 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .stat{background:var(--paper2);border-radius:16px;padding:13px 12px}
 .stat .l{font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--inkSoft);font-weight:600}
 .stat .v{font-family:var(--serif);font-size:23px;font-weight:500;margin-top:4px}.stat .s{font-size:10.5px;color:var(--inkSoft)}
-.sec{font-family:var(--serif);font-size:18px;font-weight:500;margin:18px 2px 10px}
+.sec{font-family:var(--serif);font-size:18px;font-weight:500;margin:18px 0 10px}
 .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
-.calhead{display:flex;align-items:center;justify-content:space-between;margin:18px 2px 10px}
+.calhead{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}
 .calnav{border:none;background:var(--paper2);color:var(--roseDeep);width:34px;height:34px;border-radius:11px;font-size:20px;line-height:1;cursor:pointer;font-family:var(--sans)}
 .calnav:active{transform:scale(.94)}
 .calhint{font-size:11px;color:var(--inkSoft);text-align:center;margin-top:8px;min-height:14px}
@@ -49,7 +49,7 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .day{aspect-ratio:1;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:13px;border:2px solid transparent;background:transparent;font-family:var(--sans);padding:0;color:var(--ink)}
 .day:not(.empty){cursor:pointer}.day:disabled{cursor:default;opacity:.45}
 .day.empty{border:none}.day.today{background:#fff;color:var(--ink);font-weight:800;box-shadow:0 0 0 3px rgba(33,28,26,.10)}
-.legend{display:flex;flex-wrap:wrap;gap:10px 16px;margin:14px 2px 0}
+.legend{display:flex;flex-wrap:wrap;gap:10px 16px;margin:14px 0 0}
 .lg{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--inkMid)}.dot{width:10px;height:10px;border-radius:50%}
 .macros{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}
 .mac{background:var(--paper2);border-radius:14px;padding:10px;text-align:center}
@@ -73,6 +73,7 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .msg.ai{align-self:flex-start;background:#fff;border:1px solid var(--line);padding:12px 14px;border-radius:16px 16px 16px 4px}
 .composer{position:fixed;bottom:calc(106px + env(safe-area-inset-bottom));left:0;right:0;max-width:480px;margin:0 auto;padding:8px 12px;display:flex;align-items:flex-end;gap:8px;background:var(--paper);z-index:20}
 .composer:before{content:"";position:absolute;left:0;right:0;top:-22px;height:22px;background:linear-gradient(180deg,rgba(250,245,242,0),var(--paper));pointer-events:none}
+.composer:after{content:"";position:fixed;left:0;right:0;bottom:0;height:calc(100px + env(safe-area-inset-bottom));background:var(--paper);z-index:-1;pointer-events:none}
 .composer input{flex:1;min-width:0;height:42px;border:1px solid var(--line);border-radius:18px;padding:0 15px;font-size:14px;font-family:var(--sans);outline:none;background:#fff}
 .composer button{height:42px;min-width:48px;border:none;background:var(--roseDeep);color:#fff;border-radius:18px;padding:0 16px;font-weight:700;cursor:pointer}
 .prow{display:flex;gap:8px;margin:0 0 14px}
@@ -283,16 +284,17 @@ function phaseGuide(active){
 }
 function mealIcon(mm,i){var s=((mm&&mm.dish)||"").toLowerCase();
   var map=[
-    [["омлет","яйц","яич","скрамбл","фриттат"],"🍳"],
-    [["лосос","форел","треск","сёмг","семг","тунец","скумбри","минтай","селёдк","сельдь","рыб"],"🐟"],
+    [["омлет","яйц","яич","скрамбл","фриттат","глазун"],"🍳"],
+    [["блин","оладь","панкейк","сырник"],"🥞"],
+    [["лосос","форел","треск","сёмг","семг","тунец","скумбри","минтай","селёдк","сельдь","рыб","хек","судак"],"🐟"],
     [["креветк","кальмар","мидии","морепродукт"],"🦐"],
-    [["говяд","говяж","стейк","телятин","печён","печен","ростбиф","котлет"],"🥩"],
     [["курин","куриц","кур ","индейк","индюш"],"🍗"],
-    [["творог","сырник","йогурт","кефир","ряженк","сыр ","сыром","рикотт"],"🥛"],
+    [["говяд","говяж","стейк","телятин","печён","печен","ростбиф","котлет","тефтел","фрикадельк","гуляш","свинин"],"🥩"],
+    [["творог","творож","йогурт","кефир","ряженк","сыр ","сыром","рикотт","запеканк"],"🥛"],
     [["овсян","каша","гранол","мюсли","порридж"],"🥣"],
-    [["суп","борщ","бульон","крем-суп"],"🍲"],
-    [["салат","овощ","брокколи","шпинат","капуст","огур","помидор","зелен","авокадо"],"🥗"],
-    [["рис","гречк","киноа","булгур","перлов","кускус","паста","макарон","спагетти","лапш"],"🍚"],
+    [["суп","борщ","бульон","крем-суп","щи","солянк"],"🍲"],
+    [["салат","овощ","брокколи","шпинат","капуст","огур","помидор","зелен","авокадо","рагу"],"🥗"],
+    [["рис","гречк","киноа","булгур","перлов","кускус","паста","макарон","спагетти","лапш","плов","пюре","картоф"],"🍚"],
     [["хлеб","тост","бутерброд","сэндвич","лаваш"],"🍞"],
     [["ягод","черник","малин","клубник","фрукт","яблок","банан","апельсин","груш","смузи"],"🍓"],
     [["орех","миндал","фундук","кешью","арахис","семечк"],"🥜"],
@@ -390,7 +392,7 @@ function renderToday(){
   }
   html+=EDIT_PERIODS?("<div class='editnote'><span>🩸</span><div><b>Редактирование месячных</b><br>Выбери все дни кровотечения, не только первый день. Повторный тап по отмеченному дню убирает его. «Очистить» снимает отметки в этом месяце.</div></div><div class='editbar'><button class='pbtn' onclick='savePeriodEdit()'>Сохранить</button><button class='pbtn alt' onclick='clearPeriodEditMonth()'>Очистить</button><button class='pbtn alt' onclick='cancelPeriodEdit()'>Отмена</button></div>"):("<div class='editbar'><button class='pbtn' onclick='beginPeriodEdit()'>Редактировать месячные</button></div>");
   html+="<div class='calhead'><button class='calnav' id='calPrev'>\u2039</button><div class='sec' id='calLabel' style='margin:0'></div><button class='calnav' id='calNext'>\u203A</button></div><div class='cal' id='cal'></div><div class='calhint' id='calHint'></div>";
-  html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Менструальная</div><div class='lg'><span class='dot' style='background:"+COL.fol+"'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:"+COL.ovu+"'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:"+COL.lut+"'></span>Лютеиновая</div><div class='lg'><span style='color:#E0556F;font-size:13px;line-height:1'>♥</span>Близость</div></div>";html+="<div class='nt' style='color:var(--inkSoft);margin:4px 2px 0'>Тапни любой прошедший день в календаре, чтобы отметить близость ♥</div>";
+  html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Менструальная</div><div class='lg'><span class='dot' style='background:"+COL.fol+"'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:"+COL.ovu+"'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:"+COL.lut+"'></span>Лютеиновая</div><div class='lg'><span style='color:#E0556F;font-size:13px;line-height:1'>♥</span>Близость</div></div>";html+="<div style='font-size:11px;line-height:1.4;color:var(--inkSoft);margin:5px 0 0'>Тапни прошедший день в календаре — отметить близость ♥</div>";
   html+=phaseGuide(ph);
   html+=renderCheckin();
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>📲 Добавить Айву на экран телефона</button>";html+="<div class='foot'>Отмечай месячные и симптомы, чтобы прогноз цикла и рекомендации становились точнее.</div>";
@@ -682,6 +684,7 @@ function renderStats(){
     html+="<div class='emptygraph'>Пока нет сохранённых циклов. Отметь месячные на календаре или добавь прошлые циклы вручную в боте.</div>";
   }
   html+="</div>";
+  html+="<div class='card'><div class='sec' style='margin-top:0'>Дневник симптомов</div>"+symptomDiary()+"</div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Мои данные</div><div class='kv'>";
   html+="<div class='stat'><div class='l'>Цикл</div><div class='v'>"+(D.cycle_len||'нет')+"</div><div class='s'>дней</div></div>";
   html+="<div class='stat'><div class='l'>Сводка</div><div class='v' style='font-size:18px'>"+(D.send_time||"08:00")+"</div><div class='s'>МСК</div></div>";
@@ -774,7 +777,7 @@ function startThink(){var i=0;return setInterval(function(){i=(i+1)%THINKS.lengt
 function placeAvatar(){var g=document.querySelector('#scr-today .greet');if(!g)return;if(g.parentNode&&g.parentNode.classList&&g.parentNode.classList.contains('greetrow'))return;var wrap=document.createElement('div');wrap.className='greetrow';g.parentNode.insertBefore(wrap,g);wrap.appendChild(g);var av=document.createElement('div');av.className='avatar';av.id='avatar';av.textContent=(NAME&&NAME.trim())?NAME.trim().charAt(0):'•';av.onclick=openHub;wrap.appendChild(av);}
 function symptomDiary(){var logs=(D&&D.sym_log)||[];logs=logs.filter(function(l){return (l.symptoms&&l.symptoms.length)||l.energy||l.mood;});if(!logs.length)return "<div class='emptygraph'>Пока нет отметок. Отмечай самочувствие и симптомы на экране «Сегодня» — здесь появится дневник.</div>";logs=logs.slice().reverse().slice(0,40);var h="";logs.forEach(function(l){var syms=(l.symptoms||[]).map(symLabel).filter(Boolean);var meta=[];if(l.energy)meta.push("энергия "+(LVL[l.energy]||""));if(l.mood)meta.push("настроение "+(MLVL[l.mood]||""));var chips=syms.map(function(s){return "<span class='nutrichip'>"+esc(s)+"</span>";}).join("");h+="<div class='mealcard'><div class='mealico' style='background:#FBE4E9'>📝</div><div style='min-width:0'><div class='ds'>"+fmtD(l.date)+"</div>"+(meta.length?"<div class='mealwhy'>"+meta.join(" · ")+"</div>":"")+(chips?"<div class='foodchips' style='margin-top:6px'>"+chips+"</div>":"")+"</div></div>";});return h;}
 function applyViewport(){if(!tg)return;try{var sa=(tg.safeAreaInset&&tg.safeAreaInset.top)||0;var ca=(tg.contentSafeAreaInset&&tg.contentSafeAreaInset.top)||0;var t=sa+ca;if(tg.isFullscreen&&t<44)t=56;document.documentElement.style.setProperty('--safe-top',t+'px');}catch(e){}}
-if(tg){try{tg.onEvent&&tg.onEvent('viewportChanged',applyViewport);tg.onEvent&&tg.onEvent('safeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('contentSafeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('fullscreenChanged',applyViewport);}catch(e){}applyViewport();}
+if(tg){try{tg.onEvent&&tg.onEvent('viewportChanged',applyViewport);tg.onEvent&&tg.onEvent('safeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('contentSafeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('fullscreenChanged',applyViewport);}catch(e){}applyViewport();setTimeout(applyViewport,800);}
 
 function boot(){renderToday();go('today');}
 if(INIT){api('/api/data',{name:NAME}).then(function(d){if(d&&d.onboarded){D=d;boot();}else{showNeedOnboard();}});}
