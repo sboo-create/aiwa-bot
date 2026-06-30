@@ -34,7 +34,8 @@ try:
 except Exception as e:
     RPT = None; print("report off:", e)
 BOT_USERNAME = None
-BCAST_Q = None  # очередь утренней рассылки (троттлинг под лимиты Groq)
+BOT_APP = None  # ссылка на PTB Application для веб-обработчиков
+BCAST_Q = None  # очередь утренней рассылки (троттлинг под лимиты LLM-провайдера)
 BCAST_PENDING = set()
 ALERT_LAST = {}
 CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
@@ -101,7 +102,10 @@ SYMPTOMS = [("cramps", "спазмы"), ("head", "головная боль"), (
 MENO_SYMPTOMS = [("meno_hot", "приливы"), ("meno_night", "ночная потливость"), ("meno_sleep", "плохой сон"),
                  ("meno_mood", "тревожность"), ("meno_dry", "сухость"), ("meno_heart", "сердцебиение"),
                  ("meno_joint", "суставы"), ("meno_brain", "туман в голове"), ("meno_weight", "изменение веса")]
-SYM = dict(SYMPTOMS + MENO_SYMPTOMS)
+PREG_SYMPTOMS = [("preg_nausea", "тошнота"), ("preg_heartburn", "изжога"), ("preg_swelling", "отёки"),
+                 ("preg_back", "боль в спине"), ("preg_move", "шевеления"), ("preg_tired", "усталость"),
+                 ("preg_sleep", "плохой сон"), ("preg_cramp", "тянет живот")]
+SYM = dict(SYMPTOMS + MENO_SYMPTOMS + PREG_SYMPTOMS)
 def clean_custom_symptom(text):
     s = re.sub(r"\s+", " ", (text or "").strip().lower())
     s = re.sub(r"[^0-9a-zа-яё ,.+()/-]", "", s, flags=re.I).strip(" ,.-")
@@ -1004,6 +1008,19 @@ async def push_summary(context, cid, with_image=True):
         reply_markup=kb, parse_mode="HTML")
     ev(cid, "tokens", sum(usage)); ev(cid, "goal", meta="summary")
 
+async def push_checkin(context, cid):
+    """После утренней сводки — быстрый чек-ин. Переиспользует существующий поток ci:* (энергия→настроение→симптомы)."""
+    try:
+        u = row(cid)
+        if not is_onboarded(u): return
+        log_ensure(cid, date.today().isoformat())
+        await context.bot.send_message(cid,
+            "Как ты сегодня? Отметь за 10 секунд — подстрою совет дня под твоё реальное состояние.\n\nКакая энергия?",
+            reply_markup=en_kb("e"))
+        ev(cid, "broadcast", meta="checkin_push")
+    except Exception as e:
+        log.warning("checkin push %s: %s", cid, e)
+
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     actual, _, _ = scheduled_hhmm(cid, hhmm)
@@ -1037,13 +1054,14 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
         return await enqueue_broadcast(cid)    # в очередь, обработает воркер с паузами
     try:
         await push_summary(context, cid); await push_partner(context, cid)
+        await push_checkin(context, cid)
         ev(cid, "broadcast", meta="sent")
     except Exception as e:
         ev(cid, "broadcast", meta="error")
         raise
 
 async def broadcast_worker(app):
-    """Шлёт утренние сводки по одной с паузой, чтобы не превышать лимит токенов/мин Groq."""
+    """Шлёт утренние сводки по одной с паузой, чтобы не превышать лимит токенов/мин LLM-провайдера."""
     delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "6"))
     while True:
         cid = await BCAST_Q.get()
@@ -1051,6 +1069,7 @@ async def broadcast_worker(app):
             ctx = _BCtx(app)
             await push_summary(ctx, cid)
             await push_partner(ctx, cid)
+            await push_checkin(ctx, cid)
             ev(cid, "broadcast", meta="sent")
         except Exception as e:
             try: ev(cid, "broadcast", meta="error")
@@ -1365,6 +1384,17 @@ async def set_time_cmd(update, context):
         return await update.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
     upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
     await update.message.reply_text(schedule_text(cid, hhmm))
+MODE_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Цикл", callback_data="onb_cycle")],
+    [InlineKeyboardButton("Нерегулярный цикл", callback_data="mode:irregular")],
+    [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
+    [InlineKeyboardButton("Менопауза", callback_data="mode:meno")],
+    [InlineKeyboardButton("Сейчас нет месячных", callback_data="mode:none")],
+])
+async def mode_cmd(update, context):
+    ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
+    if not is_onboarded(row(cid)): return await need_onboard(update.message)
+    await update.message.reply_text("Что отслеживаем сейчас? Поменять можно в любой момент.", reply_markup=MODE_KB)
 async def menutoday_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command"); u, st = status_of(cid)
     if not is_onboarded(u): return await need_onboard(update.message)
@@ -2325,6 +2355,60 @@ async def _api_chat(request):
         except Exception: pass
     ev(cid, "answered", meta="webapp", n=len(msg))
     return _cors(web.json_response({"answer": clean, "suggestions": sugg[:2]}))
+async def _api_mode(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    m = body.get("mode")
+    if m not in ("cycle", "irregular", "meno", "none", "preg"):
+        return _cors(web.json_response({"error": "bad_mode"}, status=400))
+    if m in ("cycle", "preg") and not u.get("last_period"):
+        return _cors(web.json_response({"error": "need_period",
+            "text": "Сначала отметь дату последних месячных — без неё этот режим не включить."}, status=400))
+    upsert(cid, mode=m, state=None)
+    if BOT_APP:
+        try: schedule_daily(BOT_APP, cid, row(cid).get("send_time") or "08:00")
+        except Exception as e: log.warning("reschedule: %s", e)
+    ev(cid, "manual", meta="web_mode_" + m)
+    return _cors(web.json_response({"ok": True, "mode": m}))
+
+async def _api_prefs(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    note = (body.get("diet_note") or "").strip()[:300]
+    upsert(cid, diet_note=note)
+    ev(cid, "manual", meta="web_prefs")
+    return _cors(web.json_response({"ok": True, "diet_note": note}))
+
+async def _api_settime(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    t = parse_time(str(body.get("time") or ""))
+    if not t: return _cors(web.json_response({"error": "bad_time", "text": "Время в формате 09:00."}, status=400))
+    upsert(cid, send_time=t)
+    if BOT_APP:
+        try: schedule_daily(BOT_APP, cid, t)
+        except Exception as e: log.warning("reschedule: %s", e)
+    ev(cid, "manual", meta="web_settime")
+    return _cors(web.json_response({"ok": True, "send_time": t}))
+
+async def _api_report(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    if not (BOT_APP and RPT):
+        return _cors(web.json_response({"error": "unavail", "text": "Выписка временно недоступна."}, status=503))
+    period = str(body.get("period") or "all")
+    try:
+        await send_report(_BCtx(BOT_APP), cid, period)
+        return _cors(web.json_response({"ok": True}))
+    except Exception as e:
+        log.warning("web report %s: %s", cid, e)
+        return _cors(web.json_response({"error": "fail", "text": "Не удалось собрать выписку."}, status=500))
+
 async def _api_opts(request): return _cors(web.Response())
 
 def _admin_key_ok(request):
@@ -2334,84 +2418,91 @@ def _admin_key_ok(request):
     got = request.query.get("key") or request.headers.get("X-Admin-Key") or ""
     return _hmac.compare_digest(str(got), str(expected))
 
-def admin_dashboard_data(days=30):
+def admin_dashboard_data(days=30, frm=None, to=None):
     from collections import Counter, defaultdict
-    try:
-        days = int(days)
-    except (TypeError, ValueError):
-        days = 30
-    days = max(7, min(180, days))
+    ACTIVE = ("manual", "button", "suggest", "command", "answered", "fallback", "voice")
     today = datetime.now(TZ).date()
-    since = today - timedelta(days=days - 1)
+    try: days = int(days)
+    except (TypeError, ValueError): days = 30
+    if frm and to:
+        try:
+            since = date.fromisoformat(str(frm)); until = date.fromisoformat(str(to))
+            if until < since: since, until = until, since
+        except Exception:
+            until = today; since = today - timedelta(days=max(1, min(180, days)) - 1)
+    else:
+        days = max(1, min(180, days)); until = today; since = today - timedelta(days=days - 1)
+    span = (until - since).days + 1
     since_ts = datetime.combine(since, dtime.min).isoformat()
+    until_ts = datetime.combine(until, dtime.max).isoformat()
     c = db()
     users = c.execute("SELECT chat_id, created, last_period, cycle_len, mode FROM users").fetchall()
-    events = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, n FROM events WHERE ts>=? ORDER BY ts",
-                       (since_ts,)).fetchall()
+    events = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, n FROM events WHERE ts>=? AND ts<=? ORDER BY ts",
+                       (since_ts, until_ts)).fetchall()
     partners = c.execute("SELECT partner_id, woman_id, created FROM partners").fetchall()
-    logs = c.execute("SELECT log_date, symptoms FROM logs WHERE log_date>=? ORDER BY log_date DESC",
-                     (since.isoformat(),)).fetchall()
+    logs = c.execute("SELECT log_date, symptoms FROM logs WHERE log_date>=? AND log_date<=? ORDER BY log_date DESC",
+                     (since.isoformat(), until.isoformat())).fetchall()
+    amin = datetime.combine(today - timedelta(days=29), dtime.min).isoformat()
+    arows = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=?", (amin,)).fetchall()
     c.close()
     def dparse(ts):
         try: return datetime.fromisoformat(ts).date()
         except Exception: return today
     def pct(a, p):
-        a = sorted(a)
-        return a[min(len(a) - 1, int(len(a) * p))] if a else 0
-    def in_period(ts):
-        return bool(ts) and dparse(ts) >= since
+        a = sorted(a); return a[min(len(a) - 1, int(len(a) * p))] if a else 0
+    def in_period(ts): return bool(ts) and since <= dparse(ts) <= until
+    umode = {cid: (mode or "cycle") for cid, _, _, _, mode in users}
 
-    active_by_day = defaultdict(set)
+    active_by_day = defaultdict(set); active_mode_day = defaultdict(lambda: defaultdict(set))
     signups_by_day = Counter(); answers_by_day = Counter(); errors_by_day = Counter()
     bcast_by_day = defaultdict(Counter)
     bcast = Counter(); bcast_today = Counter(); actions = Counter(); goals = Counter(); modes = Counter()
     answers = fallback = errors = tokens = reqs = 0; lat = []; input_lens = []
     for _, _, _, _, mode in users: modes[mode or "cycle"] += 1
     for cid, ts, action, tok, meta, ms, n in events:
-        d = dparse(ts)
-        iso = d.isoformat()
-        if action in ("manual", "button", "suggest", "command", "answered", "fallback"):
-            active_by_day[iso].add(cid)
+        d = dparse(ts); iso = d.isoformat()
+        if action in ACTIVE:
+            active_by_day[iso].add(cid); active_mode_day[iso][umode.get(cid, "cycle")].add(cid)
             if n: input_lens.append(n)
-        if action == "signup": signups_by_day[d.isoformat()] += 1
+        if action == "signup": signups_by_day[iso] += 1
         if action == "broadcast":
             key = meta or "unknown"; bcast[key] += 1; bcast_by_day[iso][key] += 1
             if d == today: bcast_today[key] += 1
         if action == "answered":
             answers += 1; answers_by_day[iso] += 1
             if ms: lat.append(ms)
-        if action == "fallback":
-            fallback += 1
-        if action == "error":
-            errors += 1; errors_by_day[iso] += 1
+        if action == "fallback": fallback += 1
+        if action == "error": errors += 1; errors_by_day[iso] += 1
         if tok: tokens += tok
-        if action in ("answered", "fallback", "command", "button", "manual", "suggest", "voice"):
-            reqs += 1
-        if action == "goal":
-            goals[meta or "goal"] += 1
+        if action in ("answered", "fallback", "command", "button", "manual", "suggest", "voice"): reqs += 1
+        if action == "goal": goals[meta or "goal"] += 1
         label = (action + ":" + meta) if meta and action in ("manual", "goal", "broadcast") else (meta or action)
         actions[label] += 1
-    def active(days):
-        cut = today - timedelta(days=days - 1)
-        return len(set().union(*[s for ds, s in active_by_day.items() if date.fromisoformat(ds) >= cut]) if active_by_day else set())
+    abd = defaultdict(set)
+    for cid, ts, action in arows:
+        if action in ACTIVE: abd[dparse(ts).isoformat()].add(cid)
+    def active(n):
+        cut = today - timedelta(days=n - 1)
+        return len(set().union(*[s for ds, s in abd.items() if date.fromisoformat(ds) >= cut]) if abd else set())
+    mode_union = defaultdict(set)
+    for iso, mm in active_mode_day.items():
+        for m, s in mm.items(): mode_union[m] |= s
+    seg_active = {m: len(s) for m, s in mode_union.items()}
+    seg_dau = {m: len(s) for m, s in active_mode_day.get(today.isoformat(), {}).items()}
     symptom_counts = Counter()
     for _, ss in logs:
         for s in (ss or "").split(","):
             if s: symptom_counts[symptom_label(s)] += 1
     series = []
-    for i in range(days - 1, -1, -1):
-        d = today - timedelta(days=i); iso = d.isoformat()
-        series.append({
-            "date": iso[5:],
-            "active": len(active_by_day.get(iso, set())),
-            "signups": signups_by_day[iso],
-            "answers": answers_by_day[iso],
-            "errors": errors_by_day[iso],
-            "broadcast_sent": bcast_by_day[iso]["sent"],
-            "broadcast_error": bcast_by_day[iso]["error"],
-        })
-    lat.sort()
-    p50 = pct(lat, 0.5); p95 = pct(lat, 0.95)
+    d = since
+    while d <= until:
+        iso = d.isoformat()
+        series.append({"date": iso[5:], "active": len(active_by_day.get(iso, set())),
+                       "signups": signups_by_day[iso], "answers": answers_by_day[iso], "errors": errors_by_day[iso],
+                       "broadcast_sent": bcast_by_day[iso]["sent"], "broadcast_error": bcast_by_day[iso]["error"],
+                       "modes": {m: len(s) for m, s in active_mode_day.get(iso, {}).items()}})
+        d += timedelta(days=1)
+    lat.sort(); p50 = pct(lat, 0.5); p95 = pct(lat, 0.95)
     onboarded = sum(1 for _, _, lp, cl, md in users if (lp and cl) or md in ("irregular", "none", "meno", "preg"))
     new_users = sum(1 for _, created, _, _, _ in users if in_period(created))
     active_period = len(set().union(*active_by_day.values()) if active_by_day else set())
@@ -2422,22 +2513,22 @@ def admin_dashboard_data(days=30):
     ans_tot = answers + fallback + errors
     success_rate = round(answers / ans_tot * 100) if ans_tot else 0
     avg_input = round(sum(input_lens) / len(input_lens)) if input_lens else 0
+    checkin_sent = bcast["checkin_push"]; checkin_done = goals["checkin"]
+    checkin_rate = round(checkin_done / checkin_sent * 100) if checkin_sent else 0
     return {
         "updated": datetime.now().strftime("%d.%m %H:%M"),
-        "period_days": days, "since": since.isoformat(), "until": today.isoformat(),
+        "period_days": span, "since": since.isoformat(), "until": until.isoformat(),
         "users": len(users), "onboarded": onboarded, "new_users": new_users, "active_period": active_period,
         "dau": active(1), "wau": active(7), "mau": active(30),
         "partners": len(partners), "partner_new": partner_new, "partner_women": len(set(p[1] for p in partners)),
-        "broadcast": {
-            "scheduled": len(all_users()), "queued": bcast["queued"], "sent": bcast["sent"], "error": bcast["error"],
-            "today_queued": bcast_today["queued"], "today_sent": bcast_today["sent"], "today_error": bcast_today["error"],
-        },
-        "model": {
-            "answers": answers, "fallback": fallback, "errors": errors, "tokens": tokens,
-            "p50_ms": p50, "p95_ms": p95, "success_rate": success_rate, "avg_input": avg_input,
-        },
+        "broadcast": {"scheduled": len(all_users()), "queued": bcast["queued"], "sent": bcast["sent"], "error": bcast["error"],
+            "today_queued": bcast_today["queued"], "today_sent": bcast_today["sent"], "today_error": bcast_today["error"]},
+        "model": {"answers": answers, "fallback": fallback, "errors": errors, "tokens": tokens,
+            "p50_ms": p50, "p95_ms": p95, "success_rate": success_rate, "avg_input": avg_input},
         "funnel": {"new_users": new_users, "onboarded_total": onboarded, "active_period": active_period,
-                   "got_summary": got_summary, "app_users": app_users, "partner_new": partner_new},
+            "got_summary": got_summary, "app_users": app_users, "partner_new": partner_new},
+        "proactivity": {"checkin_sent": checkin_sent, "checkin_done": checkin_done, "checkin_rate": checkin_rate},
+        "seg_dau": Counter(seg_dau).most_common(), "seg_active": Counter(seg_active).most_common(),
         "modes": modes.most_common(), "actions": actions.most_common(14), "goals": goals.most_common(10),
         "symptoms": symptom_counts.most_common(12), "days": series,
     }
@@ -2445,25 +2536,28 @@ def admin_dashboard_data(days=30):
 async def _admin_stats(request):
     if not _admin_key_ok(request):
         return web.json_response({"error": "forbidden"}, status=403)
-    return web.json_response(admin_dashboard_data(request.query.get("days", 30)))
+    qp = request.query
+    return web.json_response(admin_dashboard_data(qp.get("days", 30), qp.get("from"), qp.get("to")))
 
 async def _admin_page(request):
     if not _admin_key_ok(request):
         return web.Response(text="forbidden", status=403)
     html_text = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AIWA dashboard</title><style>
-:root{--paper:#FAF5F2;--ink:#211C1A;--muted:#8E8179;--line:#E8DED8;--card:#FFFDFC;--rose:#C25E76;--rose2:#F8DDE5;--green:#4FAB73;--blue:#2F84DD;--amber:#E4A93A;--bad:#A94D5A}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#FFFDFC 0,#FAF5F2 42%,#F6EEE9 100%);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Manrope","Segoe UI",Arial,sans-serif}.wrap{max-width:1240px;margin:0 auto;padding:28px 24px 40px}.top{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}.brand{display:flex;gap:12px;align-items:center}.mark{width:42px;height:42px;border-radius:16px;background:radial-gradient(circle at 35% 30%,#fff 0 14%,#F8C9D6 15% 45%,#C25E76 46% 100%);box-shadow:0 14px 30px rgba(194,94,118,.18)}h1{font-family:Georgia,"Times New Roman",serif;font-size:36px;line-height:1;margin:0;font-weight:500}.sub,.muted{color:var(--muted)}.sub{font-size:14px;margin-top:7px}.tabs{display:flex;gap:8px;background:#fff;border:1px solid var(--line);padding:6px;border-radius:999px;box-shadow:0 10px 26px rgba(33,28,26,.05)}.tabs button{border:0;border-radius:999px;background:transparent;padding:10px 14px;color:#6F625B;font-weight:800;cursor:pointer}.tabs button.on{background:var(--rose);color:white}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}.card{background:rgba(255,253,252,.92);border:1px solid var(--line);border-radius:18px;padding:17px;box-shadow:0 12px 28px rgba(33,28,26,.05)}.k{font-size:11px;text-transform:uppercase;color:#A79A91;font-weight:850;letter-spacing:.06em}.v{font-size:32px;line-height:1.05;font-family:Georgia,"Times New Roman",serif;margin-top:7px}.hint{font-size:13px;color:var(--muted);margin-top:5px}.cols{display:grid;grid-template-columns:1.35fr .85fr;gap:14px}.stack{display:grid;gap:14px}.chart{display:flex;align-items:end;gap:5px;height:180px;margin-top:16px;padding:0 2px 24px;border-bottom:1px solid var(--line)}.b{flex:1;min-width:5px;border-radius:7px 7px 0 0;background:linear-gradient(180deg,var(--rose),#E9A6B6);position:relative}.b.signup{background:linear-gradient(180deg,var(--green),#BEE4C7)}.b.answer{background:linear-gradient(180deg,var(--blue),#BBD8F5)}.b.err{background:linear-gradient(180deg,var(--bad),#F0BBC2)}.b i{position:absolute;bottom:-21px;left:50%;transform:translateX(-50%) rotate(-35deg);font-size:10px;color:#A79A91;font-style:normal;white-space:nowrap}.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:13px;font-size:13px;color:#6F625B}.dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px;background:var(--rose)}.dot.g{background:var(--green)}.dot.blu{background:var(--blue)}.dot.bad{background:var(--bad)}.row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #F0E8E3;padding:9px 0;font-size:14px}.row:last-child{border-bottom:0}.row span{color:#6F625B}.row b{text-align:right}.pillgrid{display:grid;gap:9px;margin-top:10px}.pill{display:grid;grid-template-columns:minmax(90px,1fr) 70px;gap:10px;align-items:center}.track{height:10px;border-radius:99px;background:#F2EAE5;overflow:hidden}.fill{display:block;height:100%;border-radius:99px;background:var(--rose)}.fill.green{background:var(--green)}.fill.blue{background:var(--blue)}.fill.amber{background:var(--amber)}.split{display:grid;grid-template-columns:1fr 1fr;gap:14px}.wide{grid-column:1/-1}.status{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:7px 10px;background:#fff;color:#6F625B;font-size:13px}.loading{padding:28px;border:1px dashed var(--line);border-radius:18px;color:var(--muted)}@media(max-width:980px){.grid{grid-template-columns:repeat(2,1fr)}.cols,.split{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}@media(max-width:560px){.wrap{padding:18px 14px}.grid{grid-template-columns:1fr}.tabs{width:100%;justify-content:space-between}.tabs button{flex:1;padding:9px 8px}h1{font-size:31px}.chart{gap:3px}.b i{display:none}}
-</style><div class="wrap"><div class="top"><div class="brand"><div class="mark"></div><div><h1>AIWA dashboard</h1><div class="sub" id="up">загрузка</div></div></div><div class="tabs" id="tabs"><button data-days="7">7 дней</button><button data-days="30">30 дней</button><button data-days="90">90 дней</button></div></div><div id="root" class="loading">Собираю статистику...</div></div>
+:root{--paper:#FAF5F2;--ink:#211C1A;--muted:#8E8179;--line:#E8DED8;--card:#FFFDFC;--rose:#C25E76;--rose2:#F8DDE5;--green:#4FAB73;--blue:#2F84DD;--amber:#E4A93A;--bad:#A94D5A}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#FFFDFC 0,#FAF5F2 42%,#F6EEE9 100%);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Manrope","Segoe UI",Arial,sans-serif}.wrap{max-width:1240px;margin:0 auto;padding:28px 24px 40px}.top{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}.brand{display:flex;gap:12px;align-items:center}.mark{width:42px;height:42px;border-radius:16px;background:radial-gradient(circle at 35% 30%,#fff 0 14%,#F8C9D6 15% 45%,#C25E76 46% 100%);box-shadow:0 14px 30px rgba(194,94,118,.18)}h1{font-family:Georgia,"Times New Roman",serif;font-size:36px;line-height:1;margin:0;font-weight:500}.sub,.muted{color:var(--muted)}.sub{font-size:14px;margin-top:7px}.tabs{display:flex;gap:8px;background:#fff;border:1px solid var(--line);padding:6px;border-radius:999px;box-shadow:0 10px 26px rgba(33,28,26,.05)}.tabs button{border:0;border-radius:999px;background:transparent;padding:10px 14px;color:#6F625B;font-weight:800;cursor:pointer}.tabs button.on{background:var(--rose);color:white}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}.card{background:rgba(255,253,252,.92);border:1px solid var(--line);border-radius:18px;padding:17px;box-shadow:0 12px 28px rgba(33,28,26,.05)}.k{font-size:11px;text-transform:uppercase;color:#A79A91;font-weight:850;letter-spacing:.06em}.v{font-size:32px;line-height:1.05;font-family:Georgia,"Times New Roman",serif;margin-top:7px}.hint{font-size:13px;color:var(--muted);margin-top:5px}.cols{display:grid;grid-template-columns:1.35fr .85fr;gap:14px}.stack{display:grid;gap:14px}.chart{display:flex;align-items:end;gap:5px;height:180px;margin-top:16px;padding:0 2px 24px;border-bottom:1px solid var(--line)}.b{flex:1;min-width:5px;border-radius:7px 7px 0 0;background:linear-gradient(180deg,var(--rose),#E9A6B6);position:relative}.b.signup{background:linear-gradient(180deg,var(--green),#BEE4C7)}.b.answer{background:linear-gradient(180deg,var(--blue),#BBD8F5)}.b.err{background:linear-gradient(180deg,var(--bad),#F0BBC2)}.b i{position:absolute;bottom:-21px;left:50%;transform:translateX(-50%) rotate(-35deg);font-size:10px;color:#A79A91;font-style:normal;white-space:nowrap}.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:13px;font-size:13px;color:#6F625B}.dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px;background:var(--rose)}.dot.g{background:var(--green)}.dot.blu{background:var(--blue)}.dot.bad{background:var(--bad)}.row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #F0E8E3;padding:9px 0;font-size:14px}.row:last-child{border-bottom:0}.row span{color:#6F625B}.row b{text-align:right}.pillgrid{display:grid;gap:9px;margin-top:10px}.pill{display:grid;grid-template-columns:minmax(90px,1fr) 70px;gap:10px;align-items:center}.track{height:10px;border-radius:99px;background:#F2EAE5;overflow:hidden}.fill{display:block;height:100%;border-radius:99px;background:var(--rose)}.fill.green{background:var(--green)}.fill.blue{background:var(--blue)}.fill.amber{background:var(--amber)}.split{display:grid;grid-template-columns:1fr 1fr;gap:14px}.wide{grid-column:1/-1}.status{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:7px 10px;background:#fff;color:#6F625B;font-size:13px}.loading{padding:28px;border:1px dashed var(--line);border-radius:18px;color:var(--muted)}@media(max-width:980px){.grid{grid-template-columns:repeat(2,1fr)}.cols,.split{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}.tabs .dinp{border:1px solid var(--line);border-radius:10px;padding:8px 9px;font-family:inherit;color:#6F625B;font-size:13px;background:#fff}#applyRange{background:var(--rose);color:#fff}@media(max-width:560px){.wrap{padding:18px 14px}.grid{grid-template-columns:1fr}.tabs{width:100%;justify-content:space-between}.tabs button{flex:1;padding:9px 8px}h1{font-size:31px}.chart{gap:3px}.b i{display:none}}
+</style><div class="wrap"><div class="top"><div class="brand"><div class="mark"></div><div><h1>AIWA dashboard</h1><div class="sub" id="up">загрузка</div></div></div><div class="tabs" id="tabs"><button data-days="1">сегодня</button><button data-days="2">2 дня</button><button data-days="7">7 дней</button><button data-days="30">30 дней</button><button data-days="90">90 дней</button><input type="date" id="dfrom" class="dinp"><input type="date" id="dto" class="dinp"><button id="applyRange">диапазон</button></div></div><div id="root" class="loading">Собираю статистику...</div></div>
 <script>
-const q=new URLSearchParams(location.search),key=q.get('key')||'';let period=Number(q.get('days')||30);if(![7,30,90].includes(period))period=30;const rootEl=document.getElementById('root'),upEl=document.getElementById('up');
+const q=new URLSearchParams(location.search),key=q.get('key')||'';let period=Number(q.get('days')||30);if(![1,2,7,30,90].includes(period))period=30;let frm=q.get('from')||'',to=q.get('to')||'';const rootEl=document.getElementById('root'),upEl=document.getElementById('up');
 const labels={cycle:'цикл',irregular:'нерегулярный',none:'без цикла',meno:'менопауза',preg:'беременность',answered:'ответы',fallback:'фолбэк',error:'ошибка',command:'команды',button:'кнопки',suggest:'саджесты','manual:web_checkin':'чек-ин','manual:web_period':'месячные','manual:web_pa':'близость','goal:summary':'сводка','goal:report':'выписка','goal:partner_link':'партнёр','broadcast:sent':'рассылка ушла','broadcast:error':'ошибка рассылки','broadcast:queued':'рассылка в очереди'};
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 function name(x){return labels[x]||x||'пусто'}function fmt(n){return Number(n||0).toLocaleString('ru-RU')}function row(k,v){return `<div class=row><span>${esc(k)}</span><b>${esc(v)}</b></div>`}
 function card(k,v,h){return `<div class=card><div class=k>${esc(k)}</div><div class=v>${esc(v)}</div>${h?`<div class=hint>${esc(h)}</div>`:''}</div>`}
 function list(items,cls){let mx=Math.max(1,...(items||[]).map(x=>x[1]||0));return `<div class=pillgrid>${(items||[]).map((x,i)=>`<div class=pill><div><b>${esc(name(x[0]))}</b><div class=track><span class="fill ${cls||''}" style="width:${Math.max(4,(x[1]||0)/mx*100)}%"></span></div></div><b>${fmt(x[1])}</b></div>`).join('')||'<div class=muted>нет данных</div>'}</div>`}
 function bars(days,field,cls){let mx=Math.max(1,...days.map(x=>x[field]||0));return days.map((x,i)=>`<div class="b ${cls||''}" title="${x.date}: ${x[field]||0}" style="height:${Math.max(3,(x[field]||0)/mx*100)}%">${(i%Math.ceil(days.length/8)===0)?`<i>${x.date}</i>`:''}</div>`).join('')}
-function setTabs(){document.querySelectorAll('#tabs button').forEach(b=>{b.classList.toggle('on',Number(b.dataset.days)===period);b.onclick=()=>{period=Number(b.dataset.days);q.set('days',period);history.replaceState(null,'','?'+q.toString());load();}})}
-async function load(){setTabs();rootEl.className='loading';rootEl.textContent='Собираю статистику...';let r=await fetch('/api/admin_stats?key='+encodeURIComponent(key)+'&days='+period);let d=await r.json();if(d.error){rootEl.textContent='Нет доступа';return}upEl.textContent=`${d.since} - ${d.until}, обновлено ${d.updated}`;rootEl.className='';rootEl.innerHTML=`<div class=grid>${card('Всего пользователей',fmt(d.users),`новых за период: ${fmt(d.new_users)}`)}${card('Онбординг',fmt(d.onboarded),'всего прошли настройку')}${card('Активные за период',fmt(d.active_period),`DAU ${fmt(d.dau)} · WAU ${fmt(d.wau)} · MAU ${fmt(d.mau)}`)}${card('Партнёры',fmt(d.partners),`новых: ${fmt(d.partner_new)}, женщин: ${fmt(d.partner_women)}`)}${card('Ответы модели',fmt(d.model.answers),`успешность ${d.model.success_rate}%`)}${card('Ошибки модели',fmt(d.model.errors),`p95 ${fmt(d.model.p95_ms)} мс`)}${card('Рассылки',fmt(d.broadcast.sent),`ошибок: ${fmt(d.broadcast.error)}`)}${card('Токены',fmt(d.model.tokens),`средний ввод ${fmt(d.model.avg_input)} симв.`)}</div><div class=cols><div class=stack><div class=card><div class=k>Активность за ${d.period_days} дней</div><div class=chart>${bars(d.days,'active','')}</div><div class=legend><span><i class=dot></i>активные пользователи по дням</span></div></div><div class=split><div class=card><div class=k>Регистрации</div><div class=chart>${bars(d.days,'signups','signup')}</div><div class=legend><span><i class="dot g"></i>новые пользователи</span></div></div><div class=card><div class=k>Ответы и ошибки</div><div class=chart>${bars(d.days,'answers','answer')}</div><div class=legend><span><i class="dot blu"></i>ответы</span><span><i class="dot bad"></i>ошибки: ${fmt(d.model.errors)}</span></div></div></div></div><div class=stack><div class=card><div class=k>Рассылки</div>${row('запланировано сейчас',fmt(d.broadcast.scheduled))+row('ушло за период',fmt(d.broadcast.sent))+row('ошибок за период',fmt(d.broadcast.error))+row('сегодня ушло',fmt(d.broadcast.today_sent))+row('сегодня ошибок',fmt(d.broadcast.today_error))}</div><div class=card><div class=k>Воронка</div>${row('новые пользователи',fmt(d.funnel.new_users))+row('активные за период',fmt(d.funnel.active_period))+row('получили сводку',fmt(d.funnel.got_summary))+row('пользовались приложением',fmt(d.funnel.app_users))+row('новые партнёры',fmt(d.funnel.partner_new))}</div><div class=card><div class=k>Модель</div>${row('ответы',fmt(d.model.answers))+row('фолбэки',fmt(d.model.fallback))+row('ошибки',fmt(d.model.errors))+row('успешность',d.model.success_rate+'%')+row('p50 / p95',fmt(d.model.p50_ms)+' / '+fmt(d.model.p95_ms)+' мс')}</div></div><div class="card wide"><div class=k>Топ действий</div>${list(d.actions)}</div><div class=card><div class=k>Симптомы</div>${list(d.symptoms,'amber')}</div><div class=card><div class=k>Режимы</div>${list(d.modes,'green')}</div><div class=card><div class=k>Целевые действия</div>${list(d.goals,'blue')}</div></div>`}
+function segCard(d){return `<div class="card wide"><div class=k>Активность по режимам</div><div class=split><div><div class=hint>DAU сегодня</div>${list(d.seg_dau)}</div><div><div class=hint>уникальные за период</div>${list(d.seg_active)}</div></div></div>`}
+function proCard(d){let p=d.proactivity||{};return `<div class="card wide"><div class=k>Проактивность · утренний чек-ин</div>${row('чек-инов отправлено',fmt(p.checkin_sent))+row('ответили на чек-ин',fmt(p.checkin_done))+row('доля ответивших',(p.checkin_rate||0)+'%')}</div>`}
+function setTabs(){document.querySelectorAll('#tabs button[data-days]').forEach(b=>{b.classList.toggle('on',!frm&&Number(b.dataset.days)===period);b.onclick=()=>{period=Number(b.dataset.days);frm='';to='';q.set('days',period);q.delete('from');q.delete('to');history.replaceState(null,'','?'+q.toString());load();}});var f=document.getElementById('dfrom'),t=document.getElementById('dto');if(f)f.value=frm;if(t)t.value=to;var ar=document.getElementById('applyRange');if(ar)ar.onclick=()=>{var a=document.getElementById('dfrom').value,z=document.getElementById('dto').value;if(a&&z){frm=a;to=z;q.set('from',a);q.set('to',z);q.delete('days');history.replaceState(null,'','?'+q.toString());load();}else{alert('Выбери обе даты');}};}
+async function load(){setTabs();rootEl.className='loading';rootEl.textContent='Собираю статистику...';let r=await fetch('/api/admin_stats?key='+encodeURIComponent(key)+((frm&&to)?('&from='+frm+'&to='+to):('&days='+period)));let d=await r.json();if(d.error){rootEl.textContent='Нет доступа';return}upEl.textContent=`${d.since} - ${d.until}, обновлено ${d.updated}`;rootEl.className='';rootEl.innerHTML=`<div class=grid>${card('Всего пользователей',fmt(d.users),`новых за период: ${fmt(d.new_users)}`)}${card('Онбординг',fmt(d.onboarded),'всего прошли настройку')}${card('Активные за период',fmt(d.active_period),`DAU ${fmt(d.dau)} · WAU ${fmt(d.wau)} · MAU ${fmt(d.mau)}`)}${card('Партнёры',fmt(d.partners),`новых: ${fmt(d.partner_new)}, женщин: ${fmt(d.partner_women)}`)}${card('Ответы модели',fmt(d.model.answers),`успешность ${d.model.success_rate}%`)}${card('Ошибки модели',fmt(d.model.errors),`p95 ${fmt(d.model.p95_ms)} мс`)}${card('Рассылки',fmt(d.broadcast.sent),`ошибок: ${fmt(d.broadcast.error)}`)}${card('Токены',fmt(d.model.tokens),`средний ввод ${fmt(d.model.avg_input)} симв.`)}</div>${segCard(d)}${proCard(d)}<div class=cols><div class=stack><div class=card><div class=k>Активность за ${d.period_days} дней</div><div class=chart>${bars(d.days,'active','')}</div><div class=legend><span><i class=dot></i>активные пользователи по дням</span></div></div><div class=split><div class=card><div class=k>Регистрации</div><div class=chart>${bars(d.days,'signups','signup')}</div><div class=legend><span><i class="dot g"></i>новые пользователи</span></div></div><div class=card><div class=k>Ответы и ошибки</div><div class=chart>${bars(d.days,'answers','answer')}</div><div class=legend><span><i class="dot blu"></i>ответы</span><span><i class="dot bad"></i>ошибки: ${fmt(d.model.errors)}</span></div></div></div></div><div class=stack><div class=card><div class=k>Рассылки</div>${row('запланировано сейчас',fmt(d.broadcast.scheduled))+row('ушло за период',fmt(d.broadcast.sent))+row('ошибок за период',fmt(d.broadcast.error))+row('сегодня ушло',fmt(d.broadcast.today_sent))+row('сегодня ошибок',fmt(d.broadcast.today_error))}</div><div class=card><div class=k>Воронка</div>${row('новые пользователи',fmt(d.funnel.new_users))+row('активные за период',fmt(d.funnel.active_period))+row('получили сводку',fmt(d.funnel.got_summary))+row('пользовались приложением',fmt(d.funnel.app_users))+row('новые партнёры',fmt(d.funnel.partner_new))}</div><div class=card><div class=k>Модель</div>${row('ответы',fmt(d.model.answers))+row('фолбэки',fmt(d.model.fallback))+row('ошибки',fmt(d.model.errors))+row('успешность',d.model.success_rate+'%')+row('p50 / p95',fmt(d.model.p50_ms)+' / '+fmt(d.model.p95_ms)+' мс')}</div></div><div class="card wide"><div class=k>Топ действий</div>${list(d.actions)}</div><div class=card><div class=k>Симптомы</div>${list(d.symptoms,'amber')}</div><div class=card><div class=k>Режимы</div>${list(d.modes,'green')}</div><div class=card><div class=k>Целевые действия</div>${list(d.goals,'blue')}</div></div>`}
 load().catch(e=>{rootEl.className='loading';rootEl.textContent='Ошибка загрузки: '+e.message});
 </script>"""
     return web.Response(text=html_text, content_type="text/html")
@@ -2483,14 +2577,19 @@ def build_web():
     aio.router.add_post("/api/profile", _api_profile)
     aio.router.add_post("/api/meal", _api_meal)
     aio.router.add_post("/api/partner", _api_partner)
+    aio.router.add_post("/api/mode", _api_mode)
+    aio.router.add_post("/api/prefs", _api_prefs)
+    aio.router.add_post("/api/settime", _api_settime)
+    aio.router.add_post("/api/report", _api_report)
     aio.router.add_route("OPTIONS", "/api/{tail:.*}", _api_opts)
     aio.router.add_get("/{tail:.*}", _serve_index)
     return aio
 
 async def run_all():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
+    global BOT_APP; BOT_APP = app
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
-                    ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("menutoday", menutoday_cmd),
+                    ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
                     ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
