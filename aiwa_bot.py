@@ -2302,9 +2302,17 @@ async def _api_section(request):
     if not is_onboarded(u):
         return _cors(web.json_response({"error": "onboard", "text": "Сначала настрой Айву в боте."}, status=403))
     if st is None:
-        q = {"food": "Что мне есть сегодня под мой возраст?", "training": "Какая активность мне подходит и почему?"}.get(kind, kind)
-        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), q, chat_hint(cid), None)
-        return _cors(web.json_response({"text": ans}))
+        prof = profile_of(u); target = profile_kcal(prof) if prof else None
+        if kind == "food":
+            menu = await asyncio.to_thread(L.general_menu, prof, u.get("mode"), target)
+            if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
+            txt = {"meno": "Питание под менопаузу: белок, кальций и витамин D для костей, магний для сна и приливов.",
+                   "preg": "Питание в беременности: фолиевая кислота, железо, кальций и белок; без сырого и непастеризованного.",
+                   "irregular": "Сбалансированное питание: белок в каждый приём, магний, железо, клетчатка.",
+                   "none": "Сбалансированное питание: белок, овощи, сложные углеводы и вода."}.get(u.get("mode"), "Сбалансированное питание на день.")
+            return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt}))
+        plan = await asyncio.to_thread(L.general_training, prof, u.get("mode"))
+        return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
     if kind == "food":
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
         menu = await asyncio.to_thread(L.menu_today, st, profile=prof, target=target)

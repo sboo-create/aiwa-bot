@@ -71,7 +71,8 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .msg{max-width:86%;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
 .msg.me{align-self:flex-end;background:var(--ink);color:#fff;padding:10px 14px;border-radius:16px 16px 4px 16px}
 .msg.ai{align-self:flex-start;background:#fff;border:1px solid var(--line);padding:12px 14px;border-radius:16px 16px 16px 4px}
-.composer{position:fixed;bottom:calc(106px + env(safe-area-inset-bottom));left:0;right:0;max-width:480px;margin:0 auto;padding:8px 12px;display:flex;align-items:flex-end;gap:8px;background:linear-gradient(180deg,rgba(250,245,242,0),var(--paper) 32%);z-index:20}
+.composer{position:fixed;bottom:calc(106px + env(safe-area-inset-bottom));left:0;right:0;max-width:480px;margin:0 auto;padding:8px 12px;display:flex;align-items:flex-end;gap:8px;background:var(--paper);z-index:20}
+.composer:before{content:"";position:absolute;left:0;right:0;top:-22px;height:22px;background:linear-gradient(180deg,rgba(250,245,242,0),var(--paper));pointer-events:none}
 .composer input{flex:1;min-width:0;height:42px;border:1px solid var(--line);border-radius:18px;padding:0 15px;font-size:14px;font-family:var(--sans);outline:none;background:#fff}
 .composer button{height:42px;min-width:48px;border:none;background:var(--roseDeep);color:#fff;border-radius:18px;padding:0 16px;font-weight:700;cursor:pointer}
 .prow{display:flex;gap:8px;margin:0 0 14px}
@@ -144,7 +145,9 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .copylink.danger{background:#EFEAE6;color:#6E635C;border:1px solid var(--line)}
 .copylink:active{transform:scale(.98)}
 .think{display:inline-flex;gap:4px;align-items:center;color:var(--roseDeep);font-size:13px;font-style:italic}
-.think span{width:4px;height:4px;border-radius:50%;background:var(--rose);animation:dp 1s infinite}
+.think{white-space:nowrap}
+.think span:not(.tt){width:4px;height:4px;border-radius:50%;background:var(--rose);animation:dp 1s infinite}
+.think .tt{display:inline-block;white-space:nowrap;transition:opacity .22s ease;opacity:1}
 .think span:nth-child(2){animation-delay:.16s}.think span:nth-child(3){animation-delay:.32s}
 @keyframes dp{0%,100%{opacity:.3}50%{opacity:1}}
 /* --- technique upgrades (вдохновлено sber-tma: сегмент-индикатор, переходы, cells) --- */
@@ -335,12 +338,13 @@ function renderPreg(el){var p=D.preg,w=p.week,dy=p.day,tri=p.trimester,fr=pregFr
   html+="<div class='calhead'><button class='calnav' id='pPrev'>‹</button><div class='sec' id='pLabel' style='margin:0'></div><button class='calnav' id='pNext'>›</button></div><div class='cal' id='pcal'></div>";
   html+="<div class='legend'><div class='lg'><span class='dot' style='background:#F2D785'></span>1 триместр</div><div class='lg'><span class='dot' style='background:#AFC58E'></span>2 триместр</div><div class='lg'><span class='dot' style='background:#EFA9BC'></span>3 триместр</div></div>";
   html+=renderCheckin();
+  html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>📲 Добавить Айву на экран телефона</button>";
   html+="<div class='foot'>Айва считает срок и ПДР по дате последних месячных и сверяет рекомендации с медицинской логикой беременности.</div>";
   el.innerHTML=html;
   var pc=document.getElementById("pchips");["Что есть на "+w+" неделе?","Какая активность можно?"].forEach(function(c){var b=document.createElement("button");b.className="chip";b.textContent=c;b.onclick=function(){go("chat");setTimeout(function(){send(c);},120);};pc.appendChild(b);});
   PREG_CAL_OFFSET=0;drawPregCal();
   document.getElementById("pPrev").onclick=function(){PREG_CAL_OFFSET--;drawPregCal();};
-  document.getElementById("pNext").onclick=function(){PREG_CAL_OFFSET++;drawPregCal();};
+  document.getElementById("pNext").onclick=function(){PREG_CAL_OFFSET++;drawPregCal();};updateHomeBtn();
 }
 function renderMeno(el){
   var f=MENO_FACTS[Math.floor(today.getTime()/86400000)%MENO_FACTS.length];
@@ -352,8 +356,9 @@ function renderMeno(el){
   html+=renderCheckin();
   html+="<div class='card'><div class='sec' style='margin-top:0'>Спроси Айву</div><div class='ayva-txt'>Задай вопрос про приливы, сон, кости, сердце, питание или чекапы — отвечу с учётом твоих отметок.</div><div class='chips' id='menoask'></div></div>";
   html+="<div class='card redflag'><div class='sec' style='margin-top:0'>Когда не ждать</div><div class='urgent'><div>Кровянистые выделения после менопаузы всегда стоит обсудить с врачом.</div><div>Боль в груди, одышка, обморок, внезапная слабость или сильное сердцебиение требуют срочной оценки.</div><div>Если симптомы мешают сну, работе или близости, это уже достаточная причина для консультации.</div></div></div>";
+  html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>📲 Добавить Айву на экран телефона</button>";
   html+="<div class='foot'>Айва опирается на медицинские рекомендации и твои отметки. Это не диагноз, а навигация по симптомам и профилактике.</div>";
-  el.innerHTML=html;blossom(document.getElementById('al'),34);
+  el.innerHTML=html;blossom(document.getElementById('al'),34);updateHomeBtn();
   var mc=document.getElementById('menochips');["Почему приливы?","Какие чекапы?"].forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};mc.appendChild(b);});
   var ma=document.getElementById('menoask');if(ma)["Как снизить приливы?","Что важно для костей?","Какие чекапы по возрасту?","Как улучшить сон?"].forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};ma.appendChild(b);});
 }
@@ -361,7 +366,7 @@ function renderToday(){
   var el=document.getElementById('scr-today');
   if(D.mode==='preg' && D.preg){renderPreg(el);return placeAvatar();}
   if(D.mode==='meno'){renderMeno(el);return placeAvatar();}
-  if(!D.cycle || ['irregular','none','meno','preg'].indexOf(D.mode)>=0){el.innerHTML="<div class='eyebrow'>Сегодня</div><div class='greet'>"+greeting()+(NAME?",<span class='nm'> "+esc(NAME)+"</span>":"")+"</div><div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>Цикл сейчас не отслеживается. Я могу помогать с питанием, движением и симптомами с учётом твоих данных.</div><div class='medline'>Опираюсь на медицинские рекомендации и твои отметки.</div></div></div></div><div class='prow' style='margin-top:14px'><button class='pbtn' onclick=\"markPeriod('start')\">Отметить месячные</button></div>"+renderCheckin();blossom(document.getElementById('al'),34);placeAvatar();return;}
+  if(!D.cycle || ['irregular','none','meno','preg'].indexOf(D.mode)>=0){el.innerHTML="<div class='eyebrow'>Сегодня</div><div class='greet'>"+greeting()+(NAME?",<span class='nm'> "+esc(NAME)+"</span>":"")+"</div><div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>Цикл сейчас не отслеживается. Я могу помогать с питанием, движением и симптомами с учётом твоих данных.</div><div class='medline'>Опираюсь на медицинские рекомендации и твои отметки.</div></div></div></div><div class='prow' style='margin-top:14px'><button class='pbtn' onclick=\"markPeriod('start')\">Отметить месячные</button></div>"+renderCheckin()+"<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>📲 Добавить Айву на экран телефона</button>";blossom(document.getElementById('al'),34);placeAvatar();updateHomeBtn();return;}
   var day=dayOfCycle(today),ph=phaseForDay(day,D.cycle_len),sub=subphase(day,ph,D.cycle_len),toNext=D.cycle_len-day+1;
   var PHMAP={menstrual:'men',follicular:'fol',ovulation:'ovu',luteal:'lut'};
   if(typeof D.day==='number'){day=D.day;ph=PHMAP[D.phase]||ph;sub=subphase(day,ph,D.cycle_len);if(typeof D.days_to_next==='number')toNext=D.days_to_next;}
@@ -385,7 +390,7 @@ function renderToday(){
   }
   html+=EDIT_PERIODS?("<div class='editnote'><span>🩸</span><div><b>Редактирование месячных</b><br>Выбери все дни кровотечения, не только первый день. Повторный тап по отмеченному дню убирает его. «Очистить» снимает отметки в этом месяце.</div></div><div class='editbar'><button class='pbtn' onclick='savePeriodEdit()'>Сохранить</button><button class='pbtn alt' onclick='clearPeriodEditMonth()'>Очистить</button><button class='pbtn alt' onclick='cancelPeriodEdit()'>Отмена</button></div>"):("<div class='editbar'><button class='pbtn' onclick='beginPeriodEdit()'>Редактировать месячные</button></div>");
   html+="<div class='calhead'><button class='calnav' id='calPrev'>\u2039</button><div class='sec' id='calLabel' style='margin:0'></div><button class='calnav' id='calNext'>\u203A</button></div><div class='cal' id='cal'></div><div class='calhint' id='calHint'></div>";
-  html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Менструальная</div><div class='lg'><span class='dot' style='background:"+COL.fol+"'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:"+COL.ovu+"'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:"+COL.lut+"'></span>Лютеиновая</div><div class='lg'><span style='color:#E0556F;font-size:13px;line-height:1'>♥</span>близость</div></div>";
+  html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Менструальная</div><div class='lg'><span class='dot' style='background:"+COL.fol+"'></span>Фолликулярная</div><div class='lg'><span class='dot' style='background:"+COL.ovu+"'></span>Овуляторная</div><div class='lg'><span class='dot' style='background:"+COL.lut+"'></span>Лютеиновая</div><div class='lg'><span style='color:#E0556F;font-size:13px;line-height:1'>♥</span>Близость</div></div>";html+="<div class='nt' style='color:var(--inkSoft);margin:4px 2px 0'>Тапни любой прошедший день в календаре, чтобы отметить близость ♥</div>";
   html+=phaseGuide(ph);
   html+=renderCheckin();
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>📲 Добавить Айву на экран телефона</button>";html+="<div class='foot'>Отмечай месячные и симптомы, чтобы прогноз цикла и рекомендации становились точнее.</div>";
@@ -658,7 +663,7 @@ function renderStats(){
   html+="<div class='stats'>";
   html+="<div class='stat'><div class='l'>Прошлый цикл</div><div class='v'>"+(s.last_cycle_len||'нет')+"</div><div class='s'>дней</div></div>";
   html+="<div class='stat'><div class='l'>Средний цикл</div><div class='v'>"+(s.avg_cycle||'нет')+"</div><div class='s'>дней</div></div>";
-  html+="<div class='stat'><div class='l'>Месячные</div><div class='v'>"+(s.period_len||'нет')+"</div><div class='s'>дней</div></div>";
+  html+="<div class='stat'><div class='l'>Месячные</div><div class='v'>"+((s.avg_period&&s.avg_period>1)?s.avg_period:((s.period_len&&s.period_len>1)?s.period_len:'—'))+"</div><div class='s'>дней</div></div>";
   html+="</div>";
   var graph=cycleChart(s.history||[]);
   html+="<div class='card'><div class='sec' style='margin-top:0'>Динамика цикла</div>";
@@ -684,7 +689,7 @@ function renderStats(){
   html+="<div class='stat'><div class='l'>Вес</div><div class='v'>"+(p.weight||'нет')+"</div><div class='s'>кг</div></div>";
   html+="</div><div class='chips'><button class='chip' onclick='showProfileEditor()'>Изменить рост и вес</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как поменять время рассылки?\");},120)'>Время сводки</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как добавить историю циклов?\");},120)'>История циклов</button></div>";
   html+="<div id='profileEditor' class='hidden'><div class='profileform'><label>Рост<input id='profHeight' inputmode='decimal' value='"+esc(p.height||"")+"' placeholder='168'></label><label>Вес<input id='profWeight' inputmode='decimal' value='"+esc(p.weight||"")+"' placeholder='60'></label><label>Возраст<input id='profAge' inputmode='numeric' value='"+esc(p.age||"")+"' placeholder='30'></label></div><div class='profileactions'><button class='pbtn' onclick='saveProfileApp()'>Сохранить</button><button class='pbtn alt' onclick='showProfileEditor()'>Отмена</button></div></div></div>";
-  html+="<div class='card'><div class='sec' style='margin-top:0'>Партнёр</div><div class='partnernote'>Партнёр будет видеть не твой календарь, а короткую сводку в Telegram: день цикла, общее состояние и подсказки, как поддержать.</div>"+(D.partner_linked?"<button class='copylink danger' onclick='unlinkPartner()'>Отключить партнёра</button>":"<button class='copylink' onclick='loadPartner()'>Получить ссылку</button>")+"<div id='partnerOut'></div></div>";
+  html+="<div class='card'><div class='sec' style='margin-top:0'>Выписка для врача</div><div class='partnernote'>PDF с историей цикла и симптомами — можно показать гинекологу. Придёт в чат бота.</div><button class='copylink' onclick='getReport()'>Получить выписку</button></div>";
   if(s.regularity){html+="<div class='card'><div class='pl'><span class='tag' style='color:var(--roseDeep);background:var(--roseWash)'>"+s.regularity+"</span></div>"+(s.spread!=null?("<div class='pmeta'>разброс длины цикла "+s.min_cycle+"-"+s.max_cycle+" дней</div>"):"")+"</div>";}
   html+="<div class='foot'>Статистика строится по твоим отметкам: циклы, симптомы и история изменений.</div>";
   el.innerHTML=html;
@@ -765,10 +770,10 @@ function copyHubLink(){var t=document.getElementById('hubPlink');if(!t)return;va
 const MLVL={1:"плохое",2:"нормальное",3:"хорошее"};
 const THINKS=["Айва думает","подбирает рекомендации","сверяет с твоей фазой","проверяет твои данные","собирает ответ"];
 function thinkHTML(label){return "<span class='think'><span class='tt'>"+(label||THINKS[0])+"</span><span></span><span></span><span></span></span>";}
-function startThink(){var i=0;return setInterval(function(){i=(i+1)%THINKS.length;var ns=document.querySelectorAll('.think .tt');for(var k=0;k<ns.length;k++)ns[k].textContent=THINKS[i];},1500);}
+function startThink(){var i=0;return setInterval(function(){i=(i+1)%THINKS.length;var ns=document.querySelectorAll('.think .tt');for(var k=0;k<ns.length;k++){(function(e){e.style.opacity='0';setTimeout(function(){e.textContent=THINKS[i];e.style.opacity='1';},230);})(ns[k]);}},2700);}
 function placeAvatar(){var g=document.querySelector('#scr-today .greet');if(!g)return;if(g.parentNode&&g.parentNode.classList&&g.parentNode.classList.contains('greetrow'))return;var wrap=document.createElement('div');wrap.className='greetrow';g.parentNode.insertBefore(wrap,g);wrap.appendChild(g);var av=document.createElement('div');av.className='avatar';av.id='avatar';av.textContent=(NAME&&NAME.trim())?NAME.trim().charAt(0):'•';av.onclick=openHub;wrap.appendChild(av);}
 function symptomDiary(){var logs=(D&&D.sym_log)||[];logs=logs.filter(function(l){return (l.symptoms&&l.symptoms.length)||l.energy||l.mood;});if(!logs.length)return "<div class='emptygraph'>Пока нет отметок. Отмечай самочувствие и симптомы на экране «Сегодня» — здесь появится дневник.</div>";logs=logs.slice().reverse().slice(0,40);var h="";logs.forEach(function(l){var syms=(l.symptoms||[]).map(symLabel).filter(Boolean);var meta=[];if(l.energy)meta.push("энергия "+(LVL[l.energy]||""));if(l.mood)meta.push("настроение "+(MLVL[l.mood]||""));var chips=syms.map(function(s){return "<span class='nutrichip'>"+esc(s)+"</span>";}).join("");h+="<div class='mealcard'><div class='mealico' style='background:#FBE4E9'>📝</div><div style='min-width:0'><div class='ds'>"+fmtD(l.date)+"</div>"+(meta.length?"<div class='mealwhy'>"+meta.join(" · ")+"</div>":"")+(chips?"<div class='foodchips' style='margin-top:6px'>"+chips+"</div>":"")+"</div></div>";});return h;}
-function applyViewport(){if(!tg)return;try{var t=(tg.contentSafeAreaInset&&tg.contentSafeAreaInset.top)||(tg.safeAreaInset&&tg.safeAreaInset.top)||0;document.documentElement.style.setProperty('--safe-top',t+'px');}catch(e){}}
+function applyViewport(){if(!tg)return;try{var sa=(tg.safeAreaInset&&tg.safeAreaInset.top)||0;var ca=(tg.contentSafeAreaInset&&tg.contentSafeAreaInset.top)||0;var t=sa+ca;if(tg.isFullscreen&&t<44)t=56;document.documentElement.style.setProperty('--safe-top',t+'px');}catch(e){}}
 if(tg){try{tg.onEvent&&tg.onEvent('viewportChanged',applyViewport);tg.onEvent&&tg.onEvent('safeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('contentSafeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('fullscreenChanged',applyViewport);}catch(e){}applyViewport();}
 
 function boot(){renderToday();go('today');}
