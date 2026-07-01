@@ -27,7 +27,7 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-
 .ayva-txt{font-size:13.5px;line-height:1.55;color:var(--ink);white-space:pre-wrap}
 .medline{font-size:11.5px;line-height:1.45;color:var(--inkMid);margin-top:10px;padding-top:10px;border-top:1px solid rgba(194,94,118,.14)}
 .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:13px}
-.chip{font-size:11.5px;font-weight:500;padding:8px 13px;border-radius:999px;border:1px solid rgba(194,94,118,.18);background:rgba(255,255,255,.72);color:var(--roseDeep);cursor:pointer;text-align:left}
+.chip{font-size:11.5px;font-weight:500;padding:8px 13px;border-radius:999px;border:1px solid rgba(194,94,118,.18);background:rgba(255,255,255,.72);color:var(--roseDeep);cursor:pointer;text-align:left;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .msg.ai .chip{background:#fff;border-color:var(--roseLine);box-shadow:0 1px 0 rgba(33,28,26,.03)}
 .chip:active{transform:scale(.96)}
 .card{background:var(--paper);border:1px solid var(--line);border-radius:20px;padding:18px;margin-bottom:14px}
@@ -741,7 +741,7 @@ var chatInited=false;
 function bubbleAI(text){var d=document.createElement('div');d.className='msg ai';d.textContent=text;document.getElementById('chatlog').appendChild(d);return d;}
 function bubbleMe(text){var d=document.createElement('div');d.className='msg me';d.textContent=text;document.getElementById('chatlog').appendChild(d);}
 function scrollBottom(){var c=document.getElementById('chatlog');if(c){c.scrollTop=c.scrollHeight;}else{window.scrollTo(0,document.body.scrollHeight);}}
-async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML("Айва думает");scrollBottom();var r=await api('/api/chat',{message:text});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}scrollBottom();}
+async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML("Айва думает");scrollBottom();var r=await api('/api/chat',{message:text});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+"…":s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}scrollBottom();}
 function initChat(){
   if(chatInited)return;chatInited=true;var log=(D&&D.chatlog)||[];
   if(log.length){log.forEach(function(m){if(m.role==="user")bubbleMe(m.text);else bubbleAI(m.text);});scrollBottom();}
