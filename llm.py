@@ -291,15 +291,19 @@ def fix_mixed_script(text):
     return re.sub(r"[^\W\d_]+", repl, text, flags=re.UNICODE)
 
 def split_followups(text):
-    """Достаёт из ответа строку 'СЛЕДУЮЩИЕ: q1 ;; q2' и возвращает (чистый текст, [вопросы])."""
+    """Достаёт 'СЛЕДУЮЩИЕ: q1 ;; q2' (в т.ч. обрезанное) и возвращает (чистый текст, [вопросы])."""
     if not text:
         return text, []
-    m = re.search(r"(?im)^\s*[•\-\*]?\s*СЛЕДУЮЩИЕ\s*:?\s*(.+)$", text)
-    if not m:
-        return text.strip(), []
-    qs = [q.strip(" •-–—").strip() for q in re.split(r";;|\||,\s+(?=[А-ЯA-Z])", m.group(1)) if q.strip()]
-    qs = [q for q in qs if 3 <= len(q) <= 70][:2]
-    return text[:m.start()].rstrip(), qs
+    qs = []
+    m = re.search(r"СЛЕДУЮЩИЕ\s*:?\s*(.*)$", text, re.S)   # верхний регистр, как в инструкции, в любом месте
+    if m:
+        tail = m.group(1)
+        qs = [q.strip(" •-–—\n").strip() for q in re.split(r";;|\||\n|,\s+(?=[А-ЯA-ZЁ])", tail) if q.strip()]
+        qs = [q for q in qs if 3 <= len(q) <= 70][:2]
+        clean = text[:m.start()]
+    else:
+        clean = re.sub(r"\n?\s*СЛЕДУ[А-ЯЁ]{0,6}\s*:?\s*$", "", text)   # обрезанный маркер в конце
+    return clean.rstrip(), qs
 
 def _clean(out, fallback):
     r = strip_md(out) if out else ""
@@ -581,7 +585,7 @@ def answer_question(st, question, profile=None, history=None, usage=None):
         "Не здоровайся, если пользовательница не поздоровалась прямо сейчас. Если есть история диалога, отвечай как продолжение и учитывай предыдущие реплики. "
         "Пиши живо и тепло, без воды и канцелярита. Уложись примерно в 3000 знаков и ОБЯЗАТЕЛЬНО заверши мысль, не обрывай предложение на полуслове. Только русский, без markdown. "
         "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: вопрос ;; вопрос — два релевантных вопроса от лица пользовательницы, ОЧЕНЬ КОРОТКО, по 2-4 слова.")})
-    out = _call(msgs, max_tokens=1100, temperature=0.35, usage=usage)
+    out = _call(msgs, max_tokens=1400, temperature=0.35, usage=usage)
     return _clean(out, "Я вижу вопрос, но модель сейчас не вернула ответ. Попробуй ещё раз через минуту.")
 
 
@@ -872,7 +876,7 @@ def general_answer(profile, mode, question, hint=None, history=None, usage=None)
         "Пиши живо и тепло, без воды. Уложись примерно в 3000 знаков и ОБЯЗАТЕЛЬНО заверши мысль, не обрывай на полуслове. Только русский, без markdown. "
         "ВАЖНО: у этого человека фаза цикла НЕ отслеживается, поэтому НЕ упоминай фазы менструального цикла (фолликулярную, лютеиновую, овуляторную, менструальную) и не привязывай советы к дню цикла. "
         "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: вопрос ;; вопрос — два релевантных вопроса от лица пользовательницы, ОЧЕНЬ КОРОТКО, по 2-4 слова.")})
-    out = _call(msgs, max_tokens=1100, temperature=0.35, usage=usage)
+    out = _call(msgs, max_tokens=1400, temperature=0.35, usage=usage)
     return _clean(out, "Я вижу вопрос, но модель сейчас не вернула ответ. Попробуй ещё раз через минуту.")
 
 CURATED_MENU = {
