@@ -2417,10 +2417,14 @@ async def _api_chat(request):
     msg, addressed = strip_aiwa_address(msg)
     if addressed and not msg:
         return _cors(web.json_response({"answer": "Я тут. Напиши вопрос про цикл, питание, нагрузку или самочувствие.", "suggestions": ["Когда овуляция?", "Что есть сегодня?"]}))
+    return _cors(web.json_response(await _chat_reply(cid, u, msg)))
+
+async def _chat_reply(cid, u, msg):
+    """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
     intent = match_intent(msg)
     if intent == "phases":
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", PHASES_TEXT)
-        return _cors(web.json_response({"answer": PHASES_TEXT, "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}))
+        return {"answer": PHASES_TEXT, "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}
     if intent in ("period", "addcycles", "profile", "cyclelen", "time", "wipe", "unlink", "partner", "checkin"):
         guide = {
             "period": "Через чат я не меняю календарь, чтобы случайно не записать ошибку. Открой в приложении экран «Сегодня», нажми «Редактировать месячные», отметь нужные дни прямо на календаре и нажми «Сохранить». В боте можно ещё написать /period.",
@@ -2434,7 +2438,7 @@ async def _api_chat(request):
             "checkin": "Симптомы можно отметить в приложении на экране «Сегодня» или в боте: /checkin, Меню → Симптомы.",
         }[intent]
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
-        return _cors(web.json_response({"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}))
+        return {"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}
     _, st = status_of(cid); usage = []; prof = profile_of(u)
     if intent in ("food", "training"):
         fq = ("Что мне есть сегодня под мою фазу/режим, возраст и самочувствие? Дай конкретные продукты или пример меню на день. Отвечай ТОЛЬКО про еду, не рассказывай про фазы цикла."
@@ -2456,7 +2460,37 @@ async def _api_chat(request):
                 if e not in sugg and len(sugg) < 2: sugg.append(e)
         except Exception: pass
     ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage))
-    return _cors(web.json_response({"answer": clean, "suggestions": sugg[:2]}))
+    return {"answer": clean, "suggestions": sugg[:2]}
+
+async def _api_voice(request):
+    try:
+        data = await request.post()
+    except Exception:
+        return _cors(web.json_response({"answer": "Не получила аудио.", "suggestions": []}, status=400))
+    cid = _verify_init(data.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u):
+        return _cors(web.json_response({"answer": "Сначала настрой Айву в боте: /start.", "suggestions": []}, status=403))
+    field = data.get("audio")
+    raw = b""
+    if field is not None:
+        try: raw = field.file.read()
+        except Exception:
+            raw = field if isinstance(field, (bytes, bytearray)) else b""
+    fn = getattr(field, "filename", "voice.webm") or "voice.webm"
+    if not raw:
+        return _cors(web.json_response({"transcript": "", "answer": "Пустая запись, попробуй ещё раз.", "suggestions": []}))
+    txt = await asyncio.to_thread(L.transcribe, bytes(raw), fn)
+    if not txt:
+        return _cors(web.json_response({"transcript": "", "answer": "Не расслышала, попробуй ещё раз или напиши текстом.", "suggestions": []}))
+    ev(cid, "voice", n=len(txt))
+    msg, _addr = strip_aiwa_address(txt.strip())
+    if not msg: msg = txt.strip()
+    reply = await _chat_reply(cid, u, msg)
+    reply["transcript"] = txt.strip()
+    return _cors(web.json_response(reply))
+
 async def _api_mode(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -2863,6 +2897,7 @@ def build_web():
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/chat", _api_chat)
+    aio.router.add_post("/api/voice", _api_voice)
     aio.router.add_post("/api/period", _api_period)
     aio.router.add_post("/api/pa", _api_pa)
     aio.router.add_post("/api/checkin", _api_checkin)

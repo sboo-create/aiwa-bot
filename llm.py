@@ -4,7 +4,6 @@ import os, re, json, requests, unicodedata, threading
 
 PROVIDER = os.environ.get("AIWA_PROVIDER", "litellm").lower()
 GIGA_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat-2")
-_ANS_MAX = int(os.environ.get("AIWA_ANSWER_MAX_TOKENS", "1100"))  # длина ответа: меньше = быстрее
 GIGA_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 GIGA_OAUTH = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 GIGA_CHAT = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
@@ -582,7 +581,7 @@ def answer_question(st, question, profile=None, history=None, usage=None):
         "Не здоровайся, если пользовательница не поздоровалась прямо сейчас. Если есть история диалога, отвечай как продолжение и учитывай предыдущие реплики. "
         "Пиши живо и тепло, без воды и канцелярита. Уложись примерно в 3000 знаков и ОБЯЗАТЕЛЬНО заверши мысль, не обрывай предложение на полуслове. Только русский, без markdown. "
         "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: вопрос ;; вопрос — два релевантных вопроса от лица пользовательницы, ОЧЕНЬ КОРОТКО, по 2-4 слова.")})
-    out = _call(msgs, max_tokens=_ANS_MAX, temperature=0.35, usage=usage)
+    out = _call(msgs, max_tokens=1100, temperature=0.35, usage=usage)
     return _clean(out, "Я вижу вопрос, но модель сейчас не вернула ответ. Попробуй ещё раз через минуту.")
 
 
@@ -873,7 +872,7 @@ def general_answer(profile, mode, question, hint=None, history=None, usage=None)
         "Пиши живо и тепло, без воды. Уложись примерно в 3000 знаков и ОБЯЗАТЕЛЬНО заверши мысль, не обрывай на полуслове. Только русский, без markdown. "
         "ВАЖНО: у этого человека фаза цикла НЕ отслеживается, поэтому НЕ упоминай фазы менструального цикла (фолликулярную, лютеиновую, овуляторную, менструальную) и не привязывай советы к дню цикла. "
         "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: вопрос ;; вопрос — два релевантных вопроса от лица пользовательницы, ОЧЕНЬ КОРОТКО, по 2-4 слова.")})
-    out = _call(msgs, max_tokens=_ANS_MAX, temperature=0.35, usage=usage)
+    out = _call(msgs, max_tokens=1100, temperature=0.35, usage=usage)
     return _clean(out, "Я вижу вопрос, но модель сейчас не вернула ответ. Попробуй ещё раз через минуту.")
 
 CURATED_MENU = {
@@ -1155,10 +1154,13 @@ def transcribe(audio_bytes, filename="voice.ogg"):
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         return None
+    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "ogg").lower()
+    mime = {"ogg": "audio/ogg", "oga": "audio/ogg", "webm": "audio/webm", "mp4": "audio/mp4",
+            "m4a": "audio/mp4", "mp3": "audio/mpeg", "wav": "audio/wav"}.get(ext, "audio/ogg")
     try:
         r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {key}"},
-            files={"file": (filename, audio_bytes, "audio/ogg")},
+            files={"file": (filename, audio_bytes, mime)},
             data={"model": "whisper-large-v3-turbo", "language": "ru"}, timeout=60)
         r.raise_for_status()
         return (r.json().get("text") or "").strip() or None
