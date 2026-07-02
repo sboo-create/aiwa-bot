@@ -495,6 +495,9 @@ def is_gibberish(t):
 
 def match_guide(text):
     t = text.lower()
+    has_cycle = any(w in t for w in ("цикл", "месячн", "менструац", "менстр", "овуляц"))
+    if not has_cycle:
+        return None
     for g in GUIDES:
         if any(k in t for k in g["kw"]): return g
     return None
@@ -1896,7 +1899,7 @@ async def handle_text(update, context, txt):
         ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
         ev(cid, "answered", meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         hist_push(cid, txt, ans)
-        return await send_answer(context, cid, ans, None, txt, usage=usage)
+        return await send_answer(context, cid, ans, None, txt, usage=usage, quote=txt)
     if is_onboarded(u):
         _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing")
         g = match_guide(txt)
@@ -1905,7 +1908,7 @@ async def handle_text(update, context, txt):
         ans = await think_llm(context, cid, L.answer_question, st, txt, profile_of(u), hist_get(cid), usage=usage)
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         hist_push(cid, txt, ans)
-        return await send_answer(context, cid, ans, st, txt, usage=usage)
+        return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt)
     if is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
         a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
