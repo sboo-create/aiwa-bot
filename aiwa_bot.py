@@ -13,7 +13,7 @@ except ImportError:
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
-from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter
+from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter, Forbidden
 from aiohttp import web
 import hmac as _hmac, hashlib as _hashlib
 from urllib.parse import parse_qsl as _pqsl
@@ -732,13 +732,42 @@ async def send_training_card(context, cid, st):
     except Exception as e:
         log.warning("training img: %s", e)
 
+_MENU_CACHE = {}
+def _menu_key(cid, st, prof, mode):
+    diet = ((prof.get("diet") if prof else "") or "", (prof.get("diet_note") if prof else "") or "")
+    phase = (st.get("phase") if st else ("mode:" + str(mode)))
+    return (cid, date.today().isoformat(), phase, diet)
+def menu_cached(cid, st, prof, target, mode=None, usage=None):
+    """Дневной кэш меню: обращаемся к модели максимум раз в день на юзера, дальше — мгновенно."""
+    key = _menu_key(cid, st, prof, mode)
+    hit = _MENU_CACHE.get(key)
+    if hit is not None:
+        return hit
+    if st is not None:
+        m = L.menu_today(st, profile=prof, target=target, usage=usage)
+    else:
+        m = L.general_menu(prof, mode, target, usage=usage)
+    _MENU_CACHE[key] = m
+    return m
+def menu_cache_clear(cid):
+    for k in [k for k in list(_MENU_CACHE) if k[0] == cid]:
+        _MENU_CACHE.pop(k, None)
+
+_SUM_CACHE = {}
+def _prune_day(cache):
+    today = date.today().isoformat()
+    if len(cache) > 1500:
+        for k in [k for k in list(cache) if k[1] != today]:
+            cache.pop(k, None)
+
 async def send_menu(context, cid, with_image=False):
     u, st = status_of(cid)
     if not st: return None
     if with_image:
         await context.bot.send_chat_action(cid, "upload_photo")
     prof = profile_of(u); target = profile_kcal(prof) if prof else None
-    usage = []; mdata = await asyncio.to_thread(L.menu_today, st, profile=prof, target=target, usage=usage); ev(cid, "tokens", sum(usage), meta="menu", calls=len(usage))
+    usage = []; mdata = await asyncio.to_thread(menu_cached, cid, st, prof, target, None, usage)
+    if usage: ev(cid, "tokens", sum(usage), meta="menu", calls=len(usage))
     if target:
         mdata["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
     note = st["content"]["food"]
@@ -873,15 +902,20 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     ev(cid, "tokens", sum(usage), meta="answer", calls=len(usage))
 
 async def push_general(context, cid):
-    u = row(cid); usage = []
-    body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
+    u = row(cid); usage = []; _ds = date.today().isoformat()
+    _key = (cid, _ds, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
+    body = _SUM_CACHE.get(_key)
+    if body is None:
+        body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
+        if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
     if not body:
         body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
     clean, extra = L.split_followups(body)
     kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u, app_label=APP_BUTTON_TEXT)
     await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
         reply_markup=kb, parse_mode="HTML")
-    ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage)); ev(cid, "goal", meta="summary")
+    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage))
+    ev(cid, "goal", meta="summary")
 
 async def send_general(context, cid, key):
     u = row(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
@@ -1003,15 +1037,20 @@ async def push_summary(context, cid, with_image=True):
     if not st: return
     if st["status"] != "normal": return await send_delay(context, cid, st)
     if with_image: await send_infographic(context.bot, cid)
-    usage = []
-    body = await asyncio.to_thread(L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
+    usage = []; _ds = date.today().isoformat()
+    _key = (cid, _ds, st.get("phase"), str(log_get(cid, _ds) or ""))
+    body = _SUM_CACHE.get(_key)
+    if body is None:
+        body = await asyncio.to_thread(L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
+        if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
     if not body:
         body = "💛 Сводка на сегодня готова. Открой приложение, чтобы посмотреть календарь, симптомы, питание и нагрузку."
     clean, extra = L.split_followups(body)
     kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u, app_label=APP_BUTTON_TEXT)
     await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
         reply_markup=kb, parse_mode="HTML")
-    ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage)); ev(cid, "goal", meta="summary")
+    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage))
+    ev(cid, "goal", meta="summary")
 
 async def push_checkin(context, cid):
     """После утренней сводки — быстрый чек-ин. Переиспользует существующий поток ci:* (энергия→настроение→симптомы)."""
@@ -1061,6 +1100,11 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
         await push_summary(context, cid); await push_partner(context, cid)
         await push_checkin(context, cid)
         ev(cid, "broadcast", meta="sent")
+    except Forbidden:
+        ev(cid, "broadcast", meta="blocked")
+        try:
+            for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+        except Exception: pass
     except Exception as e:
         ev(cid, "broadcast", meta="error")
         raise
@@ -1076,6 +1120,12 @@ async def broadcast_worker(app):
             await push_partner(ctx, cid)
             await push_checkin(ctx, cid)
             ev(cid, "broadcast", meta="sent")
+        except Forbidden:
+            try:
+                ev(cid, "broadcast", meta="blocked")
+                for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+            except Exception: pass
+            log.info("broadcast %s: заблокирован пользователем, снял с рассылки", cid)
         except Exception as e:
             try: ev(cid, "broadcast", meta="error")
             except Exception: pass
@@ -1551,9 +1601,9 @@ def aggregate_stats():
         f"Регистраций: {signups}, активаций: {activated} ({act_rate:.0f}%)\n\n"
         "ВОВЛЕЧЕНИЕ\n"
         f"Сессий: {sessions}, на юзера {spu:.1f}, средняя длина {avg_slen:.1f} мин, событий/сессия {avg_sev:.1f}\n"
-        f"Запросов: {requests}, на сессию {rps:.1f}, средняя длина ввода {avg_reqlen:.0f} симв.\n\n"
+        f"Действий (событий): {requests}, на сессию {rps:.1f}, средняя длина ввода {avg_reqlen:.0f} симв.\n\n"
         "РАССЫЛКИ СЕГОДНЯ\n"
-        f"Запланировано пользователей: {len(all_users())}, в очереди: {bcast_today['queued']}, отправлено: {bcast_today['sent']}, ошибок: {bcast_today['error']}\n\n"
+        f"Запланировано пользователей: {len(all_users())}, в очереди: {bcast_today['queued']}, отправлено: {bcast_today['sent']}, ошибок: {bcast_today['error']}, заблокировали бота: {bcast_today['blocked']}\n\n"
         "УДЕРЖАНИЕ (rolling)\n"
         f"D1 {fr(r1)}, D7 {fr(r7)}, D30 {fr(r30)}; активных дней за 7: {avg_l7:.1f}\n\n"
         "УСПЕШНОСТЬ\n"
@@ -2294,7 +2344,7 @@ async def _api_profile(request):
         assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80
     except Exception:
         return _cors(web.json_response({"error": "bad_profile", "text": "Нужны рост, вес и возраст."}, status=400))
-    upsert(cid, height=int(cm), weight=kg, age=age)
+    upsert(cid, height=int(cm), weight=kg, age=age); menu_cache_clear(cid)
     ev(cid, "manual", meta="web_profile")
     return _cors(web.json_response({"ok": True, "profile": {"height": int(cm), "weight": kg, "age": age}}))
 async def _api_meal(request):
@@ -2335,7 +2385,8 @@ async def _api_section(request):
     if st is None:
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
         if kind == "food":
-            menu = await asyncio.to_thread(L.general_menu, prof, u.get("mode"), target)
+            _usage = []; menu = await asyncio.to_thread(menu_cached, cid, None, prof, target, u.get("mode"), _usage)
+            if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage))
             if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
             txt = {"meno": "В менопаузе на первый план выходят кости, сон и сердце. Делай упор на белок (рыба, яйца, творог, курица) и кальций с витамином D (молочное, сардины, зелень), добавляй магний и B6 (гречка, орехи, тёмный шоколад) для сна и приливов, и омега-3 из жирной рыбы. Меньше быстрых сахаров, кофеина и алкоголя — они усиливают приливы.",
                    "preg": "В беременности важно закрыть потребность в фолиевой кислоте, железе, кальции и белке. Ешь зелень и бобовые (фолаты), красное мясо и гречку (железо), молочное (кальций), рыбу с омега-3 и белок в каждый приём. Избегай сырого мяса и рыбы, непастеризованного, печени в избытке, алкоголя и лишнего кофеина.",
@@ -2346,7 +2397,8 @@ async def _api_section(request):
         return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
     if kind == "food":
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
-        menu = await asyncio.to_thread(L.menu_today, st, profile=prof, target=target)
+        _usage = []; menu = await asyncio.to_thread(menu_cached, cid, st, prof, target, None, _usage)
+        if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage))
         if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
         text = st["content"]["food"]
         return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text}))
@@ -2383,11 +2435,19 @@ async def _api_chat(request):
         }[intent]
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
         return _cors(web.json_response({"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}))
-    _, st = status_of(cid); usage = []
-    if st is not None:
-        ans = await asyncio.to_thread(L.answer_question, st, msg, profile_of(u), hist_get(cid), usage=usage)
+    _, st = status_of(cid); usage = []; prof = profile_of(u)
+    if intent in ("food", "training"):
+        fq = ("Что мне есть сегодня под мою фазу/режим, возраст и самочувствие? Дай конкретные продукты или пример меню на день. Отвечай ТОЛЬКО про еду, не рассказывай про фазы цикла."
+              if intent == "food" else
+              "Какая физическая активность мне сегодня подходит и почему? Дай 2-3 конкретных варианта. Отвечай про тренировки, тему цикла не разворачивай.")
+        if st is not None:
+            ans = await asyncio.to_thread(L.answer_question, st, fq, prof, hist_get(cid), usage=usage)
+        else:
+            ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage)
+    elif st is not None:
+        ans = await asyncio.to_thread(L.answer_question, st, msg, prof, hist_get(cid), usage=usage)
     else:
-        ans = await asyncio.to_thread(L.general_answer, profile_of(u), u.get("mode"), msg, chat_hint(cid), hist_get(cid), usage=usage)
+        ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), msg, chat_hint(cid), hist_get(cid), usage=usage)
     hist_push(cid, msg, ans)
     clean, sugg = L.split_followups(ans)
     if st is not None and len(sugg) < 2:
@@ -2420,7 +2480,7 @@ async def _api_prefs(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     note = (body.get("diet_note") or "").strip()[:300]
-    upsert(cid, diet_note=note)
+    upsert(cid, diet_note=note); menu_cache_clear(cid)
     ev(cid, "manual", meta="web_prefs")
     return _cors(web.json_response({"ok": True, "diet_note": note}))
 
@@ -2668,7 +2728,7 @@ def admin_dashboard_data(days=30, frm=None, to=None):
         "dau": dau_now, "wau": wau_now, "mau": mau_now, "avg_dau": round(avg_dau, 1), "stickiness": stickiness,
         "partners": len(partners), "partner_new": partner_new, "partner_women": len(set(p[1] for p in partners)),
         "broadcast": {"scheduled": len(all_users()), "queued": bcast["queued"], "sent": bcast["sent"], "error": bcast["error"],
-            "today_queued": bcast_today["queued"], "today_sent": bcast_today["sent"], "today_error": bcast_today["error"]},
+            "today_queued": bcast_today["queued"], "today_sent": bcast_today["sent"], "today_error": bcast_today["error"], "blocked": bcast["blocked"], "today_blocked": bcast_today["blocked"]},
         "model": {"answers": answers, "fallback": fallback, "errors": errors, "tokens": tokens,
             "p50_ms": p50, "p95_ms": p95, "success_rate": success_rate, "avg_input": avg_input},
         "funnel": {"new_users": new_users, "onboarded_total": onboarded, "active_period": active_period,

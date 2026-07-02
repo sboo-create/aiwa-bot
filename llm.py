@@ -50,7 +50,7 @@ def _call_giga(messages, max_tokens, temperature, usage, attempts=4):
             r = requests.post(GIGA_CHAT,
                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"},
                 json={"model": GIGA_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
-                timeout=(6, 30), verify=_GIGA_VERIFY)
+                timeout=(6, float(os.environ.get("GIGACHAT_CHAT_TIMEOUT_SECONDS") or "45")), verify=_GIGA_VERIFY)
             if r.status_code == 401:
                 _giga_tok["token"] = None; tok = _giga_auth()
                 if not tok: return None
