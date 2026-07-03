@@ -74,7 +74,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-03-food-diary-kv-v2"
+AIWA_VERSION = "2026-07-03-food-vision-diag-v3"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1823,7 +1823,10 @@ async def on_photo(update, context):
     ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
     rec = normalize_food(parsed, "photo") if parsed else None
     if not rec:
-        return await update.message.reply_text("Не разобрала фото 🙈 Сфоткай ближе и светлее (тарелку целиком или этикетку с составом), либо напиши текстом, что съела — например «омлет и салат».")
+        _e = ""
+        try: _e = L.last_food_err()
+        except Exception: pass
+        return await update.message.reply_text("Не разобрала фото 🙈 Сфоткай ближе и светлее, либо напиши текстом." + (("\n\n⚙️ " + _e) if _e else ""))
     mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
     rows = [[B("🗑 Убрать из дневника", f"mdel:{mid}")]]
     wu = webapp_url(u) or AIWA_WEBAPP_URL
@@ -2693,7 +2696,12 @@ async def _api_food_photo(request):
     ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
     rec = normalize_food(parsed, "photo") if parsed else None
     if not rec:
-        return _cors(web.json_response({"ok": False, "message": "Не разобрала фото. Сфоткай ближе и светлее, либо добавь текстом."}))
+        _e = ""
+        try: _e = L.last_food_err()
+        except Exception: pass
+        msg = "Не разобрала фото. Сфоткай ближе и светлее, либо добавь текстом."
+        if _e: msg += " [" + _e + "]"
+        return _cors(web.json_response({"ok": False, "message": msg}))
     try:
         mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
         out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))

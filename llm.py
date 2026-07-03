@@ -1155,10 +1155,16 @@ def general_training(profile, mode):
             "phase": "", "day": "", "cycle_len": "", "days_to_next": "", "why": b["why"], "hormones": b.get("hormones", []),
             "options": b["options"], "avoid": b["avoid"], "reduce": b["avoid"], "recovery": b["recovery"]}
 
+_FOOD_ERR = {"msg": ""}
+def last_food_err():
+    return _FOOD_ERR.get("msg") or ""
+
 def _giga_upload_image(image_bytes, filename="food.jpg"):
     """Загружает картинку в GigaChat, возвращает file_id для attachments."""
     tok = _giga_auth()
     if not tok:
+        _FOOD_ERR["msg"] = "нет прямого ключа GigaChat (GIGACHAT_CREDENTIALS) для Vision"
+        print("FOOD upload: no GigaChat token")
         return None
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "jpg").lower()
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
@@ -1169,12 +1175,14 @@ def _giga_upload_image(image_bytes, filename="food.jpg"):
             data={"purpose": "general"},
             timeout=(6, 60), verify=_GIGA_VERIFY)
         if r.status_code != 200:
+            _FOOD_ERR["msg"] = f"загрузка {r.status_code}: {(r.text or '')[:140]}"
             print("FOOD upload HTTP", r.status_code, (r.text or "")[:400])
             return None
         fid = r.json().get("id")
         print("FOOD upload ok, file_id:", fid, "bytes:", len(image_bytes))
         return fid
     except Exception as e:
+        _FOOD_ERR["msg"] = "загрузка: " + repr(e)[:140]
         print("FOOD upload EXC:", repr(e)[:300])
         return None
 
@@ -1197,6 +1205,7 @@ def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=No
             if r.status_code == 429:
                 _t.sleep(2 * (i + 1)); continue
             if r.status_code != 200:
+                _FOOD_ERR["msg"] = f"vision {r.status_code}: {(r.text or '')[:140]} (модель {GIGA_VISION_MODEL})"
                 print("FOOD vision HTTP", r.status_code, (r.text or "")[:400], "| model:", GIGA_VISION_MODEL)
                 if i < 2:
                     _t.sleep(2 * (i + 1)); continue
@@ -1262,6 +1271,7 @@ def _parse_food(out):
 
 def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
     """Фото готового блюда ИЛИ упаковки/этикетки -> оценка КБЖУ через GigaChat Vision."""
+    _FOOD_ERR["msg"] = ""
     fid = _giga_upload_image(image_bytes, filename)
     if not fid:
         print("FOOD: image upload to GigaChat failed")
