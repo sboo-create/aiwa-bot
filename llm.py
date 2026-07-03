@@ -1168,10 +1168,14 @@ def _giga_upload_image(image_bytes, filename="food.jpg"):
             files={"file": (filename, image_bytes, mime)},
             data={"purpose": "general"},
             timeout=(6, 60), verify=_GIGA_VERIFY)
-        r.raise_for_status()
-        return r.json().get("id")
+        if r.status_code != 200:
+            print("FOOD upload HTTP", r.status_code, (r.text or "")[:400])
+            return None
+        fid = r.json().get("id")
+        print("FOOD upload ok, file_id:", fid, "bytes:", len(image_bytes))
+        return fid
     except Exception as e:
-        print("Giga upload error:", e)
+        print("FOOD upload EXC:", repr(e)[:300])
         return None
 
 def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=None):
@@ -1192,13 +1196,18 @@ def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=No
                 continue
             if r.status_code == 429:
                 _t.sleep(2 * (i + 1)); continue
-            r.raise_for_status(); data = r.json()
+            if r.status_code != 200:
+                print("FOOD vision HTTP", r.status_code, (r.text or "")[:400], "| model:", GIGA_VISION_MODEL)
+                if i < 2:
+                    _t.sleep(2 * (i + 1)); continue
+                return None
+            data = r.json()
             if usage is not None:
                 usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
             txt = (data["choices"][0]["message"]["content"] or "").strip()
             return re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip() or None
         except Exception as e:
-            print("Giga vision error:", e)
+            print("FOOD vision EXC:", repr(e)[:300])
             if i < 2: _t.sleep(2 * (i + 1)); continue
             return None
     return None

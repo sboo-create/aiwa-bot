@@ -256,6 +256,9 @@ body{padding-top:var(--safe-top,0px)}
 .dstep{border:1px solid var(--line);background:#fff;border-radius:9px;width:27px;height:27px;font-weight:800;color:var(--roseDeep);font-size:15px;flex-shrink:0;cursor:pointer}
 .dgrams{min-width:42px;text-align:center;font-size:12px;color:var(--inkSoft);flex-shrink:0}
 .ddel{border:none;background:transparent;color:var(--inkSoft);font-size:15px;flex-shrink:0;cursor:pointer;padding:4px}
+.slothead{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:800;color:var(--roseDeep);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 0}
+.slothead .slotk{margin-left:auto;color:var(--inkSoft);font-weight:700;text-transform:none;letter-spacing:0;font-size:12px}
+.slotchip{border:1px solid var(--line);background:#fff;border-radius:9px;width:30px;height:30px;font-size:15px;flex-shrink:0;cursor:pointer;padding:0;line-height:1}
 </style>
 </head>
 <body>
@@ -668,16 +671,24 @@ function diaryHTML(){
   rows.forEach(function(r){var val=Math.round(r[1]||0),tar=Math.round(r[2]||0),pct=tar?Math.round(val/tar*100):0,over=tar&&val>tar;
     h+="<div class='drow'><div class='dlab'>"+r[0]+"</div><div class='dbar'><span class='"+(over?'over':'')+"' style='width:"+Math.max(0,Math.min(100,pct))+"%'></span></div><div class='dnum'>"+val+(tar?(" / "+tar):"")+"</div></div>";});
   h+="</div>";
-  if(meals.length){meals.forEach(function(m){
-    h+="<div class='dmeal'><div style='flex:1;min-width:0'><div class='ds'>"+esc(m.title)+"</div><div class='mealwhy'>"+Math.round(m.kcal)+" ккал · Б"+Math.round(m.protein)+" Ж"+Math.round(m.fat)+" У"+Math.round(m.carbs)+(m.source==='photo'?' · 📷':(m.source==='text'?' · ✍️':''))+"</div></div>"
-     +(m.grams?("<button class='dstep' onclick='scaleMeal("+m.id+",-25)'>−</button><div class='dgrams'>"+m.grams+" г</div><button class='dstep' onclick='scaleMeal("+m.id+",25)'>+</button>"):"")
-     +"<button class='ddel' onclick='delMeal("+m.id+")' aria-label='удалить'>🗑</button></div>";});
-  }else{h+="<div class='mealwhy' style='margin-top:12px'>Пока пусто. Сфоткай тарелку или этикетку — посчитаю калории и БЖУ, или добавь текстом.</div>";}
+  if(meals.length){
+    var order=["breakfast","lunch","snack","dinner"],byslot={};
+    meals.forEach(function(m){var k=m.slot||"snack";(byslot[k]=byslot[k]||[]).push(m);});
+    order.forEach(function(sk){var arr=byslot[sk];if(!arr||!arr.length)return;var sm=slotMeta(sk),sc=arr.reduce(function(a,b){return a+Math.round(b.kcal||0);},0);
+      h+="<div class='slothead'>"+sm[0]+" "+sm[1]+"<span class='slotk'>"+sc+" ккал</span></div>";
+      arr.forEach(function(m){
+        h+="<div class='dmeal'><button class='slotchip' onclick='cycleSlot("+m.id+")' title='сменить приём'>"+slotMeta(m.slot)[0]+"</button><div style='flex:1;min-width:0'><div class='ds'>"+esc(m.title)+"</div><div class='mealwhy'>"+Math.round(m.kcal)+" ккал · Б"+Math.round(m.protein)+" Ж"+Math.round(m.fat)+" У"+Math.round(m.carbs)+(m.source==='photo'?' · 📷':(m.source==='text'?' · ✍️':''))+"</div></div>"
+         +(m.grams?("<button class='dstep' onclick='scaleMeal("+m.id+",-25)'>−</button><div class='dgrams'>"+m.grams+" г</div><button class='dstep' onclick='scaleMeal("+m.id+",25)'>+</button>"):"")
+         +"<button class='ddel' onclick='delMeal("+m.id+")' aria-label='удалить'>🗑</button></div>";});
+    });
+  }else{h+="<div class='mealwhy' style='margin-top:12px'>Пока пусто. Сфоткай тарелку или этикетку — посчитаю калории и БЖУ, или добавь текстом. Приём (завтрак/обед/ужин/перекус) определится по времени, потом можно сменить тапом по значку.</div>";}
   h+="<div class='prow' style='margin-top:12px'><button class='pbtn' onclick='pickFoodPhoto()'>📷 Сфотографировать</button><button class='pbtn alt' onclick='toggleFoodText()'>✍️ Текстом</button></div>";
   h+="<div id='foodtextbox' class='hidden' style='margin-top:8px'><div class='symadd'><input id='foodtextin' placeholder='Напр.: 200 г творога и банан'><button onclick='sendFoodText()'>Добавить</button></div></div>";
   if(meals.length)h+="<button class='chip' style='margin-top:12px' onclick='diaryReco()'>💡 Совет по дневнику</button><div id='diarreco' class='ayva-txt' style='margin-top:8px'></div>";
   h+="</div>";return h;
 }
+function slotMeta(k){return ({breakfast:["🌅","Завтрак"],lunch:["☀️","Обед"],snack:["🍎","Перекус"],dinner:["🌙","Ужин"]})[k]||["🍽","Приём"];}
+async function cycleSlot(id){var m=((DIARY&&DIARY.meals)||[]).filter(function(x){return x.id===id;})[0];if(!m)return;var order=["breakfast","lunch","snack","dinner"];var ni=(order.indexOf(m.slot||"snack")+1)%4;var r=await api("/api/diary_slot",{id:id,slot:order[ni]});if(_applyDiary(r))haptic("selection");}
 function pickFoodPhoto(){var f=document.getElementById('foodfile');if(f)f.click();}
 async function onFoodFile(e){var file=e.target.files&&e.target.files[0];e.target.value='';if(file)await uploadFoodPhoto(file);}
 function compressImage(file,maxDim,quality){return new Promise(function(resolve){try{if(!/^image\//.test(file.type||'')){resolve(file);return;}var url=URL.createObjectURL(file),img=new Image();img.onload=function(){try{URL.revokeObjectURL(url);}catch(e){}var w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;if(!w||!h){resolve(file);return;}var scale=Math.min(1,maxDim/Math.max(w,h));var cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));var c=document.createElement('canvas');c.width=cw;c.height=ch;var ctx=c.getContext('2d');ctx.drawImage(img,0,0,cw,ch);if(c.toBlob){c.toBlob(function(b){resolve(b&&b.size?b:file);},'image/jpeg',quality||0.82);}else{try{var d=c.toDataURL('image/jpeg',quality||0.82),bin=atob(d.split(',')[1]),ar=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)ar[i]=bin.charCodeAt(i);resolve(new Blob([ar],{type:'image/jpeg'}));}catch(e){resolve(file);}}};img.onerror=function(){try{URL.revokeObjectURL(url);}catch(e){}resolve(file);};img.src=url;}catch(e){resolve(file);}});}

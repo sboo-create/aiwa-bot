@@ -195,6 +195,8 @@ def db():
     for col in ("end_date TEXT",):
         try: c.execute(f"ALTER TABLE cycles ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
+    try: c.execute("ALTER TABLE meals ADD COLUMN slot TEXT")
+    except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
                 "period_end TEXT", "period_len INTEGER"):
@@ -257,20 +259,34 @@ def normalize_food(data, source="photo"):
             "kcal": kcal, "protein": protein, "fat": fat, "carbs": carbs, "grams": grams,
             "confidence": data.get("confidence") or "medium", "note": str(data.get("note") or "")[:160], "source": source}
 
+def slot_for_now():
+    try: h = datetime.now(TZ).hour
+    except Exception: h = datetime.now().hour
+    if 4 <= h < 11: return "breakfast"
+    if 11 <= h < 16: return "lunch"
+    if 16 <= h < 18: return "snack"
+    if 18 <= h < 24: return "dinner"
+    return "snack"
+
 def meal_add(cid, rec, d=None):
     d = d or date.today().isoformat()
+    slot = rec.get("slot") or slot_for_now()
     c = db(); mid = c.execute(
-        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (cid, d, datetime.now().isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
          float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
-         json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo")).lastrowid
+         json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo", slot)).lastrowid
     c.commit(); c.close(); return mid
+
+def meal_set_slot(cid, mid, slot):
+    if slot not in ("breakfast", "lunch", "snack", "dinner"): return False
+    c = db(); c.execute("UPDATE meals SET slot=? WHERE chat_id=? AND id=?", (slot, cid, int(mid))); c.commit(); c.close(); return True
 
 def meals_of(cid, d=None):
     d = d or date.today().isoformat()
-    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
+    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,slot FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
     return [{"id": x[0], "ts": x[1], "title": x[2], "kcal": x[3], "protein": x[4], "fat": x[5], "carbs": x[6],
-             "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9]} for x in r]
+             "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9], "slot": (x[10] or "snack")} for x in r]
 
 def meal_del(cid, mid):
     c = db(); c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, int(mid))); c.commit(); c.close()
@@ -2733,6 +2749,14 @@ async def _api_diary_scale(request):
     except Exception: pass
     return _cors(web.json_response(diary_payload(cid)))
 
+async def _api_diary_slot(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    try: meal_set_slot(cid, int(body.get("id")), body.get("slot"))
+    except Exception: pass
+    return _cors(web.json_response(diary_payload(cid)))
+
 async def _api_diary_reco(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -3154,6 +3178,7 @@ def build_web():
     aio.router.add_post("/api/diary", _api_diary)
     aio.router.add_post("/api/diary_del", _api_diary_del)
     aio.router.add_post("/api/diary_scale", _api_diary_scale)
+    aio.router.add_post("/api/diary_slot", _api_diary_slot)
     aio.router.add_post("/api/diary_reco", _api_diary_reco)
     aio.router.add_post("/api/period", _api_period)
     aio.router.add_post("/api/pa", _api_pa)
