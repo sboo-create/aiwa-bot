@@ -1265,7 +1265,10 @@ def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
         print("FOOD vision raw:", repr(out)[:400])
     except Exception:
         pass
-    return _parse_food(out)
+    rec = _parse_food(out)
+    try: print("FOOD vision parsed:", rec)
+    except Exception: pass
+    return rec
 
 def analyze_food_text(text, profile=None, usage=None):
     """Текст ('200 г творога и банан') -> оценка КБЖУ через GigaChat."""
@@ -1280,6 +1283,8 @@ def analyze_food_text(text, profile=None, usage=None):
     rec = _parse_food(out)
     if rec and (not rec.get("title") or rec.get("title") == "Приём пищи"):
         rec["title"] = ((text or "").strip()[:60] or "Приём пищи")
+    try: print("FOOD text parsed:", rec)
+    except Exception: pass
     return rec
 
 def diary_reco(summary, usage=None):
