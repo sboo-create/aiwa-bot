@@ -74,7 +74,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-03-food-vision-provider-v4"
+AIWA_VERSION = "2026-07-03-diary-redesign-v5"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -281,6 +281,24 @@ def meal_add(cid, rec, d=None):
 def meal_set_slot(cid, mid, slot):
     if slot not in ("breakfast", "lunch", "snack", "dinner"): return False
     c = db(); c.execute("UPDATE meals SET slot=? WHERE chat_id=? AND id=?", (slot, cid, int(mid))); c.commit(); c.close(); return True
+
+def slot_from_text(t):
+    t = (t or "").lower()
+    if "завтрак" in t: return "breakfast"
+    if "обед" in t: return "lunch"
+    if "ужин" in t: return "dinner"
+    if "перекус" in t or "полдник" in t: return "snack"
+    return None
+
+def meal_edit(cid, mid, **kw):
+    cols = {"title": "title", "kcal": "kcal", "protein": "protein", "fat": "fat", "carbs": "carbs", "grams": "grams", "slot": "slot"}
+    sets = []; vals = []
+    for k, col in cols.items():
+        if kw.get(k) is not None:
+            sets.append(col + "=?"); vals.append(kw[k])
+    if not sets: return False
+    vals += [cid, int(mid)]
+    c = db(); c.execute("UPDATE meals SET " + ", ".join(sets) + " WHERE chat_id=? AND id=?", vals); c.commit(); c.close(); return True
 
 def meals_of(cid, d=None):
     d = d or date.today().isoformat()
@@ -553,6 +571,7 @@ def match_intent(t):
     if re.search(r"месячн|менструац", t) and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t): return "period_end"
     if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
     if re.search(r"(нагрузк|трениров|какой\s+спорт|каким\s+спортом|позанима|чем\s+(мне\s+)?заня|упражнени|фитнес|какая\s+(сегодня\s+)?активн|как\s+(мне\s+)?двигат|размят|разминк|зарядк|можно\s+ли\s+(мне\s+)?(бегать|качат|присед)|(какую|какая)\s+(мне\s+)?(сегодня\s+)?(трениров|нагрузк)|что\s+по\s+(спорт|трениров|нагрузк))", t): return "training"
+    if re.search(r"(?:(?:добав\w*|запиш\w*|занес\w*|отмет\w*)\s+.{0,40}(?:(?:на\s+|в\s+)?(?:завтрак|обед|ужин|полдник|перекус)\b|в\s+дневник|в\s+еду|в\s+приём|съел|поел|скушал|покушал|съела|поела|\bела\b|поем)|(?:залогир\w*|\bлогни\b)\s+\S)", t): return "logmeal"
     if re.search(r"(мой\s+дневник|дневник\s+питани|что\s+(?:мне\s+)?добрать|добрать\s+.{0,12}(белк|калор|бжу)|сколько\s+.{0,12}(съел|калор|ккал)\s*.{0,10}сегодн|мой\s+калораж|хватает\s+ли\s+.{0,12}(белк|калор)|итог\w*\s*.{0,10}(дн|калор|по\s+еде|бжу)|сколько\s+осталось\s+.{0,12}(калор|ккал|съесть))", t): return "diary"
     if re.search(r"(что\s+(?:мне\s+|тебе\s+|лучше\s+|полезн\w*\s+|стоит\s+|сейчас\s+|сегодня\s+|можно\s+|бы\s+|такого\s+|нужно\s+)*(?:есть|поесть|съесть|покушать|скушать|кушать|приготовить|готовить)\b(?!\s*(?:ли\b|у\s+мен|в\s+профил|в\s+приложени|в\s+холодильник|дома|интересн|врем|деньг|дела|презентац|отчёт|доклад))|полезн\w*\s+(?:есть|поесть|кушать|съесть)|(?:поесть|покушать|съесть|скушать|кушать)\s+полезн|что\s+(?:есть|поесть)\s+(?:полезн|при\b|для\s|чтобы|на\s+(?:завтрак|обед|ужин|перекус))|какое\s+питани|какая\s+(?:сегодня\s+)?еда|какие\s+(?:мне\s+)?продукт|какие\s+продукты\s+полезн|меню\s+(?:на\s+)?(?:сегодня|день|завтра)|составь\s+меню|подбери\s+меню|обнови\s+меню|дай\s+меню|покажи\s+меню|пересобер\w*\s+меню|чем\s+(?:мне\s+)?(?:сегодня\s+)?питат|как\s+(?:мне\s+)?(?:лучше\s+)?питат|что\s+по\s+(?:еде|питани)|(?:посоветуй|подскажи|дай|хочу|можешь|порекоменду)\w*\s+.{0,24}(?:поесть|съесть|еду|питани|меню|рацион|продукт|блюд)|\bрацион\b|еда\s+на\s+сегодня|что\s+поедим|проголодал|что\s+на\s+(?:завтрак|обед|ужин|перекус))", t): return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
@@ -1108,6 +1127,9 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
     if intent == "training":
         if general: return await send_general(context, cid, "training")
         _, st = status_of(cid); return await send_section(context, cid, st, "training")
+    if intent == "logmeal":
+        await context.bot.send_chat_action(cid, "typing")
+        return await msg.reply_text(await log_food_from_text(cid, u, txt))
     if intent == "diary":
         await context.bot.send_chat_action(cid, "typing"); usage = []
         t = await answer_diary(cid, usage); ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage))
@@ -2580,6 +2602,9 @@ async def _chat_reply(cid, u, msg):
         }[intent]
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
         return {"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}
+    if intent == "logmeal":
+        _t = await log_food_from_text(cid, u, msg)
+        return {"answer": _t, "suggestions": ["Открыть питание", "Совет по дневнику"]}
     if intent == "diary":
         usage = []; txt = await answer_diary(cid, usage)
         if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage))
@@ -2665,6 +2690,25 @@ async def answer_diary(cid, usage=None):
         return "За сегодня в дневнике пусто. Сфоткай еду или напиши, что съела — посчитаю калории и подскажу, чего добрать."
     return await asyncio.to_thread(L.diary_reco, summ, (usage if usage is not None else []))
 
+async def log_food_from_text(cid, u, text):
+    """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
+    slot = slot_from_text(text)
+    food = re.sub(r"(?i)^\s*(айва[,\s]*)?(добав\w*|запиш\w*|занес\w*|залогир\w*|логни|отмет\w*)\b", "", text)
+    food = re.sub(r"(?i)\b(в\s+дневник|в\s+еду|в\s+приём|что\s+я\s+(съел\w*|поел\w*|ел\w*)|на\s+(завтрак|обед|ужин|перекус|полдник)|в\s+(завтрак|обед|ужин|перекус))\b", " ", food)
+    food = food.strip(" ,.:—-\t")
+    if not food:
+        food = text
+    usage = []
+    parsed = await asyncio.to_thread(L.analyze_food_text, food, profile_of(u), usage)
+    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage))
+    rec = normalize_food(parsed, "text") if parsed else None
+    if not rec:
+        return "Не поняла, что добавить. Напиши, например «добавь на завтрак рисовую кашу»."
+    rec["slot"] = slot or slot_for_now()
+    meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+    sm = {"breakfast": "завтрак", "lunch": "обед", "snack": "перекус", "dinner": "ужин"}.get(rec["slot"], "приём")
+    return f"Добавила в {sm}: {rec['title']} — {rec['kcal']} ккал (Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). Итоги дня — в разделе «Питание»."
+
 def _read_upload(field):
     if field is None: return b"", "food.jpg"
     raw = b""
@@ -2727,6 +2771,8 @@ async def _api_food_text(request):
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
         return _cors(web.json_response({"ok": False, "message": "Не поняла блюдо. Уточни, например «200 г творога и банан»."}))
+    _sl = slot_from_text(txt)
+    if _sl: rec["slot"] = _sl
     try:
         mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
         out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
@@ -2764,6 +2810,40 @@ async def _api_diary_slot(request):
     try: meal_set_slot(cid, int(body.get("id")), body.get("slot"))
     except Exception: pass
     return _cors(web.json_response(diary_payload(cid)))
+
+async def _api_diary_edit(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    kw = {}
+    if body.get("title") is not None: kw["title"] = str(body["title"]).strip()[:80]
+    for k in ("kcal", "grams"):
+        v = body.get(k)
+        if v not in (None, ""): kw[k] = int(_num(v))
+    for k in ("protein", "fat", "carbs"):
+        v = body.get(k)
+        if v not in (None, ""): kw[k] = round(_num(v), 1)
+    if body.get("slot") in ("breakfast", "lunch", "snack", "dinner"): kw["slot"] = body["slot"]
+    try: meal_edit(cid, int(body.get("id")), **kw)
+    except Exception: pass
+    return _cors(web.json_response(diary_payload(cid)))
+
+async def _api_food_manual(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву."}, status=403))
+    title = (body.get("title") or "").strip()[:80]
+    kcal = int(_num(body.get("kcal")))
+    if not title and not kcal:
+        return _cors(web.json_response({"ok": False, "message": "Укажи название или калории."}))
+    rec = {"title": title or "Приём пищи", "kind": "manual", "items": [],
+           "kcal": kcal, "protein": round(_num(body.get("protein")), 1), "fat": round(_num(body.get("fat")), 1),
+           "carbs": round(_num(body.get("carbs")), 1), "grams": (int(_num(body.get("grams"))) or None),
+           "source": "manual"}
+    if body.get("slot") in ("breakfast", "lunch", "snack", "dinner"): rec["slot"] = body["slot"]
+    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+    out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid))
+    return _cors(web.json_response(out))
 
 async def _api_diary_reco(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -3187,6 +3267,8 @@ def build_web():
     aio.router.add_post("/api/diary_del", _api_diary_del)
     aio.router.add_post("/api/diary_scale", _api_diary_scale)
     aio.router.add_post("/api/diary_slot", _api_diary_slot)
+    aio.router.add_post("/api/diary_edit", _api_diary_edit)
+    aio.router.add_post("/api/food_manual", _api_food_manual)
     aio.router.add_post("/api/diary_reco", _api_diary_reco)
     aio.router.add_post("/api/period", _api_period)
     aio.router.add_post("/api/pa", _api_pa)

@@ -244,21 +244,60 @@ body{padding-top:var(--safe-top,0px)}
 .miniload{display:inline-block;width:13px;height:13px;border:2px solid rgba(194,94,118,.3);border-top-color:var(--roseDeep);border-radius:50%;animation:bspin .7s linear infinite;vertical-align:middle}
 #scr-chat:not(.hidden){display:flex;flex-direction:column;position:fixed;left:0;right:0;top:calc(var(--safe-top,0px) + 62px);bottom:calc(160px + env(safe-area-inset-bottom));max-width:480px;margin:0 auto;padding:0 16px;z-index:6}
 .hidden{display:none}
-.dtot{display:grid;gap:9px;margin-top:12px}
-.drow{display:grid;grid-template-columns:66px 1fr 66px;gap:10px;align-items:center;font-size:12.5px}
-.drow .dlab{color:var(--inkSoft)}
-.dbar{height:8px;border-radius:99px;background:var(--paper2);overflow:hidden}
-.dbar span{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--rose),var(--roseDeep));transition:width .4s var(--spring)}
-.dbar span.over{background:linear-gradient(90deg,var(--quince),var(--quinceDeep))}
-.drow .dnum{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;color:var(--ink)}
-.dmeal{display:flex;align-items:center;gap:8px;padding:10px 0;border-top:1px solid var(--line)}
-.dmeal .ds{font-size:13.5px;font-weight:600}
-.dstep{border:1px solid var(--line);background:#fff;border-radius:9px;width:27px;height:27px;font-weight:800;color:var(--roseDeep);font-size:15px;flex-shrink:0;cursor:pointer}
-.dgrams{min-width:42px;text-align:center;font-size:12px;color:var(--inkSoft);flex-shrink:0}
-.ddel{border:none;background:transparent;color:var(--inkSoft);font-size:15px;flex-shrink:0;cursor:pointer;padding:4px}
-.slothead{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:800;color:var(--roseDeep);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 0}
-.slothead .slotk{margin-left:auto;color:var(--inkSoft);font-weight:700;text-transform:none;letter-spacing:0;font-size:12px}
-.slotchip{border:1px solid var(--line);background:#fff;border-radius:9px;width:30px;height:30px;font-size:15px;flex-shrink:0;cursor:pointer;padding:0;line-height:1}
+.djtitle{font-size:15px;font-weight:700}
+.djsub{font-size:11px;color:var(--inkSoft);font-weight:600;margin-top:2px}
+.djk{display:flex;align-items:baseline;gap:7px;margin-top:14px}
+.djk b{font-size:21px;font-weight:800;line-height:1;letter-spacing:-.01em}
+.djk .t{font-size:13px;color:var(--inkSoft);font-weight:600}
+.djk .left{margin-left:auto;font-size:11px;color:var(--sage);font-weight:700;background:var(--sageWash);padding:5px 10px;border-radius:99px;white-space:nowrap}
+.djpbar{height:9px;border-radius:99px;background:var(--paper2);overflow:hidden;margin-top:11px}
+.djpbar span{display:block;height:100%;border-radius:99px;background:var(--accent-grad);transition:width .5s var(--spring)}
+.djmac{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:15px}
+.djmac .l{font-size:11px;color:var(--inkSoft);font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+.djmac .v{font-size:15px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+.djmac .v span{font-size:11px;color:var(--inkSoft);font-weight:600}
+.djmb{height:5px;border-radius:99px;background:var(--paper2);overflow:hidden;margin-top:6px}
+.djmb span{display:block;height:100%;border-radius:99px}
+.djmb.p span{background:var(--roseDeep)}.djmb.f span{background:var(--quince)}.djmb.c span{background:var(--sage)}
+.djhead{display:flex;align-items:center;gap:8px;margin:18px 2px 4px}
+.djse{width:26px;height:26px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:14px;flex:none}
+.djhead .sl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--roseDeep)}
+.djhead .sk{margin-left:auto;font-size:13px;color:var(--inkSoft);font-weight:700;font-variant-numeric:tabular-nums}
+.se-breakfast{background:var(--quinceWash);color:var(--quinceDeep)}
+.se-lunch{background:var(--roseWash);color:var(--roseDeep)}
+.se-snack{background:var(--sageWash);color:var(--sage)}
+.se-dinner{background:#E7E2F0;color:#7A6CA8}
+.djmeal{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
+.djmi{width:38px;height:38px;border-radius:12px;flex:none;display:flex;align-items:center;justify-content:center;font-size:17px;cursor:pointer;border:none;transition:transform .15s var(--spring)}
+.djmi:active{transform:scale(.9)}
+.djmt{flex:1;min-width:0}
+.djmn{font-size:13px;font-weight:600;line-height:1.25}
+.djmm{font-size:11px;color:var(--inkSoft);margin-top:3px;font-variant-numeric:tabular-nums;font-weight:600}
+.djmk{text-align:right;flex:none;font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}
+.djmk span{font-size:11px;color:var(--inkSoft);font-weight:600;margin-left:2px}
+.djact{display:flex;gap:2px;flex:none}
+.djib{width:30px;height:30px;border:none;background:transparent;border-radius:9px;color:var(--inkSoft);font-size:15px;cursor:pointer}
+.djib:active{background:var(--paper2)}
+.djedit{border-top:1px dashed var(--roseLine);margin-top:4px;padding-top:12px;display:none}
+.djedit.open{display:block}
+.djfield{display:grid;grid-template-columns:70px 1fr;align-items:center;gap:10px;margin-bottom:8px}
+.djfield label{font-size:13px;color:var(--inkMid);font-weight:600}
+.djgrid4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin:4px 0 10px}
+.djgrid4 label{font-size:11px;color:var(--inkSoft);font-weight:700;text-transform:uppercase;letter-spacing:.03em;display:block;margin-bottom:4px}
+.djf{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:12px;background:#fff;padding:10px 11px;font-family:var(--sans);font-size:16px;font-weight:600;color:var(--ink);outline:none}
+.djf:focus{border-color:var(--roseLine)}
+.djpick{display:flex;gap:6px;margin:6px 0 12px;flex-wrap:wrap}
+.djpill{border:1px solid var(--line);background:#fff;border-radius:99px;padding:7px 12px;font-size:13px;font-weight:700;color:var(--inkMid);cursor:pointer}
+.djpill.on{background:var(--roseDeep);border-color:var(--roseDeep);color:#fff}
+.djerow{display:flex;gap:8px}
+.djbtn{flex:1;border:none;border-radius:14px;padding:12px;font-family:var(--sans);font-weight:700;font-size:13px;cursor:pointer;background:var(--ink);color:#fff}
+.djbtn.alt{background:var(--paper2);color:var(--inkMid)}
+.djbtn:active{transform:scale(.98)}
+.djadd{display:flex;gap:8px;margin-top:16px}
+.djabtn{flex:1;border:1px solid var(--line);background:#fff;border-radius:14px;padding:12px 6px;font-family:var(--sans);font-weight:700;font-size:13px;color:var(--inkMid);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px}
+.djabtn:active{background:var(--paper2);transform:scale(.98)}
+.djtip{font-size:11px;color:var(--inkSoft);line-height:1.5;margin-top:14px;text-align:center;font-weight:600}
+.djempty{font-size:13px;color:var(--inkSoft);line-height:1.5;margin-top:12px}
 </style>
 </head>
 <body>
@@ -666,29 +705,52 @@ function _applyDiary(r){if(r&&r.ok!==false&&!r.error){DIARY={meals:r.meals||[],t
 function renderDiaryBox(){var box=document.getElementById('diarybox');if(box)box.innerHTML=diaryHTML();}
 function diaryHTML(){
   var t=(DIARY&&DIARY.totals)||{kcal:0,protein:0,fat:0,carbs:0},g=(DIARY&&DIARY.target)||null,meals=(DIARY&&DIARY.meals)||[];
-  var rows=[["Калории",t.kcal||0,g&&g.kcal],["Белок",t.protein||0,g&&g.protein],["Жиры",t.fat||0,g&&g.fat],["Углеводы",t.carbs||0,g&&g.carbs]];
-  var h="<div class='card'><div class='sec' style='margin-top:0'>Дневник · сегодня</div><div class='dtot'>";
-  rows.forEach(function(r){var val=Math.round(r[1]||0),tar=Math.round(r[2]||0),pct=tar?Math.round(val/tar*100):0,over=tar&&val>tar;
-    h+="<div class='drow'><div class='dlab'>"+r[0]+"</div><div class='dbar'><span class='"+(over?'over':'')+"' style='width:"+Math.max(0,Math.min(100,pct))+"%'></span></div><div class='dnum'>"+val+(tar?(" / "+tar):"")+"</div></div>";});
-  h+="</div>";
+  var kc=Math.round(t.kcal||0),gk=g?Math.round(g.kcal):0;
+  var h="<div class='card'><div class='djtitle'>Дневник</div><div class='djsub'>сегодня · "+meals.length+" прим.</div>";
+  h+="<div class='djk'><b>"+kc+"</b><span class='t'>/ "+(gk||"—")+" ккал</span>"+(gk?("<span class='left'>осталось "+Math.max(0,gk-kc)+"</span>"):"")+"</div>";
+  h+="<div class='djpbar'><span style='width:"+(gk?Math.min(100,Math.round(kc/gk*100)):0)+"%'></span></div>";
+  h+="<div class='djmac'>"+djmac("Белок",t.protein,g&&g.protein,"p")+djmac("Жиры",t.fat,g&&g.fat,"f")+djmac("Углев.",t.carbs,g&&g.carbs,"c")+"</div>";
   if(meals.length){
     var order=["breakfast","lunch","snack","dinner"],byslot={};
     meals.forEach(function(m){var k=m.slot||"snack";(byslot[k]=byslot[k]||[]).push(m);});
     order.forEach(function(sk){var arr=byslot[sk];if(!arr||!arr.length)return;var sm=slotMeta(sk),sc=arr.reduce(function(a,b){return a+Math.round(b.kcal||0);},0);
-      h+="<div class='slothead'>"+sm[0]+" "+sm[1]+"<span class='slotk'>"+sc+" ккал</span></div>";
-      arr.forEach(function(m){
-        h+="<div class='dmeal'><button class='slotchip' onclick='cycleSlot("+m.id+")' title='сменить приём'>"+slotMeta(m.slot)[0]+"</button><div style='flex:1;min-width:0'><div class='ds'>"+esc(m.title)+"</div><div class='mealwhy'>"+Math.round(m.kcal)+" ккал · Б"+Math.round(m.protein)+" Ж"+Math.round(m.fat)+" У"+Math.round(m.carbs)+(m.source==='photo'?' · 📷':(m.source==='text'?' · ✍️':''))+"</div></div>"
-         +(m.grams?("<button class='dstep' onclick='scaleMeal("+m.id+",-25)'>−</button><div class='dgrams'>"+m.grams+" г</div><button class='dstep' onclick='scaleMeal("+m.id+",25)'>+</button>"):"")
-         +"<button class='ddel' onclick='delMeal("+m.id+")' aria-label='удалить'>🗑</button></div>";});
+      h+="<div class='djhead'><div class='djse se-"+sk+"'>"+sm[0]+"</div><div class='sl'>"+sm[1]+"</div><div class='sk'>"+sc+" ккал</div></div>";
+      arr.forEach(function(m){h+=mealRow(m);});
     });
-  }else{h+="<div class='mealwhy' style='margin-top:12px'>Пока пусто. Сфоткай тарелку или этикетку — посчитаю калории и БЖУ, или добавь текстом. Приём (завтрак/обед/ужин/перекус) определится по времени, потом можно сменить тапом по значку.</div>";}
-  h+="<div class='prow' style='margin-top:12px'><button class='pbtn' onclick='pickFoodPhoto()'>📷 Сфотографировать</button><button class='pbtn alt' onclick='toggleFoodText()'>✍️ Текстом</button></div>";
+  }else{h+="<div class='djempty'>Пока пусто. Сфоткай тарелку или этикетку, напиши текстом или добавь вручную. Приём определится по времени, потом можно сменить тапом по значку.</div>";}
+  h+="<div class='djadd'><button class='djabtn' onclick='pickFoodPhoto()'>📷 Фото</button><button class='djabtn' onclick='toggleFoodText()'>✍️ Текст</button><button class='djabtn' onclick='openManual()'>✎ Вручную</button></div>";
   h+="<div id='foodtextbox' class='hidden' style='margin-top:8px'><div class='symadd'><input id='foodtextin' placeholder='Напр.: 200 г творога и банан'><button onclick='sendFoodText()'>Добавить</button></div></div>";
-  if(meals.length)h+="<button class='chip' style='margin-top:12px' onclick='diaryReco()'>💡 Совет по дневнику</button><div id='diarreco' class='ayva-txt' style='margin-top:8px'></div>";
-  h+="</div>";return h;
+  h+=editPanel("manual",null);
+  if(meals.length)h+="<button class='djabtn' style='margin-top:12px;width:100%' onclick='diaryReco()'>💡 Совет по дневнику</button><div id='diarreco' style='margin-top:8px;font-size:13px;color:var(--inkMid);line-height:1.5'></div>";
+  h+="<div class='djtip'>Тапни значок приёма, чтобы перенести блюдо. Правь цифры карандашом.</div></div>";return h;
+}
+function djmac(l,v,tg,cls){var vv=Math.round(v||0),tt=Math.round(tg||0),p=tt?Math.min(100,Math.round(vv/tt*100)):0;return "<div><div class='l'>"+l+"</div><div class='v'>"+vv+"<span>"+(tt?(" / "+tt+" г"):" г")+"</span></div><div class='djmb "+cls+"'><span style='width:"+p+"%'></span></div></div>";}
+function mealRow(m){var sm=slotMeta(m.slot||"snack");var src=m.source==='photo'?' · 📷':(m.source==='text'?' · ✍️':(m.source==='manual'?' · ✎':''));
+  return "<div class='djmeal'><button class='djmi se-"+(m.slot||"snack")+"' onclick='cycleSlot("+m.id+")' title='сменить приём'>"+sm[0]+"</button><div class='djmt'><div class='djmn'>"+esc(m.title)+"</div><div class='djmm'>"+(m.grams?(m.grams+" г · "):"")+"Б"+Math.round(m.protein)+" · Ж"+Math.round(m.fat)+" · У"+Math.round(m.carbs)+src+"</div></div><div class='djmk'>"+Math.round(m.kcal)+"<span>ккал</span></div><div class='djact'><button class='djib' onclick='toggleMealEdit("+m.id+")'>✎</button><button class='djib' onclick='delMeal("+m.id+")'>🗑</button></div></div>"+editPanel("m"+m.id,m);
+}
+function editPanel(pid,m){var slots=[["breakfast","🌅 Завтрак"],["lunch","☀️ Обед"],["snack","🍎 Перекус"],["dinner","🌙 Ужин"]];var cur=m?(m.slot||"snack"):nowSlot();
+  var pills=slots.map(function(sp){return "<div class='djpill"+(sp[0]===cur?" on":"")+"' onclick=\"pickSlot('"+pid+"','"+sp[0]+"',this)\">"+sp[1]+"</div>";}).join("");
+  var num=function(x){return (m&&m[x]!=null)?Math.round(m[x]):"";};
+  return "<div class='djedit' id='ed-"+pid+"' data-slot='"+cur+"'>"
+   +"<div class='djfield'><label>Название</label><input class='djf' id='f-title-"+pid+"' value=\""+(m?esc(m.title):"")+"\" placeholder='Название'></div>"
+   +"<div class='djgrid4'><div><label>Ккал</label><input class='djf' inputmode='numeric' id='f-kcal-"+pid+"' value='"+num('kcal')+"'></div>"
+   +"<div><label>Белки</label><input class='djf' inputmode='numeric' id='f-p-"+pid+"' value='"+num('protein')+"'></div>"
+   +"<div><label>Жиры</label><input class='djf' inputmode='numeric' id='f-f-"+pid+"' value='"+num('fat')+"'></div>"
+   +"<div><label>Углев.</label><input class='djf' inputmode='numeric' id='f-c-"+pid+"' value='"+num('carbs')+"'></div></div>"
+   +"<div class='djfield'><label>Граммы</label><input class='djf' inputmode='numeric' id='f-g-"+pid+"' value='"+(m&&m.grams?m.grams:"")+"' placeholder='—'></div>"
+   +"<div class='djpick'>"+pills+"</div>"
+   +"<div class='djerow'><button class='djbtn' onclick=\""+(m?("saveMealEdit("+m.id+",'"+pid+"')"):("saveManual('"+pid+"')"))+"\">"+(m?"Сохранить":"Добавить")+"</button><button class='djbtn alt' onclick=\"closeEdit('"+pid+"')\">Отмена</button></div></div>";
 }
 function slotMeta(k){return ({breakfast:["🌅","Завтрак"],lunch:["☀️","Обед"],snack:["🍎","Перекус"],dinner:["🌙","Ужин"]})[k]||["🍽","Приём"];}
 async function cycleSlot(id){var m=((DIARY&&DIARY.meals)||[]).filter(function(x){return x.id===id;})[0];if(!m)return;var order=["breakfast","lunch","snack","dinner"];var ni=(order.indexOf(m.slot||"snack")+1)%4;var r=await api("/api/diary_slot",{id:id,slot:order[ni]});if(_applyDiary(r))haptic("selection");}
+function nowSlot(){var h=new Date().getHours();if(h>=4&&h<11)return "breakfast";if(h>=11&&h<16)return "lunch";if(h>=16&&h<18)return "snack";if(h>=18)return "dinner";return "snack";}
+function toggleMealEdit(id){var e=document.getElementById('ed-m'+id);if(!e)return;document.querySelectorAll('.djedit.open').forEach(function(x){if(x.id!=='ed-m'+id)x.classList.remove('open');});e.classList.toggle('open');}
+function closeEdit(pid){var e=document.getElementById('ed-'+pid);if(e)e.classList.remove('open');}
+function pickSlot(pid,slot,el){var p=document.getElementById('ed-'+pid);if(p)p.setAttribute('data-slot',slot);if(el&&el.parentNode){el.parentNode.querySelectorAll('.djpill').forEach(function(x){x.classList.remove('on');});el.classList.add('on');}}
+function _gv(id){var e=document.getElementById(id);return e?e.value:'';}
+async function saveMealEdit(id,pid){var p=document.getElementById('ed-'+pid);var body={id:id,title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};var r=await api('/api/diary_edit',body);if(_applyDiary(r)){haptic('impact','light');toast('Сохранено');}}
+function openManual(){var e=document.getElementById('ed-manual');if(!e)return;document.querySelectorAll('.djedit.open').forEach(function(x){if(x!==e)x.classList.remove('open');});e.classList.add('open');var t=document.getElementById('f-title-manual');if(t)setTimeout(function(){t.focus();},60);}
+async function saveManual(pid){var p=document.getElementById('ed-'+pid);var body={title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};if(!((body.title||'').trim())&&!((body.kcal||'').trim())){toast('Укажи название или калории');return;}var r=await api('/api/food_manual',body);if(r&&r.ok){_applyDiary(r);toast('Добавлено');haptic('impact','light');}else toast((r&&r.message)||'Не получилось');}
 function pickFoodPhoto(){var f=document.getElementById('foodfile');if(f)f.click();}
 async function onFoodFile(e){var file=e.target.files&&e.target.files[0];e.target.value='';if(file)await uploadFoodPhoto(file);}
 function compressImage(file,maxDim,quality){return new Promise(function(resolve){try{if(!/^image\//.test(file.type||'')){resolve(file);return;}var url=URL.createObjectURL(file),img=new Image();img.onload=function(){try{URL.revokeObjectURL(url);}catch(e){}var w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;if(!w||!h){resolve(file);return;}var scale=Math.min(1,maxDim/Math.max(w,h));var cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));var c=document.createElement('canvas');c.width=cw;c.height=ch;var ctx=c.getContext('2d');ctx.drawImage(img,0,0,cw,ch);if(c.toBlob){c.toBlob(function(b){resolve(b&&b.size?b:file);},'image/jpeg',quality||0.82);}else{try{var d=c.toDataURL('image/jpeg',quality||0.82),bin=atob(d.split(',')[1]),ar=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)ar[i]=bin.charCodeAt(i);resolve(new Blob([ar],{type:'image/jpeg'}));}catch(e){resolve(file);}}};img.onerror=function(){try{URL.revokeObjectURL(url);}catch(e){}resolve(file);};img.src=url;}catch(e){resolve(file);}});}
