@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, time, html, asyncio, sqlite3, secrets, logging
+import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
 try:
