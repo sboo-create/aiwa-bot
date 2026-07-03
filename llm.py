@@ -1270,24 +1270,43 @@ def _parse_food(out):
             "confidence": "medium", "note": ""}
 
 def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
-    """Фото готового блюда ИЛИ упаковки/этикетки -> оценка КБЖУ через GigaChat Vision."""
+    """Фото -> КБЖУ. Сначала через рабочий провайдер (OpenAI-стиль image_url, base64),
+    затем прямой GigaChat Vision как запасной путь (если задан GIGACHAT_CREDENTIALS)."""
+    import base64
     _FOOD_ERR["msg"] = ""
-    fid = _giga_upload_image(image_bytes, filename)
-    if not fid:
-        print("FOOD: image upload to GigaChat failed")
-        return None
     prompt = ("На фото готовая еда/тарелка ИЛИ упаковка или этикетка продукта. "
         "Если это этикетка — прочитай название и пищевую ценность (КБЖУ) с упаковки. "
         "Если это готовое блюдо — определи, что это, и оцени вес порции на глаз. Посчитай калории и БЖУ. " + _FOOD_FORMAT)
-    out = _call_giga_vision(fid, prompt, usage=usage)
+    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "jpg").lower()
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+    # 1) через рабочий провайдер (тот же канал, что и текст)
     try:
-        print("FOOD vision raw:", repr(out)[:400])
-    except Exception:
-        pass
-    rec = _parse_food(out)
-    try: print("FOOD vision parsed:", rec)
-    except Exception: pass
-    return rec
+        b64 = base64.b64encode(image_bytes).decode()
+        mm = [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}]
+        out = _call(mm, max_tokens=500, temperature=0.2, usage=usage)
+        try: print("FOOD provider vision raw:", repr(out)[:300])
+        except Exception: pass
+        rec = _parse_food(out)
+        if rec:
+            return rec
+    except Exception as e:
+        print("FOOD provider vision EXC:", repr(e)[:200])
+        _FOOD_ERR["msg"] = "провайдер: " + repr(e)[:120]
+    # 2) прямой GigaChat Vision (если есть ключ прямого API)
+    if os.environ.get("GIGACHAT_CREDENTIALS") or os.environ.get("GIGACHAT_CLIENT_ID"):
+        fid = _giga_upload_image(image_bytes, filename)
+        if fid:
+            out2 = _call_giga_vision(fid, prompt, usage=usage)
+            try: print("FOOD direct vision raw:", repr(out2)[:300])
+            except Exception: pass
+            rec2 = _parse_food(out2)
+            if rec2:
+                return rec2
+    if not _FOOD_ERR.get("msg"):
+        _FOOD_ERR["msg"] = "провайдер не распознал фото (нужна модель с поддержкой картинок)"
+    return None
 
 def analyze_food_text(text, profile=None, usage=None):
     """Текст ('200 г творога и банан') -> оценка КБЖУ через GigaChat."""
