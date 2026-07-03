@@ -185,6 +185,9 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
         ts TEXT, action TEXT, tokens INTEGER DEFAULT 0)""")
     c.execute("CREATE TABLE IF NOT EXISTS partners(partner_id INTEGER PRIMARY KEY, woman_id INTEGER, created TEXT)")
+    c.execute("""CREATE TABLE IF NOT EXISTS meals(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, d TEXT, ts TEXT,
+        title TEXT, kcal INTEGER DEFAULT 0, protein REAL DEFAULT 0, fat REAL DEFAULT 0, carbs REAL DEFAULT 0,
+        grams INTEGER, items TEXT, source TEXT)""")
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0"):
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
@@ -220,6 +223,71 @@ def get_sugg(sid):
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0):
     c = db(); c.execute("INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n,calls) VALUES(?,?,?,?,?,?,?,?)",
         (cid, datetime.now().isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls))); c.commit(); c.close()
+
+def _num(x, d=0):
+    try:
+        return float(str(x).replace(",", ".").split()[0])
+    except Exception:
+        return d
+
+def normalize_food(data, source="photo"):
+    """Приводит JSON от модели к чистой записи дневника."""
+    if not isinstance(data, dict):
+        return None
+    items = []
+    for it in (data.get("items") or []):
+        if not isinstance(it, dict):
+            continue
+        items.append({"name": str(it.get("name") or "").strip()[:60],
+                      "grams": int(_num(it.get("grams"))), "kcal": int(_num(it.get("kcal"))),
+                      "protein": round(_num(it.get("protein")), 1), "fat": round(_num(it.get("fat")), 1),
+                      "carbs": round(_num(it.get("carbs")), 1)})
+    tot = data.get("total") or {}
+    kcal = int(_num(tot.get("kcal"))) or sum(i["kcal"] for i in items)
+    protein = round(_num(tot.get("protein")) or sum(i["protein"] for i in items), 1)
+    fat = round(_num(tot.get("fat")) or sum(i["fat"] for i in items), 1)
+    carbs = round(_num(tot.get("carbs")) or sum(i["carbs"] for i in items), 1)
+    grams = int(_num(data.get("grams"))) or sum(i["grams"] for i in items) or None
+    title = str(data.get("title") or (items[0]["name"] if items else "Приём пищи")).strip()[:80]
+    if not (kcal or items):
+        return None
+    return {"title": title, "kind": data.get("kind") or "dish", "items": items,
+            "kcal": kcal, "protein": protein, "fat": fat, "carbs": carbs, "grams": grams,
+            "confidence": data.get("confidence") or "medium", "note": str(data.get("note") or "")[:160], "source": source}
+
+def meal_add(cid, rec, d=None):
+    d = d or date.today().isoformat()
+    c = db(); mid = c.execute(
+        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, d, datetime.now().isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
+         float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
+         json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo")).lastrowid
+    c.commit(); c.close(); return mid
+
+def meals_of(cid, d=None):
+    d = d or date.today().isoformat()
+    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
+    return [{"id": x[0], "ts": x[1], "title": x[2], "kcal": x[3], "protein": x[4], "fat": x[5], "carbs": x[6],
+             "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9]} for x in r]
+
+def meal_del(cid, mid):
+    c = db(); c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, int(mid))); c.commit(); c.close()
+
+def meal_scale(cid, mid, new_grams):
+    """Пересчитывает КБЖУ приёма пропорционально новой граммовке."""
+    c = db(); r = c.execute("SELECT kcal,protein,fat,carbs,grams FROM meals WHERE chat_id=? AND id=?", (cid, int(mid))).fetchone()
+    if not r or not r[4] or not new_grams:
+        c.close(); return False
+    k = float(new_grams) / float(r[4]) if r[4] else 1
+    c.execute("UPDATE meals SET kcal=?,protein=?,fat=?,carbs=?,grams=? WHERE chat_id=? AND id=?",
+              (int(round(r[0] * k)), round(r[1] * k, 1), round(r[2] * k, 1), round(r[3] * k, 1), int(new_grams), cid, int(mid)))
+    c.commit(); c.close(); return True
+
+def diary_totals(cid, d=None):
+    ms = meals_of(cid, d)
+    return {"kcal": sum(m["kcal"] for m in ms), "protein": round(sum(m["protein"] for m in ms)),
+            "fat": round(sum(m["fat"] for m in ms)), "carbs": round(sum(m["carbs"] for m in ms)), "count": len(ms)}
+
 def cyc_add(cid, d, end=None):
     c = db()
     c.execute("INSERT OR IGNORE INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?)", (cid, d, end))
@@ -467,6 +535,7 @@ def match_intent(t):
     if re.search(r"месячн|менструац", t) and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t): return "period_end"
     if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
     if re.search(r"(нагрузк|трениров|какой\s+спорт|каким\s+спортом|позанима|чем\s+(мне\s+)?заня|упражнени|фитнес|какая\s+(сегодня\s+)?активн|как\s+(мне\s+)?двигат|размят|разминк|зарядк|можно\s+ли\s+(мне\s+)?(бегать|качат|присед)|(какую|какая)\s+(мне\s+)?(сегодня\s+)?(трениров|нагрузк)|что\s+по\s+(спорт|трениров|нагрузк))", t): return "training"
+    if re.search(r"(мой\s+дневник|дневник\s+питани|что\s+(?:мне\s+)?добрать|добрать\s+.{0,12}(белк|калор|бжу)|сколько\s+.{0,12}(съел|калор|ккал)\s*.{0,10}сегодн|мой\s+калораж|хватает\s+ли\s+.{0,12}(белк|калор)|итог\w*\s*.{0,10}(дн|калор|по\s+еде|бжу)|сколько\s+осталось\s+.{0,12}(калор|ккал|съесть))", t): return "diary"
     if re.search(r"(что\s+(?:мне\s+|тебе\s+|лучше\s+|полезн\w*\s+|стоит\s+|сейчас\s+|сегодня\s+|можно\s+|бы\s+|такого\s+|нужно\s+)*(?:есть|поесть|съесть|покушать|скушать|кушать|приготовить|готовить)\b(?!\s*(?:ли\b|у\s+мен|в\s+профил|в\s+приложени|в\s+холодильник|дома|интересн|врем|деньг|дела|презентац|отчёт|доклад))|полезн\w*\s+(?:есть|поесть|кушать|съесть)|(?:поесть|покушать|съесть|скушать|кушать)\s+полезн|что\s+(?:есть|поесть)\s+(?:полезн|при\b|для\s|чтобы|на\s+(?:завтрак|обед|ужин|перекус))|какое\s+питани|какая\s+(?:сегодня\s+)?еда|какие\s+(?:мне\s+)?продукт|какие\s+продукты\s+полезн|меню\s+(?:на\s+)?(?:сегодня|день|завтра)|составь\s+меню|подбери\s+меню|обнови\s+меню|дай\s+меню|покажи\s+меню|пересобер\w*\s+меню|чем\s+(?:мне\s+)?(?:сегодня\s+)?питат|как\s+(?:мне\s+)?(?:лучше\s+)?питат|что\s+по\s+(?:еде|питани)|(?:посоветуй|подскажи|дай|хочу|можешь|порекоменду)\w*\s+.{0,24}(?:поесть|съесть|еду|питани|меню|рацион|продукт|блюд)|\bрацион\b|еда\s+на\s+сегодня|что\s+поедим|проголодал|что\s+на\s+(?:завтрак|обед|ужин|перекус))", t): return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
     if re.search(r"(проанализир|сделай анализ|^\s*анализ|разбер|оцени мой цикл|что (говор|показыв)\w*.*(данн|цикл|выписк)|анализ (выписк|цикл|данн))", t): return "analysis"
@@ -1021,6 +1090,10 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
     if intent == "training":
         if general: return await send_general(context, cid, "training")
         _, st = status_of(cid); return await send_section(context, cid, st, "training")
+    if intent == "diary":
+        await context.bot.send_chat_action(cid, "typing"); usage = []
+        t = await answer_diary(cid, usage); ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage))
+        return await msg.reply_text(t)
     if intent == "food":
         if general: return await send_general(context, cid, "food")
         _, st = status_of(cid); return await send_section(context, cid, st, "food")
@@ -1699,6 +1772,43 @@ async def on_voice(update, context):
     await update.message.reply_text(f"🎙 Расслышала: «{txt}»")
     await handle_text(update, context, txt)
 
+def food_card(rec, added=True):
+    conf = {"low": "низкая", "medium": "средняя", "high": "высокая"}.get(rec.get("confidence"), "средняя")
+    head = f"🍽 <b>{html.escape(rec['title'])}</b>"
+    if rec.get("grams"): head += f" · ~{rec['grams']} г"
+    lines = [head, f"~{rec['kcal']} ккал · Б {round(rec['protein'])} · Ж {round(rec['fat'])} · У {round(rec['carbs'])} г"]
+    for it in (rec.get("items") or [])[:6]:
+        g = f" {it['grams']} г" if it.get("grams") else ""
+        lines.append(f"• {html.escape(it['name'])}{g} — {it['kcal']} ккал")
+    if rec.get("note"): lines.append(f"<i>{html.escape(rec['note'])}</i>")
+    lines.append(f"\nОценка примерная (точность {conf})." + (" Добавила в дневник — итоги дня в приложении." if added else ""))
+    return "\n".join(lines)
+
+async def on_photo(update, context):
+    cid = update.effective_chat.id; u = row(cid)
+    if not is_onboarded(u):
+        return await update.message.reply_text("Сначала настрой Айву: /start.")
+    await context.bot.send_chat_action(cid, "typing")
+    try:
+        ph = update.message.photo
+        fid = ph[-1].file_id if ph else (update.message.document.file_id if update.message.document else None)
+        if not fid: return
+        f = await context.bot.get_file(fid); ba = await f.download_as_bytearray()
+    except Exception as e:
+        log.warning("photo dl %s: %s", cid, e)
+        return await update.message.reply_text("Не смогла скачать фото, попробуй ещё раз.")
+    prof = profile_of(u); usage = []
+    parsed = await asyncio.to_thread(L.analyze_food, bytes(ba), "food.jpg", prof, usage)
+    ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
+    rec = normalize_food(parsed, "photo") if parsed else None
+    if not rec:
+        return await update.message.reply_text("Не разобрала фото 🙈 Сфоткай ближе и светлее (тарелку целиком или этикетку с составом), либо напиши текстом, что съела — например «омлет и салат».")
+    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+    rows = [[B("🗑 Убрать из дневника", f"mdel:{mid}")]]
+    wu = webapp_url(u) or AIWA_WEBAPP_URL
+    if wu: rows.append([InlineKeyboardButton("📱 Открыть дневник", web_app=WebAppInfo(url=wu))])
+    await update.message.reply_text(food_card(rec), reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
+
 async def handle_text(update, context, txt):
     cid = update.effective_chat.id; u = row(cid); state = u["state"] if u else None
     cem = [e.custom_emoji_id for e in (update.message.entities or []) if getattr(e, "custom_emoji_id", None)]
@@ -2019,6 +2129,10 @@ async def on_cb(update, context):
         await q.message.reply_text("Напиши свой симптом коротко, например «тошнота», «ломота», «боль в груди».")
     elif data == "ci:done":
         ev(cid, "goal", meta="checkin"); await safe_edit(q, "Записала. Учту в завтрашней сводке.")
+    elif data.startswith("mdel:"):
+        try:
+            meal_del(cid, int(data.split(":")[1])); await safe_edit(q, "🗑 Убрала из дневника.")
+        except Exception: pass
     elif data.startswith("q:"):
         question = get_sugg(int(data.split(":")[1])) or "Дай рекомендацию"
         await context.bot.send_chat_action(cid, "typing")
@@ -2442,6 +2556,10 @@ async def _chat_reply(cid, u, msg):
         }[intent]
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
         return {"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}
+    if intent == "diary":
+        usage = []; txt = await answer_diary(cid, usage)
+        if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage))
+        return {"answer": txt, "suggestions": ["Открыть питание", "Что купить?"]}
     _, st = status_of(cid); usage = []; prof = profile_of(u)
     if intent in ("food", "training"):
         fq = ("Что мне есть сегодня под мою фазу/режим, возраст и самочувствие? Дай конкретные продукты или пример меню на день. Отвечай ТОЛЬКО про еду, не рассказывай про фазы цикла."
@@ -2493,6 +2611,117 @@ async def _api_voice(request):
     reply = await _chat_reply(cid, u, msg)
     reply["transcript"] = txt.strip()
     return _cors(web.json_response(reply))
+
+def diary_payload(cid, prof=None):
+    prof = prof if prof is not None else profile_of(row(cid))
+    tg = profile_kcal(prof) if prof else None
+    return {"meals": meals_of(cid), "totals": diary_totals(cid),
+            "target": ({"kcal": tg[0], "protein": tg[1], "fat": tg[2], "carbs": tg[3]} if tg else None)}
+
+def diary_reco_summary(cid):
+    prof = profile_of(row(cid)); tg = profile_kcal(prof) if prof else None
+    ms = meals_of(cid); tot = diary_totals(cid)
+    if not ms:
+        return None
+    lines = ["Приёмы: " + "; ".join(f"{m['title']} ({m['kcal']} ккал, Б{round(m['protein'])}/Ж{round(m['fat'])}/У{round(m['carbs'])})" for m in ms)]
+    lines.append(f"Итого за день: {tot['kcal']} ккал, белок {tot['protein']} г, жиры {tot['fat']} г, углеводы {tot['carbs']} г.")
+    if tg:
+        lines.append(f"Цель на день: {tg[0]} ккал, белок {tg[1]} г, жиры {tg[2]} г, углеводы {tg[3]} г.")
+    try:
+        _, st = status_of(cid)
+        if st and st.get("phase_ru"):
+            lines.append(f"Фаза цикла: {st['phase_ru']}.")
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+async def answer_diary(cid, usage=None):
+    summ = diary_reco_summary(cid)
+    if not summ:
+        return "За сегодня в дневнике пусто. Сфоткай еду или напиши, что съела — посчитаю калории и подскажу, чего добрать."
+    return await asyncio.to_thread(L.diary_reco, summ, (usage if usage is not None else []))
+
+def _read_upload(field):
+    if field is None: return b"", "food.jpg"
+    raw = b""
+    try: raw = field.file.read()
+    except Exception:
+        raw = field if isinstance(field, (bytes, bytearray)) else b""
+    return bytes(raw), (getattr(field, "filename", "food.jpg") or "food.jpg")
+
+async def _api_food_photo(request):
+    try:
+        data = await request.post()
+    except Exception:
+        return _cors(web.json_response({"ok": False, "message": "Не получила фото."}, status=400))
+    cid = _verify_init(data.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u):
+        return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте: /start."}, status=403))
+    raw, fn = _read_upload(data.get("photo"))
+    if not raw:
+        return _cors(web.json_response({"ok": False, "message": "Пустое фото."}))
+    if len(raw) > 12 * 1024 * 1024:
+        return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
+    prof = profile_of(u); usage = []
+    parsed = await asyncio.to_thread(L.analyze_food, raw, fn, prof, usage)
+    ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
+    rec = normalize_food(parsed, "photo") if parsed else None
+    if not rec:
+        return _cors(web.json_response({"ok": False, "message": "Не разобрала фото. Сфоткай ближе и светлее, либо добавь текстом."}))
+    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+    out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
+    return _cors(web.json_response(out))
+
+async def _api_food_text(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u):
+        return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте."}, status=403))
+    txt = (body.get("text") or "").strip()
+    if not txt: return _cors(web.json_response({"ok": False, "message": "Напиши, что съела."}))
+    prof = profile_of(u); usage = []
+    parsed = await asyncio.to_thread(L.analyze_food_text, txt, prof, usage)
+    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage))
+    rec = normalize_food(parsed, "text") if parsed else None
+    if not rec:
+        return _cors(web.json_response({"ok": False, "message": "Не поняла блюдо. Уточни, например «200 г творога и банан»."}))
+    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+    out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
+    return _cors(web.json_response(out))
+
+async def _api_diary(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    return _cors(web.json_response(diary_payload(cid)))
+
+async def _api_diary_del(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    try: meal_del(cid, int(body.get("id")))
+    except Exception: pass
+    return _cors(web.json_response(diary_payload(cid)))
+
+async def _api_diary_scale(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    try: meal_scale(cid, int(body.get("id")), int(body.get("grams")))
+    except Exception: pass
+    return _cors(web.json_response(diary_payload(cid)))
+
+async def _api_diary_reco(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    usage = []; text = await answer_diary(cid, usage)
+    if usage: ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage))
+    return _cors(web.json_response({"ok": True, "text": text}))
 
 async def _api_mode(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -2901,6 +3130,12 @@ def build_web():
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/chat", _api_chat)
     aio.router.add_post("/api/voice", _api_voice)
+    aio.router.add_post("/api/food_photo", _api_food_photo)
+    aio.router.add_post("/api/food_text", _api_food_text)
+    aio.router.add_post("/api/diary", _api_diary)
+    aio.router.add_post("/api/diary_del", _api_diary_del)
+    aio.router.add_post("/api/diary_scale", _api_diary_scale)
+    aio.router.add_post("/api/diary_reco", _api_diary_reco)
     aio.router.add_post("/api/period", _api_period)
     aio.router.add_post("/api/pa", _api_pa)
     aio.router.add_post("/api/checkin", _api_checkin)
@@ -2925,6 +3160,7 @@ async def run_all():
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     runner = web.AppRunner(build_web()); await runner.setup()
     port = int(os.environ.get("PORT", "8080"))

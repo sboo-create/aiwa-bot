@@ -7,6 +7,8 @@ GIGA_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat-2")
 GIGA_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 GIGA_OAUTH = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 GIGA_CHAT = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+GIGA_FILES = "https://gigachat.devices.sberbank.ru/api/v1/files"
+GIGA_VISION_MODEL = os.environ.get("GIGACHAT_VISION_MODEL", GIGA_MODEL)
 _GIGA_CA = os.environ.get("GIGACHAT_CA_BUNDLE_FILE")
 _GIGA_VERIFY = _GIGA_CA if _GIGA_CA else False
 if _GIGA_VERIFY is False:
@@ -1152,6 +1154,106 @@ def general_training(profile, mode):
     return {"title": f"{b['level']} нагрузка", "level": b["level"], "duration": b["duration"], "summary": b["summary"],
             "phase": "", "day": "", "cycle_len": "", "days_to_next": "", "why": b["why"], "hormones": b.get("hormones", []),
             "options": b["options"], "avoid": b["avoid"], "reduce": b["avoid"], "recovery": b["recovery"]}
+
+def _giga_upload_image(image_bytes, filename="food.jpg"):
+    """Загружает картинку в GigaChat, возвращает file_id для attachments."""
+    tok = _giga_auth()
+    if not tok:
+        return None
+    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "jpg").lower()
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+    try:
+        r = requests.post(GIGA_FILES,
+            headers={"Authorization": f"Bearer {tok}", "Accept": "application/json"},
+            files={"file": (filename, image_bytes, mime)},
+            data={"purpose": "general"},
+            timeout=(6, 60), verify=_GIGA_VERIFY)
+        r.raise_for_status()
+        return r.json().get("id")
+    except Exception as e:
+        print("Giga upload error:", e)
+        return None
+
+def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=None):
+    import time as _t
+    tok = _giga_auth()
+    if not tok:
+        return None
+    messages = [{"role": "user", "content": prompt, "attachments": [file_id]}]
+    for i in range(3):
+        try:
+            r = requests.post(GIGA_CHAT,
+                headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"},
+                json={"model": GIGA_VISION_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
+                timeout=(6, float(os.environ.get("GIGACHAT_VISION_TIMEOUT_SECONDS") or "70")), verify=_GIGA_VERIFY)
+            if r.status_code == 401:
+                _giga_tok["token"] = None; tok = _giga_auth()
+                if not tok: return None
+                continue
+            if r.status_code == 429:
+                _t.sleep(2 * (i + 1)); continue
+            r.raise_for_status(); data = r.json()
+            if usage is not None:
+                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            txt = (data["choices"][0]["message"]["content"] or "").strip()
+            return re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip() or None
+        except Exception as e:
+            print("Giga vision error:", e)
+            if i < 2: _t.sleep(2 * (i + 1)); continue
+            return None
+    return None
+
+_FOOD_SCHEMA = ('{"title":"краткое название","kind":"dish|package",'
+    '"items":[{"name":"...","grams":000,"kcal":000,"protein":00,"fat":00,"carbs":00}],'
+    '"total":{"kcal":000,"protein":00,"fat":00,"carbs":00},"confidence":"low|medium|high","note":"1 короткая фраза"}')
+
+def _parse_food_json(out):
+    if not out:
+        return None
+    try:
+        data = json.loads(out[out.find("{"):out.rfind("}") + 1])
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not (data.get("items") or data.get("total")):
+        return None
+    return data
+
+def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
+    """Фото готового блюда ИЛИ упаковки/этикетки -> оценка КБЖУ (JSON) через GigaChat Vision."""
+    fid = _giga_upload_image(image_bytes, filename)
+    if not fid:
+        return None
+    prompt = (
+        "На фото либо готовая еда/тарелка, либо упаковка или этикетка магазинного продукта. "
+        "Если это этикетка или упаковка: прочитай название продукта и таблицу пищевой ценности (КБЖУ на 100 г, и на порцию если указано). "
+        "Если это готовое блюдо: определи блюда и оцени порцию в граммах на глаз по виду тарелки. "
+        "Посчитай калории и БЖУ (белки, жиры, углеводы). "
+        "Отвечай СТРОГО одним JSON без обрамления, без пояснений до или после, ровно в таком виде: " + _FOOD_SCHEMA + " "
+        "Все числа целые и реалистичные (граммы порции, ккал и граммы БЖУ). Названия по-русски, коротко. "
+        "Если на фото не еда — верни JSON с пустым items и note про это.")
+    return _parse_food_json(_call_giga_vision(fid, prompt, usage=usage))
+
+def analyze_food_text(text, profile=None, usage=None):
+    """Текст ('200 г творога и банан') -> оценка КБЖУ (JSON) через GigaChat."""
+    prompt = (
+        "Пользователь описал, что съел: «" + (text or "").strip() + "». "
+        "Оцени калории и БЖУ. Если граммовка не указана — прими типичную порцию. "
+        "Отвечай СТРОГО одним JSON без обрамления и пояснений: " + _FOOD_SCHEMA + " "
+        "kind ставь \"dish\". Все числа целые и реалистичные. Названия по-русски, коротко.")
+    out = _call([{"role": "system", "content": "Ты нутрициолог. Отвечай строго JSON, по-русски."},
+                 {"role": "user", "content": prompt}], max_tokens=500, temperature=0.2, usage=usage)
+    return _parse_food_json(out)
+
+def diary_reco(summary, usage=None):
+    """Персональные советы по дневнику питания за день."""
+    prompt = ("Дневник питания пользовательницы за сегодня и её цель по КБЖУ:\n" + summary + "\n\n"
+        "Дай 2-3 очень коротких персональных совета строго по этим цифрам: чего недобирает или перебирает (калории, белок, жиры, углеводы), "
+        "что добавить или убрать в следующий приём. Если указана фаза цикла — учти её. "
+        "Каждый совет с новой строки, начинай с уместного эмодзи. Тепло, конкретно, без общих слов и без воды. "
+        "Только русский, без markdown, до 600 знаков. Не добавляй строку СЛЕДУЮЩИЕ.")
+    return _clean(_call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+                        max_tokens=500, temperature=0.4, usage=usage),
+                  "Пока мало данных за день. Добавь пару приёмов, и я подскажу, чего не хватает.")
 
 def transcribe(audio_bytes, filename="voice.ogg"):
     """Распознавание голосового через Groq Whisper."""
