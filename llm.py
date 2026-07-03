@@ -1203,46 +1203,84 @@ def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=No
             return None
     return None
 
-_FOOD_SCHEMA = ('{"title":"краткое название","kind":"dish|package",'
-    '"items":[{"name":"...","grams":000,"kcal":000,"protein":00,"fat":00,"carbs":00}],'
-    '"total":{"kcal":000,"protein":00,"fat":00,"carbs":00},"confidence":"low|medium|high","note":"1 короткая фраза"}')
+_FOOD_FORMAT = ("Ответь СТРОГО этими строками, каждая с новой строки, без вступления и без пояснений, только эти поля:\n"
+    "НАЗВАНИЕ: короткое название\n"
+    "ГРАММЫ: число (примерный вес порции)\n"
+    "ККАЛ: число\n"
+    "БЕЛКИ: число\n"
+    "ЖИРЫ: число\n"
+    "УГЛЕВОДЫ: число\n"
+    "Числа целые, без единиц измерения. Если точно не знаешь — поставь реалистичную оценку.")
 
-def _parse_food_json(out):
+def _food_num(v):
+    if v is None:
+        return 0
+    m = re.search(r"-?\d+(?:[.,]\d+)?", str(v))
+    return float(m.group(0).replace(",", ".")) if m else 0
+
+def _parse_food(out):
+    """Разбирает ответ модели: сначала пробует JSON, затем построчный формат КЛЮЧ: значение."""
     if not out:
         return None
     try:
-        data = json.loads(out[out.find("{"):out.rfind("}") + 1])
+        js = out[out.find("{"):out.rfind("}") + 1]
+        if js:
+            data = json.loads(js)
+            if isinstance(data, dict) and (data.get("items") or data.get("total") or data.get("kcal") or data.get("title")):
+                return data
     except Exception:
+        pass
+    def grab(keys):
+        for k in keys:
+            m = re.search(r"(?im)^\s*[\u2022\-\*]?\s*" + k + r"[^:\-\u2013]*[:\-\u2013]\s*(.+)$", out)
+            if m:
+                return m.group(1).strip()
         return None
-    if not isinstance(data, dict) or not (data.get("items") or data.get("total")):
+    title = grab(["НАЗВАНИЕ", "БЛЮДО", "ПРОДУКТ"])
+    kcal_s = grab(["ККАЛ", "КАЛОРИ", "ЭНЕРГ"])
+    if not kcal_s:
+        m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:ккал|калор)", out, re.I)
+        kcal_s = m.group(1) if m else None
+    if not title and not kcal_s:
         return None
-    return data
+    return {"title": title or "Приём пищи", "kind": "dish", "items": [],
+            "grams": int(_food_num(grab(["ГРАММ", "ВЕС", "ПОРЦИ"]))) or None,
+            "kcal": int(_food_num(kcal_s)),
+            "protein": round(_food_num(grab(["БЕЛК", "PROTEIN"])), 1),
+            "fat": round(_food_num(grab(["ЖИР", "FAT"])), 1),
+            "carbs": round(_food_num(grab(["УГЛЕВОД", "CARB"])), 1),
+            "confidence": "medium", "note": ""}
 
 def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
-    """Фото готового блюда ИЛИ упаковки/этикетки -> оценка КБЖУ (JSON) через GigaChat Vision."""
+    """Фото готового блюда ИЛИ упаковки/этикетки -> оценка КБЖУ через GigaChat Vision."""
     fid = _giga_upload_image(image_bytes, filename)
     if not fid:
+        print("FOOD: image upload to GigaChat failed")
         return None
-    prompt = (
-        "На фото либо готовая еда/тарелка, либо упаковка или этикетка магазинного продукта. "
-        "Если это этикетка или упаковка: прочитай название продукта и таблицу пищевой ценности (КБЖУ на 100 г, и на порцию если указано). "
-        "Если это готовое блюдо: определи блюда и оцени порцию в граммах на глаз по виду тарелки. "
-        "Посчитай калории и БЖУ (белки, жиры, углеводы). "
-        "Отвечай СТРОГО одним JSON без обрамления, без пояснений до или после, ровно в таком виде: " + _FOOD_SCHEMA + " "
-        "Все числа целые и реалистичные (граммы порции, ккал и граммы БЖУ). Названия по-русски, коротко. "
-        "Если на фото не еда — верни JSON с пустым items и note про это.")
-    return _parse_food_json(_call_giga_vision(fid, prompt, usage=usage))
+    prompt = ("На фото готовая еда/тарелка ИЛИ упаковка или этикетка продукта. "
+        "Если это этикетка — прочитай название и пищевую ценность (КБЖУ) с упаковки. "
+        "Если это готовое блюдо — определи, что это, и оцени вес порции на глаз. Посчитай калории и БЖУ. " + _FOOD_FORMAT)
+    out = _call_giga_vision(fid, prompt, usage=usage)
+    try:
+        print("FOOD vision raw:", repr(out)[:400])
+    except Exception:
+        pass
+    return _parse_food(out)
 
 def analyze_food_text(text, profile=None, usage=None):
-    """Текст ('200 г творога и банан') -> оценка КБЖУ (JSON) через GigaChat."""
-    prompt = (
-        "Пользователь описал, что съел: «" + (text or "").strip() + "». "
-        "Оцени калории и БЖУ. Если граммовка не указана — прими типичную порцию. "
-        "Отвечай СТРОГО одним JSON без обрамления и пояснений: " + _FOOD_SCHEMA + " "
-        "kind ставь \"dish\". Все числа целые и реалистичные. Названия по-русски, коротко.")
-    out = _call([{"role": "system", "content": "Ты нутрициолог. Отвечай строго JSON, по-русски."},
-                 {"role": "user", "content": prompt}], max_tokens=500, temperature=0.2, usage=usage)
-    return _parse_food_json(out)
+    """Текст ('200 г творога и банан') -> оценка КБЖУ через GigaChat."""
+    prompt = ("Пользователь съел: «" + (text or "").strip() + "». Оцени калорийность и БЖУ. "
+        "Если вес не указан — прими типичную порцию. " + _FOOD_FORMAT)
+    out = _call([{"role": "system", "content": "Ты нутрициолог, оцениваешь КБЖУ еды по описанию."},
+                 {"role": "user", "content": prompt}], max_tokens=300, temperature=0.2, usage=usage)
+    try:
+        print("FOOD text raw:", repr(out)[:400])
+    except Exception:
+        pass
+    rec = _parse_food(out)
+    if rec and (not rec.get("title") or rec.get("title") == "Приём пищи"):
+        rec["title"] = ((text or "").strip()[:60] or "Приём пищи")
+    return rec
 
 def diary_reco(summary, usage=None):
     """Персональные советы по дневнику питания за день."""

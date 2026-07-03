@@ -243,13 +243,14 @@ def normalize_food(data, source="photo"):
                       "protein": round(_num(it.get("protein")), 1), "fat": round(_num(it.get("fat")), 1),
                       "carbs": round(_num(it.get("carbs")), 1)})
     tot = data.get("total") or {}
-    kcal = int(_num(tot.get("kcal"))) or sum(i["kcal"] for i in items)
-    protein = round(_num(tot.get("protein")) or sum(i["protein"] for i in items), 1)
-    fat = round(_num(tot.get("fat")) or sum(i["fat"] for i in items), 1)
-    carbs = round(_num(tot.get("carbs")) or sum(i["carbs"] for i in items), 1)
+    kcal = int(_num(tot.get("kcal"))) or int(_num(data.get("kcal"))) or sum(i["kcal"] for i in items)
+    protein = round(_num(tot.get("protein")) or _num(data.get("protein")) or sum(i["protein"] for i in items), 1)
+    fat = round(_num(tot.get("fat")) or _num(data.get("fat")) or sum(i["fat"] for i in items), 1)
+    carbs = round(_num(tot.get("carbs")) or _num(data.get("carbs")) or sum(i["carbs"] for i in items), 1)
     grams = int(_num(data.get("grams"))) or sum(i["grams"] for i in items) or None
+    has_title = bool(str(data.get("title") or "").strip())
     title = str(data.get("title") or (items[0]["name"] if items else "Приём пищи")).strip()[:80]
-    if not (kcal or items):
+    if not (kcal or items or has_title):
         return None
     return {"title": title, "kind": data.get("kind") or "dish", "items": items,
             "kcal": kcal, "protein": protein, "fat": fat, "carbs": carbs, "grams": grams,
@@ -1798,7 +1799,10 @@ async def on_photo(update, context):
         log.warning("photo dl %s: %s", cid, e)
         return await update.message.reply_text("Не смогла скачать фото, попробуй ещё раз.")
     prof = profile_of(u); usage = []
-    parsed = await asyncio.to_thread(L.analyze_food, bytes(ba), "food.jpg", prof, usage)
+    try:
+        parsed = await asyncio.to_thread(L.analyze_food, bytes(ba), "food.jpg", prof, usage)
+    except Exception as e:
+        log.warning("on_photo analyze %s: %s", cid, e); parsed = None
     ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
     rec = normalize_food(parsed, "photo") if parsed else None
     if not rec:
@@ -2665,7 +2669,10 @@ async def _api_food_photo(request):
     if len(raw) > 12 * 1024 * 1024:
         return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
     prof = profile_of(u); usage = []
-    parsed = await asyncio.to_thread(L.analyze_food, raw, fn, prof, usage)
+    try:
+        parsed = await asyncio.to_thread(L.analyze_food, raw, fn, prof, usage)
+    except Exception as e:
+        log.warning("food_photo analyze %s: %s", cid, e); parsed = None
     ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
     rec = normalize_food(parsed, "photo") if parsed else None
     if not rec:
@@ -2683,7 +2690,10 @@ async def _api_food_text(request):
     txt = (body.get("text") or "").strip()
     if not txt: return _cors(web.json_response({"ok": False, "message": "Напиши, что съела."}))
     prof = profile_of(u); usage = []
-    parsed = await asyncio.to_thread(L.analyze_food_text, txt, prof, usage)
+    try:
+        parsed = await asyncio.to_thread(L.analyze_food_text, txt, prof, usage)
+    except Exception as e:
+        log.warning("food_text analyze %s: %s", cid, e); parsed = None
     ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage))
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
