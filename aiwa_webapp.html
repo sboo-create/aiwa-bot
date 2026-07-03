@@ -680,10 +680,13 @@ function diaryHTML(){
 }
 function pickFoodPhoto(){var f=document.getElementById('foodfile');if(f)f.click();}
 async function onFoodFile(e){var file=e.target.files&&e.target.files[0];e.target.value='';if(file)await uploadFoodPhoto(file);}
-async function uploadFoodPhoto(file){toast('Разбираю фото…');try{var fd=new FormData();fd.append('initData',INIT);fd.append('photo',file,file.name||'food.jpg');
-  var resp=await fetch('/api/food_photo',{method:'POST',body:fd});var r=await resp.json();
+function compressImage(file,maxDim,quality){return new Promise(function(resolve){try{if(!/^image\//.test(file.type||'')){resolve(file);return;}var url=URL.createObjectURL(file),img=new Image();img.onload=function(){try{URL.revokeObjectURL(url);}catch(e){}var w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;if(!w||!h){resolve(file);return;}var scale=Math.min(1,maxDim/Math.max(w,h));var cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));var c=document.createElement('canvas');c.width=cw;c.height=ch;var ctx=c.getContext('2d');ctx.drawImage(img,0,0,cw,ch);if(c.toBlob){c.toBlob(function(b){resolve(b&&b.size?b:file);},'image/jpeg',quality||0.82);}else{try{var d=c.toDataURL('image/jpeg',quality||0.82),bin=atob(d.split(',')[1]),ar=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)ar[i]=bin.charCodeAt(i);resolve(new Blob([ar],{type:'image/jpeg'}));}catch(e){resolve(file);}}};img.onerror=function(){try{URL.revokeObjectURL(url);}catch(e){}resolve(file);};img.src=url;}catch(e){resolve(file);}});}
+async function uploadFoodPhoto(file){toast('Сжимаю и разбираю фото…');var blob=file;try{blob=await compressImage(file,1600,0.82);}catch(e){}try{var fd=new FormData();fd.append('initData',INIT);fd.append('photo',blob,'food.jpg');
+  var resp=await fetch('/api/food_photo',{method:'POST',body:fd});
+  if(!resp.ok){toast(resp.status===413?'Фото слишком большое':'Сервер не принял фото ('+resp.status+')');return;}
+  var r=await resp.json();
   if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.title)||'приём')+' · '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}
-  else{toast((r&&r.message)||'Не разобрала фото');}}catch(e){toast('Не удалось отправить фото');}}
+  else{toast((r&&r.message)||'Не разобрала фото');}}catch(e){toast('Не удалось отправить фото, попробуй ещё раз');}}
 function toggleFoodText(){var b=document.getElementById('foodtextbox');if(!b)return;b.classList.toggle('hidden');var i=document.getElementById('foodtextin');if(i&&!b.classList.contains('hidden'))setTimeout(function(){i.focus();},50);}
 async function sendFoodText(){var i=document.getElementById('foodtextin');var t=(i&&i.value||'').trim();if(!t)return;i.value='';toast('Считаю…');var r=await api('/api/food_text',{text:t});if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}else toast((r&&r.message)||'Не поняла блюдо');}
 async function delMeal(id){var r=await api('/api/diary_del',{id:id});if(_applyDiary(r))haptic('selection');}

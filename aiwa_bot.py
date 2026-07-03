@@ -3121,7 +3121,7 @@ load().catch(e=>{rootEl.className='loading';rootEl.textContent='Ошибка з�
     return web.Response(text=html_text, content_type="text/html")
 
 def build_web():
-    aio = web.Application()
+    aio = web.Application(client_max_size=20 * 1024 * 1024)  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
     aio.router.add_get("/health", lambda r: web.Response(text="ok " + AIWA_VERSION))
     aio.router.add_get("/admin", _admin_page)
