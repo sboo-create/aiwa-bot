@@ -2678,9 +2678,13 @@ async def _api_food_photo(request):
     rec = normalize_food(parsed, "photo") if parsed else None
     if not rec:
         return _cors(web.json_response({"ok": False, "message": "Не разобрала фото. Сфоткай ближе и светлее, либо добавь текстом."}))
-    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
-    out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
-    return _cors(web.json_response(out))
+    try:
+        mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+        out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
+        return _cors(web.json_response(out))
+    except Exception as e:
+        import traceback; log.warning("FOOD save FAIL %s: %s", cid, traceback.format_exc())
+        return _cors(web.json_response({"ok": False, "message": "Сбой сохранения: " + str(e)[:150]}))
 
 async def _api_food_text(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -2699,9 +2703,13 @@ async def _api_food_text(request):
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
         return _cors(web.json_response({"ok": False, "message": "Не поняла блюдо. Уточни, например «200 г творога и банан»."}))
-    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
-    out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
-    return _cors(web.json_response(out))
+    try:
+        mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+        out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
+        return _cors(web.json_response(out))
+    except Exception as e:
+        import traceback; log.warning("FOOD save FAIL %s: %s", cid, traceback.format_exc())
+        return _cors(web.json_response({"ok": False, "message": "Сбой сохранения: " + str(e)[:150]}))
 
 async def _api_diary(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
