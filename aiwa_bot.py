@@ -74,7 +74,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-04-broadcast-parallel-v6"
+AIWA_VERSION = "2026-07-04-summary-spread-v7"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -695,20 +695,30 @@ def schedule_jitter_min():
     except (TypeError, ValueError):
         return 15
 
+def summary_spread_min():
+    try:
+        return max(1, int(os.environ.get("AIWA_SUMMARY_SPREAD_MIN", "180")))
+    except (TypeError, ValueError):
+        return 180
+
 def scheduled_hhmm(cid, hhmm):
     h, m = map(int, hhmm.split(":"))
-    jitter = schedule_jitter_min()
-    offset = abs(int(cid)) % jitter if jitter else 0
+    # дефолтную утреннюю сводку (08:00) размазываем по окну 08:00-11:00; кастомное время — маленький анти-коллизионный джиттер
+    window = summary_spread_min() if hhmm == "08:00" else schedule_jitter_min()
+    offset = abs(int(cid)) % window if window else 0
     m += offset
     h = (h + m // 60) % 24
-    return f"{h:02d}:{m % 60:02d}", offset, jitter
+    return f"{h:02d}:{m % 60:02d}", offset, window
 
 def schedule_text(cid, hhmm):
-    actual, offset, jitter = scheduled_hhmm(cid, hhmm)
+    actual, offset, window = scheduled_hhmm(cid, hhmm)
+    if hhmm == "08:00":
+        return (f"Утреннюю сводку присылаю в интервале 08:00-11:00 (МСК) — у тебя примерно в {actual}.\n\n"
+                f"Так нагрузка размазывается по утру и сводки не уходят всем в одну минуту. Точное время можно задать в Меню.")
     if not offset:
         return f"Время сводки: {hhmm} (МСК)."
     return (f"Время сводки: {hhmm} (МСК). Для тебя фактически около {actual}.\n\n"
-            f"Разброс до {jitter - 1} минут нужен, чтобы сводки у всех пользователей не уходили в одну секунду.")
+            f"Разброс до {window - 1} минут нужен, чтобы сводки не уходили всем в одну секунду.")
 
 def today_start_iso():
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
@@ -1750,7 +1760,8 @@ async def broadcast_today_cmd(update, context):
     users = all_users()
     queued = skipped = 0
     for uid in users:
-        if summary_sent_today(uid):
+        hhmm = (row(uid) or {}).get("send_time") or "08:00"
+        if not should_catchup_broadcast(uid, hhmm):
             skipped += 1
             continue
         if await enqueue_broadcast(uid):
@@ -3292,7 +3303,7 @@ async def run_all():
     global BOT_APP; BOT_APP = app
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))

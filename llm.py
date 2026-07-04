@@ -506,6 +506,17 @@ def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2):
         _LLM_SEM.release()
         STATS["ms"] += int((_tt.time() - t1) * 1000)
         if not out: STATS["err"] += 1
+def probe_once():
+    """Один минимальный вызов к модели В ОБХОД семафора — для замера реальной параллельности тарифа."""
+    import time as _t
+    t0 = _t.time()
+    try:
+        out = _call_impl([{"role": "system", "content": "Ответь одним словом."},
+                          {"role": "user", "content": "ок"}], max_tokens=5, temperature=0.1, usage=None, attempts=1)
+        return (bool(out), int((_t.time() - t0) * 1000))
+    except Exception:
+        return (False, int((_t.time() - t0) * 1000))
+
 def pop_stats():
     s = dict(STATS)
     for k in STATS:
