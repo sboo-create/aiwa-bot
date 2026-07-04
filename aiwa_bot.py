@@ -1761,10 +1761,16 @@ async def probe_cmd(update, context):
         n = int(context.args[0]) if getattr(context, "args", None) else 10
     except (ValueError, IndexError):
         n = 10
-    n = max(1, min(50, n))
-    await update.message.reply_text(f"Запускаю {n} параллельных вызовов к модели в обход внутреннего лимита, меряю реальную параллельность тарифа...")
+    n = max(1, min(200, n))
+    await update.message.reply_text(f"Запускаю {n} по-настоящему параллельных вызовов к модели в обход внутреннего лимита, меряю реальную параллельность тарифа...")
+    import concurrent.futures as _cf
     t0 = time.time()
-    results = await asyncio.gather(*[asyncio.to_thread(L.probe_once) for _ in range(n)])
+    loop = asyncio.get_running_loop()
+    pool = _cf.ThreadPoolExecutor(max_workers=n)
+    try:
+        results = await asyncio.gather(*[loop.run_in_executor(pool, L.probe_once) for _ in range(n)])
+    finally:
+        pool.shutdown(wait=False)
     dt = int((time.time() - t0) * 1000)
     ok = sum(1 for r in results if r[0])
     fail = n - ok
@@ -2326,7 +2332,9 @@ async def on_startup(app):
     global BOT_USERNAME, BCAST_Q
     try:
         import concurrent.futures
-        asyncio.get_running_loop().set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=24))
+        _ex_threads = max(8, min(128, int(os.environ.get("AIWA_EXECUTOR_THREADS", "32"))))
+        asyncio.get_running_loop().set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=_ex_threads))
+        log.info("default executor threads: %d", _ex_threads)
     except Exception as e:
         log.warning("executor: %s", e)
     if AIWA_WEBAPP_URL:
