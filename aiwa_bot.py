@@ -1753,6 +1753,36 @@ async def stats_cmd(update, context):
         return await update.message.reply_text("Эта команда доступна только администратору.")
     await update.message.reply_text(aggregate_stats())
 
+async def probe_cmd(update, context):
+    cid = update.effective_chat.id
+    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
+        return await update.message.reply_text("Эта команда доступна только администратору.")
+    try:
+        n = int(context.args[0]) if getattr(context, "args", None) else 10
+    except (ValueError, IndexError):
+        n = 10
+    n = max(1, min(50, n))
+    await update.message.reply_text(f"Запускаю {n} параллельных вызовов к модели в обход внутреннего лимита, меряю реальную параллельность тарифа...")
+    t0 = time.time()
+    results = await asyncio.gather(*[asyncio.to_thread(L.probe_once) for _ in range(n)])
+    dt = int((time.time() - t0) * 1000)
+    ok = sum(1 for r in results if r[0])
+    fail = n - ok
+    lats = sorted(r[1] for r in results)
+    p50 = lats[len(lats) // 2]
+    p95 = lats[min(len(lats) - 1, int(len(lats) * 0.95))]
+    verdict = ("Все прошли - тариф держит такую параллельность."
+               if fail == 0 else
+               f"{fail} из {n} упало при одновременном запуске - похоже, это потолок параллельности тарифа. "
+               f"Держи AIWA_LLM_CONCURRENCY ниже порога, где начинаются ошибки.")
+    await update.message.reply_text(
+        f"Готово за {dt} мс.\n\n"
+        f"Успешно: {ok}/{n}\n"
+        f"Ошибок: {fail}\n"
+        f"Задержка: p50 {p50} мс, p95 {p95} мс, max {lats[-1]} мс\n\n"
+        + verdict
+    )
+
 async def broadcast_today_cmd(update, context):
     cid = update.effective_chat.id
     if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
