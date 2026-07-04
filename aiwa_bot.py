@@ -74,7 +74,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-03-diary-redesign-v5"
+AIWA_VERSION = "2026-07-04-broadcast-parallel-v6"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1226,8 +1226,8 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
         raise
 
 async def broadcast_worker(app):
-    """Шлёт утренние сводки по одной с паузой, чтобы не превышать лимит токенов/мин LLM-провайдера."""
-    delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "6"))
+    """Один из нескольких параллельных воркеров рассылки. Реальный лимит GigaChat держит семафор в llm._call, поэтому большая пауза не нужна."""
+    delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "0.3"))
     while True:
         cid = await BCAST_Q.get()
         try:
@@ -2256,7 +2256,7 @@ async def load_logger(app):
                 await admin_alert(app, "llm_errors",
                     f"Модель отвечает нестабильно: ошибок {s['err']} из {calls} вызовов за последнюю минуту.\n"
                     f"Средняя задержка: {avg} мс, очередь модели: {wq}.", cooldown=600)
-            q_threshold = int(os.environ.get("AIWA_ALERT_BCAST_Q", "20"))
+            q_threshold = int(os.environ.get("AIWA_ALERT_BCAST_Q", "250"))
             if q >= q_threshold:
                 await admin_alert(app, "broadcast_queue",
                     f"Очередь рассылки выросла до {q}. Возможно, модель или Telegram тормозит.", cooldown=600)
@@ -2311,7 +2311,10 @@ async def on_startup(app):
     except Exception:
         BOT_USERNAME = None
     BCAST_Q = asyncio.Queue()
-    asyncio.create_task(broadcast_worker(app))
+    _bw = max(1, min(20, int(os.environ.get("AIWA_BROADCAST_WORKERS", "6"))))
+    for _ in range(_bw):
+        asyncio.create_task(broadcast_worker(app))
+    log.info("broadcast workers started: %d", _bw)
     asyncio.create_task(load_logger(app))
     asyncio.create_task(model_probe(app))
     n = catchup = 0
