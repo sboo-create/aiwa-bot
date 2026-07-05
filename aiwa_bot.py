@@ -74,7 +74,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-04-summary-spread-v7"
+AIWA_VERSION = "2026-07-05-screen-telemetry-v8"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1642,6 +1642,7 @@ def aggregate_stats():
     ACT = {"manual", "button", "suggest", "command", "fallback", "answered", "voice"}
     ev_by_user = defaultdict(list); active_days = defaultdict(set); first_day = {}
     tokens_total = 0; answered = 0; fallback = 0; errors = 0
+    events_today = 0; events_7 = 0
     goals = Counter(); intents = Counter(); lat = []; reqlens = []
     bcast_today = Counter()
     for cid, ts, action, tok, meta, ms, n in rows:
@@ -1650,6 +1651,8 @@ def aggregate_stats():
             bcast_today[meta or "unknown"] += 1
         if action in ACT:
             ev_by_user[cid].append(t); active_days[cid].add(d)
+            if d == today: events_today += 1
+            if (today - d).days < 7: events_7 += 1
             if cid not in first_day or d < first_day[cid]: first_day[cid] = d
             intents[meta or action] += 1
         if action == "answered":
@@ -1693,6 +1696,9 @@ def aggregate_stats():
     r1, r7, r30 = retention(1), retention(7), retention(30)
     l7 = [len([dd for dd in ds if (today - dd).days < 7]) for ds in active_days.values()]
     avg_l7 = ST.mean(l7) if l7 else 0
+    person_days_7 = sum(l7)
+    ev_per_dau_today = events_today / dau if dau else 0
+    ev_per_activeday_7 = events_7 / person_days_7 if person_days_7 else 0
 
     ans_tot = answered + fallback + errors
     succ = answered / ans_tot * 100 if ans_tot else 0
@@ -1727,7 +1733,8 @@ def aggregate_stats():
         f"Регистраций: {signups}, активаций: {activated} ({act_rate:.0f}%)\n\n"
         "ВОВЛЕЧЕНИЕ\n"
         f"Сессий: {sessions}, на юзера {spu:.1f}, средняя длина {avg_slen:.1f} мин, событий/сессия {avg_sev:.1f}\n"
-        f"Действий (событий): {requests}, на сессию {rps:.1f}, средняя длина ввода {avg_reqlen:.0f} симв.\n\n"
+        f"Действий (событий): {requests}, на сессию {rps:.1f}, средняя длина ввода {avg_reqlen:.0f} симв.\n"
+        f"Событий на DAU: сегодня {ev_per_dau_today:.1f} (событий {events_today} / DAU {dau}), в среднем за 7 дней {ev_per_activeday_7:.1f} на активного в день (приложение и бот вместе).\n\n"
         "РАССЫЛКИ СЕГОДНЯ\n"
         f"Запланировано пользователей: {len(all_users())}, в очереди: {bcast_today['queued']}, отправлено: {bcast_today['sent']}, ошибок: {bcast_today['error']}, заблокировали бота: {bcast_today['blocked']}\n\n"
         "УДЕРЖАНИЕ (rolling)\n"
@@ -1896,7 +1903,7 @@ async def on_photo(update, context):
         try: _e = L.last_food_err()
         except Exception: pass
         return await update.message.reply_text("Не разобрала фото 🙈 Сфоткай ближе и светлее, либо напиши текстом." + (("\n\n⚙️ " + _e) if _e else ""))
-    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
     rows = [[B("🗑 Убрать из дневника", f"mdel:{mid}")]]
     wu = webapp_url(u) or AIWA_WEBAPP_URL
     if wu: rows.append([InlineKeyboardButton("📱 Открыть дневник", web_app=WebAppInfo(url=wu))])
@@ -2409,6 +2416,7 @@ async def _api_data(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
+    ev(cid, "button", meta="app_open")
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
@@ -2757,7 +2765,7 @@ async def log_food_from_text(cid, u, text):
     if not rec:
         return "Не поняла, что добавить. Напиши, например «добавь на завтрак рисовую кашу»."
     rec["slot"] = slot or slot_for_now()
-    meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+    meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
     sm = {"breakfast": "завтрак", "lunch": "обед", "snack": "перекус", "dinner": "ужин"}.get(rec["slot"], "приём")
     return f"Добавила в {sm}: {rec['title']} — {rec['kcal']} ккал (Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). Итоги дня — в разделе «Питание»."
 
@@ -2799,7 +2807,7 @@ async def _api_food_photo(request):
         if _e: msg += " [" + _e + "]"
         return _cors(web.json_response({"ok": False, "message": msg}))
     try:
-        mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+        mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
         out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
         return _cors(web.json_response(out))
     except Exception as e:
@@ -2826,17 +2834,26 @@ async def _api_food_text(request):
     _sl = slot_from_text(txt)
     if _sl: rec["slot"] = _sl
     try:
-        mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+        mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
         out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
         return _cors(web.json_response(out))
     except Exception as e:
         import traceback; log.warning("FOOD save FAIL %s: %s", cid, traceback.format_exc())
         return _cors(web.json_response({"ok": False, "message": "Сбой сохранения: " + str(e)[:150]}))
 
+async def _api_track(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    scr = re.sub(r"[^a-z0-9_]", "", str(body.get("screen") or "").lower())[:20]
+    if scr and is_onboarded(row(cid)):
+        ev(cid, "button", meta="view_" + scr)
+    return _cors(web.json_response({"ok": True}))
+
 async def _api_diary(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    ev(cid, "button", meta="web_diary")
     return _cors(web.json_response(diary_payload(cid)))
 
 async def _api_diary_del(request):
@@ -2845,6 +2862,7 @@ async def _api_diary_del(request):
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     try: meal_del(cid, int(body.get("id")))
     except Exception: pass
+    ev(cid, "button", meta="web_diary_del")
     return _cors(web.json_response(diary_payload(cid)))
 
 async def _api_diary_scale(request):
@@ -2853,6 +2871,7 @@ async def _api_diary_scale(request):
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     try: meal_scale(cid, int(body.get("id")), int(body.get("grams")))
     except Exception: pass
+    ev(cid, "button", meta="web_diary_scale")
     return _cors(web.json_response(diary_payload(cid)))
 
 async def _api_diary_slot(request):
@@ -2861,6 +2880,7 @@ async def _api_diary_slot(request):
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     try: meal_set_slot(cid, int(body.get("id")), body.get("slot"))
     except Exception: pass
+    ev(cid, "button", meta="web_diary_slot")
     return _cors(web.json_response(diary_payload(cid)))
 
 async def _api_diary_edit(request):
@@ -2878,6 +2898,7 @@ async def _api_diary_edit(request):
     if body.get("slot") in ("breakfast", "lunch", "snack", "dinner"): kw["slot"] = body["slot"]
     try: meal_edit(cid, int(body.get("id")), **kw)
     except Exception: pass
+    ev(cid, "button", meta="web_diary_edit")
     return _cors(web.json_response(diary_payload(cid)))
 
 async def _api_food_manual(request):
@@ -2893,7 +2914,7 @@ async def _api_food_manual(request):
            "carbs": round(_num(body.get("carbs")), 1), "grams": (int(_num(body.get("grams"))) or None),
            "source": "manual"}
     if body.get("slot") in ("breakfast", "lunch", "snack", "dinner"): rec["slot"] = body["slot"]
-    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log")
+    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
     out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid))
     return _cors(web.json_response(out))
 
@@ -3014,6 +3035,7 @@ def admin_dashboard_data(days=30, frm=None, to=None):
     answers = fallback = errors = tokens = reqs = 0; lat = []; input_lens = []
     llm_calls = 0; tool_calls = 0; sess_ts = defaultdict(list)
     reqs_by_day = Counter(); tools_by_day = Counter(); mode_llm = Counter(); mode_tool = Counter(); tool_top = Counter()
+    events_by_day = Counter()
     TOOL_LABEL = {"menu": "меню", "answer": "ответ в чате", "summary": "сводка", "meal": "замена блюда"}
     MESSAGE_ACTIONS = ("answered", "manual", "suggest", "voice"); ud_tools = Counter()
     for _, _, _, _, mode in users: modes[mode or "cycle"] += 1
@@ -3045,7 +3067,8 @@ def admin_dashboard_data(days=30, frm=None, to=None):
         if action == "fallback": fallback += 1
         if action == "error": errors += 1; errors_by_day[iso] += 1
         if tok: tokens += tok
-        if action in ("answered", "fallback", "command", "button", "manual", "suggest", "voice"): reqs += 1
+        if action in ("answered", "fallback", "command", "button", "manual", "suggest", "voice"):
+            reqs += 1; events_by_day[iso] += 1
         if action == "goal": goals[meta or "goal"] += 1
         label = (action + ":" + meta) if meta and action in ("manual", "goal", "broadcast") else (meta or action)
         actions[label] += 1
@@ -3137,6 +3160,9 @@ def admin_dashboard_data(days=30, frm=None, to=None):
     per_sess_tool = tool_calls / sessions if sessions else 0
     dau_now = active(1); wau_now = active(7); mau_now = active(30)
     stickiness = round(dau_now / mau_now * 100) if mau_now else 0
+    events_total = reqs
+    ev_per_dau = events_total / active_user_days if active_user_days else 0
+    ev_per_dau_today = events_by_day[today.isoformat()] / dau_now if dau_now else 0
     # --- симптомы + временной ряд со скользящими метриками ---
     symptom_counts = Counter()
     for _, ss in logs:
@@ -3153,7 +3179,7 @@ def admin_dashboard_data(days=30, frm=None, to=None):
                        "stick": round(dau_d / mau_d * 100) if mau_d else 0,
                        "new": new_d, "returning": dau_d - new_d,
                        "signups": signups_by_day[iso], "answers": answers_by_day[iso], "errors": errors_by_day[iso],
-                       "reqs": reqs_by_day[iso], "tools": tools_by_day[iso], "sessions": sessions_by_day[iso],
+                       "reqs": reqs_by_day[iso], "tools": tools_by_day[iso], "sessions": sessions_by_day[iso], "events": events_by_day[iso],
                        "modes": {m: len(s) for m, s in active_mode_day.get(iso, {}).items()}})
         d += timedelta(days=1)
     # --- сводные KPI: средний WAU, запросы/инференс на активного·день, медиана, воронка ---
@@ -3187,7 +3213,8 @@ def admin_dashboard_data(days=30, frm=None, to=None):
         "kpi": {"avg_wau": round(avg_wau, 1), "sess_per_dau": round(sess_per_dau, 2),
             "msg_per_dau": round(msg_per_dau, 1), "req_per_dau": round(req_per_dau, 1),
             "req_per_dau_median": round(req_med, 1), "inf_per_dau": round(inf_per_dau, 1),
-            "messages": msgs_total, "inf_measured": bool(llm_calls)},
+            "messages": msgs_total, "inf_measured": bool(llm_calls),
+            "ev_per_dau": round(ev_per_dau, 1), "ev_per_dau_today": round(ev_per_dau_today, 1), "events_total": events_total},
         "funnel_act": {"sessions": sessions, "engaged": eng_sessions, "engaged_pct": eng_pct,
             "messages": msgs_total, "per_session": msg_per_sess},
         "throughput": {"llm_calls": llm_calls, "tool_calls": tool_calls, "reqs_total": reqs_total,
@@ -3291,7 +3318,7 @@ function lineChart(days,lines){const W=1000,H=300,PL=42,PR=16,PT=24,PB=28;const 
 function funnelBlock(d){const f=d.funnel_act||{};return `<div class=card><div class=title>Воронка активации</div><div class=tsub>сессия → сессия с сообщением → сообщения</div><div class=funnel><div class=fstep><div class=fkey>session.opened</div><div class=fval>${fmt(f.sessions)}</div><div class=fsub>базовая линия</div></div><div class=fstep><div class=fkey>session.messaged</div><div class=fval>${fmt(f.engaged)}</div><div class=fsub>${f.engaged_pct||0}% сессий</div></div><div class=fstep><div class=fkey>message.sent</div><div class=fval>${fmt(f.messages)}</div><div class=fsub>${f.per_session||0}× на сессию</div></div></div><div class=mdef>Сессия — активность без пауз дольше 30 мин. «С сообщением» — сессии, где пользователь что-то спросил/написал. «Сообщения» — всего вопросов, и в среднем на активную сессию.</div></div>`}
 function scopeVal(d,w){const t=d.throughput;if(modelScope==='dau')return w==='req'?t.per_dau_tool:t.per_dau_req;if(modelScope==='sess')return w==='req'?t.per_sess_tool:t.per_sess_req;return w==='req'?t.tool_calls:t.reqs_total}
 const SEC={
- overview:d=>{const k=d.kpi||{};return `<div class=grid>${card('Всего пользователей',fmt(d.users),'уникальные, all time','Все, кто хоть раз запускал бота.')}${card('MAU',fmt(d.mau),'за 30 дней','Уникальные активные за последние 30 дней.')}${card('DAU',fmt(d.dau),'сегодня','Уникальные активные за сегодня.')}${card('Средний DAU',fmt(d.avg_dau),'активных в день','Среднесуточное число активных пользователей за период.')}${card('Средний WAU',fmt(k.avg_wau),'скользящее 7д','Среднее недельное активное по дням (окно 7 дней).')}${card('Сессий на польз./день',k.sess_per_dau,'','Сколько сессий в среднем у активного пользователя за день.')}${card('Сообщений на польз./день',k.msg_per_dau,'','Сообщений (вопросов) на активного пользователя в день.')}${card('Запросов на DAU',k.req_per_dau,'медиана '+k.req_per_dau_median,'Пользовательских запросов (тул-коллов) на активного в день. Рядом — медиана.')}${card('Инференс-вызовов на DAU',k.inf_per_dau,k.inf_measured?'сырые вызовы модели':'копится после обновления','Вызовов модели на активного в день. Обычно больше запросов: один запрос = несколько вызовов.')}</div>${funnelBlock(d)}<div class="card mb" style="margin-top:14px">${lineChart(d.days,[{key:'dau',color:'#2F6BED',label:'DAU'},{key:'wau',color:'#22A65B',label:'WAU · 7д'},{key:'mau',color:'#E8912A',label:'MAU · 30д'}])}<div class=mdef>По горизонтали — дни периода, по вертикали — число пользователей. Дневные уники (DAU) и скользящие 7-дн (WAU) / 30-дн (MAU) окна. Расхождение линий показывает, растёт база или крутится один и тот же костяк.</div></div><div class=card><div class=title>Новые vs вернувшиеся</div><div class=chart>${(function(){let st=Math.max(1,Math.ceil(d.days.length/12)),mx=Math.max(1,...d.days.map(y=>(y.new||0)+(y.returning||0)));return d.days.map((x,i)=>{let t=(x.new||0)+(x.returning||0),h=Math.max(3,t/mx*100),np=t?(x.new/t*100):0;return `<div class=b title="${x.date}: новые ${x.new}, вернулись ${x.returning}" style="height:${h}%;background:linear-gradient(180deg,var(--green) 0 ${np}%,var(--blue) ${np}% 100%)"><b class=bv>${t}</b>${(d.days.length<=16||i%st===0||i===d.days.length-1)?`<i>${x.date}</i>`:''}</div>`}).join('')})()}</div><div class=legend><span><i class="dot g"></i>новые</span><span><i class=dot></i>вернувшиеся</span></div><div class=mdef>По горизонтали — дни, по вертикали — активные пользователи. Новые — впервые активны в этот день. Вернувшиеся — были активны раньше.</div></div>`},
+ overview:d=>{const k=d.kpi||{};return `<div class=grid>${card('Всего пользователей',fmt(d.users),'уникальные, all time','Все, кто хоть раз запускал бота.')}${card('MAU',fmt(d.mau),'за 30 дней','Уникальные активные за последние 30 дней.')}${card('DAU',fmt(d.dau),'сегодня','Уникальные активные за сегодня.')}${card('Средний DAU',fmt(d.avg_dau),'активных в день','Среднесуточное число активных пользователей за период.')}${card('Средний WAU',fmt(k.avg_wau),'скользящее 7д','Среднее недельное активное по дням (окно 7 дней).')}${card('Сессий на польз./день',k.sess_per_dau,'','Сколько сессий в среднем у активного пользователя за день.')}${card('Сообщений на польз./день',k.msg_per_dau,'','Сообщений (вопросов) на активного пользователя в день.')}${card('Запросов на DAU',k.req_per_dau,'медиана '+k.req_per_dau_median,'Пользовательских запросов (тул-коллов) на активного в день. Рядом — медиана.')}${card('Инференс-вызовов на DAU',k.inf_per_dau,k.inf_measured?'сырые вызовы модели':'копится после обновления','Вызовов модели на активного в день. Обычно больше запросов: один запрос = несколько вызовов.')}${card('Событий на DAU',k.ev_per_dau,'сегодня '+k.ev_per_dau_today,'Все действия пользователя — кнопки, команды, ответы, голос, ручной ввод — на активного в день. Приложение и бот вместе. Рядом — значение за сегодня.')}</div>${funnelBlock(d)}<div class="card mb" style="margin-top:14px">${lineChart(d.days,[{key:'dau',color:'#2F6BED',label:'DAU'},{key:'wau',color:'#22A65B',label:'WAU · 7д'},{key:'mau',color:'#E8912A',label:'MAU · 30д'}])}<div class=mdef>По горизонтали — дни периода, по вертикали — число пользователей. Дневные уники (DAU) и скользящие 7-дн (WAU) / 30-дн (MAU) окна. Расхождение линий показывает, растёт база или крутится один и тот же костяк.</div></div><div class=card><div class=title>Новые vs вернувшиеся</div><div class=chart>${(function(){let st=Math.max(1,Math.ceil(d.days.length/12)),mx=Math.max(1,...d.days.map(y=>(y.new||0)+(y.returning||0)));return d.days.map((x,i)=>{let t=(x.new||0)+(x.returning||0),h=Math.max(3,t/mx*100),np=t?(x.new/t*100):0;return `<div class=b title="${x.date}: новые ${x.new}, вернулись ${x.returning}" style="height:${h}%;background:linear-gradient(180deg,var(--green) 0 ${np}%,var(--blue) ${np}% 100%)"><b class=bv>${t}</b>${(d.days.length<=16||i%st===0||i===d.days.length-1)?`<i>${x.date}</i>`:''}</div>`}).join('')})()}</div><div class=legend><span><i class="dot g"></i>новые</span><span><i class=dot></i>вернувшиеся</span></div><div class=mdef>По горизонтали — дни, по вертикали — активные пользователи. Новые — впервые активны в этот день. Вернувшиеся — были активны раньше.</div></div>`},
  users:d=>`<div class=grid>${card('Всего пользователей',fmt(d.users),'','Все, кто запускал бота.')}${card('Онбординг',fmt(d.onboarded),'прошли настройку','Указали цикл или выбрали режим.')}${card('Активные за период',fmt(d.active_period),'уникальные','Уникальные активные за выбранный период.')}${card('Средний DAU',fmt(d.avg_dau),'','Среднесуточные активные за период.')}</div><div class="card mb"><div class=title>Средний DAU и интенсивность по типам</div><div class=tsub>сегмент = тип цикла пользователя</div>${tbl(['тип','всего','активны','ср. DAU','запр./акт·день','инференс/акт·день'],d.segments.map(s=>[name(s.mode),fmt(s.users),fmt(s.active),s.avg_dau,s.intensity_tool,s.intensity_req]))}<div class=mdef>«ср. DAU» — среднесуточные активные в сегменте. «запр./акт·день» — пользовательских запросов на активного в день; «инференс/акт·день» — вызовов модели. Видно, какой сегмент нагружает продукт сильнее.</div></div><div class=split><div class=card><div class=title>Структура: все пользователи по типам</div>${list(d.modes,'g')}<div class=mdef>Сколько всего пользователей в каждом типе цикла.</div></div><div class=card><div class=title>Интенсивность запросов по сегменту</div>${list(d.segments.map(s=>[s.mode,s.intensity_tool]))}<div class=mdef>Пользовательских запросов на одного активного в день, по сегментам.</div></div></div>`,
  model:d=>{const t=d.throughput,m=d.model,sc={total:'всего',dau:'на активного/день',sess:'на сессию'}[modelScope];return `<div class=grid>${card('Запросы ('+sc+')',fmt(scopeVal(d,'req')),'вызовы ИИ-функций','Пользовательские запросы: чат-ответ, сводка, меню, нагрузка, замена блюда, голос.')}${card('Инференс-вызовы ('+sc+')',fmt(scopeVal(d,'inf')),t.calls_measured?'сырые вызовы модели':'копится после обновления','Сырые вызовы GigaChat: интент + генерация дают несколько вызовов на запрос.')}${card('Ответы Айвы',fmt(m.answers),'успешность '+m.success_rate+'%','Число ответов пользователю в чате.')}${card('Ошибки модели',fmt(m.errors),'фолбэков '+fmt(m.fallback),'Сбои генерации. Фолбэк — ответ подстраховкой без модели.')}</div><div class="card mb"><div class=title>Объём запросов и инференса</div>${mtabs([['total','всего'],['dau','на активного/день'],['sess','на сессию']],modelScope,'setScope')}${tbl(['метрика','значение ('+sc+')'],[['Запросы (тул-коллы)',fmt(scopeVal(d,'req'))],['Инференс-вызовы',fmt(scopeVal(d,'inf'))]])}<div class=mdef>Тумблер меняет базу: «всего» за период, «на активного/день» (делим на активные·дни) или «на сессию».</div></div><div class=split><div class=card><div class=title>Топ тул-коллов</div>${list(d.tools_top,'a')}<div class=mdef>Какие ИИ-функции вызываются чаще всего за период.</div></div><div class=card><div class=title>Распределение: событий на сессию</div>${histBars(d.sessions.dist_events,'')}<div class=mdef>Сколько действий пользователь успевает за сессию. Прокси «запросов на сессию».</div></div></div><div class=split><div class=card><div class=title>Инференс-вызовы по дням</div><div class=chart>${bars(d.days,'reqs','')}</div><div class=mdef>Сырые вызовы модели по дням.</div></div><div class=card><div class=title>Качество и латентность</div>${row('ответы',fmt(m.answers))+row('фолбэки',fmt(m.fallback))+row('ошибки',fmt(m.errors))+row('успешность',m.success_rate+'%')+row('p50 / p95',fmt(m.p50_ms)+' / '+fmt(m.p95_ms)+' мс')+row('токенов всего',fmt(m.tokens))}<div class=mdef>p50/p95 — медианное и «почти худшее» время ответа модели.</div></div></div>`},
  sessions:d=>{const s=d.sessions;return `<div class=grid>${card('Сессий за период',fmt(s.count),fmt(s.users)+' пользователей','Серии действий без пауз дольше 30 минут.')}${card('Сессий в день',s.per_day,'в среднем','Среднее число сессий в сутки за период.')}${card('Сессий на пользователя',s.per_user,'','Сколько раз в среднем заходит активный пользователь.')}${card('Средняя длина',s.avg_len_min+' мин','','Средняя длительность одной сессии.')}</div><div class="card mb"><div class=title>Сессии по дням</div><div class=chart>${bars(d.days,'sessions','g')}</div><div class=mdef>Число сессий, начавшихся в каждый день.</div></div><div class=split><div class=card><div class=title>Распределение по длительности</div>${histBars(d.sessions.dist_duration,'g')}<div class=mdef>Как распределяются сессии по длине. Много «<1 мин» — заходят и быстро выходят.</div></div><div class=card><div class=title>Распределение по числу событий</div>${histBars(d.sessions.dist_events,'')}<div class=mdef>Сколько действий приходится на сессию. Правее — вовлечённее.</div></div></div><div class=grid>${card('Событий на сессию',s.events_per,'в среднем','Среднее число действий за сессию.')}${card('Запросов на сессию',d.throughput.per_sess_tool,'','Пользовательских запросов за сессию.')}${card('Инференс на сессию',d.throughput.per_sess_req,'','Вызовов модели за сессию.')}${card('Активных пользователей',fmt(s.users),'с сессиями','Дали хотя бы одну сессию.')}</div>`}
@@ -3315,6 +3342,7 @@ def build_web():
     aio.router.add_post("/api/voice", _api_voice)
     aio.router.add_post("/api/food_photo", _api_food_photo)
     aio.router.add_post("/api/food_text", _api_food_text)
+    aio.router.add_post("/api/track", _api_track)
     aio.router.add_post("/api/diary", _api_diary)
     aio.router.add_post("/api/diary_del", _api_diary_del)
     aio.router.add_post("/api/diary_scale", _api_diary_scale)
