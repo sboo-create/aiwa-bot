@@ -40,6 +40,7 @@ BCAST_Q = None  # очередь утренней рассылки (троттл
 BCAST_PENDING = set()
 FOOD_Q = None   # очередь обеденного пуша про еду
 FOOD_PENDING = set()
+ANNOUNCE_WAIT = set()   # админы в режиме рассылки: ждём следующее сообщение и копируем всем
 ALERT_LAST = {}
 CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
 def hist_get(cid):
@@ -76,12 +77,21 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-06-training-v10"
+AIWA_VERSION = "2026-07-06-training-announce-v11"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
 APP_MENU_BUTTON_TEXT = "Айва"
 APP_CTA_HTML = "📱 <b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
+ANNOUNCE_TEXT = (
+    "🌸 Большое обновление в приложении Айвы: теперь можно вести дневник питания и отмечать тренировки.\n\n"
+    "🍎 Дневник калорий. Отмечай приёмы пищи по фото тарелки, текстом или вручную — Айва посчитает калории и БЖУ, "
+    "соберёт дневник по приёмам (завтрак, обед, ужин, перекус) и подскажет, чего не хватило за день. Всё можно редактировать.\n\n"
+    "🏋️ Тренировки. Отмечай тренировку — тип, упражнения, вес для силовых и как ощущалось. Айва разберёт нагрузку "
+    "с учётом фазы цикла и твоей истории и предложит следующую: после силовой — восстановление, без повторов одного и того же.\n\n"
+    "Всё подстраивается под твой цикл и самочувствие. Открой приложение кнопкой ниже."
+)
+
 MENO_UPDATE_TEXT = (
     "🌸 Обновила экран для менопаузы в приложении Айвы.\n\n"
     "Теперь там есть отдельный режим без фаз цикла: самочувствие сегодня, симптомы менопаузы, научный факт дня, "
@@ -1926,9 +1936,43 @@ async def meno_update_cmd(update, context):
             log.warning("meno update %s: %s", uid, e)
     await update.message.reply_text(f"Пуш про мено-экран отправлен.\n\nУшло: {sent}\nОшибок: {failed}")
 
+async def _announce_capture(update, context, cid):
+    """Копирует сообщение, которое админ прислал после /announce (текст и/или фото), всем пользователям."""
+    ANNOUNCE_WAIT.discard(cid)
+    msg = update.message
+    txt = (msg.text or "").strip()
+    if txt.lower() in ("/cancel", "отмена"):
+        return await msg.reply_text("Рассылка отменена.")
+    await msg.reply_text("Рассылаю это сообщение всем пользователям. Пришлю отчёт, когда закончу.")
+    sent = failed = 0
+    for uid in all_users():
+        try:
+            await context.bot.copy_message(chat_id=uid, from_chat_id=cid, message_id=msg.message_id,
+                                           reply_markup=summary_kb(row(uid)))
+            ev(uid, "broadcast", meta="announce_sent"); sent += 1
+            await asyncio.sleep(0.25)
+        except Forbidden:
+            failed += 1; ev(uid, "broadcast", meta="blocked")
+        except Exception as e:
+            failed += 1; ev(uid, "broadcast", meta="announce_error"); log.warning("announce %s: %s", uid, e)
+    await msg.reply_text(f"Готово. Ушло: {sent}, ошибок: {failed}.")
+
+async def announce_cmd(update, context):
+    cid = update.effective_chat.id
+    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
+        return await update.message.reply_text("Эта команда доступна только администратору.")
+    ANNOUNCE_WAIT.add(cid)
+    await update.message.reply_text(
+        "Режим рассылки включён.\n\n"
+        "Пришли СЛЕДУЮЩИМ сообщением то, что разослать всем: обычный текст, или фото с подписью, или картинку. "
+        "Я скопирую это сообщение всем пользователям и добавлю кнопку «Приложение».\n\n"
+        "Чтобы отменить — напиши слово: отмена.")
+
 # ---------- text ----------
 async def on_text(update, context):
     cid = update.effective_chat.id
+    if cid in ANNOUNCE_WAIT:
+        return await _announce_capture(update, context, cid)
     try:
         await handle_text(update, context, update.message.text.strip())
     except Exception as e:
@@ -1966,6 +2010,8 @@ def food_card(rec, added=True):
 
 async def on_photo(update, context):
     cid = update.effective_chat.id; u = row(cid)
+    if cid in ANNOUNCE_WAIT:
+        return await _announce_capture(update, context, cid)
     if not is_onboarded(u):
         return await update.message.reply_text("Сначала настрой Айву: /start.")
     await context.bot.send_chat_action(cid, "typing")
@@ -3521,7 +3567,7 @@ async def run_all():
     global BOT_APP; BOT_APP = app
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
