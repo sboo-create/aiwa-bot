@@ -38,6 +38,8 @@ BOT_USERNAME = None
 BOT_APP = None  # ссылка на PTB Application для веб-обработчиков
 BCAST_Q = None  # очередь утренней рассылки (троттлинг под лимиты LLM-провайдера)
 BCAST_PENDING = set()
+FOOD_Q = None   # очередь обеденного пуша про еду
+FOOD_PENDING = set()
 ALERT_LAST = {}
 CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
 def hist_get(cid):
@@ -74,7 +76,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-05-screen-telemetry-v8"
+AIWA_VERSION = "2026-07-05-audit-foodpush-v9"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -197,6 +199,11 @@ def db():
         except sqlite3.OperationalError: pass
     try: c.execute("ALTER TABLE meals ADD COLUMN slot TEXT")
     except sqlite3.OperationalError: pass
+    for _ix in ("CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts)",
+                "CREATE INDEX IF NOT EXISTS ix_events_cid_ts ON events(chat_id, ts)",
+                "CREATE INDEX IF NOT EXISTS ix_meals_cid_d ON meals(chat_id, d)"):
+        try: c.execute(_ix)
+        except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
                 "period_end TEXT", "period_len INTEGER"):
@@ -837,7 +844,7 @@ async def send_infographic(bot, cid):
     u, st = status_of(cid)
     if not st: return
     try:
-        png = IMG.render_cycle(date.fromisoformat(u["last_period"]), u["cycle_len"], date.today())
+        png = await asyncio.to_thread(IMG.render_cycle, date.fromisoformat(u["last_period"]), u["cycle_len"], date.today())
         bio = io.BytesIO(png); bio.name = "cycle.png"
         await bot.send_photo(cid, photo=bio, caption=f"AIWA · {st['subphase']} {st['phase_ru'].lower()}, день {st['day']}. Месячные через ~{st['days_to_next']} дн.")
     except Exception as e: log.warning("infographic: %s", e)
@@ -846,7 +853,7 @@ async def send_training_card(context, cid, st):
     if not IMG: return
     await context.bot.send_chat_action(cid, "upload_photo")
     try:
-        bio = io.BytesIO(IMG.render_training(st)); bio.name = "training.png"
+        bio = io.BytesIO(await asyncio.to_thread(IMG.render_training, st)); bio.name = "training.png"
         await context.bot.send_photo(cid, photo=bio)
     except Exception as e:
         log.warning("training img: %s", e)
@@ -867,6 +874,7 @@ def menu_cached(cid, st, prof, target, mode=None, usage=None):
     else:
         m = L.general_menu(prof, mode, target, usage=usage)
     _MENU_CACHE[key] = m
+    _prune_day(_MENU_CACHE)
     return m
 def menu_cache_clear(cid):
     for k in [k for k in list(_MENU_CACHE) if k[0] == cid]:
@@ -893,7 +901,7 @@ async def send_menu(context, cid, with_image=False):
     if not with_image:
         return mdata, target
     try:
-        bio = io.BytesIO(IMG.render_menu(mdata, st["phase_ru"], target_kcal=(target[0] if target else None))); bio.name = "menu.png"
+        bio = io.BytesIO(await asyncio.to_thread(IMG.render_menu, mdata, st["phase_ru"], target_kcal=(target[0] if target else None))); bio.name = "menu.png"
         cap = f"🍽 Меню под {st['phase_ru'].lower()} фазу"
         if target: cap += f", цель ~{target[0]} ккал/день"
         cap += ". Не нравится блюдо, напиши «замени обед» или «другое на ужин»."
@@ -929,7 +937,7 @@ async def send_section(context, cid, st, key):
 async def send_delay(context, cid, st):
     if IMG:
         try:
-            bio = io.BytesIO(IMG.render_delay(st)); bio.name = "delay.png"; await context.bot.send_photo(cid, photo=bio)
+            bio = io.BytesIO(await asyncio.to_thread(IMG.render_delay, st)); bio.name = "delay.png"; await context.bot.send_photo(cid, photo=bio)
         except Exception as e: log.warning("delay img: %s", e)
     msgs = {
         "due": (
@@ -1260,6 +1268,41 @@ async def broadcast_worker(app):
             BCAST_PENDING.discard(cid)
             BCAST_Q.task_done()
         await asyncio.sleep(delay)
+
+async def push_food_reminder(context, cid):
+    u = row(cid)
+    if not is_onboarded(u): return
+    if meals_of(cid, date.today().isoformat()): return   # уже отметила еду сегодня — не дёргаем
+    wu = webapp_url(u) or AIWA_WEBAPP_URL
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🍎 Отметить еду", web_app=WebAppInfo(url=wu))]]) if wu else None
+    await context.bot.send_message(cid,
+        "🍽 Не забудь отметить обед. Пришли фото тарелки, напиши текстом или добавь вручную — Айва посчитает КБЖУ и подскажет, чего сегодня не хватает.",
+        reply_markup=kb)
+    ev(cid, "broadcast", meta="food_reminder_sent")
+
+async def food_worker(app):
+    delay = float(os.environ.get("AIWA_FOOD_DELAY", "0.3"))
+    while True:
+        cid = await FOOD_Q.get()
+        try:
+            await push_food_reminder(_BCtx(app), cid)
+        except Forbidden:
+            log.info("food reminder %s: заблокирован", cid)
+        except Exception as e:
+            log.warning("food reminder %s: %s", cid, e)
+        finally:
+            FOOD_PENDING.discard(cid)
+            FOOD_Q.task_done()
+        await asyncio.sleep(delay)
+
+async def food_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """Глобальный джоб в обед: ставит в очередь пуш про еду всем, кто ещё не отметил сегодня."""
+    if FOOD_Q is None: return
+    n = 0
+    for cid in all_users():
+        if cid in FOOD_PENDING: continue
+        FOOD_PENDING.add(cid); await FOOD_Q.put(cid); n += 1
+    log.info("food reminder queued: %d", n)
 
 def finish_onboarding(context, cid, last_period_iso, n):
     upsert(cid, last_period=last_period_iso, cycle_len=n, state=None, pending_date=None)
@@ -1758,7 +1801,8 @@ async def stats_cmd(update, context):
         return await update.message.reply_text(f"Статистика закрыта. Твой chat id: {cid}. Задай в Railway переменную AIWA_ADMIN={cid}, и команда станет доступна только тебе.")
     if str(cid) != str(AIWA_ADMIN):
         return await update.message.reply_text("Эта команда доступна только администратору.")
-    await update.message.reply_text(aggregate_stats())
+    _txt = await asyncio.to_thread(aggregate_stats)
+    await update.message.reply_text(_txt)
 
 async def probe_cmd(update, context):
     cid = update.effective_chat.id
@@ -2336,7 +2380,7 @@ async def model_probe(app):
         await asyncio.sleep(interval)
 
 async def on_startup(app):
-    global BOT_USERNAME, BCAST_Q
+    global BOT_USERNAME, BCAST_Q, FOOD_Q
     try:
         import concurrent.futures
         _ex_threads = max(8, min(128, int(os.environ.get("AIWA_EXECUTOR_THREADS", "32"))))
@@ -2371,6 +2415,16 @@ async def on_startup(app):
     for _ in range(_bw):
         asyncio.create_task(broadcast_worker(app))
     log.info("broadcast workers started: %d", _bw)
+    FOOD_Q = asyncio.Queue()
+    _fw = max(1, min(10, int(os.environ.get("AIWA_FOOD_WORKERS", "3"))))
+    for _ in range(_fw):
+        asyncio.create_task(food_worker(app))
+    try:
+        _fh, _fm = map(int, os.environ.get("AIWA_FOOD_PUSH_TIME", "14:00").split(":"))
+    except (ValueError, AttributeError):
+        _fh, _fm = 14, 0
+    app.job_queue.run_daily(food_reminder_job, time=dtime(_fh, _fm, tzinfo=TZ), name="food_reminder_all")
+    log.info("food reminder scheduled %02d:%02d, workers: %d", _fh, _fm, _fw)
     asyncio.create_task(load_logger(app))
     asyncio.create_task(model_probe(app))
     n = catchup = 0
@@ -3235,7 +3289,8 @@ async def _admin_stats(request):
     if not _admin_key_ok(request):
         return web.json_response({"error": "forbidden"}, status=403)
     qp = request.query
-    return web.json_response(admin_dashboard_data(qp.get("days", 30), qp.get("from"), qp.get("to")))
+    _d = await asyncio.to_thread(admin_dashboard_data, qp.get("days", 30), qp.get("from"), qp.get("to"))
+    return web.json_response(_d)
 
 async def _admin_page(request):
     if not _admin_key_ok(request):
@@ -3365,7 +3420,7 @@ def build_web():
     return aio
 
 async def run_all():
-    app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
+    app = Application.builder().token(os.environ["BOT_TOKEN"]).concurrent_updates(True).build()
     global BOT_APP; BOT_APP = app
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),

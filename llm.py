@@ -2,6 +2,14 @@
 """Сводка, ответы и динамические саджесты через GigaChat/LiteLLM."""
 import os, re, json, requests, unicodedata, threading
 
+# переиспользуем TCP/TLS-соединения к провайдеру вместо нового хендшейка на каждый вызов
+_HTTP = requests.Session()
+try:
+    _adp = requests.adapters.HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=0)
+    _HTTP.mount("https://", _adp); _HTTP.mount("http://", _adp)
+except Exception:
+    pass
+
 PROVIDER = os.environ.get("AIWA_PROVIDER", "litellm").lower()
 GIGA_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat-2")
 GIGA_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
@@ -30,7 +38,7 @@ def _giga_auth():
     if not creds:
         return None
     try:
-        r = requests.post(GIGA_OAUTH,
+        r = _HTTP.post(GIGA_OAUTH,
             headers={"Authorization": f"Basic {creds}", "RqUID": str(uuid.uuid4()),
                      "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
             data={"scope": GIGA_SCOPE}, timeout=30, verify=_GIGA_VERIFY)
@@ -49,7 +57,7 @@ def _call_giga(messages, max_tokens, temperature, usage, attempts=4):
     wait = 1.5
     for i in range(attempts):
         try:
-            r = requests.post(GIGA_CHAT,
+            r = _HTTP.post(GIGA_CHAT,
                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"},
                 json={"model": GIGA_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
                 timeout=(6, float(os.environ.get("GIGACHAT_CHAT_TIMEOUT_SECONDS") or "45")), verify=_GIGA_VERIFY)
@@ -155,7 +163,7 @@ def _stand_auth(force=False):
     }
     for url in _stand_token_urls():
         try:
-            r = requests.post(url, headers=headers, timeout=(6, 30), verify=_stand_verify())
+            r = _HTTP.post(url, headers=headers, timeout=(6, 30), verify=_stand_verify())
             if r.status_code in (404, 405):
                 continue
             if r.status_code >= 400:
@@ -205,7 +213,7 @@ def _call_gigastand(messages, max_tokens, temperature, usage, attempts=3):
             "User-Agent": STAND_UA,
         }
         try:
-            r = requests.post(_stand_chat_url(), headers=headers,
+            r = _HTTP.post(_stand_chat_url(), headers=headers,
                 json=_stand_payload(messages, max_tokens, temperature),
                 timeout=(6, float(os.environ.get("GIGACHAT_STAND_TIMEOUT") or os.environ.get("GIGACHAT_CHAT_TIMEOUT_SECONDS") or "60")),
                 verify=_stand_verify())
@@ -416,7 +424,7 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
     wait = 1.5
     for i in range(attempts):
         try:
-            r = requests.post(cfg["url"], headers=headers,
+            r = _HTTP.post(cfg["url"], headers=headers,
                 json=_proxy_payload(messages, max_tokens, temperature, cfg["url"], cfg.get("model")),
                 timeout=(6, 30), verify=False)
             if r.status_code == 429:
@@ -1180,7 +1188,7 @@ def _giga_upload_image(image_bytes, filename="food.jpg"):
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "jpg").lower()
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
     try:
-        r = requests.post(GIGA_FILES,
+        r = _HTTP.post(GIGA_FILES,
             headers={"Authorization": f"Bearer {tok}", "Accept": "application/json"},
             files={"file": (filename, image_bytes, mime)},
             data={"purpose": "general"},
@@ -1205,7 +1213,7 @@ def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=No
     messages = [{"role": "user", "content": prompt, "attachments": [file_id]}]
     for i in range(3):
         try:
-            r = requests.post(GIGA_CHAT,
+            r = _HTTP.post(GIGA_CHAT,
                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"},
                 json={"model": GIGA_VISION_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
                 timeout=(6, float(os.environ.get("GIGACHAT_VISION_TIMEOUT_SECONDS") or "70")), verify=_GIGA_VERIFY)
@@ -1356,7 +1364,7 @@ def transcribe(audio_bytes, filename="voice.ogg"):
     mime = {"ogg": "audio/ogg", "oga": "audio/ogg", "webm": "audio/webm", "mp4": "audio/mp4",
             "m4a": "audio/mp4", "mp3": "audio/mpeg", "wav": "audio/wav"}.get(ext, "audio/ogg")
     try:
-        r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
+        r = _HTTP.post("https://api.groq.com/openai/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {key}"},
             files={"file": (filename, audio_bytes, mime)},
             data={"model": "whisper-large-v3-turbo", "language": "ru"}, timeout=60)
