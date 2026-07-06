@@ -298,6 +298,32 @@ body{padding-top:var(--safe-top,0px)}
 .djabtn:active{background:var(--paper2);transform:scale(.98)}
 .djtip{font-size:11px;color:var(--inkSoft);line-height:1.5;margin-top:14px;text-align:center;font-weight:600}
 .djempty{font-size:13px;color:var(--inkSoft);line-height:1.5;margin-top:12px}
+
+/* ==== training log ==== */
+.trlabel{font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--inkMid);margin:16px 2px 8px}
+.trpick{display:flex;gap:6px;flex-wrap:wrap}
+.trpill{border:1px solid var(--line);background:#fff;border-radius:99px;padding:8px 13px;font-size:13px;font-weight:700;color:var(--inkMid);cursor:pointer}
+.trpill.sel{background:var(--ink);color:#fff;border-color:var(--ink)}
+.trrow{border-top:1px solid var(--line);padding:11px 0}
+.trhd{display:flex;align-items:center;gap:11px;cursor:pointer}
+.trck{width:22px;height:22px;border-radius:7px;border:1.5px solid var(--roseLine);flex:none;display:flex;align-items:center;justify-content:center;font-size:13px;color:transparent}
+.trrow.sel .trck{background:var(--roseDeep);border-color:var(--roseDeep);color:#fff}
+.trnm{flex:1;font-size:14px;font-weight:600}
+.trtag{font-size:11px;color:var(--inkSoft);font-weight:600}
+.trws{display:none;margin:11px 0 2px 33px;align-items:center;gap:9px}
+.trrow.sel .trws{display:flex}
+.trwb{width:34px;height:34px;border-radius:11px;border:1px solid var(--line);background:#fff;font-size:18px;color:var(--ink);cursor:pointer;line-height:1}
+.trwv{font-family:var(--serif);font-size:20px;font-weight:600;min-width:52px;text-align:center;font-variant-numeric:tabular-nums}
+.trwu{font-size:12px;color:var(--inkSoft);font-weight:600}
+.trweek{display:flex;gap:7px}
+.trwx{flex:1;text-align:center}
+.trwx .d{font-size:10.5px;color:var(--inkSoft);margin-bottom:6px;font-weight:600}
+.trwc{height:44px;border-radius:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;border:1px solid var(--line);font-size:16px;color:var(--inkSoft);background:var(--paper2)}
+.trwc.done{background:#E3F1E7;border-color:transparent;color:var(--ink)}
+.trwc.today{outline:2px solid var(--roseLine);background:#fff}
+.trwc small{font-size:8.5px;color:var(--inkMid);font-weight:600}
+.tpin{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:12px;background:#fff;padding:11px;font-family:var(--sans);font-size:14px;color:var(--ink)}
+.trprow{display:flex;justify-content:space-between;align-items:center}
 </style>
 </head>
 <body>
@@ -770,6 +796,7 @@ async function diaryReco(){var box=document.getElementById('diarreco');if(box)bo
 async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",hormones:["Без данных о цикле Айва не делает выводы о фазе.","Главные ориентиры: боль, кровотечение, слабость, сон и восстановление.","При беременности, сильной боли, головокружении или обильном кровотечении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли, рывков и глубокого пресса"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости, боли или обильного кровотечения",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка"};}
   var html="<div class='h'>Нагрузка</div>";
   html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trainBlossom'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+esc(p.level)+"</div><div class='pmeta'>"+esc(p.duration)+(p.day?(" · день "+esc(p.day)+" из "+esc(p.cycle_len)):"")+"</div><div class='ayva-txt' style='margin-top:9px'>"+esc(p.summary||"")+"</div></div></div></div>";
+  html+="<div id='trLog'></div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Почему именно так</div><div class='ayva-txt'>"+esc(p.why||"")+"</div></div>";
   if(p.hormones&&p.hormones.length){html+="<div class='card'><div class='sec' style='margin-top:0'>Гормоны и нагрузка</div><div class='sciencegrid'>";p.hormones.forEach(function(x,i){html+="<div class='sciencerow'><div class='sciencen'>"+(i+1)+"</div><div class='sciencet'>"+esc(x)+"</div></div>";});html+="</div></div>";}
   html+="<div class='card'><div class='sec' style='margin-top:0'>Что выбрать</div>";
@@ -778,7 +805,82 @@ async function renderTrain(){var el=document.getElementById('scr-train');if(load
   html+="<div class='card'><div class='ayva-lab'>Сегодня лучше не делать</div><div class='ayva-txt'>"+esc(p.avoid||p.reduce||"тренировку через боль и слабость")+"</div><div class='ayva-lab' style='margin-top:12px'>После нагрузки</div><div class='ayva-txt'>"+esc(p.recovery||"вода, белок, сон")+"</div></div>";
   html+="<div class='chips'><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"А если мало сил сегодня?\");},120)'>А если мало сил?</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Что после тренировки?\");},120)'>Что после тренировки?</button></div>";
   html+="<div class='foot'>Нагрузка подбирается по фазе цикла и самочувствию. При боли, слабости, беременности или обильном кровотечении лучше снизить интенсивность и обсудить активность с врачом.</div>";
-  el.innerHTML=html;blossom(document.getElementById('trainBlossom'),34);loadedTrain=true;}
+  el.innerHTML=html;blossom(document.getElementById('trainBlossom'),34);loadedTrain=true;try{renderTrainLog();}catch(e){}}
+var TREX={'Силовая':{w:true,items:[['Присед',40],['Становая тяга',50],['Жим лёжа',30],['Тяга в наклоне',35],['Выпады',16],['Ягодичный мост',45]]},'Кардио':{w:false,items:[['Бег',0],['Велотренажёр',0],['Эллипс',0],['Гребля',0],['Скакалка',0]]},'Йога':{w:false,items:[['Виньяса',0],['Хатха',0],['Растяжка',0],['Кор',0],['Дыхание',0]]},'Ходьба':{w:false,items:[['Прогулка',0],['Скандинавская',0]]},'Плавание':{w:false,items:[['Кроль',0],['Брасс',0],['На спине',0]]}};
+var TRICON={'Силовая':'🏋️','Кардио':'🏃','Йога':'🧘','Ходьба':'🚶','Плавание':'🏊'};
+var TRAIN_STATE={}; var trcur={type:'Силовая',dur:'45 мин',rpe:'Тяжело',ex:{}};
+async function renderTrainLog(){
+  var box=document.getElementById('trLog'); if(!box) return;
+  box.innerHTML="<div class='prow'><button class='pbtn' onclick='openLog()'>＋ Отметить тренировку</button></div>"+
+    "<div id='trAnBox'></div>"+
+    "<div class='card'><div class='sec' style='margin-top:0'>Эта неделя</div><div class='trweek' id='trWeek'></div></div>"+
+    "<div class='card'><div class='trprow'><div class='ayva-lab'>Чем занимаешься</div><button class='chip' onclick='openTrProfile()'>Изменить</button></div><div class='ayva-txt' id='trProf' style='margin-top:8px'>Расскажи о своих тренировках — Айва учтёт это в разборе.</div></div>";
+  renderTrWeek([]);
+  try{ var r=await api('/api/train',{}); if(r&&r.ok){ TRAIN_STATE=r; renderTrWeek(r.week||[]); renderTrReview(r.last_review||""); renderTrProfileCard(r.profile||{}); } }catch(e){}
+}
+function renderTrWeek(week){
+  var el=document.getElementById('trWeek'); if(!el) return;
+  if(!week||!week.length){var nm=['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];week=nm.map(function(n){return {dow:n,type:'',count:0,today:false};});}
+  el.innerHTML=week.map(function(w){
+    var ic=w.count?(TRICON[w.type]||'💪'):'·';
+    var cls='trwc'+(w.count?' done':'')+(w.today?' today':'');
+    var sm=(w.count&&w.type)?("<small>"+esc(w.type.toLowerCase().slice(0,6))+"</small>"):"";
+    return "<div class='trwx'><div class='d'>"+esc(w.dow)+"</div><div class='"+cls+"'>"+ic+sm+"</div></div>";
+  }).join('');
+}
+function renderTrReview(review){
+  var box=document.getElementById('trAnBox'); if(!box) return;
+  if(review&&review.trim()){
+    box.innerHTML="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trAnBloss'></span><div style='flex:1'><div class='ayva-lab'>Айва · разбор тренировки</div><div class='ayva-txt' style='margin-top:5px;white-space:pre-wrap'>"+esc(review)+"</div></div></div></div>";
+    try{blossom(document.getElementById('trAnBloss'),30);}catch(e){}
+  } else { box.innerHTML=""; }
+}
+function renderTrProfileCard(pf){
+  var el=document.getElementById('trProf'); if(!el) return; pf=pf||{};
+  var parts=[]; if(pf.format)parts.push(pf.format); if(pf.goal)parts.push('цель: '+pf.goal); if(pf.limits)parts.push('бережём: '+pf.limits);
+  el.textContent=parts.length?parts.join(' · '):'Расскажи о своих тренировках — Айва учтёт это в разборе.';
+}
+function openLog(){
+  var h="<div class='hubhead'><div class='hubtitle'>Отметить тренировку</div><button class='hubclose' onclick='closeHub()'>✕</button></div><div class='hubpanel'>";
+  h+="<div class='trlabel'>Что делала</div><div class='trpick' id='trType'></div>";
+  h+="<div class='trlabel'>Упражнения <span style='text-transform:none;letter-spacing:0;font-weight:600;color:var(--inkSoft)'>· отметь, что делала</span></div><div id='trEx'></div>";
+  h+="<div class='trlabel'>Сколько по времени</div><div class='trpick' id='trDur'></div>";
+  h+="<div class='trlabel'>Как ощущалось</div><div class='trpick' id='trRpe'></div>";
+  h+="<button class='pbtn' style='margin-top:20px' onclick='saveWorkout()'>Сохранить и разобрать</button></div>";
+  document.getElementById('hub').innerHTML=h;
+  document.getElementById('hubBackdrop').classList.remove('hidden');document.getElementById('hub').classList.remove('hidden');
+  trpills('trType',Object.keys(TREX),'type');trpills('trDur',['15 мин','30 мин','45 мин','60+ мин'],'dur');trpills('trRpe',['Легко','Нормально','Тяжело'],'rpe');trRenderEx();
+}
+function trpills(id,arr,field){var host=document.getElementById(id);if(!host)return;host.innerHTML='';arr.forEach(function(v){var b=document.createElement('div');b.className='trpill'+(trcur[field]===v?' sel':'');b.textContent=v;b.onclick=function(){trcur[field]=v;[].forEach.call(host.children,function(c){c.classList.remove('sel');});b.classList.add('sel');if(field==='type')trRenderEx();};host.appendChild(b);});}
+function trRenderEx(){var host=document.getElementById('trEx');if(!host)return;host.innerHTML='';trcur.ex={};var d=TREX[trcur.type];d.items.forEach(function(it,i){var on=(d.w?i<2:i===0);trcur.ex[it[0]]={sel:on,w:it[1]};var row=document.createElement('div');row.className='trrow'+(on?' sel':'');row.id='trrow'+i;var tag=d.w?"<div class='trtag'>силовое</div>":"";var step=d.w?("<div class='trws'><button class='trwb' onclick=\"trw(event,'"+it[0]+"',"+i+",-2.5)\">−</button><span class='trwv' id='trwv"+i+"'>"+it[1]+"</span><span class='trwu'>кг</span><button class='trwb' onclick=\"trw(event,'"+it[0]+"',"+i+",2.5)\">＋</button></div>"):"";row.innerHTML="<div class='trhd' onclick=\"trTog('"+it[0]+"',"+i+")\"><div class='trck'>✓</div><div class='trnm'>"+it[0]+"</div>"+tag+"</div>"+step;host.appendChild(row);});}
+function trTog(n,i){var o=trcur.ex[n];o.sel=!o.sel;document.getElementById('trrow'+i).classList.toggle('sel',o.sel);}
+function trw(e,n,i,dd){e.stopPropagation();var o=trcur.ex[n];o.w=Math.max(0,Math.round((o.w+dd)*2)/2);document.getElementById('trwv'+i).textContent=o.w;}
+async function saveWorkout(){
+  var d=TREX[trcur.type],strength=d.w;
+  var sel=Object.keys(trcur.ex).filter(function(k){return trcur.ex[k].sel;});
+  if(!sel.length){toast('Отметь хотя бы одно упражнение');return;}
+  var items=sel.map(function(k){return {name:k,weight:strength?trcur.ex[k].w:null};});
+  toast('Айва разбирает тренировку…');
+  var r=await api('/api/workout',{type:trcur.type,items:items,duration:trcur.dur,rpe:trcur.rpe});
+  if(r&&r.ok){closeHub();TRAIN_STATE.week=r.week;renderTrWeek(r.week||[]);renderTrReview(r.review||"");toast('Записала тренировку');window.scrollTo({top:0,behavior:'smooth'});}
+  else{toast((r&&r.text)||'Не получилось сохранить');}
+}
+function openTrProfile(){
+  var pf=(TRAIN_STATE&&TRAIN_STATE.profile)||{};
+  var h="<div class='hubhead'><div class='hubtitle'>Чем занимаешься</div><button class='hubclose' onclick='closeHub()'>✕</button></div><div class='hubpanel'>";
+  h+="<div class='trlabel'>Формат</div><input id='tpFormat' class='tpin' placeholder='зал, дом, бег, йога…' value=\""+esc(pf.format||"")+"\">";
+  h+="<div class='trlabel'>Цель</div><input id='tpGoal' class='tpin' placeholder='тонус, сила, энергия, снижение веса…' value=\""+esc(pf.goal||"")+"\">";
+  h+="<div class='trlabel'>Ограничения</div><input id='tpLimits' class='tpin' placeholder='спина, колени, беременность…' value=\""+esc(pf.limits||"")+"\">";
+  h+="<button class='pbtn' style='margin-top:18px' onclick='saveTrProfile()'>Сохранить</button></div>";
+  document.getElementById('hub').innerHTML=h;
+  document.getElementById('hubBackdrop').classList.remove('hidden');document.getElementById('hub').classList.remove('hidden');
+}
+async function saveTrProfile(){
+  var b={format:_tv('tpFormat'),goal:_tv('tpGoal'),limits:_tv('tpLimits')};
+  var r=await api('/api/train_profile',b);
+  if(r&&r.ok){TRAIN_STATE.profile=r.profile;renderTrProfileCard(r.profile);closeHub();toast('Сохранила профиль');}else toast('Не получилось сохранить');
+}
+function _tv(id){var e=document.getElementById(id);return e?(e.value||'').trim():'';}
 function fmtD(iso){var p=iso.split('-');return parseInt(p[2],10)+' '+MONTHS[parseInt(p[1],10)-1];}
 function cycleChart(hist){
   var items=hist.filter(function(h){return h.len!=null;}).slice(-7);

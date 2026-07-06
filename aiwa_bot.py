@@ -76,7 +76,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-05-audit-foodpush-v9"
+AIWA_VERSION = "2026-07-06-training-v10"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -191,6 +191,8 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS meals(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, d TEXT, ts TEXT,
         title TEXT, kcal INTEGER DEFAULT 0, protein REAL DEFAULT 0, fat REAL DEFAULT 0, carbs REAL DEFAULT 0,
         grams INTEGER, items TEXT, source TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS workouts(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, d TEXT, ts TEXT,
+        type TEXT, items TEXT, duration TEXT, rpe TEXT, note TEXT, review TEXT)""")
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0"):
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
@@ -201,12 +203,13 @@ def db():
     except sqlite3.OperationalError: pass
     for _ix in ("CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts)",
                 "CREATE INDEX IF NOT EXISTS ix_events_cid_ts ON events(chat_id, ts)",
-                "CREATE INDEX IF NOT EXISTS ix_meals_cid_d ON meals(chat_id, d)"):
+                "CREATE INDEX IF NOT EXISTS ix_meals_cid_d ON meals(chat_id, d)",
+                "CREATE INDEX IF NOT EXISTS ix_workouts_cid_d ON workouts(chat_id, d)"):
         try: c.execute(_ix)
         except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
-                "period_end TEXT", "period_len INTEGER"):
+                "period_end TEXT", "period_len INTEGER", "train_profile TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     return c
@@ -325,6 +328,45 @@ def meal_scale(cid, mid, new_grams):
     c.execute("UPDATE meals SET kcal=?,protein=?,fat=?,carbs=?,grams=? WHERE chat_id=? AND id=?",
               (int(round(r[0] * k)), round(r[1] * k, 1), round(r[2] * k, 1), round(r[3] * k, 1), int(new_grams), cid, int(mid)))
     c.commit(); c.close(); return True
+
+def workout_add(cid, rec, d=None):
+    d = d or date.today().isoformat()
+    c = db()
+    cur = c.execute("INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note,review) VALUES(?,?,?,?,?,?,?,?,?)",
+        (cid, d, datetime.now(TZ).isoformat(), rec.get("type", ""), json.dumps(rec.get("items", []), ensure_ascii=False),
+         rec.get("duration", ""), rec.get("rpe", ""), rec.get("note", ""), rec.get("review", "")))
+    wid = cur.lastrowid; c.commit(); c.close(); return wid
+
+def workouts_of(cid, d=None):
+    d = d or date.today().isoformat()
+    c = db(); r = c.execute("SELECT id,ts,type,items,duration,rpe,note,review FROM workouts WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
+    return [{"id": x[0], "ts": x[1], "type": x[2], "items": json.loads(x[3] or "[]"), "duration": x[4],
+             "rpe": x[5], "note": x[6], "review": x[7]} for x in r]
+
+def workouts_recent(cid, days=10, limit=8):
+    cut = (date.today() - timedelta(days=days)).isoformat()
+    c = db(); r = c.execute("SELECT d,type,items,duration,rpe FROM workouts WHERE chat_id=? AND d>=? ORDER BY ts DESC LIMIT ?", (cid, cut, limit)).fetchall(); c.close()
+    return [{"d": x[0], "type": x[1], "items": json.loads(x[2] or "[]"), "duration": x[3], "rpe": x[4]} for x in r]
+
+def workout_del(cid, wid):
+    c = db(); c.execute("DELETE FROM workouts WHERE chat_id=? AND id=?", (cid, int(wid))); c.commit(); c.close()
+
+def train_week(cid):
+    today = datetime.now(TZ).date(); monday = today - timedelta(days=today.weekday())
+    dow = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]; out = []
+    for i in range(7):
+        d = monday + timedelta(days=i); ws = workouts_of(cid, d.isoformat())
+        out.append({"d": d.isoformat(), "dow": dow[i], "today": d == today,
+                    "type": (ws[0]["type"] if ws else ""), "count": len(ws)})
+    return out
+
+def train_profile_get(cid):
+    u = row(cid) or {}
+    try: return json.loads(u.get("train_profile") or "{}")
+    except (TypeError, ValueError): return {}
+
+def train_profile_set(cid, prof):
+    upsert(cid, train_profile=json.dumps(prof, ensure_ascii=False))
 
 def diary_totals(cid, d=None):
     ms = meals_of(cid, d)
@@ -2903,6 +2945,58 @@ async def _api_track(request):
         ev(cid, "button", meta="view_" + scr)
     return _cors(web.json_response({"ok": True}))
 
+async def _api_train(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    ev(cid, "button", meta="web_train")
+    tod = workouts_of(cid)
+    return _cors(web.json_response({"ok": True, "profile": train_profile_get(cid), "week": train_week(cid),
+        "today": tod, "last_review": (tod[-1]["review"] if tod else "")}))
+
+async def _api_workout(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    items = []
+    for i in (body.get("items") or [])[:12]:
+        nm = str(i.get("name") or "").strip()[:40]
+        if not nm: continue
+        w = i.get("weight")
+        items.append({"name": nm, "weight": (_num(w) if w not in (None, "", 0) else None)})
+    wk = {"type": str(body.get("type") or "")[:40], "items": items,
+          "duration": str(body.get("duration") or "")[:20], "rpe": str(body.get("rpe") or "")[:20],
+          "note": str(body.get("note") or "")[:200]}
+    if not wk["type"] and not items:
+        return _cors(web.json_response({"error": "empty", "text": "Выбери тип и упражнения."}, status=400))
+    _, st = status_of(cid); phase_ru = (st or {}).get("phase_ru") if st else None
+    usage = []
+    try:
+        review = await asyncio.to_thread(L.training_review, wk, workouts_recent(cid), phase_ru, u.get("mode"), train_profile_get(cid), usage)
+    except Exception as e:
+        review = ""; log.warning("train review %s: %s", cid, e)
+    wk["review"] = review
+    try:
+        workout_add(cid, wk)
+    except Exception as e:
+        return _cors(web.json_response({"error": "save", "text": "Сбой сохранения: " + str(e)}, status=500))
+    if usage: ev(cid, "tokens", sum(usage), meta="workout", calls=len(usage))
+    ev(cid, "goal", meta="workout"); ev(cid, "manual", meta="workout")
+    return _cors(web.json_response({"ok": True, "review": review, "week": train_week(cid), "today": workouts_of(cid)}))
+
+async def _api_train_profile(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    prof = {}
+    for k in ("format", "goal", "limits", "level", "freq"):
+        v = body.get(k)
+        if v is not None: prof[k] = str(v).strip()[:120]
+    train_profile_set(cid, prof)
+    ev(cid, "manual", meta="web_train_profile")
+    return _cors(web.json_response({"ok": True, "profile": prof}))
+
 async def _api_diary(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -3398,6 +3492,9 @@ def build_web():
     aio.router.add_post("/api/food_photo", _api_food_photo)
     aio.router.add_post("/api/food_text", _api_food_text)
     aio.router.add_post("/api/track", _api_track)
+    aio.router.add_post("/api/train", _api_train)
+    aio.router.add_post("/api/workout", _api_workout)
+    aio.router.add_post("/api/train_profile", _api_train_profile)
     aio.router.add_post("/api/diary", _api_diary)
     aio.router.add_post("/api/diary_del", _api_diary_del)
     aio.router.add_post("/api/diary_scale", _api_diary_scale)

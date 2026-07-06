@@ -766,6 +766,42 @@ def training_text(st, profile=None):
     lines.append("СЛЕДУЮЩИЕ: А если мало сил? ;; Что после тренировки?")
     return "\n".join(lines)
 
+def training_review(workout, recent=None, phase_ru=None, mode=None, profile=None, usage=None):
+    """Разбор отмеченной тренировки + адаптивная следующая нагрузка (учёт истории, восстановление, фаза; без повторов)."""
+    def _items(w):
+        out = []
+        for it in (w.get("items") or []):
+            nm = (it.get("name") or "").strip()
+            if not nm: continue
+            out.append(nm + (" " + str(it.get("weight")) + " кг" if it.get("weight") else ""))
+        return ", ".join(out)
+    today_items = _items(workout) or "без деталей"
+    hist_lines = []
+    for w in (recent or [])[:6]:
+        it = ", ".join((i.get("name") or "") for i in (w.get("items") or []) if i.get("name"))
+        hist_lines.append((w.get("d","") or "") + ": " + (w.get("type","") or "") + ((" (" + it + ")") if it else "") + ((", " + w.get("rpe")) if w.get("rpe") else ""))
+    hist = "; ".join(hist_lines) or "нет записей"
+    ctx = []
+    if phase_ru: ctx.append("Фаза цикла сейчас: " + str(phase_ru) + ".")
+    if mode and mode != "cycle": ctx.append("Режим: " + str(mode) + " (цикл не отслеживается, опирайся на самочувствие).")
+    prof = profile if isinstance(profile, dict) else {}
+    pr = "; ".join(str(k) + ": " + str(v) for k, v in prof.items() if v)
+    if pr: ctx.append("Профиль тренировок: " + pr + ".")
+    parts = [
+        "Пользователь только что отметила тренировку.",
+        "Сегодня: " + (workout.get("type","") or "") + " · " + today_items + " · " + (workout.get("duration","") or "") + " · ощущение: " + (workout.get("rpe","") or "") + ".",
+        "Недавние тренировки (свежие сверху): " + hist + ".",
+        " ".join(ctx),
+        "Дай короткий разбор обычным текстом, без markdown и списков.",
+        "1) Разбор: как эта нагрузка ложится на фазу цикла и на недавнюю историю, по делу и поддерживающе, 1-2 предложения.",
+        "2) Отдельным абзацем, начиная строго со слов 'Следующая нагрузка:' - предложи конкретную следующую тренировку (тип, примерная длительность и почему). Обязательно учитывай восстановление: после тяжёлой силовой предложи восстановление, зону 2 или другую группу мышц, а не то же самое. Не повторяй одинаковые советы изо дня в день, опирайся на историю и фазу.",
+        "Всего 3-5 предложений, конкретно, без общих фраз.",
+    ]
+    user = "\n".join(x for x in parts if x)
+    sys = "Ты AIWA — тёплый и точный ассистент по женскому здоровью и тренировкам. Пиши по-русски, обычным текстом, без markdown, без звёздочек и списков, без приветствий."
+    out = _call([{"role": "system", "content": sys}, {"role": "user", "content": user}], max_tokens=380, temperature=0.6, usage=usage)
+    return (out or "").strip()
+
 def explain_section(st, key, usage=None):
     if key == "training":
         return training_text(st)
