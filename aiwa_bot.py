@@ -79,7 +79,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-06-weekcal-v17"
+AIWA_VERSION = "2026-07-08-analytics-v18"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1901,127 +1901,44 @@ async def help_cmd(update, context):
 
 # ---------- stats ----------
 def aggregate_stats():
-    from collections import defaultdict, Counter
-    import statistics as ST
-    PRICE = float(os.environ.get("AIWA_TOKEN_PRICE_USD", "0.5"))  # $ за 1M токенов, blended, приблизительно
-    c = db()
-    users = c.execute("SELECT chat_id, created, last_period, cycle_len, mode FROM users").fetchall()
-    rows = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, n FROM events ORDER BY chat_id, ts").fetchall()
-    partner_rows = c.execute("SELECT partner_id, woman_id, created FROM partners").fetchall()
-    c.close()
-    now = datetime.now(); today = now.date()
-    ACT = {"manual", "button", "suggest", "command", "fallback", "answered", "voice"}
-    ev_by_user = defaultdict(list); active_days = defaultdict(set); first_day = {}
-    tokens_total = 0; answered = 0; fallback = 0; errors = 0
-    events_today = 0; events_7 = 0
-    goals = Counter(); intents = Counter(); lat = []; reqlens = []
-    bcast_today = Counter()
-    for cid, ts, action, tok, meta, ms, n in rows:
-        t = datetime.fromisoformat(ts); d = t.date(); tokens_total += (tok or 0)
-        if action == "broadcast" and d == today:
-            bcast_today[meta or "unknown"] += 1
-        if action in ACT:
-            ev_by_user[cid].append(t); active_days[cid].add(d)
-            if d == today: events_today += 1
-            if (today - d).days < 7: events_7 += 1
-            if cid not in first_day or d < first_day[cid]: first_day[cid] = d
-            intents[meta or action] += 1
-        if action == "answered":
-            answered += 1
-            if ms: lat.append(ms)
-            if n: reqlens.append(n)
-        elif action == "fallback": fallback += 1
-        elif action == "error": errors += 1
-        elif action == "goal": goals[meta or "goal"] += 1
-        elif action == "manual" and n: reqlens.append(n)
-
-    n_users = len(users)
-    onboarded = sum(1 for _, _, lp, cl, md in users if (lp and cl) or md in ("irregular", "none", "meno", "preg"))
-    signups = len(set(r[0] for r in rows if r[2] == "signup")) or n_users
-    activated = len(set(r[0] for r in rows if r[2] == "activated"))
-    act_rate = activated / signups * 100 if signups else 0
-    def active_in(days):
-        cut = today - timedelta(days=days - 1)
-        return len(set(cid for cid, ds in active_days.items() if any(dd >= cut for dd in ds)))
-    dau, wau, mau = active_in(1), active_in(7), active_in(30)
-    sev7 = today - timedelta(days=7)
-    returning = len(set(cid for cid, ds in active_days.items() if any(dd > sev7 for dd in ds) and any(dd <= sev7 for dd in ds)))
-    stick = dau / mau * 100 if mau else 0
-
-    GAP = 1800; sessions = 0; slens = []; sev = []; requests = 0
-    for cid, tl in ev_by_user.items():
-        tl = sorted(tl); requests += len(tl); cur = []
-        for t in tl:
-            if cur and (t - cur[-1]).total_seconds() > GAP:
-                sessions += 1; slens.append((cur[-1] - cur[0]).total_seconds()); sev.append(len(cur)); cur = []
-            cur.append(t)
-        if cur: sessions += 1; slens.append((cur[-1] - cur[0]).total_seconds()); sev.append(len(cur))
-    avg_slen = ST.mean(slens) / 60 if slens else 0; avg_sev = ST.mean(sev) if sev else 0
-    spu = sessions / len(ev_by_user) if ev_by_user else 0; rps = requests / sessions if sessions else 0
-
-    def retention(win):
-        elig = [cid for cid, fd in first_day.items() if (today - fd).days >= win]
-        if not elig: return None
-        ret = sum(1 for cid in elig if any((dd - first_day[cid]).days >= win for dd in active_days[cid]))
-        return ret / len(elig) * 100
-    r1, r7, r30 = retention(1), retention(7), retention(30)
-    l7 = [len([dd for dd in ds if (today - dd).days < 7]) for ds in active_days.values()]
-    avg_l7 = ST.mean(l7) if l7 else 0
-    person_days_7 = sum(l7)
-    ev_per_dau_today = events_today / dau if dau else 0
-    ev_per_activeday_7 = events_7 / person_days_7 if person_days_7 else 0
-
-    ans_tot = answered + fallback + errors
-    succ = answered / ans_tot * 100 if ans_tot else 0
-    fb_rate = fallback / requests * 100 if requests else 0
-    err_rate = errors / requests * 100 if requests else 0
-    avg_reqlen = ST.mean(reqlens) if reqlens else 0
-    tpd = tokens_total / answered if answered else 0
-    cost = tokens_total / 1e6 * PRICE; cost_act = cost / mau if mau else 0
-    def pct(a, p):
-        a = sorted(a); return a[min(len(a) - 1, int(len(a) * p))] if a else 0
-    p50, p95 = pct(lat, 0.5), pct(lat, 0.95)
-    modes = Counter((md or "cycle") for _, _, lp, cl, md in users)
-    partners_connected = len(partner_rows)
-    partners_women = len(set(r[1] for r in partner_rows))
-    partners_unique = len(set(r[0] for r in partner_rows))
-    got_sum = len(set(r[0] for r in rows if r[2] == "goal" and r[4] == "summary"))
-    got_out = len(set(r[0] for r in rows if r[2] == "goal" and r[4] in ("report", "partner_link")))
-    def fr(x): return f"{x:.0f}%" if x is not None else "n/a"
-    top = ", ".join(f"{k} {v}" for k, v in intents.most_common(8)) or "нет данных"
-    goalstr = ", ".join(f"{k} {v}" for k, v in goals.most_common()) or "нет"
-    modestr = ", ".join(f"{k} {v}" for k, v in modes.most_common())
-
-    return (
-        "Аналитика AIWA\n\n"
-        "АУДИТОРИЯ\n"
-        f"Всего: {n_users}, онбординг пройден: {onboarded}\n"
-        f"Партнёров подключено: {partners_connected}, у женщин с партнёром: {partners_women}, уникальных партнёров: {partners_unique}\n"
-        f"DAU {dau} / WAU {wau} / MAU {mau}\n"
-        f"Вернувшиеся: {returning}, stickiness DAU/MAU: {stick:.0f}%\n"
-        f"Режимы: {modestr}\n\n"
-        "АКТИВАЦИЯ\n"
-        f"Регистраций: {signups}, активаций: {activated} ({act_rate:.0f}%)\n\n"
-        "ВОВЛЕЧЕНИЕ\n"
-        f"Сессий: {sessions}, на юзера {spu:.1f}, средняя длина {avg_slen:.1f} мин, событий/сессия {avg_sev:.1f}\n"
-        f"Действий (событий): {requests}, на сессию {rps:.1f}, средняя длина ввода {avg_reqlen:.0f} симв.\n"
-        f"Событий на DAU: сегодня {ev_per_dau_today:.1f} (событий {events_today} / DAU {dau}), в среднем за 7 дней {ev_per_activeday_7:.1f} на активного в день (приложение и бот вместе).\n\n"
-        "РАССЫЛКИ СЕГОДНЯ\n"
-        f"Запланировано пользователей: {len(all_users())}, в очереди: {bcast_today['queued']}, отправлено: {bcast_today['sent']}, ошибок: {bcast_today['error']}, заблокировали бота: {bcast_today['blocked']}\n\n"
-        "УДЕРЖАНИЕ (rolling)\n"
-        f"D1 {fr(r1)}, D7 {fr(r7)}, D30 {fr(r30)}; активных дней за 7: {avg_l7:.1f}\n\n"
-        "УСПЕШНОСТЬ\n"
-        f"Ответов: {answered}, доля успешных {succ:.0f}%, фолбэков {fallback} ({fb_rate:.0f}%), ошибок {errors} ({err_rate:.0f}%)\n"
-        f"Целевые действия: {goalstr}\n"
-        f"Воронка: рег {signups} → актив {activated} → получили сводку {got_sum} → выписка/партнёр {got_out}\n\n"
-        "ЗАПРОСЫ\n"
-        f"Топ интентов: {top}\n\n"
-        "ТОКЕНЫ И СКОРОСТЬ\n"
-        f"Токенов: {tokens_total}, на диалог ~{tpd:.0f}\n"
-        f"Оценка стоимости: ${cost:.2f} (по ${PRICE}/1M токенов), на активного ${cost_act:.3f}\n"
-        f"Латентность ответа: p50 {p50} мс, p95 {p95} мс"
-    )
-
+    """Компактная выжимка /stats из analytics_data (спека v2)."""
+    A = analytics_data(days=7)
+    a = A["audience"]; e = A["engagement"]; pr = A["product"]; qd = A["quality"]
+    def r(x): return "-" if x is None else (str(x) + "%")
+    L = []
+    L.append("Аналитика AIWA · " + A["since"] + " -> " + A["until"])
+    L.append("")
+    L.append("АУДИТОРИЯ")
+    L.append("DAU " + str(a["dau"]) + " · WAU " + str(a["wau"]) + " · MAU " + str(a["mau"]) + " (средний DAU " + str(a["avg_dau"]) + ")")
+    L.append("Stickiness: " + str(a["stickiness"]) + "% (DAU/MAU)")
+    ret = a["retention"]
+    L.append("Retention D1/7/30: " + r(ret["d1"]) + "/" + r(ret["d7"]) + "/" + r(ret["d30"]) + "; rolling " + r(ret["roll_d1"]) + "/" + r(ret["roll_d7"]) + "/" + r(ret["roll_d30"]))
+    L.append("Всего " + str(a["users_total"]) + ", новых " + str(a["new_users"]) + ", партнёров " + str(a["partners"]["connected"]))
+    L.append("Сегменты (активных): " + (", ".join(str(sg["mode"]) + " " + str(sg["active"]) for sg in a["segments"]) or "нет"))
+    L.append("")
+    L.append("ВОВЛЕЧЁННОСТЬ")
+    L.append("Событий на DAU: " + str(e["events_per_dau"]) + " = " + str(e["events_total"]) + " событий / " + str(e["active_user_days"]) + " активных·дней")
+    L.append("Тул-коллов на DAU: " + str(e["toolcalls_per_dau"]) + " = " + str(e["toolcalls_total"]) + " вызовов модели / " + str(e["active_user_days"]) + " активных·дней")
+    L.append("Источник: приложение " + str(e["by_source"]["app"]) + ", чат " + str(e["by_source"]["chat"]))
+    L.append("Топ действий: " + (", ".join(str(k) + " " + str(vv) for k, vv in e["actions_top"][:6]) or "нет"))
+    L.append("Тул-коллы по типам: " + (", ".join(str(k) + " " + str(vv) for k, vv in e["toolcalls_by_meta"][:6]) or "нет"))
+    ss = e["sessions"]
+    L.append("Сессий/DAU " + str(ss["per_dau"]) + ", длина " + str(ss["avg_len_min"]) + " мин, действий/сессия " + str(ss["events_per"]))
+    L.append("")
+    L.append("ПРОДУКТ")
+    po = pr["push_open"]
+    L.append("Пуш->открытие: " + str(po["rate"]) + "% (" + str(po["opened"]) + " из " + str(po["sent"]) + ")")
+    _bc = sorted(pr["broadcasts"].items(), key=lambda x: -x[1])[:6]
+    L.append("Рассылки: " + (", ".join(str(k) + " " + str(vv) for k, vv in _bc) or "нет"))
+    f = pr["funnel"]
+    L.append("Воронка: новые " + str(f["new_users"]) + " -> активны " + str(f["onboarded"]) + " -> сводка " + str(f["got_summary"]) + " -> еда " + str(f["logged_food"]) + " -> тренировка " + str(f["logged_workout"]))
+    L.append("")
+    L.append("КАЧЕСТВО")
+    L.append("Успешность " + str(qd["success_rate"]) + "% = " + str(qd["answered"]) + " / (" + str(qd["answered"]) + "+" + str(qd["fallback"]) + "+" + str(qd["errors"]) + ")")
+    L.append("Фолбэки " + str(qd["fallback_rate"]) + "%, ошибки " + str(qd["error_rate"]) + "%")
+    L.append("Латентность p50 " + str(qd["p50"]) + " / p95 " + str(qd["p95"]) + " мс")
+    L.append("Токены " + str(qd["tokens"]) + ", оценка $" + str(qd["cost_usd"]))
+    return "\n".join(L)
 
 async def stats_cmd(update, context):
     cid = update.effective_chat.id
@@ -2986,7 +2903,9 @@ async def _api_section(request):
         if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
         text = st["content"]["food"]
         return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text}))
-    text = await asyncio.to_thread(L.explain_section, st, "training")
+    _usage = []
+    text = await asyncio.to_thread(L.explain_section, st, "training", _usage)
+    if _usage: ev(cid, "tokens", sum(_usage), meta="training_section", calls=len(_usage))
     text = L.split_followups(text)[0]
     plan = await asyncio.to_thread(L.training_plan, st, profile_of(u))
     return _cors(web.json_response({"text": text, "training": plan}))
@@ -3428,6 +3347,168 @@ def _admin_key_ok(request):
     got = request.query.get("key") or request.headers.get("X-Admin-Key") or ""
     return _hmac.compare_digest(str(got), str(expected))
 
+def analytics_data(days=7, frm=None, to=None):
+    """Чистый слой аналитики (спека v2). tool-calls = Σ calls (все хопы к модели)."""
+    from collections import Counter, defaultdict
+    ACTIVE = ("command", "button", "suggest", "manual", "answered", "voice", "fallback")
+    APP_PREF = ("web_", "view_", "app_open")
+    PUSH_META = ("sent", "checkin_push", "food_reminder_sent", "train_reminder_sent", "phase_push", "reactivation_sent", "announce_sent", "meno_update_sent")
+    today = datetime.now().date()
+    try: days = int(days)
+    except (TypeError, ValueError): days = 7
+    if frm and to:
+        try:
+            since = date.fromisoformat(str(frm)); until = date.fromisoformat(str(to))
+            if until < since: since, until = until, since
+        except Exception:
+            until = today; since = today - timedelta(days=max(1, min(180, days)) - 1)
+    else:
+        days = max(1, min(180, days)); until = today; since = today - timedelta(days=days - 1)
+    span = (until - since).days + 1
+    since_ts = datetime.combine(since, dtime.min).isoformat(); until_ts = datetime.combine(until, dtime.max).isoformat()
+    def dparse(ts):
+        try: return datetime.fromisoformat(ts).date()
+        except Exception: return today
+    c = db()
+    users = c.execute("SELECT chat_id, created, mode FROM users").fetchall()
+    evs = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, calls FROM events WHERE ts>=? AND ts<=?", (since_ts, until_ts)).fetchall()
+    partners = c.execute("SELECT partner_id, woman_id FROM partners").fetchall()
+    wmin = datetime.combine(until - timedelta(days=120), dtime.min).isoformat()
+    wide = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=? AND ts<=?", (wmin, until_ts)).fetchall()
+    first_rows = c.execute("SELECT chat_id, MIN(ts) FROM events WHERE action IN ('command','button','suggest','manual','answered','voice','fallback') GROUP BY chat_id").fetchall()
+    goalrows = c.execute("SELECT DISTINCT chat_id, meta FROM events WHERE action='goal'").fetchall()
+    c.close()
+    umode = {cid: (m or "cycle") for cid, _, m in users}
+    created_by = {}
+    for cid, cr, _ in users:
+        try: created_by[cid] = date.fromisoformat((cr or "")[:10])
+        except Exception: pass
+    active_by_day = defaultdict(set); events_by_day = Counter(); tool_by_day = Counter()
+    ev_src = Counter(); actions = Counter(); tool_meta = Counter()
+    answered = fallback = errors = tokens = tool_total = ev_total = 0
+    lat = []; sess = defaultdict(list); modeseg = defaultdict(set); mode_active_day = defaultdict(lambda: defaultdict(set))
+    bcast = Counter(); ans_by_day = Counter(); err_by_day = Counter(); tool_meta_day = defaultdict(Counter)
+    push_days = defaultdict(set); act_days = defaultdict(set); new_by_day = Counter()
+    for cid, ts, action, tok, meta, ms, calls in evs:
+        d = dparse(ts); iso = d.isoformat(); tokens += (tok or 0)
+        if calls:
+            tool_total += calls; tool_by_day[iso] += calls; tool_meta[meta or action] += calls
+        if action == "broadcast":
+            bcast[meta or "unknown"] += 1
+            if meta in PUSH_META: push_days[cid].add(d)
+            continue
+        if action == "answered":
+            answered += 1; ans_by_day[iso] += 1
+            if ms: lat.append(ms)
+        elif action == "fallback": fallback += 1
+        elif action == "error": errors += 1; err_by_day[iso] += 1
+        if action in ACTIVE:
+            ev_total += 1; events_by_day[iso] += 1; active_by_day[iso].add(cid); act_days[cid].add(d)
+            actions[(meta or action)] += 1
+            m = umode.get(cid, "cycle"); mode_active_day[iso][m].add(cid); modeseg[m].add(cid)
+            ev_src["app" if (meta and str(meta).startswith(APP_PREF)) else "chat"] += 1
+            sess[cid].append(datetime.fromisoformat(ts) if isinstance(ts, str) else ts)
+            if created_by.get(cid) == d: new_by_day[iso] += 1
+    active_user_days = sum(len(x) for x in active_by_day.values())
+    abw = defaultdict(set)
+    for cid, ts, action in wide:
+        if action in ACTIVE: abw[dparse(ts).isoformat()].add(cid)
+    def win_union(dd, n):
+        acc = set(); k = dd - timedelta(days=n - 1)
+        while k <= dd: acc |= abw.get(k.isoformat(), set()); k += timedelta(days=1)
+        return acc
+    dau = len(active_by_day.get(today.isoformat(), set())); wau = len(win_union(today, 7)); mau = len(win_union(today, 30))
+    avg_dau = active_user_days / span if span else 0
+    adays = defaultdict(set); fa = {}
+    for cid, ts, action in wide:
+        if action in ACTIVE: adays[cid].add(dparse(ts))
+    for cid, mn in first_rows:
+        if mn: fa[cid] = dparse(mn)
+    def retention(n, rolling):
+        elig = [cid for cid, f in fa.items() if n <= (today - f).days <= 90]
+        if not elig: return None
+        hit = 0
+        for cid in elig:
+            f = fa[cid]
+            if rolling: hit += 1 if any((d - f).days >= n for d in adays.get(cid, ())) else 0
+            else: hit += 1 if (f + timedelta(days=n)) in adays.get(cid, ()) else 0
+        return round(hit / len(elig) * 100)
+    GAP = 1800; sc = 0; slens = []; sevs = []
+    for cid, tl in sess.items():
+        tl.sort(); cur = []
+        for t in tl:
+            if cur and (t - cur[-1]).total_seconds() > GAP:
+                sc += 1; slens.append((cur[-1] - cur[0]).total_seconds()); sevs.append(len(cur)); cur = []
+            cur.append(t)
+        if cur: sc += 1; slens.append((cur[-1] - cur[0]).total_seconds()); sevs.append(len(cur))
+    popen = ptot = 0
+    for cid, pd in push_days.items():
+        for d in pd:
+            ptot += 1
+            if d in act_days.get(cid, set()): popen += 1
+    gset = defaultdict(set)
+    for cid, meta in goalrows: gset[meta].add(cid)
+    def pct(a, pp):
+        a = sorted(a); return a[min(len(a) - 1, int(len(a) * pp))] if a else 0
+    onboarded = len(fa)
+    new_users = sum(1 for cid, cr in created_by.items() if since <= cr <= until)
+    active_period = len(set().union(*active_by_day.values()) if active_by_day else set())
+    seg = []
+    for m in sorted(modeseg, key=lambda x: -len(modeseg[x])):
+        act = 0
+        for iso, mm in mode_active_day.items(): act += len(mm.get(m, set()))
+        seg.append({"mode": m, "users": sum(1 for c2, _, mo in users if (mo or "cycle") == m),
+                    "active": len(modeseg[m]), "avg_dau": round(act / span, 1) if span else 0})
+    PRICE = float(os.environ.get("AIWA_TOKEN_PRICE_USD", "0.5"))
+    series = []; d = since
+    while d <= until:
+        iso = d.isoformat()
+        series.append({"date": iso[5:], "full": iso,
+            "dau": len(active_by_day.get(iso, set())), "wau": len(win_union(d, 7)), "mau": len(win_union(d, 30)),
+            "events": events_by_day[iso], "toolcalls": tool_by_day[iso],
+            "answered": ans_by_day[iso], "errors": err_by_day[iso], "new": new_by_day[iso],
+            "stick": (round(len(active_by_day.get(iso, set())) / len(win_union(d, 30)) * 100) if len(win_union(d, 30)) else 0)})
+        d += timedelta(days=1)
+    ans_tot = answered + fallback + errors
+    return {
+        "since": since.isoformat(), "until": until.isoformat(), "span": span,
+        "updated": datetime.now().strftime("%d.%m %H:%M"),
+        "audience": {
+            "dau": dau, "wau": wau, "mau": mau, "avg_dau": round(avg_dau, 1),
+            "avg_wau": round(sum(x["wau"] for x in series) / len(series), 1) if series else 0,
+            "stickiness": round(dau / mau * 100) if mau else 0,
+            "users_total": len(users), "onboarded": onboarded, "new_users": new_users, "active_period": active_period,
+            "partners": {"connected": len(partners), "women": len(set(p[1] for p in partners))},
+            "segments": seg,
+            "retention": {"d1": retention(1, False), "d7": retention(7, False), "d30": retention(30, False),
+                          "roll_d1": retention(1, True), "roll_d7": retention(7, True), "roll_d30": retention(30, True)}},
+        "engagement": {
+            "events_total": ev_total, "toolcalls_total": tool_total, "active_user_days": active_user_days,
+            "events_per_dau": round(ev_total / active_user_days, 2) if active_user_days else 0,
+            "toolcalls_per_dau": round(tool_total / active_user_days, 2) if active_user_days else 0,
+            "by_source": {"chat": ev_src.get("chat", 0), "app": ev_src.get("app", 0)},
+            "actions_top": actions.most_common(12), "toolcalls_by_meta": tool_meta.most_common(10),
+            "sessions": {"count": sc, "per_dau": round(sc / active_user_days, 2) if active_user_days else 0,
+                         "avg_len_min": round(sum(slens) / len(slens) / 60, 1) if slens else 0,
+                         "events_per": round(sum(sevs) / len(sevs), 1) if sevs else 0}},
+        "product": {
+            "broadcasts": dict(bcast),
+            "push_open": {"sent": ptot, "opened": popen, "rate": round(popen / ptot * 100) if ptot else 0},
+            "funnel": {"new_users": new_users, "onboarded": onboarded,
+                       "got_summary": len(gset.get("summary", set())), "logged_food": len(gset.get("food_log", set())),
+                       "logged_workout": len(gset.get("workout", set()))},
+            "adoption": {"food": len(gset.get("food_log", set())), "workout": len(gset.get("workout", set())),
+                         "partner": len(set(p[1] for p in partners))}},
+        "quality": {
+            "answered": answered, "fallback": fallback, "errors": errors,
+            "success_rate": round(answered / ans_tot * 100) if ans_tot else 0,
+            "fallback_rate": round(fallback / ans_tot * 100) if ans_tot else 0,
+            "error_rate": round(errors / ans_tot * 100) if ans_tot else 0,
+            "p50": pct(lat, 0.5), "p95": pct(lat, 0.95),
+            "tokens": tokens, "cost_usd": round(tokens / 1e6 * PRICE, 2)},
+        "series": series,
+    }
+
 def admin_dashboard_data(days=30, frm=None, to=None):
     from collections import Counter, defaultdict
     ACTIVE = ("manual", "button", "suggest", "command", "answered", "fallback", "voice")
@@ -3673,99 +3754,138 @@ async def _admin_stats(request):
     if not _admin_key_ok(request):
         return web.json_response({"error": "forbidden"}, status=403)
     qp = request.query
-    _d = await asyncio.to_thread(admin_dashboard_data, qp.get("days", 30), qp.get("from"), qp.get("to"))
-    return web.json_response(_d)
+    d = await asyncio.to_thread(analytics_data, qp.get("days", 7), qp.get("from"), qp.get("to"))
+    return web.json_response(d)
 
 async def _admin_page(request):
     if not _admin_key_ok(request):
         return web.Response(text="forbidden", status=403)
-    html_text = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AIWA · product metrics</title><style>
-:root{--bg:#F6F8FA;--card:#FFFFFF;--ink:#14181F;--muted:#6B7280;--faint:#9AA3AF;--line:#E9ECF1;--blue:#2F6BED;--green:#22A65B;--amber:#E8912A;--red:#DC5A5A}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Arial,sans-serif;-webkit-font-smoothing:antialiased}
-.wrap{max-width:1280px;margin:0 auto;padding:26px 22px 48px}
-.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px;flex-wrap:wrap}
-.brand{display:flex;gap:12px;align-items:center;min-width:0}
-.mark{width:40px;height:40px;border-radius:12px;background:var(--ink);display:flex;align-items:center;justify-content:center;flex:none}
-.mark svg{width:22px;height:22px;stroke:#fff;fill:none;stroke-width:2.2}
-h1{font-size:20px;line-height:1.1;margin:0;font-weight:700;letter-spacing:-.01em}
-.sub{color:var(--muted);font-size:12.5px;margin-top:3px}
-.chip{display:inline-flex;align-items:center;gap:6px;background:#EEF1F5;border-radius:8px;padding:3px 8px;font-size:12px;color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.tabs{display:flex;gap:6px;background:var(--card);border:1px solid var(--line);padding:5px;border-radius:12px;flex-wrap:wrap}
-.tabs button{border:0;border-radius:8px;background:transparent;padding:8px 12px;color:var(--muted);font-weight:700;cursor:pointer;font-size:13px}
-.tabs button.on{background:var(--ink);color:#fff}
-.tabs .dinp{border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-family:inherit;color:var(--muted);font-size:12.5px;background:#fff}
-#applyRange{background:var(--blue);color:#fff}
-.sectabs{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 18px}
-.sectabs button{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:9px 15px;font-weight:700;color:var(--muted);cursor:pointer;font-size:13.5px}
-.sectabs button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:12px;margin-bottom:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;min-width:0;box-shadow:0 1px 2px rgba(16,24,40,.03)}
-.k{font-size:11px;text-transform:uppercase;color:var(--faint);font-weight:800;letter-spacing:.05em}
-.v{font-size:27px;line-height:1.05;margin-top:8px;font-weight:750;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
-.hint{font-size:12.5px;color:var(--muted);margin-top:5px}
-.mdef{font-size:11.5px;color:var(--faint);margin-top:11px;line-height:1.45;border-top:1px solid #F0F2F6;padding-top:9px}
-.title{font-size:14px;font-weight:750;margin:0}.tsub{font-size:12.5px;color:var(--muted);margin-top:3px}
-.funnel{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px}
-.fstep{background:#F7F9FB;border:1px solid #EAEEF3;border-radius:12px;padding:15px;min-width:0}
-.fkey{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--muted)}
-.fval{font-size:24px;font-weight:750;margin-top:7px;font-variant-numeric:tabular-nums}
-.fsub{color:var(--green);font-size:12.5px;margin-top:5px;font-family:ui-monospace,monospace}
-.lchart{width:100%;height:auto;display:block;margin-top:6px}
-.legendr{display:flex;gap:16px;justify-content:flex-end;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:4px}
-.legendr .lg i{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
-.chart{display:flex;align-items:end;gap:6px;height:158px;margin-top:20px;padding:18px 2px 24px;border-bottom:1px solid var(--line);overflow:visible}
-.b{flex:1;min-width:4px;border-radius:5px 5px 0 0;background:var(--blue);position:relative;opacity:.9}
-.b.g{background:var(--green)}.b.a{background:var(--amber)}.b.err{background:var(--red)}
-.b i{position:absolute;bottom:-19px;left:50%;transform:translateX(-50%);font-size:10px;color:var(--faint);font-style:normal;white-space:nowrap}.b .bv{position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-size:10px;color:var(--muted);font-weight:700;white-space:nowrap}
-.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:11px;font-size:12.5px;color:var(--muted)}
-.dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:6px;background:var(--blue)}.dot.g{background:var(--green)}.dot.a{background:var(--amber)}
-.mtabs{display:inline-flex;gap:3px;background:#EEF1F5;border-radius:9px;padding:3px;margin:10px 0 4px}
-.mtabs button{border:0;background:transparent;border-radius:7px;padding:6px 12px;font-weight:700;font-size:12.5px;color:var(--muted);cursor:pointer}
-.mtabs button.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(16,24,40,.08)}
-.row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #F1F3F7;padding:9px 0;font-size:13.5px}.row:last-child{border-bottom:0}.row span{color:var(--muted)}
-.pillgrid{display:grid;gap:9px;margin-top:10px}.pill{display:grid;grid-template-columns:minmax(0,1fr) 64px;gap:10px;align-items:center}
-.track{height:8px;border-radius:99px;background:#EEF1F5;overflow:hidden}.fill{display:block;height:100%;border-radius:99px;background:var(--blue)}.fill.g{background:var(--green)}.fill.a{background:var(--amber)}
-.tbl{width:100%;border-collapse:collapse;margin-top:10px;font-size:13.5px}.tbl th{text-align:left;color:var(--faint);font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.03em;padding:8px 6px;border-bottom:1px solid var(--line)}
-.tbl td{padding:10px 6px;border-bottom:1px solid #F1F3F7}.tbl td:not(:first-child),.tbl th:not(:first-child){text-align:right;font-variant-numeric:tabular-nums}.tbl tr:last-child td{border-bottom:0}.tbl td:first-child{font-weight:650}
-.split{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
-.mb{margin-bottom:14px}
-.loading{padding:26px;border:1px dashed var(--line);border-radius:14px;color:var(--muted);background:var(--card)}
-@media(max-width:720px){.split,.funnel{grid-template-columns:1fr}.b i{display:none}.sectabs button{flex:1;text-align:center}}
+    html_text = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIWA · Аналитика</title><style>
+:root{--bg:#F6F8FA;--card:#fff;--ink:#14181F;--mut:#6B7280;--faint:#9AA3AF;--line:#E9ECF1;--blue:#2F6BED;--green:#22A65B;--amber:#E8912A;--red:#DC5A5A;--violet:#8256D0}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,Inter,"Segoe UI",Arial,sans-serif}
+.wrap{max-width:1200px;margin:0 auto;padding:22px 20px 60px}
+.head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px}
+h1{font-size:20px;margin:0}
+.upd{color:var(--mut);font-size:12px}
+.ctrl{margin-left:auto;display:flex;gap:6px;align-items:center}
+.ctrl button{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 11px;font-size:13px;cursor:pointer;color:var(--ink)}
+.ctrl button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.tabs{display:flex;gap:6px;margin:14px 0 18px;flex-wrap:wrap}
+.tabs button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 16px;font-size:13.5px;font-weight:600;cursor:pointer;color:var(--mut)}
+.tabs button.on{background:var(--blue);color:#fff;border-color:var(--blue)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px}
+.mc{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 15px}
+.ml{font-size:12px;color:var(--mut);font-weight:600;display:flex;align-items:center;gap:5px}
+.mv{font-size:26px;font-weight:800;margin-top:4px;letter-spacing:-.02em}
+.ms{font-size:11.5px;color:var(--faint);margin-top:2px}
+.ic{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:var(--line);color:var(--mut);font-size:10px;font-style:italic;cursor:help;font-weight:700}
+.chartcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 15px;margin-bottom:16px}
+.ct{font-size:13px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:5px}
+.leg{font-size:11.5px;color:var(--mut);margin-top:6px}
+.tb{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:16px}
+.tb th{background:#FAFBFC;text-align:left;font-size:11px;color:var(--mut);font-weight:700;padding:9px 12px;text-transform:uppercase;letter-spacing:.03em}
+.tb td{padding:9px 12px;font-size:13px;border-top:1px solid var(--line)}
+.sec-h{font-size:14px;font-weight:800;margin:20px 0 10px;display:flex;align-items:center;gap:5px}
+.loading{color:var(--mut);padding:40px;text-align:center}
 </style>
 <div class="wrap">
-<div class="top"><div class="brand"><div class="mark"><svg viewBox="0 0 24 24"><polyline points="2,13 7,13 10,5 14,19 17,11 22,11"/></svg></div><div><h1>AIWA · product metrics</h1><div class="sub" id="up">загрузка</div></div></div>
-<div class="tabs" id="tabs"><button data-days="1">сегодня</button><button data-q="yday">вчера</button><button data-days="7">7д</button><button data-days="14">14д</button><button data-days="30">30д</button><button data-days="90">90д</button><input type="date" id="dfrom" class="dinp"><input type="date" id="dto" class="dinp"><button id="applyRange">применить</button></div></div>
-<div class="sectabs" id="secTabs"><button data-sec="overview">Обзор</button><button data-sec="users">Пользователи</button><button data-sec="model">Модель и тулы</button><button data-sec="sessions">Сессии</button></div>
-<div id="root" class="loading">Собираю статистику...</div></div>
+ <div class="head"><h1>AIWA · Аналитика</h1><span class="upd" id="upd"></span>
+  <div class="ctrl"><button data-d="7">7д</button><button data-d="30">30д</button><button data-d="90">90д</button><button id="csv">Скачать Excel (CSV)</button><button id="rl">Обновить</button></div>
+ </div>
+ <div class="tabs" id="tabs"></div>
+ <div id="view" class="loading">Загрузка…</div>
+</div>
 <script>
-const q=new URLSearchParams(location.search),key=q.get('key')||'';let period=Number(q.get('days')||30);if(![1,7,14,30,90].includes(period))period=30;let frm=q.get('from')||'',to=q.get('to')||'';
-let sec='overview';try{sec=localStorage.getItem('aiwa_sec3')||'overview'}catch(e){}
-let modelScope='total';const rootEl=document.getElementById('root'),upEl=document.getElementById('up');let DATA=null;
-const labels={cycle:'цикл',irregular:'нерегулярный',none:'без цикла',meno:'менопауза',preg:'беременность'};
-function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
-function name(x){return labels[x]||x||'—'}function fmt(n){return Number(n||0).toLocaleString('ru-RU')}
-function row(k,v){return `<div class=row><span>${esc(k)}</span><b>${esc(v)}</b></div>`}
-function card(k,v,sub,def){return `<div class=card><div class=k>${esc(k)}</div><div class=v>${esc(v)}</div>${sub?`<div class=hint>${esc(sub)}</div>`:''}${def?`<div class=mdef>${esc(def)}</div>`:''}</div>`}
-function list(items,cls){let mx=Math.max(1,...(items||[]).map(x=>Number(x[1])||0));return `<div class=pillgrid>${(items||[]).map(x=>`<div class=pill><div style="min-width:0"><b>${esc(name(x[0]))}</b><div class=track><span class="fill ${cls||''}" style="width:${Math.max(4,(Number(x[1])||0)/mx*100)}%"></span></div></div><b>${fmt(x[1])}</b></div>`).join('')||'<div class=hint>нет данных</div>'}</div>`}
-function bars(days,field,cls){let mx=Math.max(1,...days.map(x=>x[field]||0));let st=Math.max(1,Math.ceil(days.length/12));return days.map((x,i)=>`<div class="b ${cls||''}" title="${x.date}: ${x[field]||0}" style="height:${Math.max(3,(x[field]||0)/mx*100)}%"><b class=bv>${x[field]||0}</b>${(days.length<=16||i%st===0||i===days.length-1)?`<i>${x.date}</i>`:''}</div>`).join('')}
-function histBars(dist,cls){let mx=Math.max(1,...(dist||[]).map(x=>x[1]||0));return `<div class=chart>${(dist||[]).map(x=>`<div class="b ${cls||''}" title="${esc(x[0])}: ${x[1]}" style="height:${Math.max(3,(x[1]||0)/mx*100)}%"><b class=bv>${x[1]}</b><i>${esc(x[0])}</i></div>`).join('')}</div>`}
-function tbl(head,rows){return `<table class=tbl><thead><tr>${head.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`}
-function mtabs(opts,cur,cb){return `<div class=mtabs>${opts.map(o=>`<button class="${o[0]===cur?'on':''}" onclick="${cb}('${o[0]}')">${esc(o[1])}</button>`).join('')}</div>`}
-window.setScope=k=>{modelScope=k;renderSec()};
-function lineChart(days,lines){const W=1000,H=300,PL=42,PR=16,PT=24,PB=28;const n=days.length;const xs=n>1?(W-PL-PR)/(n-1):0;const mx=Math.max(1,...lines.flatMap(l=>days.map(d=>d[l.key]||0)));const ny=v=>PT+(H-PT-PB)*(1-v/mx);const nx=i=>n>1?PL+xs*i:(PL+(W-PL-PR)/2);let grid='';for(let g=0;g<=4;g++){let yy=PT+(H-PT-PB)*g/4,val=Math.round(mx*(1-g/4));grid+=`<line x1=${PL} y1=${yy.toFixed(1)} x2=${W-PR} y2=${yy.toFixed(1)} stroke="#EDF0F4"/><text x=${PL-8} y=${(yy+4).toFixed(1)} text-anchor=end font-size=12 fill="#9AA3AF">${val}</text>`;}let xl='';const st=Math.max(1,Math.ceil(n/8));days.forEach((d,i)=>{if(n<=14||i%st===0||i===n-1)xl+=`<text x=${nx(i).toFixed(1)} y=${H-8} text-anchor=middle font-size=11 fill="#9AA3AF">${d.date}</text>`;});let paths=lines.map((l,li)=>{let pts=days.map((d,i)=>`${nx(i).toFixed(1)},${ny(d[l.key]||0).toFixed(1)}`).join(' ');let dots=days.map((d,i)=>`<circle cx=${nx(i).toFixed(1)} cy=${ny(d[l.key]||0).toFixed(1)} r=2.8 fill="${l.color}"/>`).join('');let vl='';if(li===0){vl=days.map((d,i)=>(n<=14||i%st===0||i===n-1)?`<text x=${nx(i).toFixed(1)} y=${(ny(d[l.key]||0)-9).toFixed(1)} text-anchor=middle font-size=11 font-weight=700 fill="${l.color}">${d[l.key]||0}</text>`:'').join('');}else{let i=n-1,d=days[i]||{};vl=`<text x=${(nx(i)-4).toFixed(1)} y=${(ny(d[l.key]||0)-9).toFixed(1)} text-anchor=end font-size=11 font-weight=700 fill="${l.color}">${d[l.key]||0}</text>`;}return `<polyline fill=none stroke="${l.color}" stroke-width=2.4 stroke-linejoin=round points="${pts}"/>${dots}${vl}`;}).join('');let leg=lines.map(l=>`<span class=lg><i style="background:${l.color}"></i>${l.label}</span>`).join('');return `<div class=legendr>${leg}</div><svg viewBox="0 0 ${W} ${H}" class=lchart>${grid}${paths}${xl}</svg>`;}
-function funnelBlock(d){const f=d.funnel_act||{};return `<div class=card><div class=title>Воронка активации</div><div class=tsub>сессия → сессия с сообщением → сообщения</div><div class=funnel><div class=fstep><div class=fkey>session.opened</div><div class=fval>${fmt(f.sessions)}</div><div class=fsub>базовая линия</div></div><div class=fstep><div class=fkey>session.messaged</div><div class=fval>${fmt(f.engaged)}</div><div class=fsub>${f.engaged_pct||0}% сессий</div></div><div class=fstep><div class=fkey>message.sent</div><div class=fval>${fmt(f.messages)}</div><div class=fsub>${f.per_session||0}× на сессию</div></div></div><div class=mdef>Сессия — активность без пауз дольше 30 мин. «С сообщением» — сессии, где пользователь что-то спросил/написал. «Сообщения» — всего вопросов, и в среднем на активную сессию.</div></div>`}
-function scopeVal(d,w){const t=d.throughput;if(modelScope==='dau')return w==='req'?t.per_dau_tool:t.per_dau_req;if(modelScope==='sess')return w==='req'?t.per_sess_tool:t.per_sess_req;return w==='req'?t.tool_calls:t.reqs_total}
-const SEC={
- overview:d=>{const k=d.kpi||{};return `<div class=grid>${card('Всего пользователей',fmt(d.users),'уникальные, all time','Все, кто хоть раз запускал бота.')}${card('MAU',fmt(d.mau),'за 30 дней','Уникальные активные за последние 30 дней.')}${card('DAU',fmt(d.dau),'сегодня','Уникальные активные за сегодня.')}${card('Средний DAU',fmt(d.avg_dau),'активных в день','Среднесуточное число активных пользователей за период.')}${card('Средний WAU',fmt(k.avg_wau),'скользящее 7д','Среднее недельное активное по дням (окно 7 дней).')}${card('Сессий на польз./день',k.sess_per_dau,'','Сколько сессий в среднем у активного пользователя за день.')}${card('Сообщений на польз./день',k.msg_per_dau,'','Сообщений (вопросов) на активного пользователя в день.')}${card('Запросов на DAU',k.req_per_dau,'медиана '+k.req_per_dau_median,'Пользовательских запросов (тул-коллов) на активного в день. Рядом — медиана.')}${card('Инференс-вызовов на DAU',k.inf_per_dau,k.inf_measured?'сырые вызовы модели':'копится после обновления','Вызовов модели на активного в день. Обычно больше запросов: один запрос = несколько вызовов.')}${card('Событий на DAU',k.ev_per_dau,'сегодня '+k.ev_per_dau_today,'Все действия пользователя — кнопки, команды, ответы, голос, ручной ввод — на активного в день. Приложение и бот вместе. Рядом — значение за сегодня.')}</div>${funnelBlock(d)}<div class="card mb" style="margin-top:14px">${lineChart(d.days,[{key:'dau',color:'#2F6BED',label:'DAU'},{key:'wau',color:'#22A65B',label:'WAU · 7д'},{key:'mau',color:'#E8912A',label:'MAU · 30д'}])}<div class=mdef>По горизонтали — дни периода, по вертикали — число пользователей. Дневные уники (DAU) и скользящие 7-дн (WAU) / 30-дн (MAU) окна. Расхождение линий показывает, растёт база или крутится один и тот же костяк.</div></div><div class=card><div class=title>Новые vs вернувшиеся</div><div class=chart>${(function(){let st=Math.max(1,Math.ceil(d.days.length/12)),mx=Math.max(1,...d.days.map(y=>(y.new||0)+(y.returning||0)));return d.days.map((x,i)=>{let t=(x.new||0)+(x.returning||0),h=Math.max(3,t/mx*100),np=t?(x.new/t*100):0;return `<div class=b title="${x.date}: новые ${x.new}, вернулись ${x.returning}" style="height:${h}%;background:linear-gradient(180deg,var(--green) 0 ${np}%,var(--blue) ${np}% 100%)"><b class=bv>${t}</b>${(d.days.length<=16||i%st===0||i===d.days.length-1)?`<i>${x.date}</i>`:''}</div>`}).join('')})()}</div><div class=legend><span><i class="dot g"></i>новые</span><span><i class=dot></i>вернувшиеся</span></div><div class=mdef>По горизонтали — дни, по вертикали — активные пользователи. Новые — впервые активны в этот день. Вернувшиеся — были активны раньше.</div></div>`},
- users:d=>`<div class=grid>${card('Всего пользователей',fmt(d.users),'','Все, кто запускал бота.')}${card('Онбординг',fmt(d.onboarded),'прошли настройку','Указали цикл или выбрали режим.')}${card('Активные за период',fmt(d.active_period),'уникальные','Уникальные активные за выбранный период.')}${card('Средний DAU',fmt(d.avg_dau),'','Среднесуточные активные за период.')}</div><div class="card mb"><div class=title>Средний DAU и интенсивность по типам</div><div class=tsub>сегмент = тип цикла пользователя</div>${tbl(['тип','всего','активны','ср. DAU','запр./акт·день','инференс/акт·день'],d.segments.map(s=>[name(s.mode),fmt(s.users),fmt(s.active),s.avg_dau,s.intensity_tool,s.intensity_req]))}<div class=mdef>«ср. DAU» — среднесуточные активные в сегменте. «запр./акт·день» — пользовательских запросов на активного в день; «инференс/акт·день» — вызовов модели. Видно, какой сегмент нагружает продукт сильнее.</div></div><div class=split><div class=card><div class=title>Структура: все пользователи по типам</div>${list(d.modes,'g')}<div class=mdef>Сколько всего пользователей в каждом типе цикла.</div></div><div class=card><div class=title>Интенсивность запросов по сегменту</div>${list(d.segments.map(s=>[s.mode,s.intensity_tool]))}<div class=mdef>Пользовательских запросов на одного активного в день, по сегментам.</div></div></div>`,
- model:d=>{const t=d.throughput,m=d.model,sc={total:'всего',dau:'на активного/день',sess:'на сессию'}[modelScope];return `<div class=grid>${card('Запросы ('+sc+')',fmt(scopeVal(d,'req')),'вызовы ИИ-функций','Пользовательские запросы: чат-ответ, сводка, меню, нагрузка, замена блюда, голос.')}${card('Инференс-вызовы ('+sc+')',fmt(scopeVal(d,'inf')),t.calls_measured?'сырые вызовы модели':'копится после обновления','Сырые вызовы GigaChat: интент + генерация дают несколько вызовов на запрос.')}${card('Ответы Айвы',fmt(m.answers),'успешность '+m.success_rate+'%','Число ответов пользователю в чате.')}${card('Ошибки модели',fmt(m.errors),'фолбэков '+fmt(m.fallback),'Сбои генерации. Фолбэк — ответ подстраховкой без модели.')}</div><div class="card mb"><div class=title>Объём запросов и инференса</div>${mtabs([['total','всего'],['dau','на активного/день'],['sess','на сессию']],modelScope,'setScope')}${tbl(['метрика','значение ('+sc+')'],[['Запросы (тул-коллы)',fmt(scopeVal(d,'req'))],['Инференс-вызовы',fmt(scopeVal(d,'inf'))]])}<div class=mdef>Тумблер меняет базу: «всего» за период, «на активного/день» (делим на активные·дни) или «на сессию».</div></div><div class=split><div class=card><div class=title>Топ тул-коллов</div>${list(d.tools_top,'a')}<div class=mdef>Какие ИИ-функции вызываются чаще всего за период.</div></div><div class=card><div class=title>Распределение: событий на сессию</div>${histBars(d.sessions.dist_events,'')}<div class=mdef>Сколько действий пользователь успевает за сессию. Прокси «запросов на сессию».</div></div></div><div class=split><div class=card><div class=title>Инференс-вызовы по дням</div><div class=chart>${bars(d.days,'reqs','')}</div><div class=mdef>Сырые вызовы модели по дням.</div></div><div class=card><div class=title>Качество и латентность</div>${row('ответы',fmt(m.answers))+row('фолбэки',fmt(m.fallback))+row('ошибки',fmt(m.errors))+row('успешность',m.success_rate+'%')+row('p50 / p95',fmt(m.p50_ms)+' / '+fmt(m.p95_ms)+' мс')+row('токенов всего',fmt(m.tokens))}<div class=mdef>p50/p95 — медианное и «почти худшее» время ответа модели.</div></div></div>`},
- sessions:d=>{const s=d.sessions;return `<div class=grid>${card('Сессий за период',fmt(s.count),fmt(s.users)+' пользователей','Серии действий без пауз дольше 30 минут.')}${card('Сессий в день',s.per_day,'в среднем','Среднее число сессий в сутки за период.')}${card('Сессий на пользователя',s.per_user,'','Сколько раз в среднем заходит активный пользователь.')}${card('Средняя длина',s.avg_len_min+' мин','','Средняя длительность одной сессии.')}</div><div class="card mb"><div class=title>Сессии по дням</div><div class=chart>${bars(d.days,'sessions','g')}</div><div class=mdef>Число сессий, начавшихся в каждый день.</div></div><div class=split><div class=card><div class=title>Распределение по длительности</div>${histBars(d.sessions.dist_duration,'g')}<div class=mdef>Как распределяются сессии по длине. Много «<1 мин» — заходят и быстро выходят.</div></div><div class=card><div class=title>Распределение по числу событий</div>${histBars(d.sessions.dist_events,'')}<div class=mdef>Сколько действий приходится на сессию. Правее — вовлечённее.</div></div></div><div class=grid>${card('Событий на сессию',s.events_per,'в среднем','Среднее число действий за сессию.')}${card('Запросов на сессию',d.throughput.per_sess_tool,'','Пользовательских запросов за сессию.')}${card('Инференс на сессию',d.throughput.per_sess_req,'','Вызовов модели за сессию.')}${card('Активных пользователей',fmt(s.users),'с сессиями','Дали хотя бы одну сессию.')}</div>`}
+var q=new URLSearchParams(location.search), key=q.get('key')||'', DAYS=Number(q.get('days'))||7, D=null, TAB='aud';
+var DEF={
+ dau:"Уникальные активные за сегодня. Активный = не менее одного действия пользователя (кнопки, команды, ответы, голос, ручной ввод) в чате или приложении. Получение пуша активностью НЕ считается.",
+ wau:"Уникальные активные за последние 7 дней (скользящее окно).",
+ mau:"Уникальные активные за последние 30 дней (скользящее окно).",
+ adau:"Среднесуточные активные за период = сумма дневных DAU / число дней периода.",
+ awau:"Среднее скользящего 7-дневного окна по дням периода.",
+ stick:"Липкость = DAU / MAU * 100%. Доля месячной аудитории, заходящей в конкретный день.",
+ ret:"Ретеншен D_N: доля новых, вернувшихся на N-й день после первого. Rolling: активны на N-й день ИЛИ позже. Когорты возрастом от N до 90 дней.",
+ evdau:"Событий на DAU = все действия пользователя (чат + приложение) / активные·дни.",
+ tcdau:"Тул-коллов на DAU = все вызовы модели (сумма calls, учтены все хопы; фото около 1) / активные·дни.",
+ evtot:"Все пользовательские действия за период (чат + приложение).",
+ tctot:"Все вызовы модели за период = сумма поля calls по всем событиям (все хопы каждого запроса).",
+ succ:"Успешность = answered / (answered + fallback + errors) * 100%.",
+ fb:"Доля фолбэков = fallback / (answered + fallback + errors) * 100%.",
+ er:"Доля ошибок = errors / (answered + fallback + errors) * 100%.",
+ lat:"Латентность: p50 (медиана) и p95 по полю ms события answered.",
+ push:"Конверсия пуш→открытие = доля отправленных пушей, после которых пользователь сделал действие в тот же день.",
+ tok:"Токены модели за период и оценка стоимости по цене за 1M токенов."
 };
-function renderSec(){if(!DATA)return;document.querySelectorAll('#secTabs button').forEach(b=>b.classList.toggle('on',b.dataset.sec===sec));rootEl.className='';rootEl.innerHTML=(SEC[sec]||SEC.overview)(DATA)}
-function setTabs(){document.querySelectorAll('#tabs button[data-days]').forEach(b=>{b.classList.toggle('on',!frm&&Number(b.dataset.days)===period);b.onclick=()=>{period=Number(b.dataset.days);frm='';to='';q.set('days',period);q.delete('from');q.delete('to');history.replaceState(null,'','?'+q.toString());load();}});document.querySelectorAll('#tabs button[data-q]').forEach(b=>{var y=new Date(Date.now()-864e5).toISOString().slice(0,10);b.classList.toggle('on',b.dataset.q==='yday'&&frm===y&&to===y);b.onclick=()=>{if(b.dataset.q==='yday'){frm=y;to=y;q.set('from',y);q.set('to',y);q.delete('days');history.replaceState(null,'','?'+q.toString());load();}};});var f=document.getElementById('dfrom'),t=document.getElementById('dto');if(f)f.value=frm;if(t)t.value=to;var ar=document.getElementById('applyRange');if(ar)ar.onclick=()=>{var a=document.getElementById('dfrom').value,z=document.getElementById('dto').value;if(a&&z){frm=a;to=z;q.set('from',a);q.set('to',z);q.delete('days');history.replaceState(null,'','?'+q.toString());load();}else{alert('Выбери обе даты');}};document.querySelectorAll('#secTabs button').forEach(b=>{b.onclick=()=>{sec=b.dataset.sec;try{localStorage.setItem('aiwa_sec3',sec)}catch(e){}renderSec();}});}
-async function load(){setTabs();rootEl.className='loading';rootEl.textContent='Собираю статистику...';let r=await fetch('/api/admin_stats?key='+encodeURIComponent(key)+((frm&&to)?('&from='+frm+'&to='+to):('&days='+period)));let d=await r.json();if(d.error){rootEl.textContent='Нет доступа';return}DATA=d;upEl.textContent=`${d.since} → ${d.until} · обновлено ${d.updated}`;renderSec();}
-load().catch(e=>{rootEl.className='loading';rootEl.textContent='Ошибка загрузки: '+e.message});
+function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function ic(d){return d?"<span class='ic' title=\""+esc(d)+"\">i</span>":"";}
+function card(label,val,sub,def){return "<div class='mc'><div class='ml'>"+label+ic(def)+"</div><div class='mv'>"+(val==null?'—':val)+"</div>"+(sub?"<div class='ms'>"+sub+"</div>":"")+"</div>";}
+function tbl(head,rows){if(!rows.length)return "<div class='ms' style='margin-bottom:16px'>нет данных</div>";return "<table class='tb'><tr>"+head.map(function(h){return "<th>"+h+"</th>";}).join('')+"</tr>"+rows.map(function(r){return "<tr>"+r.map(function(c){return "<td>"+c+"</td>";}).join('')+"</tr>";}).join('')+"</table>";}
+function svg(series,lines,title,def){
+ var W=760,H=210,pad=30; var n=series.length; var xs=n>1?(W-pad*2)/(n-1):0; var mx=1;
+ series.forEach(function(p){lines.forEach(function(l){mx=Math.max(mx,p[l.key]||0);});});
+ function X(i){return pad+i*xs;} function Y(v){return H-pad-(v/mx)*(H-pad*2);}
+ var g="<line x1='"+pad+"' y1='"+(H-pad)+"' x2='"+(W-pad)+"' y2='"+(H-pad)+"' stroke='#E9ECF1'/>";
+ lines.forEach(function(l){
+  var d=series.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p[l.key]||0).toFixed(1);}).join(' ');
+  g+="<path d='"+d+"' fill='none' stroke='"+l.color+"' stroke-width='2'/>";
+  series.forEach(function(p,i){var cx=X(i).toFixed(1),cy=Y(p[l.key]||0).toFixed(1);g+="<circle cx='"+cx+"' cy='"+cy+"' r='9' fill='transparent'><title>"+esc(p.date)+" · "+esc(l.label)+": "+(p[l.key]||0)+"</title></circle><circle cx='"+cx+"' cy='"+cy+"' r='2.5' fill='"+l.color+"'/>";});
+ });
+ var step=Math.max(1,Math.ceil(n/9));
+ series.forEach(function(p,i){if(i%step===0||i===n-1)g+="<text x='"+X(i).toFixed(1)+"' y='"+(H-8)+"' font-size='9' fill='#9AA3AF' text-anchor='middle'>"+esc(p.date)+"</text>";});
+ var leg=lines.map(function(l){return "<span style='color:"+l.color+";font-weight:800'>■</span> "+esc(l.label);}).join(' &nbsp; ');
+ return "<div class='chartcard'><div class='ct'>"+title+ic(def)+"</div><svg viewBox='0 0 "+W+" "+H+"' style='width:100%;height:210px'>"+g+"</svg><div class='leg'>"+leg+" · макс "+mx+"</div></div>";
+}
+function pctv(x){return x==null?'—':x+'%';}
+function render(){
+ var v=document.getElementById('view'); if(!D){v.textContent='нет данных';return;} v.className='';
+ if(TAB==='aud'){
+  var a=D.audience,h='';
+  h+="<div class='grid'>"+card('DAU',a.dau,'сегодня',DEF.dau)+card('WAU',a.wau,'7 дней',DEF.wau)+card('MAU',a.mau,'30 дней',DEF.mau)+card('Средний DAU',a.avg_dau,'за период',DEF.adau)+card('Средний WAU',a.avg_wau,'скользящее',DEF.awau)+card('Stickiness',a.stickiness+'%','DAU/MAU',DEF.stick)+"</div>";
+  h+=svg(D.series,[{key:'dau',color:'#2F6BED',label:'DAU'},{key:'wau',color:'#22A65B',label:'WAU'},{key:'mau',color:'#E8912A',label:'MAU'}],'Аудитория по дням',DEF.dau);
+  h+=svg(D.series,[{key:'stick',color:'#8256D0',label:'Stickiness %'}],'Липкость по дням',DEF.stick);
+  var r=a.retention;
+  h+="<div class='sec-h'>Ретеншен"+ic(DEF.ret)+"</div>";
+  h+=tbl(['','D1','D7','D30'],[['Классический',pctv(r.d1),pctv(r.d7),pctv(r.d30)],['Rolling',pctv(r.roll_d1),pctv(r.roll_d7),pctv(r.roll_d30)]]);
+  h+="<div class='sec-h'>Сегменты по режиму</div>";
+  h+=tbl(['Режим','Всего','Активных','Ср. DAU'],a.segments.map(function(s){return [s.mode,s.users,s.active,s.avg_dau];}));
+  h+="<div class='grid'>"+card('Всего пользователей',a.users_total,'',null)+card('Новых за период',a.new_users,'',null)+card('Партнёров',a.partners.connected,'у '+a.partners.women+' женщин',null)+"</div>";
+  v.innerHTML=h;
+ } else if(TAB==='eng'){
+  var e=D.engagement,h='';
+  h+="<div class='grid'>"+card('Событий на DAU',e.events_per_dau,e.events_total+' соб / '+e.active_user_days+' акт·дн',DEF.evdau)+card('Тул-коллов на DAU',e.toolcalls_per_dau,e.toolcalls_total+' вызовов / '+e.active_user_days+' акт·дн',DEF.tcdau)+card('Всего событий',e.events_total,'за период',DEF.evtot)+card('Всего тул-коллов',e.toolcalls_total,'Σ calls',DEF.tctot)+"</div>";
+  h+=svg(D.series,[{key:'events',color:'#2F6BED',label:'События'},{key:'toolcalls',color:'#8256D0',label:'Тул-коллы'}],'События и тул-коллы по дням',DEF.tctot);
+  h+="<div class='sec-h'>Источник событий</div>";
+  h+=tbl(['Источник','События'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
+  h+="<div class='sec-h'>Тул-коллы по типам"+ic('Из чего складываются вызовы модели: сводка, меню, распознавание еды по фото/тексту, замена блюда, разбор тренировки, ответ в чате.')+"</div>";
+  h+=tbl(['Тип','Вызовов'],e.toolcalls_by_meta.map(function(x){return [x[0],x[1]];}));
+  h+="<div class='sec-h'>Топ действий</div>";
+  h+=tbl(['Действие','Кол-во'],e.actions_top.map(function(x){return [x[0],x[1]];}));
+  var ss=e.sessions;
+  h+="<div class='grid'>"+card('Сессий/DAU',ss.per_dau,'',null)+card('Средняя длина',ss.avg_len_min+' мин','',null)+card('Действий/сессия',ss.events_per,'',null)+"</div>";
+  v.innerHTML=h;
+ } else if(TAB==='prod'){
+  var pr=D.product,h='';
+  var po=pr.push_open;
+  h+="<div class='grid'>"+card('Конверсия пуш→открытие',po.rate+'%',po.opened+' из '+po.sent,DEF.push)+card('Отправлено пушей',po.sent,'за период',null)+"</div>";
+  h+="<div class='sec-h'>Рассылки по типам</div>";
+  h+=tbl(['Тип','Кол-во'],Object.keys(pr.broadcasts).sort(function(a,b){return pr.broadcasts[b]-pr.broadcasts[a];}).map(function(k){return [k,pr.broadcasts[k]];}));
+  var f=pr.funnel;
+  h+="<div class='sec-h'>Воронка активации"+ic('Путь: регистрация → активность → первая сводка → первый лог еды → первая тренировка.')+"</div>";
+  h+=tbl(['Этап','Пользователей'],[['Новые',f.new_users],['Активированы',f.onboarded],['Получили сводку',f.got_summary],['Залогировали еду',f.logged_food],['Отметили тренировку',f.logged_workout]]);
+  v.innerHTML=h;
+ } else {
+  var qd=D.quality,h='';
+  h+="<div class='grid'>"+card('Успешность ответов',qd.success_rate+'%',qd.answered+' ответов',DEF.succ)+card('Доля фолбэков',qd.fallback_rate+'%',qd.fallback+' шт',DEF.fb)+card('Доля ошибок',qd.error_rate+'%',qd.errors+' шт',DEF.er)+card('Латентность p50/p95',qd.p50+' / '+qd.p95+' мс','ответ модели',DEF.lat)+card('Токены',qd.tokens,'≈ $'+qd.cost_usd,DEF.tok)+"</div>";
+  h+=svg(D.series,[{key:'answered',color:'#22A65B',label:'Ответы'},{key:'errors',color:'#DC5A5A',label:'Ошибки'}],'Ответы и ошибки по дням',DEF.succ);
+  v.innerHTML=h;
+ }
+}
+function tabsBar(){var t=[['aud','Аудитория'],['eng','Вовлечённость'],['prod','Продукт'],['qual','Качество']];document.getElementById('tabs').innerHTML=t.map(function(x){return "<button data-t='"+x[0]+"' class='"+(TAB===x[0]?'on':'')+"'>"+x[1]+"</button>";}).join('');document.querySelectorAll('#tabs button').forEach(function(b){b.onclick=function(){TAB=b.dataset.t;tabsBar();render();};});}
+function ctrls(){document.querySelectorAll('.ctrl button[data-d]').forEach(function(b){b.classList.toggle('on',Number(b.dataset.d)===DAYS);b.onclick=function(){DAYS=Number(b.dataset.d);q.set('days',DAYS);history.replaceState(null,'','?'+q.toString());load();};});document.getElementById('rl').onclick=load;document.getElementById('csv').onclick=toCSV;}
+function toCSV(){if(!D)return;var head=['date','dau','wau','mau','events','toolcalls','answered','errors','new','stickiness_pct'];var lines=[head.join(',')];D.series.forEach(function(p){lines.push([p.full,p.dau,p.wau,p.mau,p.events,p.toolcalls,p.answered,p.errors,p.new,p.stick].join(','));});var blob=new Blob(['﻿'+lines.join('\n')],{type:'text/csv;charset=utf-8'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='aiwa_analytics_'+D.since+'_'+D.until+'.csv';document.body.appendChild(a);a.click();a.remove();}
+async function load(){var v=document.getElementById('view');v.className='loading';v.textContent='Собираю аналитику…';ctrls();tabsBar();try{var r=await fetch('/api/admin_stats?key='+encodeURIComponent(key)+'&days='+DAYS);var d=await r.json();if(d.error){v.textContent='Нет доступа';return;}D=d;document.getElementById('upd').textContent=d.since+' → '+d.until+' · обновлено '+d.updated;render();}catch(e){v.className='loading';v.textContent='Ошибка загрузки: '+e.message;}}
+load();
 </script>"""
     return web.Response(text=html_text, content_type="text/html")
 
