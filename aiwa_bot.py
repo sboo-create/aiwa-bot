@@ -79,7 +79,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-08-analytics-v18"
+AIWA_VERSION = "2026-07-08-analytics-v19"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1901,29 +1901,31 @@ async def help_cmd(update, context):
 
 # ---------- stats ----------
 def aggregate_stats():
-    """Компактная выжимка /stats из analytics_data (спека v2)."""
+    """Выжимка /stats из analytics_data: 4 блока, явный период, WoW, источники."""
     A = analytics_data(days=7)
     a = A["audience"]; e = A["engagement"]; pr = A["product"]; qd = A["quality"]
-    def r(x): return "-" if x is None else (str(x) + "%")
+    g = A.get("growth", {}); ts = A.get("toolcalls_by_source", {})
+    def rr(x): return "-" if x is None else (str(x) + "%")
+    def wow(x): return "" if x is None else (" · WoW " + ("+" if x >= 0 else "") + str(x) + "%")
     L = []
-    L.append("Аналитика AIWA · " + A["since"] + " -> " + A["until"])
+    L.append("Аналитика AIWA · за 7 дней (" + A["since"] + " -> " + A["until"] + ")")
     L.append("")
     L.append("АУДИТОРИЯ")
-    L.append("DAU " + str(a["dau"]) + " · WAU " + str(a["wau"]) + " · MAU " + str(a["mau"]) + " (средний DAU " + str(a["avg_dau"]) + ")")
-    L.append("Stickiness: " + str(a["stickiness"]) + "% (DAU/MAU)")
+    L.append("Средний DAU " + str(a["avg_dau"]) + wow(g.get("avg_dau")) + " · сегодня " + str(a["dau"]) + " (день идёт)")
+    L.append("WAU " + str(a["wau"]) + " · MAU " + str(a["mau"]) + " · Stickiness " + str(a["stickiness"]) + "% (DAU/MAU)")
     ret = a["retention"]
-    L.append("Retention D1/7/30: " + r(ret["d1"]) + "/" + r(ret["d7"]) + "/" + r(ret["d30"]) + "; rolling " + r(ret["roll_d1"]) + "/" + r(ret["roll_d7"]) + "/" + r(ret["roll_d30"]))
-    L.append("Всего " + str(a["users_total"]) + ", новых " + str(a["new_users"]) + ", партнёров " + str(a["partners"]["connected"]))
+    L.append("Rolling retention D1/7/30: " + rr(ret["roll_d1"]) + "/" + rr(ret["roll_d7"]) + "/" + rr(ret["roll_d30"]))
+    L.append("Всего " + str(a["users_total"]) + ", новых за период " + str(a["new_users"]) + ", партнёров " + str(a["partners"]["connected"]))
     L.append("Сегменты (активных): " + (", ".join(str(sg["mode"]) + " " + str(sg["active"]) for sg in a["segments"]) or "нет"))
     L.append("")
     L.append("ВОВЛЕЧЁННОСТЬ")
-    L.append("Событий на DAU: " + str(e["events_per_dau"]) + " = " + str(e["events_total"]) + " событий / " + str(e["active_user_days"]) + " активных·дней")
-    L.append("Тул-коллов на DAU: " + str(e["toolcalls_per_dau"]) + " = " + str(e["toolcalls_total"]) + " вызовов модели / " + str(e["active_user_days"]) + " активных·дней")
-    L.append("Источник: приложение " + str(e["by_source"]["app"]) + ", чат " + str(e["by_source"]["chat"]))
+    L.append("Событий на DAU: " + str(e["events_per_dau"]) + " = " + str(e["events_total"]) + " событий / " + str(e["active_user_days"]) + " активных·дней" + wow(g.get("events")))
+    L.append("Тул-коллов на DAU: " + str(e["toolcalls_per_dau"]) + " = " + str(e["toolcalls_total"]) + " вызовов / " + str(e["active_user_days"]) + " активных·дней" + wow(g.get("toolcalls")))
+    L.append("Тул-коллы по источнику: приложение " + str(ts.get("app", 0)) + ", чат " + str(ts.get("chat", 0)) + ", авто-сводки " + str(ts.get("auto", 0)))
+    L.append("События по источнику: приложение " + str(e["by_source"]["app"]) + ", чат " + str(e["by_source"]["chat"]))
     L.append("Топ действий: " + (", ".join(str(k) + " " + str(vv) for k, vv in e["actions_top"][:6]) or "нет"))
-    L.append("Тул-коллы по типам: " + (", ".join(str(k) + " " + str(vv) for k, vv in e["toolcalls_by_meta"][:6]) or "нет"))
     ss = e["sessions"]
-    L.append("Сессий/DAU " + str(ss["per_dau"]) + ", длина " + str(ss["avg_len_min"]) + " мин, действий/сессия " + str(ss["events_per"]))
+    L.append("Сессии за период: всего " + str(ss["count"]) + ", на DAU " + str(ss["per_dau"]) + ", длина " + str(ss["avg_len_min"]) + " мин, действий/сессия " + str(ss["events_per"]))
     L.append("")
     L.append("ПРОДУКТ")
     po = pr["push_open"]
@@ -3347,6 +3349,43 @@ def _admin_key_ok(request):
     got = request.query.get("key") or request.headers.get("X-Admin-Key") or ""
     return _hmac.compare_digest(str(got), str(expected))
 
+_EV_LBL = {
+    "app_open": "Открыла приложение", "web_food": "Открыла меню", "web_diary": "Открыла дневник",
+    "web_checkin": "Чек-ин (в приложении)", "web_training": "Открыла тренировки", "web_meal_replace": "Замена блюда",
+    "web_partner": "Партнёр", "web_profile": "Профиль", "web_prefs": "Предпочтения по еде", "web_settime": "Время сводки",
+    "web_train_profile": "Профиль тренировок", "web_pa": "Отметка близости", "web_diary_del": "Удаление из дневника",
+    "web_diary_edit": "Правка в дневнике", "web_diary_scale": "Граммовка в дневнике", "web_diary_slot": "Перенос приёма",
+    "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
+    "answer": "Вопрос в чате", "general": "Вопрос в чате", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
+    "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",
+}
+def _ev_lbl(m):
+    if not m: return "Прочее"
+    if m.startswith("ci:e:"): return "Чек-ин: энергия"
+    if m.startswith("ci:m:"): return "Чек-ин: настроение"
+    if m.startswith("ci:s:"): return "Чек-ин: симптом"
+    if m == "ci:done": return "Чек-ин: готово"
+    if m.startswith("ci:"): return "Чек-ин"
+    if m.startswith("tm:"): return "Время сводки"
+    if m.startswith("q:"): return "Подсказка в чате"
+    if m.startswith("web_period"): return "Отметка месячных"
+    if m.startswith("view_"): return {"view_today": "Экран: Сегодня", "view_food": "Экран: Питание", "view_train": "Экран: Нагрузка", "view_stats": "Экран: Статистика", "view_chat": "Экран: Чат"}.get(m, "Экран: " + m[5:])
+    if m.startswith("intent_"): return "Запрос: " + m[7:]
+    if m.startswith("web_"): return _EV_LBL.get(m, "Приложение: " + m[4:])
+    return _EV_LBL.get(m, m)
+
+_TC_LBL = {"summary": "Сводки (утро)", "answer": "Ответы в чате", "menu": "Меню питания", "food_photo": "Фото еды",
+           "food_text": "Еда текстом", "meal": "Замена блюда", "workout": "Разбор тренировки", "diary_reco": "Совет по дневнику",
+           "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру"}
+def _tc_lbl(m): return _TC_LBL.get(m, m or "прочее")
+_TC_APP = ("menu", "food_photo", "food_text", "meal", "workout", "diary_reco", "webapp", "training_section")
+_TC_CHAT = ("answer", "general", "partner_q")
+def _tc_src(m):
+    if m in _TC_APP: return "app"
+    if m in _TC_CHAT: return "chat"
+    if m == "summary": return "auto"
+    return "other"
+
 def analytics_data(days=7, frm=None, to=None):
     """Чистый слой аналитики (спека v2). tool-calls = Σ calls (все хопы к модели)."""
     from collections import Counter, defaultdict
@@ -3377,7 +3416,17 @@ def analytics_data(days=7, frm=None, to=None):
     wide = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=? AND ts<=?", (wmin, until_ts)).fetchall()
     first_rows = c.execute("SELECT chat_id, MIN(ts) FROM events WHERE action IN ('command','button','suggest','manual','answered','voice','fallback') GROUP BY chat_id").fetchall()
     goalrows = c.execute("SELECT DISTINCT chat_id, meta FROM events WHERE action='goal'").fetchall()
+    pmin = datetime.combine(since - timedelta(days=span), dtime.min).isoformat()
+    pmax = datetime.combine(since - timedelta(days=1), dtime.max).isoformat()
+    prev = c.execute("SELECT chat_id, ts, action, calls FROM events WHERE ts>=? AND ts<=?", (pmin, pmax)).fetchall()
     c.close()
+    _ACT = ("command", "button", "suggest", "manual", "answered", "voice", "fallback")
+    pv_events = 0; pv_tool = 0; pv_days = defaultdict(set)
+    for cid, ts, action, calls in prev:
+        if calls: pv_tool += calls
+        if action in _ACT:
+            pv_events += 1; pv_days[dparse(ts).isoformat()].add(cid)
+    pv_aud = sum(len(x) for x in pv_days.values())
     umode = {cid: (m or "cycle") for cid, _, m in users}
     created_by = {}
     for cid, cr, _ in users:
@@ -3387,12 +3436,12 @@ def analytics_data(days=7, frm=None, to=None):
     ev_src = Counter(); actions = Counter(); tool_meta = Counter()
     answered = fallback = errors = tokens = tool_total = ev_total = 0
     lat = []; sess = defaultdict(list); modeseg = defaultdict(set); mode_active_day = defaultdict(lambda: defaultdict(set))
-    bcast = Counter(); ans_by_day = Counter(); err_by_day = Counter(); tool_meta_day = defaultdict(Counter)
+    bcast = Counter(); ans_by_day = Counter(); err_by_day = Counter(); tool_src = Counter()
     push_days = defaultdict(set); act_days = defaultdict(set); new_by_day = Counter()
     for cid, ts, action, tok, meta, ms, calls in evs:
         d = dparse(ts); iso = d.isoformat(); tokens += (tok or 0)
         if calls:
-            tool_total += calls; tool_by_day[iso] += calls; tool_meta[meta or action] += calls
+            tool_total += calls; tool_by_day[iso] += calls; tool_meta[meta or action] += calls; tool_src[_tc_src(meta or action)] += calls
         if action == "broadcast":
             bcast[meta or "unknown"] += 1
             if meta in PUSH_META: push_days[cid].add(d)
@@ -3404,7 +3453,7 @@ def analytics_data(days=7, frm=None, to=None):
         elif action == "error": errors += 1; err_by_day[iso] += 1
         if action in ACTIVE:
             ev_total += 1; events_by_day[iso] += 1; active_by_day[iso].add(cid); act_days[cid].add(d)
-            actions[(meta or action)] += 1
+            actions[_ev_lbl(meta or action)] += 1
             m = umode.get(cid, "cycle"); mode_active_day[iso][m].add(cid); modeseg[m].add(cid)
             ev_src["app" if (meta and str(meta).startswith(APP_PREF)) else "chat"] += 1
             sess[cid].append(datetime.fromisoformat(ts) if isinstance(ts, str) else ts)
@@ -3487,7 +3536,7 @@ def analytics_data(days=7, frm=None, to=None):
             "events_per_dau": round(ev_total / active_user_days, 2) if active_user_days else 0,
             "toolcalls_per_dau": round(tool_total / active_user_days, 2) if active_user_days else 0,
             "by_source": {"chat": ev_src.get("chat", 0), "app": ev_src.get("app", 0)},
-            "actions_top": actions.most_common(12), "toolcalls_by_meta": tool_meta.most_common(10),
+            "actions_top": actions.most_common(12), "toolcalls_by_meta": [[_tc_lbl(k), v] for k, v in tool_meta.most_common(10)],
             "sessions": {"count": sc, "per_dau": round(sc / active_user_days, 2) if active_user_days else 0,
                          "avg_len_min": round(sum(slens) / len(slens) / 60, 1) if slens else 0,
                          "events_per": round(sum(sevs) / len(sevs), 1) if sevs else 0}},
@@ -3506,6 +3555,11 @@ def analytics_data(days=7, frm=None, to=None):
             "error_rate": round(errors / ans_tot * 100) if ans_tot else 0,
             "p50": pct(lat, 0.5), "p95": pct(lat, 0.95),
             "tokens": tokens, "cost_usd": round(tokens / 1e6 * PRICE, 2)},
+        "toolcalls_by_source": {"app": tool_src.get("app", 0), "chat": tool_src.get("chat", 0), "auto": tool_src.get("auto", 0), "other": tool_src.get("other", 0)},
+        "growth": {
+            "events": (round((ev_total - pv_events) / pv_events * 100) if pv_events else None),
+            "toolcalls": (round((tool_total - pv_tool) / pv_tool * 100) if pv_tool else None),
+            "avg_dau": (round((avg_dau - (pv_aud / span)) / (pv_aud / span) * 100) if pv_aud else None)},
         "series": series,
     }
 
@@ -3761,130 +3815,155 @@ async def _admin_page(request):
     if not _admin_key_ok(request):
         return web.Response(text="forbidden", status=403)
     html_text = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AIWA · Аналитика</title><style>
-:root{--bg:#F6F8FA;--card:#fff;--ink:#14181F;--mut:#6B7280;--faint:#9AA3AF;--line:#E9ECF1;--blue:#2F6BED;--green:#22A65B;--amber:#E8912A;--red:#DC5A5A;--violet:#8256D0}
+<title>AIWA · Аналитика</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#F6F8FA;--card:#fff;--ink:#14181F;--mut:#6B7280;--faint:#9AA3AF;--line:#E9ECF1;--blue:#2F6BED;--green:#1E9E54;--amber:#E8912A;--red:#DC5A5A;--violet:#7C5CD0}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,Inter,"Segoe UI",Arial,sans-serif}
-.wrap{max-width:1200px;margin:0 auto;padding:22px 20px 60px}
-.head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px}
+.wrap{max-width:1180px;margin:0 auto;padding:20px 20px 70px}
+.head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 h1{font-size:20px;margin:0}
-.upd{color:var(--mut);font-size:12px}
-.ctrl{margin-left:auto;display:flex;gap:6px;align-items:center}
-.ctrl button{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 11px;font-size:13px;cursor:pointer;color:var(--ink)}
-.ctrl button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
-.tabs{display:flex;gap:6px;margin:14px 0 18px;flex-wrap:wrap}
+.per{color:var(--mut);font-size:12.5px}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:14px 0 4px}
+.bar button,.bar input{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 11px;font-size:13px;cursor:pointer;color:var(--ink)}
+.bar input{cursor:text;width:140px}
+.bar button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.bar .sp{flex:1}
+.tabs{display:flex;gap:6px;margin:16px 0 18px;flex-wrap:wrap}
 .tabs button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 16px;font-size:13.5px;font-weight:600;cursor:pointer;color:var(--mut)}
 .tabs button.on{background:var(--blue);color:#fff;border-color:var(--blue)}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin-bottom:16px}
 .mc{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 15px}
 .ml{font-size:12px;color:var(--mut);font-weight:600;display:flex;align-items:center;gap:5px}
-.mv{font-size:26px;font-weight:800;margin-top:4px;letter-spacing:-.02em}
-.ms{font-size:11.5px;color:var(--faint);margin-top:2px}
-.ic{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:var(--line);color:var(--mut);font-size:10px;font-style:italic;cursor:help;font-weight:700}
-.chartcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 15px;margin-bottom:16px}
-.ct{font-size:13px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:5px}
-.leg{font-size:11.5px;color:var(--mut);margin-top:6px}
+.mv{font-size:26px;font-weight:800;margin-top:5px;letter-spacing:-.02em;display:flex;align-items:baseline;gap:8px}
+.ms{font-size:11.5px;color:var(--faint);margin-top:3px}
+.chip{font-size:11px;font-weight:800;padding:2px 7px;border-radius:999px}
+.chip.up{color:#0E7A3A;background:#E4F5EC}.chip.dn{color:#B33636;background:#FBE7E7}.chip.zero{color:var(--mut);background:var(--line)}
+.ic{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:var(--line);color:var(--mut);font-size:10px;font-style:italic;cursor:pointer;font-weight:800;user-select:none}
+.chartcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:16px}
+.ct{font-size:13px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px}
 .tb{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:16px}
 .tb th{background:#FAFBFC;text-align:left;font-size:11px;color:var(--mut);font-weight:700;padding:9px 12px;text-transform:uppercase;letter-spacing:.03em}
 .tb td{padding:9px 12px;font-size:13px;border-top:1px solid var(--line)}
-.sec-h{font-size:14px;font-weight:800;margin:20px 0 10px;display:flex;align-items:center;gap:5px}
-.loading{color:var(--mut);padding:40px;text-align:center}
+.tb td:last-child,.tb th:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.sec-h{font-size:14px;font-weight:800;margin:22px 0 10px;display:flex;align-items:center;gap:6px}
+.loading{color:var(--mut);padding:50px;text-align:center}
+#defpop{position:absolute;display:none;max-width:300px;background:#111827;color:#fff;font-size:12px;line-height:1.5;padding:10px 12px;border-radius:10px;z-index:99;box-shadow:0 8px 24px rgba(0,0,0,.2)}
 </style>
 <div class="wrap">
- <div class="head"><h1>AIWA · Аналитика</h1><span class="upd" id="upd"></span>
-  <div class="ctrl"><button data-d="7">7д</button><button data-d="30">30д</button><button data-d="90">90д</button><button id="csv">Скачать Excel (CSV)</button><button id="rl">Обновить</button></div>
+ <div class="head"><h1>AIWA · Аналитика</h1><span class="per" id="per"></span></div>
+ <div class="bar" id="bar">
+   <button data-d="7">7 дней</button><button data-d="30">30 дней</button><button data-d="90">90 дней</button>
+   <button id="yday">Вчера</button>
+   <span style="color:var(--mut);font-size:12px">c</span><input type="date" id="from"><span style="color:var(--mut);font-size:12px">по</span><input type="date" id="to"><button id="apply">Применить</button>
+   <span class="sp"></span><button id="csv">Excel (CSV)</button><button id="rl">Обновить</button>
  </div>
  <div class="tabs" id="tabs"></div>
  <div id="view" class="loading">Загрузка…</div>
 </div>
+<div id="defpop"></div>
 <script>
-var q=new URLSearchParams(location.search), key=q.get('key')||'', DAYS=Number(q.get('days'))||7, D=null, TAB='aud';
+var q=new URLSearchParams(location.search), key=q.get('key')||'', DAYS=Number(q.get('days'))||7, FROM=q.get('from')||'', TO=q.get('to')||'', D=null, TAB='aud', CH=[];
+var C={dau:'#2F6BED',wau:'#1E9E54',mau:'#E8912A',stick:'#7C5CD0',ev:'#2F6BED',tc:'#7C5CD0',ans:'#1E9E54',err:'#DC5A5A'};
 var DEF={
- dau:"Уникальные активные за сегодня. Активный = не менее одного действия пользователя (кнопки, команды, ответы, голос, ручной ввод) в чате или приложении. Получение пуша активностью НЕ считается.",
+ dau:"Уникальные активные за день. Активный = минимум одно действие пользователя (кнопки, команды, ответы, голос, ручной ввод) в чате или приложении. Получение пуша активностью НЕ считается.",
+ avgdau:"Средний DAU = сумма дневных DAU за период / число дней. Показатель за весь период, не за сегодня.",
  wau:"Уникальные активные за последние 7 дней (скользящее окно).",
  mau:"Уникальные активные за последние 30 дней (скользящее окно).",
- adau:"Среднесуточные активные за период = сумма дневных DAU / число дней периода.",
- awau:"Среднее скользящего 7-дневного окна по дням периода.",
- stick:"Липкость = DAU / MAU * 100%. Доля месячной аудитории, заходящей в конкретный день.",
- ret:"Ретеншен D_N: доля новых, вернувшихся на N-й день после первого. Rolling: активны на N-й день ИЛИ позже. Когорты возрастом от N до 90 дней.",
- evdau:"Событий на DAU = все действия пользователя (чат + приложение) / активные·дни.",
- tcdau:"Тул-коллов на DAU = все вызовы модели (сумма calls, учтены все хопы; фото около 1) / активные·дни.",
+ stick:"Липкость = DAU / MAU × 100%. Доля месячной аудитории, заходящей в конкретный день.",
+ ret:"Rolling retention D_N: доля новых пользователей, кто был активен на N-й день после первого ИЛИ позже. Считается по когортам возрастом от N до 90 дней.",
+ evdau:"Событий на DAU = все действия пользователя (чат + приложение) за период / активные·дни.",
+ tcdau:"Тул-коллов на DAU = все вызовы модели (сумма calls, учтены все хопы одного запроса; фото ≈ 1) / активные·дни.",
+ aud:"Активные·дни = сумма по дням числа активных пользователей за период (человеко-дни). Это знаменатель метрик «на DAU».",
  evtot:"Все пользовательские действия за период (чат + приложение).",
- tctot:"Все вызовы модели за период = сумма поля calls по всем событиям (все хопы каждого запроса).",
- succ:"Успешность = answered / (answered + fallback + errors) * 100%.",
- fb:"Доля фолбэков = fallback / (answered + fallback + errors) * 100%.",
- er:"Доля ошибок = errors / (answered + fallback + errors) * 100%.",
- lat:"Латентность: p50 (медиана) и p95 по полю ms события answered.",
+ tctot:"Все вызовы модели за период = сумма поля calls по всем событиям.",
+ tcsrc:"Откуда пришли вызовы модели: приложение (меню, фото/текст еды, тренировки), чат (ответы), авто (утренние сводки).",
+ succ:"Успешность = answered / (answered + fallback + errors) × 100%.",
+ lat:"Латентность ответа модели: p50 (медиана) и p95 (почти худшее) по времени ответа.",
  push:"Конверсия пуш→открытие = доля отправленных пушей, после которых пользователь сделал действие в тот же день.",
- tok:"Токены модели за период и оценка стоимости по цене за 1M токенов."
+ tok:"Токены модели за период и оценка стоимости по цене за 1M токенов.",
+ grow:"WoW = рост относительно предыдущего периода такой же длины."
 };
-function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function ic(d){return d?"<span class='ic' title=\""+esc(d)+"\">i</span>":"";}
-function card(label,val,sub,def){return "<div class='mc'><div class='ml'>"+label+ic(def)+"</div><div class='mv'>"+(val==null?'—':val)+"</div>"+(sub?"<div class='ms'>"+sub+"</div>":"")+"</div>";}
-function tbl(head,rows){if(!rows.length)return "<div class='ms' style='margin-bottom:16px'>нет данных</div>";return "<table class='tb'><tr>"+head.map(function(h){return "<th>"+h+"</th>";}).join('')+"</tr>"+rows.map(function(r){return "<tr>"+r.map(function(c){return "<td>"+c+"</td>";}).join('')+"</tr>";}).join('')+"</table>";}
-function svg(series,lines,title,def){
- var W=760,H=210,pad=30; var n=series.length; var xs=n>1?(W-pad*2)/(n-1):0; var mx=1;
- series.forEach(function(p){lines.forEach(function(l){mx=Math.max(mx,p[l.key]||0);});});
- function X(i){return pad+i*xs;} function Y(v){return H-pad-(v/mx)*(H-pad*2);}
- var g="<line x1='"+pad+"' y1='"+(H-pad)+"' x2='"+(W-pad)+"' y2='"+(H-pad)+"' stroke='#E9ECF1'/>";
- lines.forEach(function(l){
-  var d=series.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p[l.key]||0).toFixed(1);}).join(' ');
-  g+="<path d='"+d+"' fill='none' stroke='"+l.color+"' stroke-width='2'/>";
-  series.forEach(function(p,i){var cx=X(i).toFixed(1),cy=Y(p[l.key]||0).toFixed(1);g+="<circle cx='"+cx+"' cy='"+cy+"' r='9' fill='transparent'><title>"+esc(p.date)+" · "+esc(l.label)+": "+(p[l.key]||0)+"</title></circle><circle cx='"+cx+"' cy='"+cy+"' r='2.5' fill='"+l.color+"'/>";});
- });
- var step=Math.max(1,Math.ceil(n/9));
- series.forEach(function(p,i){if(i%step===0||i===n-1)g+="<text x='"+X(i).toFixed(1)+"' y='"+(H-8)+"' font-size='9' fill='#9AA3AF' text-anchor='middle'>"+esc(p.date)+"</text>";});
- var leg=lines.map(function(l){return "<span style='color:"+l.color+";font-weight:800'>■</span> "+esc(l.label);}).join(' &nbsp; ');
- return "<div class='chartcard'><div class='ct'>"+title+ic(def)+"</div><svg viewBox='0 0 "+W+" "+H+"' style='width:100%;height:210px'>"+g+"</svg><div class='leg'>"+leg+" · макс "+mx+"</div></div>";
-}
+function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function ic(d){return d?"<span class='ic' data-def=\""+esc(d)+"\">i</span>":"";}
+function chip(g){if(g==null)return '';var c=g>0?'up':(g<0?'dn':'zero');var ar=g>0?'▲':(g<0?'▼':'■');return "<span class='chip "+c+"' title='WoW'>"+ar+" "+Math.abs(g)+"%</span>";}
+function card(label,val,sub,def,growth){return "<div class='mc'><div class='ml'>"+label+ic(def)+"</div><div class='mv'>"+(val==null?'—':val)+(growth!==undefined?chip(growth):'')+"</div>"+(sub?"<div class='ms'>"+sub+"</div>":"")+"</div>";}
+function tbl(head,rows){if(!rows||!rows.length)return "<div class='ms' style='margin-bottom:16px'>нет данных за период</div>";return "<table class='tb'><tr>"+head.map(function(h){return "<th>"+h+"</th>";}).join('')+"</tr>"+rows.map(function(r){return "<tr>"+r.map(function(c){return "<td>"+c+"</td>";}).join('')+"</tr>";}).join('')+"</table>";}
+function chartCard(id,title,def){return "<div class='chartcard'><div class='ct'>"+title+ic(def)+"</div><div style='height:230px'><canvas id='"+id+"'></canvas></div></div>";}
+function mkLine(id,keys){var el=document.getElementById(id);if(!el||!window.Chart)return;var labels=D.series.map(function(p){return p.date;});
+ var ds=keys.map(function(k){return {label:k.label,data:D.series.map(function(p){return p[k.key]||0;}),borderColor:k.color,backgroundColor:k.color,tension:.3,pointRadius:3,pointHoverRadius:6,borderWidth:2,fill:false};});
+ CH.push(new Chart(el,{type:'line',data:{labels:labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}},tooltip:{enabled:true}},scales:{y:{beginAtZero:true,grid:{color:'#EEF1F5'},ticks:{font:{size:11}}},x:{grid:{display:false},ticks:{font:{size:11},maxRotation:0,autoSkip:true,maxTicksLimit:9}}}}}));}
+function clearCharts(){CH.forEach(function(c){try{c.destroy();}catch(e){}});CH=[];}
 function pctv(x){return x==null?'—':x+'%';}
 function render(){
- var v=document.getElementById('view'); if(!D){v.textContent='нет данных';return;} v.className='';
+ clearCharts();var v=document.getElementById('view');if(!D){v.textContent='нет данных';return;}v.className='';
+ var g=D.growth||{};
  if(TAB==='aud'){
   var a=D.audience,h='';
-  h+="<div class='grid'>"+card('DAU',a.dau,'сегодня',DEF.dau)+card('WAU',a.wau,'7 дней',DEF.wau)+card('MAU',a.mau,'30 дней',DEF.mau)+card('Средний DAU',a.avg_dau,'за период',DEF.adau)+card('Средний WAU',a.avg_wau,'скользящее',DEF.awau)+card('Stickiness',a.stickiness+'%','DAU/MAU',DEF.stick)+"</div>";
-  h+=svg(D.series,[{key:'dau',color:'#2F6BED',label:'DAU'},{key:'wau',color:'#22A65B',label:'WAU'},{key:'mau',color:'#E8912A',label:'MAU'}],'Аудитория по дням',DEF.dau);
-  h+=svg(D.series,[{key:'stick',color:'#8256D0',label:'Stickiness %'}],'Липкость по дням',DEF.stick);
+  h+="<div class='grid'>"+
+   card('Средний DAU',a.avg_dau,'за период',DEF.avgdau,g.avg_dau)+
+   card('DAU сегодня',a.dau,'день ещё идёт',DEF.dau)+
+   card('WAU',a.wau,'7 дней',DEF.wau)+
+   card('MAU',a.mau,'30 дней',DEF.mau)+
+   card('Stickiness',a.stickiness+'%','DAU/MAU',DEF.stick)+
+   card('Новых за период',a.new_users,'из '+a.users_total+' всего',null)+"</div>";
+  h+=chartCard('cAud','Аудитория по дням',DEF.dau);
+  h+=chartCard('cStick','Липкость по дням, %',DEF.stick);
   var r=a.retention;
-  h+="<div class='sec-h'>Ретеншен"+ic(DEF.ret)+"</div>";
-  h+=tbl(['','D1','D7','D30'],[['Классический',pctv(r.d1),pctv(r.d7),pctv(r.d30)],['Rolling',pctv(r.roll_d1),pctv(r.roll_d7),pctv(r.roll_d30)]]);
+  h+="<div class='sec-h'>Rolling retention"+ic(DEF.ret)+"</div>";
+  h+="<div class='grid'>"+card('D1',pctv(r.roll_d1),'вернулись на 1-й день+',DEF.ret)+card('D7',pctv(r.roll_d7),'на 7-й день+',DEF.ret)+card('D30',pctv(r.roll_d30),'на 30-й день+',DEF.ret)+"</div>";
   h+="<div class='sec-h'>Сегменты по режиму</div>";
   h+=tbl(['Режим','Всего','Активных','Ср. DAU'],a.segments.map(function(s){return [s.mode,s.users,s.active,s.avg_dau];}));
-  h+="<div class='grid'>"+card('Всего пользователей',a.users_total,'',null)+card('Новых за период',a.new_users,'',null)+card('Партнёров',a.partners.connected,'у '+a.partners.women+' женщин',null)+"</div>";
-  v.innerHTML=h;
+  h+="<div class='grid'>"+card('Партнёров',a.partners.connected,'у '+a.partners.women+' женщин',null)+card('Активных за период',a.active_period,'уникальных',null)+"</div>";
+  v.innerHTML=h;mkLine('cAud',[{key:'dau',label:'DAU',color:C.dau},{key:'wau',label:'WAU',color:C.wau},{key:'mau',label:'MAU',color:C.mau}]);mkLine('cStick',[{key:'stick',label:'Stickiness %',color:C.stick}]);
  } else if(TAB==='eng'){
-  var e=D.engagement,h='';
-  h+="<div class='grid'>"+card('Событий на DAU',e.events_per_dau,e.events_total+' соб / '+e.active_user_days+' акт·дн',DEF.evdau)+card('Тул-коллов на DAU',e.toolcalls_per_dau,e.toolcalls_total+' вызовов / '+e.active_user_days+' акт·дн',DEF.tcdau)+card('Всего событий',e.events_total,'за период',DEF.evtot)+card('Всего тул-коллов',e.toolcalls_total,'Σ calls',DEF.tctot)+"</div>";
-  h+=svg(D.series,[{key:'events',color:'#2F6BED',label:'События'},{key:'toolcalls',color:'#8256D0',label:'Тул-коллы'}],'События и тул-коллы по дням',DEF.tctot);
-  h+="<div class='sec-h'>Источник событий</div>";
-  h+=tbl(['Источник','События'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
-  h+="<div class='sec-h'>Тул-коллы по типам"+ic('Из чего складываются вызовы модели: сводка, меню, распознавание еды по фото/тексту, замена блюда, разбор тренировки, ответ в чате.')+"</div>";
+  var e=D.engagement,ts=D.toolcalls_by_source||{},h='';
+  h+="<div class='grid'>"+
+   card('Событий на DAU',e.events_per_dau,e.events_total+' соб / '+e.active_user_days+' акт·дн',DEF.evdau,g.events)+
+   card('Тул-коллов на DAU',e.toolcalls_per_dau,e.toolcalls_total+' вызовов / '+e.active_user_days+' акт·дн',DEF.tcdau,g.toolcalls)+
+   card('Всего событий',e.events_total,'за период',DEF.evtot,g.events)+
+   card('Всего тул-коллов',e.toolcalls_total,'Σ вызовов модели',DEF.tctot,g.toolcalls)+"</div>";
+  h+=chartCard('cEng','События и тул-коллы по дням',DEF.tctot);
+  h+="<div class='sec-h'>Тул-коллы по источнику"+ic(DEF.tcsrc)+"</div>";
+  h+=tbl(['Источник','Вызовов'],[['Приложение',ts.app],['Чат',ts.chat],['Авто (сводки)',ts.auto]].concat(ts.other?[['Прочее',ts.other]]:[]));
+  h+="<div class='sec-h'>Тул-коллы по типам</div>";
   h+=tbl(['Тип','Вызовов'],e.toolcalls_by_meta.map(function(x){return [x[0],x[1]];}));
+  h+="<div class='sec-h'>События по источнику</div>";
+  h+=tbl(['Источник','Событий'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
   h+="<div class='sec-h'>Топ действий</div>";
   h+=tbl(['Действие','Кол-во'],e.actions_top.map(function(x){return [x[0],x[1]];}));
   var ss=e.sessions;
-  h+="<div class='grid'>"+card('Сессий/DAU',ss.per_dau,'',null)+card('Средняя длина',ss.avg_len_min+' мин','',null)+card('Действий/сессия',ss.events_per,'',null)+"</div>";
-  v.innerHTML=h;
+  h+="<div class='sec-h'>Сессии <span style='font-weight:600;color:var(--mut);font-size:12px'>(за период "+D.since+" → "+D.until+")</span></div>";
+  h+="<div class='grid'>"+card('Сессий всего',ss.count,'',null)+card('Сессий/DAU',ss.per_dau,'',null)+card('Средняя длина',ss.avg_len_min+' мин','',null)+card('Действий/сессия',ss.events_per,'',null)+"</div>";
+  v.innerHTML=h;mkLine('cEng',[{key:'events',label:'События',color:C.ev},{key:'toolcalls',label:'Тул-коллы',color:C.tc}]);
  } else if(TAB==='prod'){
-  var pr=D.product,h='';
-  var po=pr.push_open;
-  h+="<div class='grid'>"+card('Конверсия пуш→открытие',po.rate+'%',po.opened+' из '+po.sent,DEF.push)+card('Отправлено пушей',po.sent,'за период',null)+"</div>";
+  var pr=D.product,po=pr.push_open,h='';
+  h+="<div class='grid'>"+card('Конверсия пуш→открытие',po.rate+'%',po.opened+' из '+po.sent+' пушей',DEF.push)+card('Отправлено пушей',po.sent,'за период',null)+"</div>";
   h+="<div class='sec-h'>Рассылки по типам</div>";
   h+=tbl(['Тип','Кол-во'],Object.keys(pr.broadcasts).sort(function(a,b){return pr.broadcasts[b]-pr.broadcasts[a];}).map(function(k){return [k,pr.broadcasts[k]];}));
   var f=pr.funnel;
-  h+="<div class='sec-h'>Воронка активации"+ic('Путь: регистрация → активность → первая сводка → первый лог еды → первая тренировка.')+"</div>";
-  h+=tbl(['Этап','Пользователей'],[['Новые',f.new_users],['Активированы',f.onboarded],['Получили сводку',f.got_summary],['Залогировали еду',f.logged_food],['Отметили тренировку',f.logged_workout]]);
+  h+="<div class='sec-h'>Воронка активации"+ic('Путь: новые → активные → первая сводка → первый лог еды → первая тренировка.')+"</div>";
+  h+=tbl(['Этап','Пользователей'],[['Новые за период',f.new_users],['Активные (совершали действия)',f.onboarded],['Получили сводку',f.got_summary],['Записали еду',f.logged_food],['Отметили тренировку',f.logged_workout]]);
   v.innerHTML=h;
  } else {
   var qd=D.quality,h='';
-  h+="<div class='grid'>"+card('Успешность ответов',qd.success_rate+'%',qd.answered+' ответов',DEF.succ)+card('Доля фолбэков',qd.fallback_rate+'%',qd.fallback+' шт',DEF.fb)+card('Доля ошибок',qd.error_rate+'%',qd.errors+' шт',DEF.er)+card('Латентность p50/p95',qd.p50+' / '+qd.p95+' мс','ответ модели',DEF.lat)+card('Токены',qd.tokens,'≈ $'+qd.cost_usd,DEF.tok)+"</div>";
-  h+=svg(D.series,[{key:'answered',color:'#22A65B',label:'Ответы'},{key:'errors',color:'#DC5A5A',label:'Ошибки'}],'Ответы и ошибки по дням',DEF.succ);
-  v.innerHTML=h;
+  h+="<div class='grid'>"+card('Успешность ответов',qd.success_rate+'%',qd.answered+' ответов',DEF.succ)+card('Фолбэки',qd.fallback,qd.fallback_rate+'% от попыток',null)+card('Ошибки',qd.errors,qd.error_rate+'% от попыток',null)+card('Латентность',qd.p50+' / '+qd.p95+' мс','p50 / p95',DEF.lat)+card('Токены',qd.tokens,'≈ $'+qd.cost_usd,DEF.tok)+"</div>";
+  h+=chartCard('cQ','Ответы и ошибки по дням',DEF.succ);
+  v.innerHTML=h;mkLine('cQ',[{key:'answered',label:'Ответы',color:C.ans},{key:'errors',label:'Ошибки',color:C.err}]);
  }
 }
 function tabsBar(){var t=[['aud','Аудитория'],['eng','Вовлечённость'],['prod','Продукт'],['qual','Качество']];document.getElementById('tabs').innerHTML=t.map(function(x){return "<button data-t='"+x[0]+"' class='"+(TAB===x[0]?'on':'')+"'>"+x[1]+"</button>";}).join('');document.querySelectorAll('#tabs button').forEach(function(b){b.onclick=function(){TAB=b.dataset.t;tabsBar();render();};});}
-function ctrls(){document.querySelectorAll('.ctrl button[data-d]').forEach(function(b){b.classList.toggle('on',Number(b.dataset.d)===DAYS);b.onclick=function(){DAYS=Number(b.dataset.d);q.set('days',DAYS);history.replaceState(null,'','?'+q.toString());load();};});document.getElementById('rl').onclick=load;document.getElementById('csv').onclick=toCSV;}
+function bar(){
+ document.querySelectorAll('#bar button[data-d]').forEach(function(b){b.classList.toggle('on',!FROM&&Number(b.dataset.d)===DAYS);b.onclick=function(){DAYS=Number(b.dataset.d);FROM='';TO='';q.set('days',DAYS);q.delete('from');q.delete('to');upURL();load();};});
+ var fy=document.getElementById('from'),ty=document.getElementById('to');fy.value=FROM;ty.value=TO;
+ document.getElementById('apply').onclick=function(){var a=fy.value,z=ty.value;if(a&&z){FROM=a;TO=z;q.set('from',a);q.set('to',z);q.delete('days');upURL();load();}else alert('Выбери обе даты');};
+ document.getElementById('yday').onclick=function(){var y=new Date(Date.now()-864e5).toISOString().slice(0,10);FROM=y;TO=y;q.set('from',y);q.set('to',y);q.delete('days');upURL();load();};
+ document.getElementById('rl').onclick=load;document.getElementById('csv').onclick=toCSV;
+}
+function upURL(){history.replaceState(null,'','?'+q.toString());}
 function toCSV(){if(!D)return;var head=['date','dau','wau','mau','events','toolcalls','answered','errors','new','stickiness_pct'];var lines=[head.join(',')];D.series.forEach(function(p){lines.push([p.full,p.dau,p.wau,p.mau,p.events,p.toolcalls,p.answered,p.errors,p.new,p.stick].join(','));});var blob=new Blob(['﻿'+lines.join('\n')],{type:'text/csv;charset=utf-8'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='aiwa_analytics_'+D.since+'_'+D.until+'.csv';document.body.appendChild(a);a.click();a.remove();}
-async function load(){var v=document.getElementById('view');v.className='loading';v.textContent='Собираю аналитику…';ctrls();tabsBar();try{var r=await fetch('/api/admin_stats?key='+encodeURIComponent(key)+'&days='+DAYS);var d=await r.json();if(d.error){v.textContent='Нет доступа';return;}D=d;document.getElementById('upd').textContent=d.since+' → '+d.until+' · обновлено '+d.updated;render();}catch(e){v.className='loading';v.textContent='Ошибка загрузки: '+e.message;}}
+document.addEventListener('click',function(e){var pp=document.getElementById('defpop');if(e.target&&e.target.classList&&e.target.classList.contains('ic')){var r=e.target.getBoundingClientRect();pp.textContent=e.target.getAttribute('data-def')||'';pp.style.display='block';pp.style.left=Math.max(8,Math.min(window.innerWidth-312,r.left-140))+'px';pp.style.top=(r.bottom+window.scrollY+7)+'px';e.stopPropagation();}else{pp.style.display='none';}});
+async function load(){var v=document.getElementById('view');v.className='loading';v.textContent='Собираю аналитику…';bar();tabsBar();try{var u='/api/admin_stats?key='+encodeURIComponent(key)+(FROM&&TO?('&from='+FROM+'&to='+TO):('&days='+DAYS));var r=await fetch(u);var d=await r.json();if(d.error){v.textContent='Нет доступа';return;}D=d;var span=d.span;document.getElementById('per').textContent='Период: '+d.since+' → '+d.until+' ('+span+' дн.) · обновлено '+d.updated;render();}catch(e){v.className='loading';v.textContent='Ошибка загрузки: '+e.message;}}
 load();
 </script>"""
     return web.Response(text=html_text, content_type="text/html")
