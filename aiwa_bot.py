@@ -79,7 +79,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-08-analytics-v20"
+AIWA_VERSION = "2026-07-08-ux-full-v22"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2842,11 +2842,21 @@ async def _api_profile(request):
                 upsert(cid, kcal_goal=(gi if 800 <= gi <= 6000 else None))
             except (TypeError, ValueError):
                 pass
+    if "cycle_len" in body:
+        try:
+            _ci = int(float(str(body.get("cycle_len"))))
+            if 15 <= _ci <= 60:
+                upsert(cid, cycle_len=_ci)
+                if BOT_APP:
+                    try: schedule_daily(BOT_APP, cid, (row(cid).get("send_time") or "08:00"))
+                    except Exception as e: log.warning("reschedule: %s", e)
+        except (TypeError, ValueError):
+            pass
     menu_cache_clear(cid)
     ev(cid, "manual", meta="web_profile")
     _u2 = row(cid)
     return _cors(web.json_response({"ok": True,
-        "profile": {"height": int(cm), "weight": kg, "age": age, "kcal_goal": _u2.get("kcal_goal")},
+        "profile": {"height": int(cm), "weight": kg, "age": age, "kcal_goal": _u2.get("kcal_goal")}, "cycle_len": _u2.get("cycle_len"),
         "kcal_base": calc_calories(int(cm), kg, age, _u2.get("activity") or 3)[0]}))
 async def _api_meal(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
