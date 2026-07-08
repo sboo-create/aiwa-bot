@@ -102,10 +102,6 @@ html{overscroll-behavior:none}body{margin:0;background:var(--paper);color:var(--
 .phasecard .pd{font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
 .phasecard .pb{font-size:12.5px;line-height:1.5;color:var(--inkMid)}
 .phasecard .plst{display:grid;gap:4px;margin-top:8px;font-size:12px;line-height:1.42}
-.phasecompact{border-radius:18px;border:1px solid var(--line);padding:14px;background:#fff}
-.phasecompact .pn{font-family:var(--serif);font-size:20px;font-weight:600;margin-top:3px}
-.phasecompact .pb{font-size:12.5px;line-height:1.5;color:var(--inkMid);margin-top:6px}
-.phasecompact .minirow{margin-top:10px}
 .phasepill{border-radius:999px;padding:7px 10px;font-size:11px;font-weight:800;background:#fff;color:var(--inkMid);border:1px solid rgba(33,28,26,.07)}
 .phasenow{border-radius:18px;border:1px solid var(--line);padding:14px;background:#fff;margin-top:14px}
 .phasenow-hd{display:flex;align-items:center;justify-content:space-between;gap:10px}
@@ -135,7 +131,7 @@ html{overscroll-behavior:none}body{margin:0;background:var(--paper);color:var(--
 .sciencerow:first-child{border-top:none;padding-top:0}
 .sciencen{width:28px;height:28px;border-radius:10px;background:var(--roseWash);color:var(--roseDeep);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:900}
 .sciencet{font-size:12.5px;line-height:1.48;color:var(--inkMid)}
-.profileform{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+.profileform{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:12px}
 .profileform label{display:grid;gap:5px;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--inkSoft);font-weight:800}
 .profileform input{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:13px;background:#fff;padding:10px 9px;font-family:var(--sans);font-size:13px;color:var(--ink)}
 .profileactions{display:flex;gap:8px;margin-top:10px}
@@ -508,7 +504,7 @@ function renderMeno(el){
   html+="<div class='greet'>"+greeting()+(NAME?",<br><span class='nm'>"+esc(NAME)+"</span>":"")+"</div>";
   html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05;margin-bottom:8px'>Личный навигатор по менопаузе</div><div class='ayva-txt'>Айва помогает связать симптомы с понятными причинами: снижением эстрогена, терморегуляцией, сном, слизистыми, весом, костями и сердечно-сосудистыми рисками.</div><div class='medline'>Если приливы, бессонница, сухость или тревожность мешают жить, стоит обсудить с врачом МГТ, противопоказания и негормональные варианты.</div></div></div><div class='chips' id='menochips'></div></div>";
   html+="<div class='stats'><div class='stat'><div class='l'>Режим</div><div class='v'>план</div><div class='s'>для менопаузы</div></div><div class='stat'><div class='l'>Фокус</div><div class='v' style='font-size:20px'>"+esc(f[3])+"</div><div class='s'>"+esc(f[4])+"</div></div><div class='stat'><div class='l'>Важно</div><div class='v'>чекап</div><div class='s'>по возрасту</div></div></div>";
-  html+="<div class='card foodhero'><div class='ayva-lab'>Научный факт дня</div><div style='display:grid;grid-template-columns:38px 1fr;gap:11px;align-items:start'><div class='mealico' style='background:#fff'>"+esc(f[0])+"</div><div><div class='ds'>"+esc(f[1])+"</div><div class='mealwhy'>"+esc(f[2])+"</div></div></div></div>";
+  html+="<div class='card foodhero'><div class='ayva-lab'>Научный факт дня</div><div style='display:grid;grid-template-columns:34px 1fr;gap:11px;align-items:start'><div class='mealico' style='background:#fff'>"+esc(f[0])+"</div><div><div class='ds'>"+esc(f[1])+"</div><div class='mealwhy'>"+esc(f[2])+"</div></div></div></div>";
   html+=renderCheckin();
   html+="<div class='card'><div class='sec' style='margin-top:0'>Спроси Айву</div><div class='ayva-txt'>Задай вопрос про приливы, сон, кости, сердце, питание или чекапы — отвечу с учётом твоих отметок.</div><div class='chips' id='menoask'></div></div>";
   html+="<div class='card redflag'><div class='sec' style='margin-top:0'>Когда не ждать</div><div class='urgent'><div>Кровянистые выделения после менопаузы всегда стоит обсудить с врачом.</div><div>Боль в груди, одышка, обморок, внезапная слабость или сильное сердцебиение требуют срочной оценки.</div><div>Если симптомы мешают сну, работе или близости, это уже достаточная причина для консультации.</div></div></div>";
@@ -1066,13 +1062,13 @@ function renderStats(){
   html+="</div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Дневник симптомов</div>"+symptomDiary()+"</div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Мои данные</div><div class='kv'>";
-  html+="<div class='stat'><div class='l'>Возраст</div><div class='v'>"+(p.age||'—')+"</div><div class='s'>лет</div></div>";
-  html+="<div class='stat'><div class='l'>Рост</div><div class='v'>"+(p.height||'—')+"</div><div class='s'>см</div></div>";
-  html+="<div class='stat'><div class='l'>Вес</div><div class='v'>"+(p.weight||'—')+"</div><div class='s'>кг</div></div>";
-  html+="<div class='stat'><div class='l'>Длина цикла</div><div class='v'>"+(D.cycle_len||'—')+"</div><div class='s'>дней</div></div>";
-  html+="<div class='stat'><div class='l'>Месячные</div><div class='v'>"+(D.period_len||((s.avg_period&&s.avg_period>1)?s.avg_period:'—'))+"</div><div class='s'>дней</div></div>";
+  html+="<div class='stat'><div class='l'>Возраст</div><div class='v' style='font-size:18px'>"+(p.age||'—')+"</div><div class='s'>лет</div></div>";
+  html+="<div class='stat'><div class='l'>Рост</div><div class='v' style='font-size:18px'>"+(p.height||'—')+"</div><div class='s'>см</div></div>";
+  html+="<div class='stat'><div class='l'>Вес</div><div class='v' style='font-size:18px'>"+(p.weight||'—')+"</div><div class='s'>кг</div></div>";
+  html+="<div class='stat'><div class='l'>Длина цикла</div><div class='v' style='font-size:18px'>"+(D.cycle_len||'—')+"</div><div class='s'>дней</div></div>";
+  html+="<div class='stat'><div class='l'>Месячные</div><div class='v' style='font-size:18px'>"+(D.period_len||((s.avg_period&&s.avg_period>1)?s.avg_period:'—'))+"</div><div class='s'>дней</div></div>";
   html+="<div class='stat'><div class='l'>Калории</div><div class='v' style='font-size:18px'>"+(p.kcal_goal?(''+p.kcal_goal):(D.kcal_base?(''+D.kcal_base):'—'))+"</div><div class='s'>"+(p.kcal_goal?'цель/день':'норма/день')+"</div></div>";
-  html+="<div class='stat'><div class='l'>Активность</div><div class='v' style='font-size:15px'>"+(["—","минимум","низкая","средняя","высокая","макс."][p.activity||0]||'—')+"</div><div class='s'>уровень</div></div>";
+  html+="<div class='stat'><div class='l'>Активность</div><div class='v' style='font-size:18px'>"+(["—","минимум","низкая","средняя","высокая","макс."][p.activity||0]||'—')+"</div><div class='s'>уровень</div></div>";
   html+="<div class='stat'><div class='l'>Сводка</div><div class='v' style='font-size:18px'>"+(D.send_time||"08:00")+"</div><div class='s'>МСК</div></div>";
   html+="</div>";if(p.diet_note)html+="<div class='foot' style='margin-top:10px;text-align:left'>Питание: "+esc(p.diet_note)+"</div>";html+="<div class='chips'><button class='chip' onclick='showProfileEditor()'>Изменить данные</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как поменять время рассылки?\");},120)'>Время сводки</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как добавить историю циклов?\");},120)'>История циклов</button></div>";
   html+="<div id='profileEditor' class='hidden'><div class='profileform'><label>Рост<input id='profHeight' inputmode='decimal' value='"+esc(p.height||"")+"' placeholder='168'></label><label>Вес<input id='profWeight' inputmode='decimal' value='"+esc(p.weight||"")+"' placeholder='60'></label><label>Возраст<input id='profAge' inputmode='numeric' value='"+esc(p.age||"")+"' placeholder='30'></label><label>Ср. длина цикла<input id='profCycle' inputmode='numeric' value='"+esc(D.cycle_len||"")+"' placeholder='28'></label></div><div class='profileactions'><button class='pbtn' onclick='saveProfileApp()'>Сохранить</button><button class='pbtn alt' onclick='showProfileEditor()'>Отмена</button></div></div></div>";
