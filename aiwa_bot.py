@@ -79,7 +79,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-08-analytics-v19"
+AIWA_VERSION = "2026-07-08-analytics-v20"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1920,8 +1920,6 @@ def aggregate_stats():
     L.append("")
     L.append("ВОВЛЕЧЁННОСТЬ")
     L.append("Событий на DAU: " + str(e["events_per_dau"]) + " = " + str(e["events_total"]) + " событий / " + str(e["active_user_days"]) + " активных·дней" + wow(g.get("events")))
-    L.append("Тул-коллов на DAU: " + str(e["toolcalls_per_dau"]) + " = " + str(e["toolcalls_total"]) + " вызовов / " + str(e["active_user_days"]) + " активных·дней" + wow(g.get("toolcalls")))
-    L.append("Тул-коллы по источнику: приложение " + str(ts.get("app", 0)) + ", чат " + str(ts.get("chat", 0)) + ", авто-сводки " + str(ts.get("auto", 0)))
     L.append("События по источнику: приложение " + str(e["by_source"]["app"]) + ", чат " + str(e["by_source"]["chat"]))
     L.append("Топ действий: " + (", ".join(str(k) + " " + str(vv) for k, vv in e["actions_top"][:6]) or "нет"))
     ss = e["sessions"]
@@ -3466,7 +3464,8 @@ def analytics_data(days=7, frm=None, to=None):
         acc = set(); k = dd - timedelta(days=n - 1)
         while k <= dd: acc |= abw.get(k.isoformat(), set()); k += timedelta(days=1)
         return acc
-    dau = len(active_by_day.get(today.isoformat(), set())); wau = len(win_union(today, 7)); mau = len(win_union(today, 30))
+    anchor = until
+    dau = len(active_by_day.get(anchor.isoformat(), set())); wau = len(win_union(anchor, 7)); mau = len(win_union(anchor, 30))
     avg_dau = active_user_days / span if span else 0
     adays = defaultdict(set); fa = {}
     for cid, ts, action in wide:
@@ -3902,7 +3901,7 @@ function render(){
   var a=D.audience,h='';
   h+="<div class='grid'>"+
    card('Средний DAU',a.avg_dau,'за период',DEF.avgdau,g.avg_dau)+
-   card('DAU сегодня',a.dau,'день ещё идёт',DEF.dau)+
+   card('DAU за день',a.dau,'на '+D.until,DEF.dau)+
    card('WAU',a.wau,'7 дней',DEF.wau)+
    card('MAU',a.mau,'30 дней',DEF.mau)+
    card('Stickiness',a.stickiness+'%','DAU/MAU',DEF.stick)+
@@ -3920,22 +3919,17 @@ function render(){
   var e=D.engagement,ts=D.toolcalls_by_source||{},h='';
   h+="<div class='grid'>"+
    card('Событий на DAU',e.events_per_dau,e.events_total+' соб / '+e.active_user_days+' акт·дн',DEF.evdau,g.events)+
-   card('Тул-коллов на DAU',e.toolcalls_per_dau,e.toolcalls_total+' вызовов / '+e.active_user_days+' акт·дн',DEF.tcdau,g.toolcalls)+
    card('Всего событий',e.events_total,'за период',DEF.evtot,g.events)+
-   card('Всего тул-коллов',e.toolcalls_total,'Σ вызовов модели',DEF.tctot,g.toolcalls)+"</div>";
-  h+=chartCard('cEng','События и тул-коллы по дням',DEF.tctot);
-  h+="<div class='sec-h'>Тул-коллы по источнику"+ic(DEF.tcsrc)+"</div>";
-  h+=tbl(['Источник','Вызовов'],[['Приложение',ts.app],['Чат',ts.chat],['Авто (сводки)',ts.auto]].concat(ts.other?[['Прочее',ts.other]]:[]));
-  h+="<div class='sec-h'>Тул-коллы по типам</div>";
-  h+=tbl(['Тип','Вызовов'],e.toolcalls_by_meta.map(function(x){return [x[0],x[1]];}));
-  h+="<div class='sec-h'>События по источнику</div>";
+   card('Активные·дни',e.active_user_days,'знаменатель «на DAU»',DEF.aud)+"</div>";
+  h+=chartCard('cEng','События по дням',DEF.evtot);
+  h+="<div class='sec-h'>События по источнику"+ic('Приложение vs чат — где пользователи совершают действия.')+"</div>";
   h+=tbl(['Источник','Событий'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
   h+="<div class='sec-h'>Топ действий</div>";
   h+=tbl(['Действие','Кол-во'],e.actions_top.map(function(x){return [x[0],x[1]];}));
   var ss=e.sessions;
   h+="<div class='sec-h'>Сессии <span style='font-weight:600;color:var(--mut);font-size:12px'>(за период "+D.since+" → "+D.until+")</span></div>";
   h+="<div class='grid'>"+card('Сессий всего',ss.count,'',null)+card('Сессий/DAU',ss.per_dau,'',null)+card('Средняя длина',ss.avg_len_min+' мин','',null)+card('Действий/сессия',ss.events_per,'',null)+"</div>";
-  v.innerHTML=h;mkLine('cEng',[{key:'events',label:'События',color:C.ev},{key:'toolcalls',label:'Тул-коллы',color:C.tc}]);
+  v.innerHTML=h;mkLine('cEng',[{key:'events',label:'События',color:C.ev}]);
  } else if(TAB==='prod'){
   var pr=D.product,po=pr.push_open,h='';
   h+="<div class='grid'>"+card('Конверсия пуш→открытие',po.rate+'%',po.opened+' из '+po.sent+' пушей',DEF.push)+card('Отправлено пушей',po.sent,'за период',null)+"</div>";
