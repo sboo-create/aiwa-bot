@@ -79,7 +79,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-06-backdate-addreco-v16"
+AIWA_VERSION = "2026-07-06-weekcal-v17"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -377,8 +377,8 @@ def workouts_recent(cid, days=10, limit=8):
 def workout_del(cid, wid):
     c = db(); c.execute("DELETE FROM workouts WHERE chat_id=? AND id=?", (cid, int(wid))); c.commit(); c.close()
 
-def train_week(cid):
-    today = datetime.now(TZ).date(); monday = today - timedelta(days=today.weekday())
+def train_week(cid, offset=0):
+    today = datetime.now(TZ).date(); monday = today - timedelta(days=today.weekday()) + timedelta(days=offset * 7)
     dow = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]; out = []
     for i in range(7):
         d = monday + timedelta(days=i); ws = workouts_of(cid, d.isoformat())
@@ -3217,8 +3217,13 @@ async def _api_train(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     ev(cid, "button", meta="web_train")
+    try:
+        wo = int(body.get("week_offset") or 0)
+    except (TypeError, ValueError):
+        wo = 0
+    wo = max(-52, min(0, wo))
     tod = workouts_of(cid)
-    return _cors(web.json_response({"ok": True, "profile": train_profile_get(cid), "week": train_week(cid),
+    return _cors(web.json_response({"ok": True, "profile": train_profile_get(cid), "week": train_week(cid, wo),
         "today": tod, "last_review": (tod[-1]["review"] if tod else "")}))
 
 async def _api_workout(request):
