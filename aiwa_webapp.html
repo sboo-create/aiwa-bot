@@ -107,6 +107,12 @@ html{overscroll-behavior:none}body{margin:0;background:var(--paper);color:var(--
 .phasecompact .pb{font-size:12.5px;line-height:1.5;color:var(--inkMid);margin-top:6px}
 .phasecompact .minirow{margin-top:10px}
 .phasepill{border-radius:999px;padding:7px 10px;font-size:11px;font-weight:800;background:#fff;color:var(--inkMid);border:1px solid rgba(33,28,26,.07)}
+.phasenow{border-radius:18px;border:1px solid var(--line);padding:14px;background:#fff;margin-top:14px}
+.phasenow-hd{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.phasenow-lab{font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--inkSoft);font-weight:700}
+.phasenow .pn{font-family:var(--serif);font-size:20px;font-weight:600;margin-top:6px}
+.phasenow .pb{font-size:12.5px;line-height:1.5;color:var(--inkMid);margin-top:6px}
+.phasenow .minirow{margin-top:11px}
 .foodhero{background:linear-gradient(135deg,#FBEFCB 0%,#FBE4E9 86%);border-color:#F2D7B5}
 .foodchips,.trainchips{display:flex;flex-wrap:wrap;gap:7px;margin:11px 0 4px}
 .nutrichip{border-radius:999px;padding:7px 10px;font-size:11px;font-weight:800;background:#fff;color:var(--inkMid);border:1px solid rgba(33,28,26,.07)}
@@ -339,7 +345,7 @@ body{padding-top:var(--safe-top,0px)}
 
 .trplus{flex:none;width:40px;height:40px;border-radius:11px;border:1px solid var(--line);background:#fff;font-size:22px;color:var(--ink);cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center}
 
-.streakchip{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:800;color:var(--quinceDeep);background:var(--quinceWash);border-radius:99px;padding:4px 10px;flex:none;white-space:nowrap}
+.streakchip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:var(--quinceDeep);background:var(--quinceWash);border-radius:99px;padding:4px 9px;flex:none;white-space:nowrap}
 .djhdr{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
 .trwkhdr{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
 .symgrp{font-size:11px;color:var(--inkSoft);font-weight:700;margin:11px 0 5px}
@@ -423,11 +429,11 @@ function phaseGuide(active){
   active=active||"fol";
   var g=PHASE_GUIDE[active]||PHASE_GUIDE.fol;
   var f=PHASE_FOCUS[active]||PHASE_FOCUS.fol;
-  var html="<div class='card'><div class='sec' style='margin-top:0'>Фаза сейчас</div>";
-  html+="<div class='phasecompact' style='background:"+WASH[active]+";border-color:"+COL[active]+"'>";
-  html+="<span class='tag' style='color:"+COL[active]+";background:#fff'>"+g.days+"</span><div class='pn' style='color:"+COL[active]+"'>"+RU[active]+"</div>";
+  var html="<div class='phasenow' style='background:"+WASH[active]+";border-color:"+COL[active]+"'>";
+  html+="<div class='phasenow-hd'><span class='phasenow-lab'>Фаза сейчас</span><span class='tag' style='color:"+COL[active]+";background:#fff'>"+g.days+"</span></div>";
+  html+="<div class='pn' style='color:"+COL[active]+"'>"+RU[active]+"</div>";
   html+="<div class='pb'>"+g.body+"</div><div class='minirow'><span class='phasepill'>Еда: "+f.food+"</span><span class='phasepill'>Нагрузка: "+f.move+"</span></div>";
-  html+="</div></div>";
+  html+="</div>";
   return html;
 }
 function mealIcon(mm,i){var s=((mm&&mm.dish)||"").toLowerCase();
@@ -524,8 +530,7 @@ function renderToday(){
   var delayMsg=delayed?delayMsgText(D.status,D.delay_days||0):"";
   var ayvaTxt=delayed?delayAyvaText(D.status,D.delay_days||0):SUMM[ph];
   var g=greeting();
-  var html="<div class='eyebrow'>"+WD[(today.getDay()+6)%7]+"</div>";
-  html+="<div class='greet'>"+g+(NAME?",<br><span class='nm'>"+esc(NAME)+"</span>":"")+"</div>";
+  var html="<div class='greet'>"+g+(NAME?",<br><span class='nm'>"+esc(NAME)+"</span>":"")+"</div>";
   html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='al'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+ayvaTxt+"</div><div class='medline'>Опираюсь на медицинские рекомендации и твои отметки.</div></div></div><div class='chips' id='tchips'></div></div>";
   var phaseChip="<span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span>";
   var tagHtml=delayed?(phaseChip+"<span class='tag delaychip'>Задержка</span>"):(phaseChip+"<span class='psub'>"+sub+" фаза</span>");
@@ -756,7 +761,6 @@ async function renderFood(){
     html+=dishChips(r);
   }
   html+="<div id='diarybox'></div>";
-  html+="<div class='chips'><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Что приготовить на ужин с учётом фазы?\");},120)'>Идеи на ужин</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Собери список покупок по этому меню на день.\");},120)'>Список покупок</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Чем заменить блюдо, если не хочу его есть?\");},120)'>Заменить блюдо</button></div>";
   html+="<div class='foot'>Меню рассчитывается каждый день с учётом фазы цикла, твоих пожеланий, пищевых ограничений и медицинских рекомендаций.</div>";
   el.innerHTML=html;loadedFood=true;
   loadDiary();
@@ -769,8 +773,9 @@ function dishChips(r){
   var seen={},items=[];
   meals.forEach(function(mm){var d=(mm&&mm.dish||'').trim();if(!d)return;var kw=d.split(' ')[0].replace(/[,.:;]+$/,'');if(kw.length<3)kw=d;var key=kw.toLowerCase();if(seen[key])return;seen[key]=1;items.push({kw:kw,dish:d});});
   items=items.slice(0,3);if(!items.length)return '';
-  var h="<div class='chips'>";
-  items.forEach(function(it){var q="Чем полезно блюдо «"+it.dish+"» в моём меню сегодня? Ответь коротко.";h+="<button class='chip' onclick='go(\"chat\");setTimeout(function(){send("+JSON.stringify(q)+");},120)'>"+esc(it.kw)+" — в чём польза?</button>";});
+  var T=[{l:"польза?",q:"Чем полезно блюдо «%d» в моём меню сегодня? Ответь коротко."},{l:"замена?",q:"Чем можно заменить «%d», если не хочется? Дай пару вариантов под мою фазу."},{l:"рецепт?",q:"Как проще и вкуснее приготовить «%d»? Короткий рецепт."},{l:"порция?",q:"Какая примерно порция «%d» под мою дневную норму?"}];
+  var h="<div class='chips' style='margin:4px 0 16px'>";
+  items.forEach(function(it,i){var t=T[i%T.length];var q=t.q.replace('%d',it.dish);h+="<button class='chip' onclick='go(\"chat\");setTimeout(function(){send("+JSON.stringify(q)+");},120)'>"+esc(it.kw)+": "+t.l+"</button>";});
   h+="</div>";return h;
 }
 function renderDiaryBox(){var box=document.getElementById('diarybox');if(box)box.innerHTML=diaryHTML();}
@@ -793,7 +798,7 @@ function diaryHTML(){
   h+="<div id='foodtextbox' class='hidden' style='margin-top:8px'><div class='symadd'><input id='foodtextin' placeholder='Напр.: 200 г творога и банан'><button onclick='sendFoodText()'>Добавить</button></div></div>";
   h+=editPanel("manual",null);
   if(meals.length)h+="<button class='djabtn' style='margin-top:12px;width:100%' onclick='diaryReco()'>💡 Совет по дневнику</button><div id='diarreco' style='margin-top:8px;font-size:13px;color:var(--inkMid);line-height:1.5'></div>";
-  h+="<div class='djtip'>Иконка приёма (🌅 завтрак · ☀️ обед · 🍎 перекус · 🌙 ужин) — тап меняет приём. ✎ правит блюдо, 🗑 удаляет.</div></div>";return h;
+  h+="</div>";return h;
 }
 function djmac(l,v,tg,cls){var vv=Math.round(v||0),tt=Math.round(tg||0),p=tt?Math.min(100,Math.round(vv/tt*100)):0;return "<div><div class='l'>"+l+"</div><div class='v'>"+vv+"<span>"+(tt?(" / "+tt+" г"):" г")+"</span></div><div class='djmb "+cls+"'><span style='width:"+p+"%'></span></div></div>";}
 function mealRow(m){var sm=slotMeta(m.slot||"snack");var src=m.source==='photo'?' · 📷':(m.source==='text'?' · ✍️':(m.source==='manual'?' · ✎':''));
@@ -839,12 +844,11 @@ async function diaryReco(){var box=document.getElementById('diarreco');if(box)bo
 (function(){var f=document.getElementById('foodfile');if(f)f.addEventListener('change',onFoodFile);})();
 async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",hormones:["Без данных о цикле Айва не делает выводы о фазе.","Главные ориентиры: боль, кровотечение, слабость, сон и восстановление.","При беременности, сильной боли, головокружении или обильном кровотечении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли, рывков и глубокого пресса"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости, боли или обильного кровотечения",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка"};}
   var html="<div class='h'>Нагрузка</div>";
-  html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trainBlossom'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+esc(p.level)+"</div><div class='pmeta'>"+esc(p.duration)+(p.day?(" · день "+esc(p.day)+" из "+esc(p.cycle_len)):"")+"</div><div class='ayva-txt' style='margin-top:9px'>"+esc(p.summary||"")+"</div></div></div></div>";
+  html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trainBlossom'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+esc(p.level)+"</div><div class='pmeta'>"+esc(p.duration)+(p.day?(" · день "+esc(p.day)+" из "+esc(p.cycle_len)):"")+"</div><div class='ayva-txt' style='margin-top:9px'>"+esc(p.summary||"")+"</div>"+(p.why?("<div class='ayva-txt' style='margin-top:8px'>"+esc(p.why)+"</div>"):"")+"</div></div></div>";
   html+="<div id='trLog'></div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Что выбрать</div>";
   (p.options||[]).forEach(function(o,i){html+="<div class='trainrow rich'><div class='trainico'>"+(i+1)+"</div><div><div class='tn'>"+esc(o.name)+"</div><div class='trainmeta'><div><div class='ml'>Чем полезна</div><div class='mv'>"+esc(o.benefit||"")+"</div></div><div><div class='ml'>Как делать</div><div class='mv'>"+esc(o.how||o.detail||"")+"</div></div></div></div></div>";});
   html+="</div>";
-  html+="<div class='card'><div class='sec' style='margin-top:0'>Почему именно так</div><div class='ayva-txt'>"+esc(p.why||"")+"</div></div>";
   html+="<div class='card'><div class='ayva-lab'>Сегодня лучше не делать</div><div class='ayva-txt'>"+esc(p.avoid||p.reduce||"тренировку через боль и слабость")+"</div><div class='ayva-lab' style='margin-top:12px'>После нагрузки</div><div class='ayva-txt'>"+esc(p.recovery||"вода, белок, сон")+"</div></div>";
   var _o0=(p.options&&p.options[0]&&p.options[0].name)||"";var trq="<div class='chips'>";if(_o0)trq+="<button class='chip' onclick='go(\"chat\");setTimeout(function(){send("+JSON.stringify("Как правильно делать «"+_o0+"» и сколько по времени?")+");},120)'>"+esc(_o0)+": как делать?</button>";trq+="<button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"А если сегодня мало сил — что делать?\");},120)'>Мало сил?</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Что делать после тренировки для восстановления?\");},120)'>После нагрузки</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Можно ли тренироваться при боли или кровотечении?\");},120)'>Можно при боли?</button></div>";html+=trq;
   html+="<div class='foot'>Нагрузка подбирается по фазе цикла и самочувствию. При боли, слабости, беременности или обильном кровотечении лучше снизить интенсивность и обсудить активность с врачом.</div>";
