@@ -767,19 +767,22 @@ def training_text(st, profile=None):
     return "\n".join(lines)
 
 def training_review(workout, recent=None, phase_ru=None, mode=None, profile=None, usage=None):
-    """Разбор отмеченной тренировки + адаптивная следующая нагрузка (учёт истории, восстановление, фаза; без повторов)."""
+    """Разбор тренировки: разбор + что добавить + следующая нагрузка (учёт истории, восстановления, фазы)."""
     def _items(w):
         out = []
         for it in (w.get("items") or []):
             nm = (it.get("name") or "").strip()
             if not nm: continue
-            out.append(nm + (" " + str(it.get("weight")) + " кг" if it.get("weight") else ""))
+            extra = []
+            if it.get("weight"): extra.append(str(it.get("weight")) + " кг")
+            if it.get("sets"): extra.append(str(it.get("sets")) + "x" + (str(it.get("reps")) if it.get("reps") else "?"))
+            out.append(nm + ((" " + " ".join(extra)) if extra else ""))
         return ", ".join(out)
     today_items = _items(workout) or "без деталей"
     hist_lines = []
     for w in (recent or [])[:6]:
         it = ", ".join((i.get("name") or "") for i in (w.get("items") or []) if i.get("name"))
-        hist_lines.append((w.get("d","") or "") + ": " + (w.get("type","") or "") + ((" (" + it + ")") if it else "") + ((", " + w.get("rpe")) if w.get("rpe") else ""))
+        hist_lines.append((w.get("d","") or "") + ": " + (w.get("type","") or "") + ((" (" + it + ")") if it else ""))
     hist = "; ".join(hist_lines) or "нет записей"
     ctx = []
     if phase_ru: ctx.append("Фаза цикла сейчас: " + str(phase_ru) + ".")
@@ -787,19 +790,21 @@ def training_review(workout, recent=None, phase_ru=None, mode=None, profile=None
     prof = profile if isinstance(profile, dict) else {}
     pr = "; ".join(str(k) + ": " + str(v) for k, v in prof.items() if v)
     if pr: ctx.append("Профиль тренировок: " + pr + ".")
+    if workout.get("muscles"): ctx.append("Основные группы мышц: " + str(workout.get("muscles")) + ".")
+    if workout.get("kcal"): ctx.append("Оценка сожжённых калорий: около " + str(workout.get("kcal")) + " ккал.")
     parts = [
         "Пользователь только что отметила тренировку.",
-        "Сегодня: " + (workout.get("type","") or "") + " · " + today_items + " · " + (workout.get("duration","") or "") + " · ощущение: " + (workout.get("rpe","") or "") + ".",
+        "Сегодня: " + (workout.get("type","") or "") + " - " + today_items + " - " + (workout.get("duration","") or "") + " - ощущение: " + (workout.get("rpe","") or "") + ".",
         "Недавние тренировки (свежие сверху): " + hist + ".",
         " ".join(ctx),
-        "Дай короткий разбор обычным текстом, без markdown и списков.",
-        "1) Разбор: как эта нагрузка ложится на фазу цикла и на недавнюю историю, по делу и поддерживающе, 1-2 предложения.",
-        "2) Отдельным абзацем, начиная строго со слов 'Следующая нагрузка:' - предложи конкретную следующую тренировку (тип, примерная длительность и почему). Обязательно учитывай восстановление: после тяжёлой силовой предложи восстановление, зону 2 или другую группу мышц, а не то же самое. Не повторяй одинаковые советы изо дня в день, опирайся на историю и фазу.",
-        "Всего 3-5 предложений, конкретно, без общих фраз.",
+        "Ответь обычным текстом, без markdown и звёздочек, тремя короткими блоками, каждый с новой строки и с указанной подписи в начале:",
+        "Разбор: 1-2 предложения, как эта нагрузка ложится на фазу цикла и недавнюю историю, поддерживающе.",
+        "Что добавить: 1 предложение - какой группы мышц или элемента не хватает на этой неделе.",
+        "Следующая нагрузка: 1-2 предложения, конкретно что сделать в следующий раз, обязательно с учётом восстановления (после тяжёлой силовой - восстановление или другая группа, не то же самое) и без повторов изо дня в день.",
     ]
     user = "\n".join(x for x in parts if x)
-    sys = "Ты AIWA — тёплый и точный ассистент по женскому здоровью и тренировкам. Пиши по-русски, обычным текстом, без markdown, без звёздочек и списков, без приветствий."
-    out = _call([{"role": "system", "content": sys}, {"role": "user", "content": user}], max_tokens=380, temperature=0.6, usage=usage)
+    sys = "Ты AIWA - тёплый и точный ассистент по женскому здоровью и тренировкам. Пиши по-русски, обычным текстом, без markdown, без звёздочек и списков, без приветствий."
+    out = _call([{"role": "system", "content": sys}, {"role": "user", "content": user}], max_tokens=420, temperature=0.6, usage=usage)
     return (out or "").strip()
 
 def explain_section(st, key, usage=None):

@@ -40,6 +40,8 @@ BCAST_Q = None  # очередь утренней рассылки (троттл
 BCAST_PENDING = set()
 FOOD_Q = None   # очередь обеденного пуша про еду
 FOOD_PENDING = set()
+TRAIN_Q = None  # очередь вечернего пуша про тренировку
+TRAIN_PENDING = set()
 ANNOUNCE_WAIT = set()   # админы в режиме рассылки: ждём следующее сообщение и копируем всем
 ALERT_LAST = {}
 CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
@@ -77,7 +79,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-06-training-announce-v11"
+AIWA_VERSION = "2026-07-06-train-pushes-v13"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -211,6 +213,9 @@ def db():
         except sqlite3.OperationalError: pass
     try: c.execute("ALTER TABLE meals ADD COLUMN slot TEXT")
     except sqlite3.OperationalError: pass
+    for _wcol in ("kcal INTEGER DEFAULT 0", "muscles TEXT"):
+        try: c.execute(f"ALTER TABLE workouts ADD COLUMN {_wcol}")
+        except sqlite3.OperationalError: pass
     for _ix in ("CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts)",
                 "CREATE INDEX IF NOT EXISTS ix_events_cid_ts ON events(chat_id, ts)",
                 "CREATE INDEX IF NOT EXISTS ix_meals_cid_d ON meals(chat_id, d)",
@@ -219,7 +224,7 @@ def db():
         except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
-                "period_end TEXT", "period_len INTEGER", "train_profile TEXT"):
+                "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     return c
@@ -339,19 +344,30 @@ def meal_scale(cid, mid, new_grams):
               (int(round(r[0] * k)), round(r[1] * k, 1), round(r[2] * k, 1), round(r[3] * k, 1), int(new_grams), cid, int(mid)))
     c.commit(); c.close(); return True
 
+_MET = {"Силовая": 5.0, "Кардио": 8.0, "Йога": 3.0, "Ходьба": 3.5, "Плавание": 7.0}
+def workout_calories(wtype, duration, rpe, weight_kg):
+    m = re.search(r"\d+", str(duration or "")); mins = int(m.group()) if m else 40
+    met = _MET.get(wtype, 5.0)
+    r = str(rpe or "").lower()
+    if "лег" in r: met *= 0.85
+    elif "тяж" in r: met *= 1.15
+    w = weight_kg if (weight_kg and weight_kg > 30) else 65
+    return int(round(met * w * (mins / 60.0)))
+
 def workout_add(cid, rec, d=None):
     d = d or date.today().isoformat()
     c = db()
-    cur = c.execute("INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note,review) VALUES(?,?,?,?,?,?,?,?,?)",
+    cur = c.execute("INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note,review,kcal,muscles) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (cid, d, datetime.now(TZ).isoformat(), rec.get("type", ""), json.dumps(rec.get("items", []), ensure_ascii=False),
-         rec.get("duration", ""), rec.get("rpe", ""), rec.get("note", ""), rec.get("review", "")))
+         rec.get("duration", ""), rec.get("rpe", ""), rec.get("note", ""), rec.get("review", ""),
+         int(rec.get("kcal") or 0), rec.get("muscles", "")))
     wid = cur.lastrowid; c.commit(); c.close(); return wid
 
 def workouts_of(cid, d=None):
     d = d or date.today().isoformat()
-    c = db(); r = c.execute("SELECT id,ts,type,items,duration,rpe,note,review FROM workouts WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
+    c = db(); r = c.execute("SELECT id,ts,type,items,duration,rpe,note,review,kcal,muscles FROM workouts WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
     return [{"id": x[0], "ts": x[1], "type": x[2], "items": json.loads(x[3] or "[]"), "duration": x[4],
-             "rpe": x[5], "note": x[6], "review": x[7]} for x in r]
+             "rpe": x[5], "note": x[6], "review": x[7], "kcal": x[8], "muscles": x[9]} for x in r]
 
 def workouts_recent(cid, days=10, limit=8):
     cut = (date.today() - timedelta(days=days)).isoformat()
@@ -558,13 +574,22 @@ DIETD = dict(DIET)
 def profile_of(u):
     if u and u.get("height") and u.get("weight") and u.get("age"):
         return {"height": u["height"], "weight": u["weight"], "age": u["age"], "activity": u.get("activity") or 3,
-                "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or ""}
+                "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}
     return None
 def diet_human(code_csv):
     if not code_csv: return "без ограничений"
     return ", ".join(DIETD.get(x, x) for x in code_csv.split(",") if x) or "без ограничений"
 def profile_kcal(p):
-    return calc_calories(p["height"], p["weight"], p["age"], p["activity"])
+    base = calc_calories(p["height"], p["weight"], p["age"], p["activity"])
+    try:
+        goal = int(p.get("kcal_goal") or 0)
+    except (TypeError, ValueError):
+        goal = 0
+    if 800 <= goal <= 6000:
+        kg = p["weight"]; prot = round(1.6 * kg); fat = round(goal * 0.3 / 9)
+        carbs = round(max(0, goal - prot * 4 - fat * 9) / 4)
+        return (goal, prot, fat, carbs)
+    return base
 
 def match_meta(text):
     t = text.lower()
@@ -1321,16 +1346,68 @@ async def broadcast_worker(app):
             BCAST_Q.task_done()
         await asyncio.sleep(delay)
 
+def _phase_of(cid):
+    try:
+        _, st = status_of(cid); return (st or {}).get("phase")
+    except Exception:
+        return None
+
+def food_reminder_text(cid):
+    base = "🍽 Не забудь отметить обед. Пришли фото тарелки, напиши текстом или добавь вручную — Айва посчитает КБЖУ."
+    tip = {"menstrual": "Сейчас менструация — добавь железо: гречка, красное мясо, зелень, гранат.",
+           "follicular": "Ты в фолликулярной фазе — упор на белок и овощи, углеводы усваиваются хорошо.",
+           "ovulation": "Овуляция — лёгкая клетчатка, белок и побольше воды.",
+           "luteal": "Лютеиновая фаза — магний и белок помогут с тягой к сладкому и сытостью."}.get(_phase_of(cid))
+    return base + (("\n\n" + tip) if tip else "")
+
+def train_reminder_text(cid):
+    base = "🏋️ Ещё не отмечала тренировку сегодня? Даже 20 минут считается. Отметь — Айва разберёт нагрузку и подскажет следующую."
+    tip = {"menstrual": "Сейчас менструация — подойдёт лёгкое: ходьба, растяжка, мягкая йога.",
+           "follicular": "Фолликулярная фаза — хорошее окно для силовой или интенсива.",
+           "ovulation": "Овуляция — сил много, но береги связки.",
+           "luteal": "Лютеиновая фаза — спокойное кардио или зона 2, без рекордов."}.get(_phase_of(cid))
+    return base + (("\n\n" + tip) if tip else "")
+
 async def push_food_reminder(context, cid):
     u = row(cid)
     if not is_onboarded(u): return
     if meals_of(cid, date.today().isoformat()): return   # уже отметила еду сегодня — не дёргаем
     wu = webapp_url(u) or AIWA_WEBAPP_URL
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🍎 Отметить еду", web_app=WebAppInfo(url=wu))]]) if wu else None
-    await context.bot.send_message(cid,
-        "🍽 Не забудь отметить обед. Пришли фото тарелки, напиши текстом или добавь вручную — Айва посчитает КБЖУ и подскажет, чего сегодня не хватает.",
-        reply_markup=kb)
+    await context.bot.send_message(cid, food_reminder_text(cid), reply_markup=kb)
     ev(cid, "broadcast", meta="food_reminder_sent")
+
+async def push_train_reminder(context, cid):
+    u = row(cid)
+    if not is_onboarded(u): return
+    if workouts_of(cid, date.today().isoformat()): return   # уже отметила тренировку — не дёргаем
+    wu = webapp_url(u) or AIWA_WEBAPP_URL
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏋️ Отметить тренировку", web_app=WebAppInfo(url=wu))]]) if wu else None
+    await context.bot.send_message(cid, train_reminder_text(cid), reply_markup=kb)
+    ev(cid, "broadcast", meta="train_reminder_sent")
+
+async def train_worker(app):
+    delay = float(os.environ.get("AIWA_TRAIN_DELAY", "0.3"))
+    while True:
+        cid = await TRAIN_Q.get()
+        try:
+            await push_train_reminder(_BCtx(app), cid)
+        except Forbidden:
+            log.info("train reminder %s: заблокирован", cid)
+        except Exception as e:
+            log.warning("train reminder %s: %s", cid, e)
+        finally:
+            TRAIN_PENDING.discard(cid)
+            TRAIN_Q.task_done()
+        await asyncio.sleep(delay)
+
+async def train_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    if TRAIN_Q is None: return
+    n = 0
+    for cid in all_users():
+        if cid in TRAIN_PENDING: continue
+        TRAIN_PENDING.add(cid); await TRAIN_Q.put(cid); n += 1
+    log.info("train reminder queued: %d", n)
 
 async def food_worker(app):
     delay = float(os.environ.get("AIWA_FOOD_DELAY", "0.3"))
@@ -2468,7 +2545,7 @@ async def model_probe(app):
         await asyncio.sleep(interval)
 
 async def on_startup(app):
-    global BOT_USERNAME, BCAST_Q, FOOD_Q
+    global BOT_USERNAME, BCAST_Q, FOOD_Q, TRAIN_Q
     try:
         import concurrent.futures
         _ex_threads = max(8, min(128, int(os.environ.get("AIWA_EXECUTOR_THREADS", "32"))))
@@ -2513,6 +2590,15 @@ async def on_startup(app):
         _fh, _fm = 14, 0
     app.job_queue.run_daily(food_reminder_job, time=dtime(_fh, _fm, tzinfo=TZ), name="food_reminder_all")
     log.info("food reminder scheduled %02d:%02d, workers: %d", _fh, _fm, _fw)
+    TRAIN_Q = asyncio.Queue()
+    for _ in range(_fw):
+        asyncio.create_task(train_worker(app))
+    try:
+        _th, _tm = map(int, os.environ.get("AIWA_TRAIN_PUSH_TIME", "19:00").split(":"))
+    except (ValueError, AttributeError):
+        _th, _tm = 19, 0
+    app.job_queue.run_daily(train_reminder_job, time=dtime(_th, _tm, tzinfo=TZ), name="train_reminder_all")
+    log.info("train reminder scheduled %02d:%02d", _th, _tm)
     asyncio.create_task(load_logger(app))
     asyncio.create_task(model_probe(app))
     n = catchup = 0
@@ -2566,9 +2652,14 @@ async def _api_data(request):
            "today_log": log_get(cid, date.today().isoformat()) or {"symptoms": []},
            "send_time": u.get("send_time") or "08:00",
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
-                       "activity": u.get("activity"), "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or ""}}
+                       "activity": u.get("activity"), "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}}
     out["sym_log"] = logs_of(cid, (date.today() - timedelta(days=45)).isoformat())
     out["past_periods"] = periods_of(cid)
+    try:
+        _pr = profile_of(u)
+        out["kcal_base"] = calc_calories(_pr["height"], _pr["weight"], _pr["age"], _pr["activity"])[0] if _pr else None
+    except Exception:
+        out["kcal_base"] = None
     if out["cycle"]:
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
@@ -2709,9 +2800,22 @@ async def _api_profile(request):
         assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80
     except Exception:
         return _cors(web.json_response({"error": "bad_profile", "text": "Нужны рост, вес и возраст."}, status=400))
-    upsert(cid, height=int(cm), weight=kg, age=age); menu_cache_clear(cid)
+    upsert(cid, height=int(cm), weight=kg, age=age)
+    g = body.get("kcal_goal")
+    if g in (None, "", 0, "0"):
+        upsert(cid, kcal_goal=None)
+    else:
+        try:
+            gi = int(float(str(g).replace(",", ".")))
+            upsert(cid, kcal_goal=(gi if 800 <= gi <= 6000 else None))
+        except (TypeError, ValueError):
+            pass
+    menu_cache_clear(cid)
     ev(cid, "manual", meta="web_profile")
-    return _cors(web.json_response({"ok": True, "profile": {"height": int(cm), "weight": kg, "age": age}}))
+    _u2 = row(cid)
+    return _cors(web.json_response({"ok": True,
+        "profile": {"height": int(cm), "weight": kg, "age": age, "kcal_goal": _u2.get("kcal_goal")},
+        "kcal_base": calc_calories(int(cm), kg, age, _u2.get("activity") or 3)[0]}))
 async def _api_meal(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -3005,17 +3109,25 @@ async def _api_workout(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
-    items = []
-    for i in (body.get("items") or [])[:12]:
+    items = []; groups = []
+    for i in (body.get("items") or [])[:24]:
         nm = str(i.get("name") or "").strip()[:40]
         if not nm: continue
-        w = i.get("weight")
-        items.append({"name": nm, "weight": (_num(w) if w not in (None, "", 0) else None)})
-    wk = {"type": str(body.get("type") or "")[:40], "items": items,
-          "duration": str(body.get("duration") or "")[:20], "rpe": str(body.get("rpe") or "")[:20],
-          "note": str(body.get("note") or "")[:200]}
-    if not wk["type"] and not items:
+        w = i.get("weight"); sets = i.get("sets"); reps = i.get("reps"); grp = str(i.get("group") or "").strip()[:24]
+        items.append({"name": nm,
+                      "weight": (_num(w) if w not in (None, "", 0) else None),
+                      "sets": (int(_num(sets)) if sets not in (None, "", 0) else None),
+                      "reps": (int(_num(reps)) if reps not in (None, "", 0) else None),
+                      "group": (grp or None)})
+        if grp and grp not in groups: groups.append(grp)
+    wtype = str(body.get("type") or "")[:40]; dur = str(body.get("duration") or "")[:20]; rpe = str(body.get("rpe") or "")[:20]
+    if not wtype and not items:
         return _cors(web.json_response({"error": "empty", "text": "Выбери тип и упражнения."}, status=400))
+    prof = profile_of(u); weight_kg = (prof.get("weight") if prof else None)
+    kcal = workout_calories(wtype, dur, rpe, weight_kg)
+    muscles = ", ".join(groups)
+    wk = {"type": wtype, "items": items, "duration": dur, "rpe": rpe, "note": str(body.get("note") or "")[:200],
+          "kcal": kcal, "muscles": muscles}
     _, st = status_of(cid); phase_ru = (st or {}).get("phase_ru") if st else None
     usage = []
     try:
@@ -3029,7 +3141,8 @@ async def _api_workout(request):
         return _cors(web.json_response({"error": "save", "text": "Сбой сохранения: " + str(e)}, status=500))
     if usage: ev(cid, "tokens", sum(usage), meta="workout", calls=len(usage))
     ev(cid, "goal", meta="workout"); ev(cid, "manual", meta="workout")
-    return _cors(web.json_response({"ok": True, "review": review, "week": train_week(cid), "today": workouts_of(cid)}))
+    return _cors(web.json_response({"ok": True, "review": review, "calories": kcal, "muscles": muscles,
+        "week": train_week(cid), "today": workouts_of(cid)}))
 
 async def _api_train_profile(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))

@@ -324,6 +324,18 @@ body{padding-top:var(--safe-top,0px)}
 .trwc small{font-size:8.5px;color:var(--inkMid);font-weight:600}
 .tpin{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:12px;background:#fff;padding:11px;font-family:var(--sans);font-size:14px;color:var(--ink)}
 .trprow{display:flex;justify-content:space-between;align-items:center}
+
+.trgrp{border-top:1px solid var(--line)}
+.trgh{display:flex;align-items:center;gap:8px;padding:12px 2px;cursor:pointer;font-size:14px;font-weight:700}
+.trgh .trgc{margin-left:auto;font-size:11px;font-weight:700;color:var(--roseDeep);background:var(--roseWash);border-radius:99px;padding:1px 8px;min-width:20px;text-align:center}
+.trgh .trgar{font-size:11px;color:var(--inkSoft);transition:transform .2s}
+.trgrp.open .trgar{transform:rotate(180deg)}
+.trstep{display:inline-flex;align-items:center;gap:5px;margin:2px 6px 2px 0}
+.trwlab{font-size:10px;color:var(--inkSoft);font-weight:700;text-transform:uppercase}
+.trws{flex-wrap:wrap}
+.trstat{font-size:12.5px;font-weight:700;color:var(--roseDeep);margin-top:4px}
+.trcustom{display:flex;gap:8px;align-items:center;padding:8px 0 4px}
+.trcustom .tpin{margin:0}
 </style>
 </head>
 <body>
@@ -777,18 +789,18 @@ function pickSlot(pid,slot,el){var p=document.getElementById('ed-'+pid);if(p)p.s
 function _gv(id){var e=document.getElementById(id);return e?e.value:'';}
 async function saveMealEdit(id,pid){var p=document.getElementById('ed-'+pid);var body={id:id,title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};var r=await api('/api/diary_edit',body);if(_applyDiary(r)){haptic('impact','light');toast('Сохранено');}}
 function openManual(){var e=document.getElementById('ed-manual');if(!e)return;document.querySelectorAll('.djedit.open').forEach(function(x){if(x!==e)x.classList.remove('open');});e.classList.add('open');var t=document.getElementById('f-title-manual');if(t)setTimeout(function(){t.focus();},60);}
-async function saveManual(pid){var p=document.getElementById('ed-'+pid);var body={title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};if(!((body.title||'').trim())&&!((body.kcal||'').trim())){toast('Укажи название или калории');return;}var r=await api('/api/food_manual',body);if(r&&r.ok){_applyDiary(r);toast('Добавлено');haptic('impact','light');}else toast((r&&r.message)||'Не получилось');}
+async function saveManual(pid){var p=document.getElementById('ed-'+pid);var body={title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};if(!((body.title||'').trim())&&!((body.kcal||'').trim())){toast('Укажи название или калории');return;}showFoodLoading();var r=await api('/api/food_manual',body);hideFoodLoading();if(r&&r.ok){_applyDiary(r);toast('Добавлено');haptic('impact','light');}else toast((r&&r.message)||'Не получилось');}
 function pickFoodPhoto(){var f=document.getElementById('foodfile');if(f)f.click();}
 async function onFoodFile(e){var file=e.target.files&&e.target.files[0];e.target.value='';if(file)await uploadFoodPhoto(file);}
 function compressImage(file,maxDim,quality){return new Promise(function(resolve){try{if(!/^image\//.test(file.type||'')){resolve(file);return;}var url=URL.createObjectURL(file),img=new Image();img.onload=function(){try{URL.revokeObjectURL(url);}catch(e){}var w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;if(!w||!h){resolve(file);return;}var scale=Math.min(1,maxDim/Math.max(w,h));var cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));var c=document.createElement('canvas');c.width=cw;c.height=ch;var ctx=c.getContext('2d');ctx.drawImage(img,0,0,cw,ch);if(c.toBlob){c.toBlob(function(b){resolve(b&&b.size?b:file);},'image/jpeg',quality||0.82);}else{try{var d=c.toDataURL('image/jpeg',quality||0.82),bin=atob(d.split(',')[1]),ar=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)ar[i]=bin.charCodeAt(i);resolve(new Blob([ar],{type:'image/jpeg'}));}catch(e){resolve(file);}}};img.onerror=function(){try{URL.revokeObjectURL(url);}catch(e){}resolve(file);};img.src=url;}catch(e){resolve(file);}});}
-async function uploadFoodPhoto(file){toast('Сжимаю и разбираю фото…');var blob=file;try{blob=await compressImage(file,1600,0.82);}catch(e){}try{var fd=new FormData();fd.append('initData',INIT);fd.append('photo',blob,'food.jpg');
+async function uploadFoodPhoto(file){toast('Сжимаю и разбираю фото…');var blob=file;try{blob=await compressImage(file,1600,0.82);}catch(e){}showFoodLoading();try{var fd=new FormData();fd.append('initData',INIT);fd.append('photo',blob,'food.jpg');
   var resp=await fetch('/api/food_photo',{method:'POST',body:fd});
-  if(!resp.ok){toast(resp.status===413?'Фото слишком большое':'Сервер не принял фото ('+resp.status+')');return;}
-  var r=await resp.json();
+  if(!resp.ok){hideFoodLoading();toast(resp.status===413?'Фото слишком большое':'Сервер не принял фото ('+resp.status+')');return;}
+  hideFoodLoading();var r=await resp.json();
   if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.title)||'приём')+' · '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}
-  else{toast((r&&r.message)||'Не разобрала фото');}}catch(e){toast('Не удалось отправить фото, попробуй ещё раз');}}
+  else{toast((r&&r.message)||'Не разобрала фото');}}catch(e){hideFoodLoading();toast('Не удалось отправить фото, попробуй ещё раз');}}
 function toggleFoodText(){var b=document.getElementById('foodtextbox');if(!b)return;b.classList.toggle('hidden');var i=document.getElementById('foodtextin');if(i&&!b.classList.contains('hidden'))setTimeout(function(){i.focus();},50);}
-async function sendFoodText(){var i=document.getElementById('foodtextin');var t=(i&&i.value||'').trim();if(!t)return;i.value='';toast('Считаю…');var r=await api('/api/food_text',{text:t});if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}else toast((r&&r.message)||'Не поняла блюдо');}
+async function sendFoodText(){var i=document.getElementById('foodtextin');var t=(i&&i.value||'').trim();if(!t)return;i.value='';toast('Считаю…');showFoodLoading();var r=await api('/api/food_text',{text:t});hideFoodLoading();if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}else toast((r&&r.message)||'Не поняла блюдо');}
 async function delMeal(id){var r=await api('/api/diary_del',{id:id});if(_applyDiary(r))haptic('selection');}
 async function scaleMeal(id,delta){var m=((DIARY&&DIARY.meals)||[]).filter(function(x){return x.id===id;})[0];if(!m||!m.grams)return;var ng=Math.max(10,m.grams+delta);var r=await api('/api/diary_scale',{id:id,grams:ng});if(_applyDiary(r))haptic('selection');}
 async function diaryReco(){var box=document.getElementById('diarreco');if(box)box.innerHTML=thinkHTML('Айва смотрит дневник');var r=await api('/api/diary_reco',{});if(box)box.textContent=(r&&r.text)||'Не получилось, попробуй позже.';}
@@ -806,9 +818,26 @@ async function renderTrain(){var el=document.getElementById('scr-train');if(load
   html+="<div class='chips'><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"А если мало сил сегодня?\");},120)'>А если мало сил?</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Что после тренировки?\");},120)'>Что после тренировки?</button></div>";
   html+="<div class='foot'>Нагрузка подбирается по фазе цикла и самочувствию. При боли, слабости, беременности или обильном кровотечении лучше снизить интенсивность и обсудить активность с врачом.</div>";
   el.innerHTML=html;blossom(document.getElementById('trainBlossom'),34);loadedTrain=true;try{renderTrainLog();}catch(e){}}
-var TREX={'Силовая':{w:true,items:[['Присед',40],['Становая тяга',50],['Жим лёжа',30],['Тяга в наклоне',35],['Выпады',16],['Ягодичный мост',45]]},'Кардио':{w:false,items:[['Бег',0],['Велотренажёр',0],['Эллипс',0],['Гребля',0],['Скакалка',0]]},'Йога':{w:false,items:[['Виньяса',0],['Хатха',0],['Растяжка',0],['Кор',0],['Дыхание',0]]},'Ходьба':{w:false,items:[['Прогулка',0],['Скандинавская',0]]},'Плавание':{w:false,items:[['Кроль',0],['Брасс',0],['На спине',0]]}};
+var TREX={
+ 'Силовая':{w:true,groups:{
+  'Ноги':[['Присед',40],['Жим ногами',80],['Выпады',16],['Болгарские',14],['Румынская тяга',40],['Разгибания',30],['Сгибания',25],['Икры',40]],
+  'Спина':[['Вертикальная тяга',35],['Горизонтальная тяга',35],['Тяга в наклоне',30],['Становая',50],['Подтягивания',0],['Гиперэкстензия',0]],
+  'Грудь':[['Жим лёжа',30],['Жим гантелей',18],['Жим в наклоне',22],['Сведения',14],['Отжимания',0]],
+  'Плечи':[['Жим стоя',20],['Махи в стороны',8],['Махи в наклоне',8],['Протяжка',20]],
+  'Ягодицы':[['Ягодичный мост',45],['Отведение бедра',20],['Мах ногой',12],['Плие-присед',30]],
+  'Руки':[['Бицепс',12],['Молоток',12],['Разгибания трицепс',15],['Французский жим',18]],
+  'Кор':[['Планка',0],['Скручивания',0],['Подъём ног',0],['Русский твист',8]],
+  'Своё':[]
+ }},
+ 'Кардио':{w:false,flat:['Бег','Велотренажёр','Эллипс','Гребля','Скакалка']},
+ 'Йога':{w:false,flat:['Виньяса','Хатха','Растяжка','Пилатес','Дыхание']},
+ 'Ходьба':{w:false,flat:['Прогулка','Скандинавская','Быстрая ходьба']},
+ 'Плавание':{w:false,flat:['Кроль','Брасс','На спине']},
+ 'Своё':{w:false,flat:[],custom:true}
+};
 var TRICON={'Силовая':'🏋️','Кардио':'🏃','Йога':'🧘','Ходьба':'🚶','Плавание':'🏊'};
-var TRAIN_STATE={}; var trcur={type:'Силовая',dur:'45 мин',rpe:'Тяжело',ex:{}};
+var TRAIN_STATE={}; var trcur={type:'Силовая',customType:'',dur:'45 мин',rpe:'Тяжело',ex:{}};
+var _trIdx=0;
 async function renderTrainLog(){
   var box=document.getElementById('trLog'); if(!box) return;
   box.innerHTML="<div class='prow'><button class='pbtn' onclick='openLog()'>＋ Отметить тренировку</button></div>"+
@@ -816,7 +845,7 @@ async function renderTrainLog(){
     "<div class='card'><div class='sec' style='margin-top:0'>Эта неделя</div><div class='trweek' id='trWeek'></div></div>"+
     "<div class='card'><div class='trprow'><div class='ayva-lab'>Чем занимаешься</div><button class='chip' onclick='openTrProfile()'>Изменить</button></div><div class='ayva-txt' id='trProf' style='margin-top:8px'>Расскажи о своих тренировках — Айва учтёт это в разборе.</div></div>";
   renderTrWeek([]);
-  try{ var r=await api('/api/train',{}); if(r&&r.ok){ TRAIN_STATE=r; renderTrWeek(r.week||[]); renderTrReview(r.last_review||""); renderTrProfileCard(r.profile||{}); } }catch(e){}
+  try{ var r=await api('/api/train',{}); if(r&&r.ok){ TRAIN_STATE=r; renderTrWeek(r.week||[]); var lw=(r.today&&r.today.length)?r.today[r.today.length-1]:null; renderTrReview(r.last_review||"", lw&&lw.kcal, lw&&lw.muscles); renderTrProfileCard(r.profile||{}); } }catch(e){}
 }
 function renderTrWeek(week){
   var el=document.getElementById('trWeek'); if(!el) return;
@@ -828,12 +857,13 @@ function renderTrWeek(week){
     return "<div class='trwx'><div class='d'>"+esc(w.dow)+"</div><div class='"+cls+"'>"+ic+sm+"</div></div>";
   }).join('');
 }
-function renderTrReview(review){
+function renderTrReview(review,calories,muscles){
   var box=document.getElementById('trAnBox'); if(!box) return;
-  if(review&&review.trim()){
-    box.innerHTML="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trAnBloss'></span><div style='flex:1'><div class='ayva-lab'>Айва · разбор тренировки</div><div class='ayva-txt' style='margin-top:5px;white-space:pre-wrap'>"+esc(review)+"</div></div></div></div>";
-    try{blossom(document.getElementById('trAnBloss'),30);}catch(e){}
-  } else { box.innerHTML=""; }
+  if(!(review&&review.trim())&&!calories){box.innerHTML="";return;}
+  var stat="";
+  if(calories||muscles){stat="<div class='trstat'>"+(calories?("🔥 ~"+calories+" ккал"):"")+((calories&&muscles)?" · ":"")+(muscles?("мышцы: "+esc(muscles)):"")+"</div>";}
+  box.innerHTML="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trAnBloss'></span><div style='flex:1'><div class='ayva-lab'>Айва · разбор тренировки</div>"+stat+"<div class='ayva-txt' style='margin-top:5px;white-space:pre-wrap'>"+esc(review||"")+"</div></div></div></div>";
+  try{blossom(document.getElementById('trAnBloss'),30);}catch(e){}
 }
 function renderTrProfileCard(pf){
   var el=document.getElementById('trProf'); if(!el) return; pf=pf||{};
@@ -852,17 +882,63 @@ function openLog(){
   trpills('trType',Object.keys(TREX),'type');trpills('trDur',['15 мин','30 мин','45 мин','60+ мин'],'dur');trpills('trRpe',['Легко','Нормально','Тяжело'],'rpe');trRenderEx();
 }
 function trpills(id,arr,field){var host=document.getElementById(id);if(!host)return;host.innerHTML='';arr.forEach(function(v){var b=document.createElement('div');b.className='trpill'+(trcur[field]===v?' sel':'');b.textContent=v;b.onclick=function(){trcur[field]=v;[].forEach.call(host.children,function(c){c.classList.remove('sel');});b.classList.add('sel');if(field==='type')trRenderEx();};host.appendChild(b);});}
-function trRenderEx(){var host=document.getElementById('trEx');if(!host)return;host.innerHTML='';trcur.ex={};var d=TREX[trcur.type];d.items.forEach(function(it,i){var on=(d.w?i<2:i===0);trcur.ex[it[0]]={sel:on,w:it[1]};var row=document.createElement('div');row.className='trrow'+(on?' sel':'');row.id='trrow'+i;var tag=d.w?"<div class='trtag'>силовое</div>":"";var step=d.w?("<div class='trws'><button class='trwb' onclick=\"trw(event,'"+it[0]+"',"+i+",-2.5)\">−</button><span class='trwv' id='trwv"+i+"'>"+it[1]+"</span><span class='trwu'>кг</span><button class='trwb' onclick=\"trw(event,'"+it[0]+"',"+i+",2.5)\">＋</button></div>"):"";row.innerHTML="<div class='trhd' onclick=\"trTog('"+it[0]+"',"+i+")\"><div class='trck'>✓</div><div class='trnm'>"+it[0]+"</div>"+tag+"</div>"+step;host.appendChild(row);});}
-function trTog(n,i){var o=trcur.ex[n];o.sel=!o.sel;document.getElementById('trrow'+i).classList.toggle('sel',o.sel);}
-function trw(e,n,i,dd){e.stopPropagation();var o=trcur.ex[n];o.w=Math.max(0,Math.round((o.w+dd)*2)/2);document.getElementById('trwv'+i).textContent=o.w;}
+function exRowHTML(name,w,strength,group){
+  var i=_trIdx++;
+  trcur.ex[name]={sel:false,w:w,sets:3,reps:10,group:group,strength:strength};
+  var steps="";
+  if(strength){
+    steps="<div class='trws'>"
+     +"<span class='trstep'><span class='trwlab'>вес</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'w',-2.5)\">−</button><span class='trwv' id='w"+i+"'>"+w+"</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'w',2.5)\">＋</button></span>"
+     +"<span class='trstep'><span class='trwlab'>подх</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'sets',-1)\">−</button><span class='trwv' id='s"+i+"'>3</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'sets',1)\">＋</button></span>"
+     +"<span class='trstep'><span class='trwlab'>повт</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'reps',-1)\">−</button><span class='trwv' id='r"+i+"'>10</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'reps',1)\">＋</button></span>"
+     +"</div>";
+  }
+  return "<div class='trrow' id='row"+i+"'><div class='trhd' onclick=\"trTog('"+name+"',"+i+")\"><div class='trck'>✓</div><div class='trnm'>"+esc(name)+"</div></div>"+steps+"</div>";
+}
+function customAdderHTML(tag){return "<div class='trcustom'><input class='tpin' id='trcin-"+tag+"' placeholder='Своё упражнение'><button class='chip' onclick=\"trAddCustom('"+tag+"')\">Добавить</button></div>";}
+function trRenderEx(){
+  var host=document.getElementById('trEx'); if(!host) return;
+  var d=TREX[trcur.type]; trcur.ex={}; _trIdx=0; var html="";
+  if(trcur.type==='Своё'){
+    html+="<input class='tpin' id='trCustomType' placeholder='Название тренировки (напр. Танцы)' value=\""+esc(trcur.customType||"")+"\" oninput=\"trcur.customType=this.value\" style='margin-bottom:8px'>";
+    html+="<div id='trgb-Своё'></div>"+customAdderHTML('Своё');
+    host.innerHTML=html; return;
+  }
+  if(d.w){
+    Object.keys(d.groups).forEach(function(g){
+      html+="<div class='trgrp' id='trgrp-"+g+"'><div class='trgh' onclick=\"trToggleGrp('"+g+"')\"><span>"+g+"</span><span class='trgc' id='trgc-"+g+"'>0</span><span class='trgar'>▾</span></div><div class='trgb' id='trgb-"+g+"' style='display:none'>";
+      d.groups[g].forEach(function(it){ html+=exRowHTML(it[0],it[1],true,g); });
+      html+=customAdderHTML(g);
+      html+="</div></div>";
+    });
+  } else {
+    (d.flat||[]).forEach(function(nm){ html+=exRowHTML(nm,0,false,trcur.type); });
+    html+="<div id='trgb-flat'></div>"+customAdderHTML('flat');
+  }
+  host.innerHTML=html;
+}
+function trToggleGrp(g){var el=document.getElementById('trgrp-'+g),b=document.getElementById('trgb-'+g);if(!el||!b)return;var open=el.classList.toggle('open');b.style.display=open?'block':'none';}
+function trTog(name,i){var o=trcur.ex[name];if(!o)return;o.sel=!o.sel;var row=document.getElementById('row'+i);if(row)row.classList.toggle('sel',o.sel);updGrp(o.group);}
+function trStep(e,name,i,field,delta){e.stopPropagation();var o=trcur.ex[name];if(!o)return;if(field==='w')o.w=Math.max(0,Math.round((o.w+delta)*2)/2);else o[field]=Math.max(1,(o[field]||0)+delta);var el=document.getElementById((field==='w'?'w':field==='sets'?'s':'r')+i);if(el)el.textContent=(field==='w'?o.w:o[field]);}
+function updGrp(g){if(!g)return;var c=document.getElementById('trgc-'+g);if(!c)return;var n=0;Object.keys(trcur.ex).forEach(function(k){if(trcur.ex[k].group===g&&trcur.ex[k].sel)n++;});c.textContent=n;}
+function trAddCustom(tag){
+  var inp=document.getElementById('trcin-'+tag);var nm=(inp&&inp.value||'').trim();if(!nm){toast('Впиши название');return;}
+  var strength=(trcur.type==='Силовая');var group=(trcur.type==='Своё')?'Своё':(strength?tag:trcur.type);
+  var box=document.getElementById('trgb-'+tag)||document.getElementById('trgb-flat')||document.getElementById('trgb-Своё');
+  var holder=document.createElement('div');holder.innerHTML=exRowHTML(nm,0,strength,group);var node=holder.firstChild;
+  var adder=box.querySelector('.trcustom');if(adder)box.insertBefore(node,adder);else box.appendChild(node);
+  // auto-select the custom exercise
+  var o=trcur.ex[nm];if(o){o.sel=true;node.classList.add('sel');updGrp(group);}
+  if(inp)inp.value='';
+}
 async function saveWorkout(){
-  var d=TREX[trcur.type],strength=d.w;
   var sel=Object.keys(trcur.ex).filter(function(k){return trcur.ex[k].sel;});
   if(!sel.length){toast('Отметь хотя бы одно упражнение');return;}
-  var items=sel.map(function(k){return {name:k,weight:strength?trcur.ex[k].w:null};});
+  var items=sel.map(function(k){var o=trcur.ex[k];return {name:k,weight:o.strength?o.w:null,sets:o.strength?o.sets:null,reps:o.strength?o.reps:null,group:o.group||null};});
+  var tp=(trcur.type==='Своё')?(((document.getElementById('trCustomType')||{}).value||trcur.customType||'').trim()||'Тренировка'):trcur.type;
   toast('Айва разбирает тренировку…');
-  var r=await api('/api/workout',{type:trcur.type,items:items,duration:trcur.dur,rpe:trcur.rpe});
-  if(r&&r.ok){closeHub();TRAIN_STATE.week=r.week;renderTrWeek(r.week||[]);renderTrReview(r.review||"");toast('Записала тренировку');window.scrollTo({top:0,behavior:'smooth'});}
+  var r=await api('/api/workout',{type:tp,items:items,duration:trcur.dur,rpe:trcur.rpe});
+  if(r&&r.ok){closeHub();TRAIN_STATE.week=r.week;renderTrWeek(r.week||[]);renderTrReview(r.review||"",r.calories,r.muscles);toast('Записала тренировку');window.scrollTo({top:0,behavior:'smooth'});}
   else{toast((r&&r.text)||'Не получилось сохранить');}
 }
 function openTrProfile(){
@@ -880,6 +956,8 @@ async function saveTrProfile(){
   var r=await api('/api/train_profile',b);
   if(r&&r.ok){TRAIN_STATE.profile=r.profile;renderTrProfileCard(r.profile);closeHub();toast('Сохранила профиль');}else toast('Не получилось сохранить');
 }
+function showFoodLoading(){var b=document.getElementById('diarybox');if(!b||document.getElementById('foodLoading'))return;var d=document.createElement('div');d.id='foodLoading';d.className='card';d.style.display='flex';d.style.alignItems='center';d.style.gap='10px';d.innerHTML="<span class='blossom' id='flb'></span><span style='font-size:13.5px;color:var(--inkMid)'>Айва считает КБЖУ…</span>";b.insertBefore(d,b.firstChild);try{blossom(document.getElementById('flb'),22);}catch(e){}}
+function hideFoodLoading(){var d=document.getElementById('foodLoading');if(d)d.remove();}
 function _tv(id){var e=document.getElementById(id);return e?(e.value||'').trim():'';}
 function fmtD(iso){var p=iso.split('-');return parseInt(p[2],10)+' '+MONTHS[parseInt(p[1],10)-1];}
 function cycleChart(hist){
@@ -1047,7 +1125,7 @@ function renderHub(){
   h+="<div class='cellrow' onclick=\"hubToggle('prefs')\"><div class='ci'>🍽</div><div class='ctxt'><div class='ct'>Предпочтения по питанию</div><div class='cc'>любимое, что исключить, аллергии</div></div><div class='chev'>›</div></div>";
   h+="<div id='hub-prefs' class='hubpanel hidden'><textarea id='hubPrefs' placeholder='Например: без свинины, люблю рыбу и творог, аллергия на орехи'>"+esc(p.diet_note||"")+"</textarea><button class='pbtn' style='margin-top:8px' onclick='saveHubPrefs()'>Сохранить</button></div>";
   h+="<div class='cellrow' onclick=\"hubToggle('data')\"><div class='ci'>📏</div><div class='ctxt'><div class='ct'>Мои данные</div><div class='cc'>рост "+(p.height||"—")+" · вес "+(p.weight||"—")+" · возраст "+(p.age||"—")+"</div></div><div class='chev'>›</div></div>";
-  h+="<div id='hub-data' class='hubpanel hidden'><div class='hubgrid3'><input id='hubH' inputmode='decimal' placeholder='Рост' value='"+esc(p.height||"")+"'><input id='hubW' inputmode='decimal' placeholder='Вес' value='"+esc(p.weight||"")+"'><input id='hubA' inputmode='numeric' placeholder='Возраст' value='"+esc(p.age||"")+"'></div><button class='pbtn' style='margin-top:8px' onclick='saveHubProfile()'>Сохранить</button></div>";
+  h+="<div id='hub-data' class='hubpanel hidden'><div class='hubgrid3'><input id='hubH' inputmode='decimal' placeholder='Рост' value='"+esc(p.height||"")+"'><input id='hubW' inputmode='decimal' placeholder='Вес' value='"+esc(p.weight||"")+"'><input id='hubA' inputmode='numeric' placeholder='Возраст' value='"+esc(p.age||"")+"'></div><div class='trlabel' style='margin:12px 2px 6px'>Желаемые калории <span style='text-transform:none;letter-spacing:0;font-weight:600;color:var(--inkSoft)'>&middot; необязательно</span></div><input id='hubKcal' class='tpin' inputmode='numeric' placeholder='напр. 1700 &middot; пусто = рассчитаю сама' value='"+esc(p.kcal_goal||"")+"'><div class='trpick' style='margin-top:8px'><div class='trpill' onclick='setKcalPreset(0.8)'>Дефицит</div><div class='trpill' onclick='setKcalPreset(1)'>Норма</div><div class='trpill' onclick='setKcalPreset(1.12)'>Профицит</div></div><div class='cc' style='margin-top:6px'>"+((D&&D.kcal_base)?('Норма для тебя ~'+D.kcal_base+' ккал в день'):'Заполни рост, вес и возраст — рассчитаю норму.')+"</div><button class='pbtn' style='margin-top:10px' onclick='saveHubProfile()'>Сохранить</button></div>";
   h+="<div class='cellrow' onclick=\"hubToggle('time')\"><div class='ci'>⏰</div><div class='ctxt'><div class='ct'>Время утренней сводки</div><div class='cc'>"+(D.send_time||"08:00")+" · МСК</div></div><div class='chev'>›</div></div>";
   h+="<div id='hub-time' class='hubpanel hidden'><input id='hubTime' placeholder='09:00' value='"+esc(D.send_time||"08:00")+"'><button class='pbtn' style='margin-top:8px' onclick='saveHubTime()'>Сохранить</button></div>";
   h+="<div class='cellrow' onclick='hubPartner()'><div class='ci'>❤️</div><div class='ctxt'><div class='ct'>Партнёр и близкие</div><div class='cc'>"+(D.partner_linked?"подключён":"короткая сводка партнёру")+"</div></div><div class='chev'>›</div></div>";
@@ -1058,7 +1136,8 @@ function renderHub(){
 async function chooseMode(m){var r=await api('/api/mode',{mode:m});if(r&&r.ok){toast("Режим: "+modeLabel(m));closeHub();await reloadAfterEdit();}else{toast((r&&r.text)||"Не получилось сменить режим");}}
 function switchPreg(){chooseMode('preg');}
 async function saveHubPrefs(){var t=(document.getElementById('hubPrefs').value||"").trim();var r=await api('/api/prefs',{diet_note:t});if(r&&r.ok){D.profile=D.profile||{};D.profile.diet_note=r.diet_note;loadedFood=false;toast("Сохранила предпочтения");}else toast("Не получилось сохранить");}
-async function saveHubProfile(){var h=parseFloat(String(document.getElementById('hubH').value||"").replace(",","."));var w=parseFloat(String(document.getElementById('hubW').value||"").replace(",","."));var a=parseInt(String(document.getElementById('hubA').value||""),10);if(!(h>120&&h<220&&w>30&&w<250&&a>10&&a<80)){toast("Проверь рост, вес и возраст");return;}var r=await api('/api/profile',{height:h,weight:w,age:a});if(r&&r.ok){D.profile=r.profile;loadedFood=false;toast("Данные обновлены");renderHub();}else toast((r&&r.text)||"Не получилось сохранить");}
+async function saveHubProfile(){var h=parseFloat(String(document.getElementById('hubH').value||"").replace(",","."));var w=parseFloat(String(document.getElementById('hubW').value||"").replace(",","."));var a=parseInt(String(document.getElementById('hubA').value||""),10);if(!(h>120&&h<220&&w>30&&w<250&&a>10&&a<80)){toast("Проверь рост, вес и возраст");return;}var _kc=(document.getElementById('hubKcal')&&document.getElementById('hubKcal').value||"").trim();var r=await api('/api/profile',{height:h,weight:w,age:a,kcal_goal:_kc});if(r&&r.ok){D.profile=r.profile;if(r.kcal_base)D.kcal_base=r.kcal_base;loadedFood=false;toast(_kc&&r.profile&&r.profile.kcal_goal?("Цель: "+r.profile.kcal_goal+" ккал"):"Данные обновлены");renderHub();}else toast((r&&r.text)||"Не получилось сохранить");}
+function setKcalPreset(m){var b=(D&&D.kcal_base)||0;if(!b){toast('Заполни рост, вес и возраст');return;}var el=document.getElementById('hubKcal');if(el)el.value=Math.round(b*m/10)*10;}
 async function saveHubTime(){var t=(document.getElementById('hubTime').value||"").trim();var r=await api('/api/settime',{time:t});if(r&&r.ok){D.send_time=r.send_time;toast("Сводка в "+r.send_time);renderHub();}else toast((r&&r.text)||"Время в формате 09:00");}
 async function getReport(){toast("Готовлю выписку…");var r=await api('/api/report',{period:'all'});if(r&&r.ok)toast("Выписка отправлена в чат бота");else toast((r&&r.text)||"Выписка временно недоступна");}
 async function hubPartner(){var box=document.getElementById('hub-partner');['mode','prefs','data','time'].forEach(function(x){var e=document.getElementById('hub-'+x);if(e)e.classList.add('hidden');});box.classList.remove('hidden');box.innerHTML="<div style='font-size:13px;color:var(--inkMid)'>Готовлю ссылку…</div>";var r=await api('/api/partner',{});if(r&&r.linked){box.innerHTML="<div class='partnerstatus'>Партнёр подключён.</div><button class='copylink danger' onclick='unlinkPartnerHub()'>Отключить партнёра</button>";return;}if(!(r&&r.link)){box.innerHTML="<div style='font-size:13px;color:var(--inkMid)'>Ссылка будет доступна после запуска из Telegram. В боте — команда /partner.</div>";return;}box.innerHTML="<div class='partnernote'>Перешли ссылку партнёру — он подтвердит подключение в боте.</div><div class='partnerbox'><div class='ln' id='hubPlink'>"+esc(r.link)+"</div><button class='copylink' onclick='copyHubLink()'>Скопировать ссылку</button></div>";}
