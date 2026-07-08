@@ -79,7 +79,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-06-train-pushes-v13"
+AIWA_VERSION = "2026-07-06-retention-v15"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -224,7 +224,7 @@ def db():
         except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
-                "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER"):
+                "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER", "last_phase_notified TEXT", "last_reactivation TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     return c
@@ -1408,6 +1408,105 @@ async def train_reminder_job(context: ContextTypes.DEFAULT_TYPE):
         if cid in TRAIN_PENDING: continue
         TRAIN_PENDING.add(cid); await TRAIN_Q.put(cid); n += 1
     log.info("train reminder queued: %d", n)
+
+def streak_of(cid):
+    """Дней подряд с активностью (еда, тренировка или чек-ин), заканчивая сегодня или вчера."""
+    c = db(); days = set()
+    for tbl in ("meals", "workouts"):
+        for (d,) in c.execute(f"SELECT DISTINCT d FROM {tbl} WHERE chat_id=?", (cid,)):
+            if d: days.add(d)
+    for (d,) in c.execute("SELECT DISTINCT log_date FROM logs WHERE chat_id=? AND (energy IS NOT NULL OR (symptoms IS NOT NULL AND symptoms<>''))", (cid,)):
+        if d: days.add(d)
+    c.close()
+    today = datetime.now(TZ).date()
+    if today.isoformat() in days:
+        cur = today
+    elif (today - timedelta(days=1)).isoformat() in days:
+        cur = today - timedelta(days=1)
+    else:
+        return 0
+    n = 0
+    while cur.isoformat() in days:
+        n += 1; cur = cur - timedelta(days=1)
+    return n
+
+PHASE_INTRO = {
+    "menstrual": "🌙 Началась менструация. Гормоны сейчас низко — тело просит поберечься: добавь железо (гречка, красное мясо, зелень), тепло и мягкое движение. Резкие тренировки лучше отложить.",
+    "follicular": "🌱 Ты вошла в фолликулярную фазу. Эстроген растёт, энергии больше — хорошее окно для силовых и новых начинаний, тело лучше восстанавливается.",
+    "ovulation": "☀️ Овуляция — пик энергии и сил. Можно самые интенсивные тренировки, но береги связки. Настроение и либидо обычно на высоте.",
+    "luteal": "🌾 Началась лютеиновая фаза. Растёт прогестерон — может тянуть на еду и быстрее приходить усталость. Помогут спокойное кардио, магний и белок.",
+}
+
+async def phase_transition_job(context: ContextTypes.DEFAULT_TYPE):
+    """Пуш при входе в новую фазу цикла. На первом расчёте только запоминаем фазу, без пуша."""
+    delay = float(os.environ.get("AIWA_PHASE_DELAY", "0.3"))
+    sent = 0
+    for cid in all_users():
+        try:
+            u = row(cid)
+            if not is_onboarded(u) or (u.get("mode") or "cycle") != "cycle":
+                continue
+            _, st = status_of(cid); phase = (st or {}).get("phase")
+            if not phase or u.get("last_phase_notified") == phase:
+                continue
+            first = u.get("last_phase_notified") is None
+            upsert(cid, last_phase_notified=phase)
+            if first:
+                continue
+            txt = PHASE_INTRO.get(phase)
+            if not txt:
+                continue
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=wu))]]) if wu else None
+            await context.bot.send_message(cid, txt, reply_markup=kb)
+            ev(cid, "broadcast", meta="phase_push"); sent += 1
+            await asyncio.sleep(delay)
+        except Forbidden:
+            pass
+        except Exception as e:
+            log.warning("phase push %s: %s", cid, e)
+    log.info("phase transition pushes: %d", sent)
+
+async def reactivation_job(context: ContextTypes.DEFAULT_TYPE):
+    """Возврат неактивных: если не заходила N дней и давно не слали возврат — тёплый персональный пуш."""
+    delay = float(os.environ.get("AIWA_REACT_DELAY", "0.3"))
+    ndays = max(2, int(os.environ.get("AIWA_INACTIVE_DAYS", "5")))
+    today = datetime.now(TZ).date(); sent = 0
+    for cid in all_users():
+        try:
+            u = row(cid)
+            if not is_onboarded(u):
+                continue
+            c = db(); r = c.execute("SELECT MAX(ts) FROM events WHERE chat_id=? AND action IN ('manual','button','suggest','command','answered','voice','goal')", (cid,)).fetchone(); c.close()
+            if not r or not r[0]:
+                continue
+            last = datetime.fromisoformat(r[0]).date()
+            if (today - last).days < ndays:
+                continue
+            lr = u.get("last_reactivation")
+            if lr:
+                try:
+                    if (today - date.fromisoformat(lr)).days < 7:
+                        continue
+                except Exception:
+                    pass
+            upsert(cid, last_reactivation=today.isoformat())
+            _, st = status_of(cid); phase = (st or {}).get("phase")
+            tip = {"menstrual": "Сейчас у тебя менструация — поберегись и добавь железо.",
+                   "follicular": "Ты в фолликулярной фазе — энергии больше обычного.",
+                   "ovulation": "У тебя овуляция — пик сил.",
+                   "luteal": "Ты в лютеиновой фазе — самое время на спокойный режим и белок."}.get(phase, "")
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=wu))]]) if wu else None
+            txt = "🌸 Давно не виделись. " + (tip + " " if tip else "") + "Загляни — я собрала твою сводку и рекомендации на сегодня."
+            await context.bot.send_message(cid, txt, reply_markup=kb)
+            ev(cid, "broadcast", meta="reactivation_sent"); sent += 1
+            await asyncio.sleep(delay)
+        except Forbidden:
+            pass
+        except Exception as e:
+            log.warning("reactivation %s: %s", cid, e)
+    log.info("reactivation pushes: %d", sent)
 
 async def food_worker(app):
     delay = float(os.environ.get("AIWA_FOOD_DELAY", "0.3"))
@@ -2599,6 +2698,17 @@ async def on_startup(app):
         _th, _tm = 19, 0
     app.job_queue.run_daily(train_reminder_job, time=dtime(_th, _tm, tzinfo=TZ), name="train_reminder_all")
     log.info("train reminder scheduled %02d:%02d", _th, _tm)
+    try:
+        _ph, _pm = map(int, os.environ.get("AIWA_PHASE_PUSH_TIME", "11:30").split(":"))
+    except (ValueError, AttributeError):
+        _ph, _pm = 11, 30
+    app.job_queue.run_daily(phase_transition_job, time=dtime(_ph, _pm, tzinfo=TZ), name="phase_transition")
+    try:
+        _rh, _rm = map(int, os.environ.get("AIWA_REACT_TIME", "18:30").split(":"))
+    except (ValueError, AttributeError):
+        _rh, _rm = 18, 30
+    app.job_queue.run_daily(reactivation_job, time=dtime(_rh, _rm, tzinfo=TZ), name="reactivation")
+    log.info("phase push %02d:%02d, reactivation %02d:%02d", _ph, _pm, _rh, _rm)
     asyncio.create_task(load_logger(app))
     asyncio.create_task(model_probe(app))
     n = catchup = 0
@@ -2660,6 +2770,10 @@ async def _api_data(request):
         out["kcal_base"] = calc_calories(_pr["height"], _pr["weight"], _pr["age"], _pr["activity"])[0] if _pr else None
     except Exception:
         out["kcal_base"] = None
+    try:
+        out["streak"] = streak_of(cid)
+    except Exception:
+        out["streak"] = 0
     if out["cycle"]:
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
@@ -2801,15 +2915,16 @@ async def _api_profile(request):
     except Exception:
         return _cors(web.json_response({"error": "bad_profile", "text": "Нужны рост, вес и возраст."}, status=400))
     upsert(cid, height=int(cm), weight=kg, age=age)
-    g = body.get("kcal_goal")
-    if g in (None, "", 0, "0"):
-        upsert(cid, kcal_goal=None)
-    else:
-        try:
-            gi = int(float(str(g).replace(",", ".")))
-            upsert(cid, kcal_goal=(gi if 800 <= gi <= 6000 else None))
-        except (TypeError, ValueError):
-            pass
+    if "kcal_goal" in body:
+        g = body.get("kcal_goal")
+        if g in (None, "", 0, "0"):
+            upsert(cid, kcal_goal=None)
+        else:
+            try:
+                gi = int(float(str(g).replace(",", ".")))
+                upsert(cid, kcal_goal=(gi if 800 <= gi <= 6000 else None))
+            except (TypeError, ValueError):
+                pass
     menu_cache_clear(cid)
     ev(cid, "manual", meta="web_profile")
     _u2 = row(cid)
