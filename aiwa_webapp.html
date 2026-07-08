@@ -706,6 +706,18 @@ function paintMeal(i,mm){
   var dish=document.getElementById("meal-dish-"+i),note=document.getElementById("meal-note-"+i),ico=document.getElementById("meal-ico-"+i),tm=document.getElementById("meal-time-"+i);
   if(tm)tm.textContent=mm.time||"";if(dish)dish.textContent=mm.dish||"";if(note)note.textContent=(mm.note||"белок и сытость")+(mm.kcal?(" · "+mm.kcal):"");if(ico)ico.textContent=mealIcon(mm,i);
 }
+async function addReco(btn,i){
+  var mm=FOOD_DATA&&FOOD_DATA.menu&&FOOD_DATA.menu.meals?FOOD_DATA.menu.meals[i]:null;
+  if(!mm||!mm.dish){toast('Нет блюда');return;}
+  haptic('impact','light');var slots=['breakfast','lunch','snack','dinner'];
+  if(btn){btn.disabled=true;btn.innerHTML="<span class='miniload'></span>";}
+  showFoodLoading();
+  var r=await api('/api/food_text',{text:mm.dish,slot:slots[i]||'snack'});
+  hideFoodLoading();
+  if(btn){btn.disabled=false;btn.textContent='Добавить';}
+  if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.title)||mm.dish)+' · '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}
+  else toast((r&&r.message)||'Не получилось добавить');
+}
 async function replaceMeal(btn,i){
   haptic("impact","light");
   var orig=null;if(btn){orig=btn.innerHTML;btn.disabled=true;btn.style.opacity=".65";btn.innerHTML="<span class='miniload'></span>";}
@@ -733,7 +745,7 @@ async function renderFood(){
   html+="</div></div>";
   if(r.menu&&r.menu.meals){
     html+="<div class='card'><div class='sec' style='margin-top:0'>БЖУ и приёмы</div><div class='macros'><div class='mac'><div class='l'>Белок</div><div class='v'>"+(mk.protein||"-")+"</div></div><div class='mac'><div class='l'>Жиры</div><div class='v'>"+(mk.fat||"-")+"</div></div><div class='mac'><div class='l'>Углеводы</div><div class='v'>"+(mk.carbs||"-")+"</div></div></div>";
-    r.menu.meals.forEach(function(mm,i){html+="<div class='mealcard'><div class='mealico' id='meal-ico-"+i+"'>"+mealIcon(mm,i)+"</div><div class='mealmain'><div class='mealtop'><div><div class='tm' id='meal-time-"+i+"'>"+esc(mm.time||"")+"</div><div class='ds' id='meal-dish-"+i+"'>"+esc(mm.dish||"")+"</div></div><button class='swapbtn' onclick='replaceMeal(this,"+i+")'>Заменить</button></div><div class='mealwhy' id='meal-note-"+i+"'>"+esc(mm.note||"белок и сытость")+(mm.kcal?(" · "+esc(mm.kcal)):"")+"</div></div></div>";});
+    r.menu.meals.forEach(function(mm,i){html+="<div class='mealcard'><div class='mealico' id='meal-ico-"+i+"'>"+mealIcon(mm,i)+"</div><div class='mealmain'><div class='mealtop'><div><div class='tm' id='meal-time-"+i+"'>"+esc(mm.time||"")+"</div><div class='ds' id='meal-dish-"+i+"'>"+esc(mm.dish||"")+"</div></div><button class='swapbtn' onclick='addReco(this,"+i+")'>Добавить</button></div><div class='mealwhy' id='meal-note-"+i+"'>"+esc(mm.note||"белок и сытость")+(mm.kcal?(" · "+esc(mm.kcal)):"")+"</div></div></div>";});
     html+="</div>";
   }
   html+="<div id='diarybox'></div>";
@@ -875,8 +887,17 @@ function renderTrProfileCard(pf){
   var parts=[]; if(pf.format)parts.push(pf.format); if(pf.goal)parts.push('цель: '+pf.goal); if(pf.limits)parts.push('бережём: '+pf.limits);
   el.textContent=parts.length?parts.join(' · '):'Расскажи о своих тренировках — Айва учтёт это в разборе.';
 }
+function isoOf(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function todayISO(){return isoOf(new Date());}
+function shiftISO(iso,delta){var p=iso.split('-');var d=new Date(+p[0],+p[1]-1,+p[2]);d.setDate(d.getDate()+delta);return isoOf(d);}
+function renderWhen(){var host=document.getElementById('trWhen');if(!host)return;var td=todayISO();if(!trcur.date)trcur.date=td;
+  var opts=[['Сегодня',td],['Вчера',shiftISO(td,-1)],['Позавчера',shiftISO(td,-2)]];
+  host.innerHTML=opts.map(function(o){return "<div class='trpill"+(trcur.date===o[1]?' sel':'')+"' onclick=\"pickWhen('"+o[1]+"')\">"+o[0]+"</div>";}).join('')+"<input type='date' id='trDateIn' class='tpin' style='flex:1;min-width:120px;margin-left:6px' max='"+td+"' value='"+trcur.date+"' onchange=\"pickWhen(this.value)\">";}
+function pickWhen(d){if(!d)return;trcur.date=d;renderWhen();}
 function openLog(){
+  trcur.date=todayISO();
   var h="<div class='hubhead'><div class='hubtitle'>Отметить тренировку</div><button class='hubclose' onclick='closeHub()'>✕</button></div><div class='hubpanel'>";
+  h+="<div class='trlabel'>Когда</div><div class='trpick' id='trWhen'></div>";
   h+="<div class='trlabel'>Что делала</div><div class='trpick' id='trType'></div>";
   h+="<div class='trlabel'>Упражнения <span style='text-transform:none;letter-spacing:0;font-weight:600;color:var(--inkSoft)'>· отметь, что делала</span></div><div id='trEx'></div>";
   h+="<div class='trlabel'>Сколько по времени</div><div class='trpick' id='trDur'></div>";
@@ -884,7 +905,7 @@ function openLog(){
   h+="<button class='pbtn' style='margin-top:20px' onclick='saveWorkout()'>Сохранить и разобрать</button></div>";
   document.getElementById('hub').innerHTML=h;
   document.getElementById('hubBackdrop').classList.remove('hidden');document.getElementById('hub').classList.remove('hidden');
-  trpills('trType',Object.keys(TREX),'type');trpills('trDur',['15 мин','30 мин','45 мин','60+ мин'],'dur');trpills('trRpe',['Легко','Нормально','Тяжело'],'rpe');trRenderEx();
+  trpills('trType',Object.keys(TREX),'type');trpills('trDur',['15 мин','30 мин','45 мин','60+ мин'],'dur');trpills('trRpe',['Легко','Нормально','Тяжело'],'rpe');trRenderEx();renderWhen();
 }
 function trpills(id,arr,field){var host=document.getElementById(id);if(!host)return;host.innerHTML='';arr.forEach(function(v){var b=document.createElement('div');b.className='trpill'+(trcur[field]===v?' sel':'');b.textContent=v;b.onclick=function(){trcur[field]=v;[].forEach.call(host.children,function(c){c.classList.remove('sel');});b.classList.add('sel');if(field==='type')trRenderEx();};host.appendChild(b);});}
 function exRowHTML(name,w,strength,group){
@@ -942,7 +963,7 @@ async function saveWorkout(){
   var items=sel.map(function(k){var o=trcur.ex[k];return {name:k,weight:o.strength?o.w:null,sets:o.strength?o.sets:null,reps:o.strength?o.reps:null,group:o.group||null};});
   var tp=(trcur.type==='Своё')?(((document.getElementById('trCustomType')||{}).value||trcur.customType||'').trim()||'Тренировка'):trcur.type;
   toast('Айва разбирает тренировку…');
-  var r=await api('/api/workout',{type:tp,items:items,duration:trcur.dur,rpe:trcur.rpe});
+  var r=await api('/api/workout',{type:tp,items:items,duration:trcur.dur,rpe:trcur.rpe,date:trcur.date});
   if(r&&r.ok){closeHub();TRAIN_STATE.week=r.week;renderTrWeek(r.week||[]);renderTrReview(r.review||"",r.calories,r.muscles);toast('Записала тренировку');window.scrollTo({top:0,behavior:'smooth'});}
   else{toast((r&&r.text)||'Не получилось сохранить');}
 }

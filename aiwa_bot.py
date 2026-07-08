@@ -79,7 +79,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-06-retention-v15"
+AIWA_VERSION = "2026-07-06-backdate-addreco-v16"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -3192,8 +3192,10 @@ async def _api_food_text(request):
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
         return _cors(web.json_response({"ok": False, "message": "Не поняла блюдо. Уточни, например «200 г творога и банан»."}))
+    _bslot = body.get("slot")
     _sl = slot_from_text(txt)
-    if _sl: rec["slot"] = _sl
+    if _bslot in ("breakfast", "lunch", "snack", "dinner"): rec["slot"] = _bslot
+    elif _sl: rec["slot"] = _sl
     try:
         mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
         out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
@@ -3250,8 +3252,17 @@ async def _api_workout(request):
     except Exception as e:
         review = ""; log.warning("train review %s: %s", cid, e)
     wk["review"] = review
+    d_iso = str(body.get("date") or "")[:10]
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", d_iso):
+        d_iso = None
+    else:
+        try:
+            _dd = date.fromisoformat(d_iso); _td = datetime.now(TZ).date()
+            if _dd > _td or (_td - _dd).days > 90: d_iso = None
+        except Exception:
+            d_iso = None
     try:
-        workout_add(cid, wk)
+        workout_add(cid, wk, d=d_iso)
     except Exception as e:
         return _cors(web.json_response({"error": "save", "text": "Сбой сохранения: " + str(e)}, status=500))
     if usage: ev(cid, "tokens", sum(usage), meta="workout", calls=len(usage))
