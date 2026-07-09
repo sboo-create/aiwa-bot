@@ -316,6 +316,8 @@ body{padding-top:var(--safe-top,0px)}
 .trrow.sel .trws{display:flex}
 .trwb{width:34px;height:34px;border-radius:11px;border:1px solid var(--line);background:#fff;font-size:18px;color:var(--ink);cursor:pointer;line-height:1}
 .trwv{font-family:var(--serif);font-size:20px;font-weight:600;min-width:52px;text-align:center;font-variant-numeric:tabular-nums}
+.trwvi{font-family:var(--serif);font-size:20px;font-weight:600;width:58px;text-align:center;font-variant-numeric:tabular-nums;border:1px solid var(--line);border-radius:10px;background:#fff;padding:6px 2px;color:var(--ink);outline:none}
+.trwvi:focus{border-color:var(--roseLine)}
 .trwu{font-size:12px;color:var(--inkSoft);font-weight:600}
 .trweek{display:flex;gap:7px}
 .trwx{flex:1;text-align:center}
@@ -940,13 +942,13 @@ function openLog(pre){
 function trpills(id,arr,field){var host=document.getElementById(id);if(!host)return;host.innerHTML='';arr.forEach(function(v){var b=document.createElement('div');b.className='trpill'+(trcur[field]===v?' sel':'');b.textContent=v;b.onclick=function(){trcur[field]=v;[].forEach.call(host.children,function(c){c.classList.remove('sel');});b.classList.add('sel');if(field==='type')trRenderEx();};host.appendChild(b);});}
 function exRowHTML(name,w,strength,group){
   var i=_trIdx++;
-  trcur.ex[name]={sel:false,w:w,sets:3,reps:10,group:group,strength:strength};
+  trcur.ex[name]={sel:false,w:0,sets:3,reps:10,group:group,strength:strength};
   var steps="";
   if(strength){
     steps="<div class='trws'>"
-     +"<span class='trstep'><span class='trwlab'>вес</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'w',-2.5)\">−</button><span class='trwv' id='w"+i+"'>"+w+"</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'w',2.5)\">＋</button></span>"
-     +"<span class='trstep'><span class='trwlab'>подх</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'sets',-1)\">−</button><span class='trwv' id='s"+i+"'>3</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'sets',1)\">＋</button></span>"
-     +"<span class='trstep'><span class='trwlab'>повт</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'reps',-1)\">−</button><span class='trwv' id='r"+i+"'>10</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'reps',1)\">＋</button></span>"
+     +"<span class='trstep'><span class='trwlab'>вес</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'w',-2.5)\">−</button><input class='trwvi' id='w"+i+"' inputmode='decimal' value='' placeholder='0' onclick='event.stopPropagation()' oninput=\"trInput('"+name+"',"+i+",'w',this.value)\"><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'w',2.5)\">＋</button></span>"
+     +"<span class='trstep'><span class='trwlab'>подх</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'sets',-1)\">−</button><input class='trwvi' id='s"+i+"' inputmode='numeric' value='3' onclick='event.stopPropagation()' oninput=\"trInput('"+name+"',"+i+",'sets',this.value)\"><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'sets',1)\">＋</button></span>"
+     +"<span class='trstep'><span class='trwlab'>повт</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'reps',-1)\">−</button><input class='trwvi' id='r"+i+"' inputmode='numeric' value='10' onclick='event.stopPropagation()' oninput=\"trInput('"+name+"',"+i+",'reps',this.value)\"><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'reps',1)\">＋</button></span>"
      +"</div>";
   }
   return "<div class='trrow' id='row"+i+"'><div class='trhd' onclick=\"trTog('"+name+"',"+i+")\"><div class='trck'>✓</div><div class='trnm'>"+esc(name)+"</div></div>"+steps+"</div>";
@@ -975,7 +977,8 @@ function trRenderEx(){
 }
 function trToggleGrp(g){var el=document.getElementById('trgrp-'+g),b=document.getElementById('trgb-'+g);if(!el||!b)return;var open=el.classList.toggle('open');b.style.display=open?'block':'none';}
 function trTog(name,i){var o=trcur.ex[name];if(!o)return;o.sel=!o.sel;var row=document.getElementById('row'+i);if(row)row.classList.toggle('sel',o.sel);updGrp(o.group);}
-function trStep(e,name,i,field,delta){e.stopPropagation();var o=trcur.ex[name];if(!o)return;if(field==='w')o.w=Math.max(0,Math.round((o.w+delta)*2)/2);else o[field]=Math.max(1,(o[field]||0)+delta);var el=document.getElementById((field==='w'?'w':field==='sets'?'s':'r')+i);if(el)el.textContent=(field==='w'?o.w:o[field]);}
+function trStep(e,name,i,field,delta){e.stopPropagation();var o=trcur.ex[name];if(!o)return;if(field==='w')o.w=Math.max(0,Math.round(((o.w||0)+delta)*2)/2);else o[field]=Math.max(1,(o[field]||0)+delta);var el=document.getElementById((field==='w'?'w':field==='sets'?'s':'r')+i);if(el)el.value=(field==='w'?o.w:o[field]);}
+function trInput(name,i,field,val){var o=trcur.ex[name];if(!o)return;val=String(val).replace(',','.');if(field==='w'){var n=parseFloat(val);o.w=(isNaN(n)||n<0)?0:n;}else{var m=parseInt(val,10);if(!isNaN(m)&&m>0)o[field]=m;}}
 function updGrp(g){if(!g)return;var c=document.getElementById('trgc-'+g);if(!c)return;var n=0;Object.keys(trcur.ex).forEach(function(k){if(trcur.ex[k].group===g&&trcur.ex[k].sel)n++;});c.textContent=n;}
 function trAddCustom(tag){
   var inp=document.getElementById('trcin-'+tag);var nm=(inp&&inp.value||'').trim();if(!nm){toast('Впиши название');return;}
