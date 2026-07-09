@@ -103,7 +103,7 @@ html{overscroll-behavior:none}body{margin:0;background:var(--paper);color:var(--
 .phasecard .pb{font-size:12.5px;line-height:1.5;color:var(--inkMid)}
 .phasecard .plst{display:grid;gap:4px;margin-top:8px;font-size:12px;line-height:1.42}
 .phasepill{border-radius:999px;padding:7px 10px;font-size:11px;font-weight:800;background:#fff;color:var(--inkMid);border:1px solid rgba(33,28,26,.07)}
-.phasenow{border-radius:18px;border:1px solid var(--line);padding:14px;background:#fff;margin-top:14px}
+.phasenow{border-radius:18px;border:1px solid var(--line);padding:14px;background:#fff;margin:14px 0}
 .phasenow-hd{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .phasenow-lab{font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--inkSoft);font-weight:700}
 .phasenow .pn{font-family:var(--serif);font-size:20px;font-weight:600;margin-top:6px}
@@ -344,7 +344,7 @@ body{padding-top:var(--safe-top,0px)}
 .streakchip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:var(--quinceDeep);background:var(--quinceWash);border-radius:99px;padding:4px 9px;flex:none;white-space:nowrap}
 .djhdr{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
 .trwkhdr{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
-.symgrp{font-size:11px;color:var(--inkSoft);font-weight:700;margin:11px 0 5px}
+.symgrp{font-size:11px;color:var(--inkSoft);font-weight:800;letter-spacing:.02em;margin:15px 0 7px}
 
 .trwnav{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
 .trwnav span{font-size:12.5px;font-weight:700;color:var(--inkMid)}
@@ -545,6 +545,7 @@ function renderToday(){
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>📲 Добавить Айву на экран телефона</button>";html+="<div class='foot'>Отмечай месячные и симптомы, чтобы прогноз цикла и рекомендации становились точнее.</div>";
   el.innerHTML=html;blossom(document.getElementById('al'),34);updateHomeBtn();
   var tc=document.getElementById('tchips');(CHIPS[ph]||[]).forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc.appendChild(b);});
+  if(!delayed){api('/api/today',{}).then(function(n){if(!n||n.error)return;var av=document.querySelector('#scr-today .ayva-txt');if(n.summary&&av)av.textContent=n.summary;var tc2=document.getElementById('tchips');if(tc2&&n.suggestions&&n.suggestions.length){tc2.innerHTML='';n.suggestions.forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc2.appendChild(b);});}}).catch(function(){});}
   syncMarks();
   STARTS=buildStarts();calOffset=0;
   document.getElementById('calPrev').onclick=function(){calOffset--;drawCal();haptic("selection");};
@@ -754,7 +755,7 @@ async function renderFood(){
     html+="<div class='card'><div class='sec' style='margin-top:0'>Рекомендуемое меню</div><div class='macros'><div class='mac'><div class='l'>Белок</div><div class='v'>"+(mk.protein||"-")+"</div></div><div class='mac'><div class='l'>Жиры</div><div class='v'>"+(mk.fat||"-")+"</div></div><div class='mac'><div class='l'>Углеводы</div><div class='v'>"+(mk.carbs||"-")+"</div></div></div>";
     r.menu.meals.forEach(function(mm,i){html+="<div class='mealcard'><div class='mealico' id='meal-ico-"+i+"'>"+mealIcon(mm,i)+"</div><div class='mealmain'><div class='mealtop'><div><div class='tm' id='meal-time-"+i+"'>"+esc(mm.time||"")+"</div><div class='ds' id='meal-dish-"+i+"'>"+esc(mm.dish||"")+"</div></div><button class='swapbtn' onclick='addReco(this,"+i+")'>Добавить</button></div><div class='mealwhy' id='meal-note-"+i+"'>"+esc(mm.note||"белок и сытость")+(mm.kcal?(" · "+esc(mm.kcal)):"")+"</div></div></div>";});
     html+="</div>";
-    html+=dishChips(r);
+    html+=suggChips(r.suggestions);
   }
   html+="<div id='diarybox'></div>";
   html+="<div class='foot'>Меню рассчитывается каждый день с учётом фазы цикла, твоих пожеланий, пищевых ограничений и медицинских рекомендаций.</div>";
@@ -764,6 +765,13 @@ async function renderFood(){
 var DIARY=null;
 async function loadDiary(){try{var r=await api('/api/diary',{});if(r&&!r.error){DIARY=r;}}catch(e){}renderDiaryBox();}
 function _applyDiary(r){if(r&&r.ok!==false&&!r.error){DIARY={meals:r.meals||[],totals:r.totals||{},target:r.target||null};renderDiaryBox();return true;}return false;}
+function suggChips(list){
+  var a=(list||[]).filter(function(s){return s&&(''+s).trim();}).slice(0,3);
+  if(!a.length)return '';
+  var h="<div class='chips' style='margin:4px 0 16px'>";
+  a.forEach(function(s){s=(''+s).trim();h+="<button class='chip' onclick='go(\"chat\");setTimeout(function(){send("+JSON.stringify(s)+");},120)'>"+esc(s)+"</button>";});
+  h+="</div>";return h;
+}
 function dishChips(r){
   var meals=(r&&r.menu&&r.menu.meals)||[];if(!meals.length)return '';
   var seen={},items=[];
@@ -803,13 +811,13 @@ function mealRow(m){var sm=slotMeta(m.slot||"snack");var src=m.source==='photo'?
 function editPanel(pid,m){var slots=[["breakfast","🌅 Завтрак"],["lunch","☀️ Обед"],["snack","🍎 Перекус"],["dinner","🌙 Ужин"]];var cur=m?(m.slot||"snack"):nowSlot();
   var pills=slots.map(function(sp){return "<div class='djpill"+(sp[0]===cur?" on":"")+"' onclick=\"pickSlot('"+pid+"','"+sp[0]+"',this)\">"+sp[1]+"</div>";}).join("");
   var num=function(x){return (m&&m[x]!=null)?Math.round(m[x]):"";};
-  return "<div class='djedit' id='ed-"+pid+"' data-slot='"+cur+"'>"
+  return "<div class='djedit' id='ed-"+pid+"' data-slot='"+cur+"' data-bg='"+(m&&m.grams?m.grams:"")+"' data-bk='"+(m&&m.kcal!=null?m.kcal:"")+"' data-bp='"+(m&&m.protein!=null?m.protein:"")+"' data-bf='"+(m&&m.fat!=null?m.fat:"")+"' data-bc='"+(m&&m.carbs!=null?m.carbs:"")+"'>"
    +"<div class='djfield'><label>Название</label><input class='djf' id='f-title-"+pid+"' value=\""+(m?esc(m.title):"")+"\" placeholder='Название'></div>"
    +"<div class='djgrid4'><div><label>Ккал</label><input class='djf' inputmode='numeric' id='f-kcal-"+pid+"' value='"+num('kcal')+"'></div>"
    +"<div><label>Белки</label><input class='djf' inputmode='numeric' id='f-p-"+pid+"' value='"+num('protein')+"'></div>"
    +"<div><label>Жиры</label><input class='djf' inputmode='numeric' id='f-f-"+pid+"' value='"+num('fat')+"'></div>"
    +"<div><label>Углев.</label><input class='djf' inputmode='numeric' id='f-c-"+pid+"' value='"+num('carbs')+"'></div></div>"
-   +"<div class='djfield'><label>Граммы</label><input class='djf' inputmode='numeric' id='f-g-"+pid+"' value='"+(m&&m.grams?m.grams:"")+"' placeholder='—'></div>"
+   +"<div class='djfield'><label>Граммы</label><input class='djf' inputmode='numeric' id='f-g-"+pid+"' value='"+(m&&m.grams?m.grams:"")+"' placeholder='—' oninput=\"rescaleEdit('"+pid+"')\"></div>"
    +"<div class='djpick'>"+pills+"</div>"
    +"<div class='djerow'><button class='djbtn' onclick=\""+(m?("saveMealEdit("+m.id+",'"+pid+"')"):("saveManual('"+pid+"')"))+"\">"+(m?"Сохранить":"Добавить")+"</button><button class='djbtn alt' onclick=\"closeEdit('"+pid+"')\">Отмена</button></div></div>";
 }
@@ -820,6 +828,7 @@ function toggleMealEdit(id){var e=document.getElementById('ed-m'+id);if(!e)retur
 function closeEdit(pid){var e=document.getElementById('ed-'+pid);if(e)e.classList.remove('open');}
 function pickSlot(pid,slot,el){var p=document.getElementById('ed-'+pid);if(p)p.setAttribute('data-slot',slot);if(el&&el.parentNode){el.parentNode.querySelectorAll('.djpill').forEach(function(x){x.classList.remove('on');});el.classList.add('on');}}
 function _gv(id){var e=document.getElementById(id);return e?e.value:'';}
+function rescaleEdit(pid){var ed=document.getElementById('ed-'+pid);if(!ed)return;var bg=parseFloat(ed.getAttribute('data-bg'))||0;if(bg<=0)return;var g=parseFloat(String(_gv('f-g-'+pid)||'').replace(',','.'))||0;if(g<=0)return;var k=g/bg;var sv=function(id2,base,dec){var e=document.getElementById(id2);if(!e)return;var b=parseFloat(base);if(isNaN(b))return;e.value=dec?Math.round(b*k*10)/10:Math.round(b*k);};sv('f-kcal-'+pid,ed.getAttribute('data-bk'),0);sv('f-p-'+pid,ed.getAttribute('data-bp'),1);sv('f-f-'+pid,ed.getAttribute('data-bf'),1);sv('f-c-'+pid,ed.getAttribute('data-bc'),1);}
 async function saveMealEdit(id,pid){var p=document.getElementById('ed-'+pid);var body={id:id,title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};var r=await api('/api/diary_edit',body);if(_applyDiary(r)){haptic('impact','light');toast('Сохранено');}}
 function openManual(){var e=document.getElementById('ed-manual');if(!e)return;document.querySelectorAll('.djedit.open').forEach(function(x){if(x!==e)x.classList.remove('open');});e.classList.add('open');var t=document.getElementById('f-title-manual');if(t)setTimeout(function(){t.focus();},60);}
 async function saveManual(pid){var p=document.getElementById('ed-'+pid);var body={title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};if(!((body.title||'').trim())&&!((body.kcal||'').trim())){toast('Укажи название или калории');return;}showFoodLoading();var r=await api('/api/food_manual',body);hideFoodLoading();if(r&&r.ok){_applyDiary(r);toast('Добавлено');haptic('impact','light');}else toast((r&&r.message)||'Не получилось');}
@@ -838,15 +847,14 @@ async function delMeal(id){var r=await api('/api/diary_del',{id:id});if(_applyDi
 async function scaleMeal(id,delta){var m=((DIARY&&DIARY.meals)||[]).filter(function(x){return x.id===id;})[0];if(!m||!m.grams)return;var ng=Math.max(10,m.grams+delta);var r=await api('/api/diary_scale',{id:id,grams:ng});if(_applyDiary(r))haptic('selection');}
 async function diaryReco(){var box=document.getElementById('diarreco');if(box)box.innerHTML=thinkHTML('Айва смотрит дневник');var r=await api('/api/diary_reco',{});if(box)box.textContent=(r&&r.text)||'Не получилось, попробуй позже.';}
 (function(){var f=document.getElementById('foodfile');if(f)f.addEventListener('change',onFoodFile);})();
-async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",hormones:["Без данных о цикле Айва не делает выводы о фазе.","Главные ориентиры: боль, кровотечение, слабость, сон и восстановление.","При беременности, сильной боли, головокружении или обильном кровотечении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли, рывков и глубокого пресса"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости, боли или обильного кровотечения",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка"};}
+async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",hormones:["Без данных о цикле Айва не делает выводы о фазе.","Главные ориентиры: боль, кровотечение, слабость, сон и восстановление.","При беременности, сильной боли, головокружении или обильном кровотечении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли, рывков и глубокого пресса"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости, боли или обильного кровотечения",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка",suggestions:["Мало сил сегодня?","Что после нагрузки?","Можно при боли?"]};}
   var html="<div class='h'>Нагрузка</div>";
   html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trainBlossom'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+esc(p.level)+"</div><div class='pmeta'>"+esc(p.duration)+(p.day?(" · день "+esc(p.day)+" из "+esc(p.cycle_len)):"")+"</div><div class='ayva-txt' style='margin-top:9px'>"+esc(p.summary||"")+"</div>"+(p.why?("<div class='ayva-txt' style='margin-top:8px'>"+esc(p.why)+"</div>"):"")+"</div></div></div>";
   html+="<div id='trLog'></div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Что выбрать</div>";
   (p.options||[]).forEach(function(o,i){html+="<div class='trainrow rich'><div class='trainico'>"+(i+1)+"</div><div><div class='tn'>"+esc(o.name)+"</div><div class='trainmeta'><div><div class='ml'>Чем полезна</div><div class='mv'>"+esc(o.benefit||"")+"</div></div><div><div class='ml'>Как делать</div><div class='mv'>"+esc(o.how||o.detail||"")+"</div></div></div></div></div>";});
   html+="</div>";
-  html+="<div class='card'><div class='ayva-lab'>Сегодня лучше не делать</div><div class='ayva-txt'>"+esc(p.avoid||p.reduce||"тренировку через боль и слабость")+"</div><div class='ayva-lab' style='margin-top:12px'>После нагрузки</div><div class='ayva-txt'>"+esc(p.recovery||"вода, белок, сон")+"</div></div>";
-  var _o0=(p.options&&p.options[0]&&p.options[0].name)||"";var trq="<div class='chips'>";if(_o0)trq+="<button class='chip' onclick='go(\"chat\");setTimeout(function(){send("+JSON.stringify("Как правильно делать «"+_o0+"» и сколько по времени?")+");},120)'>"+esc(_o0)+": как делать?</button>";trq+="<button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"А если сегодня мало сил — что делать?\");},120)'>Мало сил?</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Что делать после тренировки для восстановления?\");},120)'>После нагрузки</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Можно ли тренироваться при боли или кровотечении?\");},120)'>Можно при боли?</button></div>";html+=trq;
+  html+=suggChips(p.suggestions);
   html+="<div class='foot'>Нагрузка подбирается по фазе цикла и самочувствию. При боли, слабости, беременности или обильном кровотечении лучше снизить интенсивность и обсудить активность с врачом.</div>";
   el.innerHTML=html;blossom(document.getElementById('trainBlossom'),34);loadedTrain=true;try{renderTrainLog();}catch(e){}}
 var TREX={
@@ -1061,17 +1069,7 @@ function renderStats(){
   }
   html+="</div>";
   html+="<div class='card'><div class='sec' style='margin-top:0'>Дневник симптомов</div>"+symptomDiary()+"</div>";
-  html+="<div class='card'><div class='sec' style='margin-top:0'>Мои данные</div><div class='kv'>";
-  html+="<div class='stat'><div class='l'>Возраст</div><div class='v' style='font-size:18px'>"+(p.age||'—')+"</div><div class='s'>лет</div></div>";
-  html+="<div class='stat'><div class='l'>Рост</div><div class='v' style='font-size:18px'>"+(p.height||'—')+"</div><div class='s'>см</div></div>";
-  html+="<div class='stat'><div class='l'>Вес</div><div class='v' style='font-size:18px'>"+(p.weight||'—')+"</div><div class='s'>кг</div></div>";
-  html+="<div class='stat'><div class='l'>Длина цикла</div><div class='v' style='font-size:18px'>"+(D.cycle_len||'—')+"</div><div class='s'>дней</div></div>";
-  html+="<div class='stat'><div class='l'>Месячные</div><div class='v' style='font-size:18px'>"+(D.period_len||((s.avg_period&&s.avg_period>1)?s.avg_period:'—'))+"</div><div class='s'>дней</div></div>";
-  html+="<div class='stat'><div class='l'>Калории</div><div class='v' style='font-size:18px'>"+(p.kcal_goal?(''+p.kcal_goal):(D.kcal_base?(''+D.kcal_base):'—'))+"</div><div class='s'>"+(p.kcal_goal?'цель/день':'норма/день')+"</div></div>";
-  html+="<div class='stat'><div class='l'>Активность</div><div class='v' style='font-size:18px'>"+(["—","минимум","низкая","средняя","высокая","макс."][p.activity||0]||'—')+"</div><div class='s'>уровень</div></div>";
-  html+="<div class='stat'><div class='l'>Сводка</div><div class='v' style='font-size:18px'>"+(D.send_time||"08:00")+"</div><div class='s'>МСК</div></div>";
-  html+="</div>";if(p.diet_note)html+="<div class='foot' style='margin-top:10px;text-align:left'>Питание: "+esc(p.diet_note)+"</div>";html+="<div class='chips'><button class='chip' onclick='showProfileEditor()'>Изменить данные</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как поменять время рассылки?\");},120)'>Время сводки</button><button class='chip' onclick='go(\"chat\");setTimeout(function(){send(\"Как добавить историю циклов?\");},120)'>История циклов</button></div>";
-  html+="<div id='profileEditor' class='hidden'><div class='profileform'><label>Рост<input id='profHeight' inputmode='decimal' value='"+esc(p.height||"")+"' placeholder='168'></label><label>Вес<input id='profWeight' inputmode='decimal' value='"+esc(p.weight||"")+"' placeholder='60'></label><label>Возраст<input id='profAge' inputmode='numeric' value='"+esc(p.age||"")+"' placeholder='30'></label><label>Ср. длина цикла<input id='profCycle' inputmode='numeric' value='"+esc(D.cycle_len||"")+"' placeholder='28'></label></div><div class='profileactions'><button class='pbtn' onclick='saveProfileApp()'>Сохранить</button><button class='pbtn alt' onclick='showProfileEditor()'>Отмена</button></div></div></div>";
+
   html+="<div class='card'><div class='sec' style='margin-top:0'>Выписка для врача</div><div class='partnernote'>PDF с историей цикла и симптомами — можно показать гинекологу. Придёт в чат бота.</div><button class='copylink' onclick='getReport()'>Получить выписку</button></div>";
   html+="<div class='foot'>Статистика строится по твоим отметкам: циклы, симптомы и история изменений.</div>";
   el.innerHTML=html;

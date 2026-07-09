@@ -79,7 +79,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-08-ux-full-v25"
+AIWA_VERSION = "2026-07-09-ai-sections-v26"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2887,6 +2887,35 @@ async def _api_partner(request):
     pid = partner_of(cid)
     ev(cid, "button", meta="web_partner")
     return _cors(web.json_response({"code": code, "link": link, "linked": bool(pid)}))
+def _food_ctx(u, st):
+    if st:
+        return f"Сейчас {st.get('subphase','')} {st['phase_ru'].lower()} фаза, день {st['day']} цикла."
+    return {"meno": "Режим менопаузы.", "preg": "Беременность.", "irregular": "Нерегулярный цикл.",
+            "none": "Месячных сейчас нет."}.get(u.get("mode"), "")
+
+def _recent_workouts_text(cid):
+    try:
+        rw = workouts_recent(cid, days=10, limit=5)
+    except Exception:
+        return ""
+    parts = []
+    for w in rw:
+        items = ", ".join((i.get("name") or "") for i in (w.get("items") or []) if i.get("name"))
+        seg = (w.get("d", "") or "") + ": " + (w.get("type", "") or "")
+        if items: seg += " (" + items[:60] + ")"
+        parts.append(seg)
+    return "; ".join(parts)
+
+def _recent_syms_text(cid):
+    lg = log_get(cid, date.today().isoformat()) or {}
+    out = []
+    e = lg.get("energy"); m = lg.get("mood")
+    if e: out.append("энергия " + {1: "низкая", 2: "средняя", 3: "высокая"}.get(e, str(e)))
+    if m: out.append("настроение " + {1: "плохое", 2: "нормальное", 3: "хорошее"}.get(m, str(m)))
+    n = len(lg.get("symptoms") or [])
+    if n: out.append(f"симптомов отмечено: {n}")
+    return ", ".join(out)
+
 async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -2903,8 +2932,11 @@ async def _api_section(request):
                    "preg": "В беременности важно закрыть потребность в фолиевой кислоте, железе, кальции и белке. Ешь зелень и бобовые (фолаты), красное мясо и гречку (железо), молочное (кальций), рыбу с омега-3 и белок в каждый приём. Избегай сырого мяса и рыбы, непастеризованного, печени в избытке, алкоголя и лишнего кофеина.",
                    "irregular": "Без чёткого цикла опирайся на стабильный сахар и сытость. Белок в каждый приём (яйца, рыба, птица, творог), сложные углеводы (гречка, рис, овощи), магний и железо — это держит энергию и настроение ровными в течение дня.",
                    "none": "Сбалансированно и просто: белок в каждый приём, овощи и зелень, сложные углеводы, полезные жиры (рыба, орехи) и достаточно воды. Меньше резких скачков сахара — стабильнее энергия и меньше тяги к перекусам."}.get(u.get("mode"), "Сбалансированное питание на день: белок, овощи, сложные углеводы и вода.")
-            return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt}))
-        plan = await asyncio.to_thread(L.general_training, prof, u.get("mode"))
+            _su = []; sugg = await asyncio.to_thread(L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, None), _su)
+            if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su))
+            return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt, "suggestions": sugg}))
+        _su = []; plan = await asyncio.to_thread(L.training_today, None, prof, _recent_workouts_text(cid), u.get("mode"), _su)
+        if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su))
         return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
     if kind == "food":
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
@@ -2912,13 +2944,23 @@ async def _api_section(request):
         if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage))
         if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
         text = st["content"]["food"]
-        return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text}))
-    _usage = []
-    text = await asyncio.to_thread(L.explain_section, st, "training", _usage)
-    if _usage: ev(cid, "tokens", sum(_usage), meta="training_section", calls=len(_usage))
-    text = L.split_followups(text)[0]
-    plan = await asyncio.to_thread(L.training_plan, st, profile_of(u))
-    return _cors(web.json_response({"text": text, "training": plan}))
+        _su = []; sugg = await asyncio.to_thread(L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, st), _su)
+        if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su))
+        return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text, "suggestions": sugg}))
+    _su = []; plan = await asyncio.to_thread(L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
+    if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su))
+    return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
+async def _api_today(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    _, st = status_of(cid); ev(cid, "button", meta="web_today")
+    _su = []
+    note = await asyncio.to_thread(L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), _su)
+    if _su: ev(cid, "tokens", sum(_su), meta="today_note", calls=len(_su))
+    return _cors(web.json_response(note))
+
 async def _api_chat(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -3363,6 +3405,7 @@ _EV_LBL = {
     "web_partner": "Партнёр", "web_profile": "Профиль", "web_prefs": "Предпочтения по еде", "web_settime": "Время сводки",
     "web_train_profile": "Профиль тренировок", "web_pa": "Отметка близости", "web_diary_del": "Удаление из дневника",
     "web_diary_edit": "Правка в дневнике", "web_diary_scale": "Граммовка в дневнике", "web_diary_slot": "Перенос приёма",
+    "web_today": "Открыла «Сегодня»", "food_suggest": "Идеи по питанию", "training_today": "Разбор нагрузки", "today_note": "Сводка дня",
     "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
     "answer": "Вопрос в чате", "general": "Вопрос в чате", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
     "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",
@@ -3980,6 +4023,7 @@ def build_web():
     aio.router.add_get("/api/admin_stats", _admin_stats)
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
+    aio.router.add_post("/api/today", _api_today)
     aio.router.add_post("/api/chat", _api_chat)
     aio.router.add_post("/api/voice", _api_voice)
     aio.router.add_post("/api/food_photo", _api_food_photo)

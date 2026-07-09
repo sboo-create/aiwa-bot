@@ -807,6 +807,126 @@ def training_review(workout, recent=None, phase_ru=None, mode=None, profile=None
     out = _call([{"role": "system", "content": sys}, {"role": "user", "content": user}], max_tokens=420, temperature=0.6, usage=usage)
     return (out or "").strip()
 
+def _parse_str_list(out, n=3):
+    if not out: return []
+    arr = None
+    try:
+        arr = json.loads(out[out.find("["):out.rfind("]") + 1])
+    except Exception:
+        arr = [re.sub(r"^[\-\*•\d\.\)\s\"]+", "", l).strip().strip('"').strip()
+               for l in (out or "").splitlines() if l.strip()]
+    res = []
+    for x in (arr or []):
+        if isinstance(x, str):
+            x = x.strip().strip('"').strip()
+            if x and x not in res:
+                res.append(x)
+    return res[:n]
+
+
+def _train_ctx(st, mode, profile):
+    if st:
+        base = (f"Сегодня день {st['day']} из {st['cycle_len']}, {st.get('subphase','')} "
+                f"{st['phase_ru'].lower()} фаза, до месячных ~{st['days_to_next']} дн.")
+    else:
+        mm = {"meno": "менопауза (цикл не отслеживается)", "preg": "беременность",
+              "irregular": "нерегулярный цикл", "none": "месячных сейчас нет"}.get(mode, "цикл не отслеживается")
+        base = f"Режим: {mm}. Опирайся на самочувствие, сон, боль и энергию, без жёсткой привязки к фазе."
+    bits = []
+    if profile:
+        if profile.get("age"): bits.append(f"возраст {profile['age']}")
+        a = _ACT.get(profile.get("activity"))
+        if a: bits.append(f"обычная активность {a}")
+    if bits:
+        base += " Пользовательница: " + ", ".join(bits) + "."
+    return base
+
+
+def training_today(st, profile=None, recent=None, mode=None, usage=None):
+    """Динамическая рекомендация по нагрузке от модели: меняется день ото дня и учитывает недавние тренировки."""
+    ctx = _train_ctx(st, mode, profile)
+    rec = ""
+    if recent:
+        rec = (" Недавние тренировки (свежие сверху): " + recent +
+               ". Не предлагай то же самое подряд, чередуй нагрузку и группы мышц, учитывай восстановление.")
+    prompt = (
+        "Ты тренер и физиолог женского здоровья. Составь рекомендацию по физической нагрузке на СЕГОДНЯ лично для неё. "
+        + ctx + rec +
+        " Ответ должен быть живым и разным день ото дня, без шаблонных повторов. Строго JSON без обрамления:\n"
+        '{"level":"2-4 слова, напр. Силовая, можно активнее",'
+        '"duration":"диапазон, напр. 35-50 мин",'
+        '"summary":"1-2 живых предложения: что делать сегодня и ради чего",'
+        '"why":"2-3 предложения простыми словами: физиология именно сегодня — фаза, гормоны или самочувствие",'
+        '"options":[{"name":"короткое название","benefit":"чем полезно именно ей сегодня","how":"как делать: время, подходы или темп"}],'
+        '"suggestions":["три очень коротких (до 40 знаков) РАЗНЫХ вопроса от лица женщины про нагрузку, восстановление или технику"]}\n'
+        "В options 2-3 конкретных варианта. Только обычная доступная активность. По-русски, без markdown."
+    )
+    out = _call([{"role": "system", "content": "Ты тренер femtech-приложения. Отвечай строго JSON, по-русски, без markdown."},
+                 {"role": "user", "content": prompt}], max_tokens=750, temperature=0.6, usage=usage)
+    data = None
+    if out:
+        try:
+            data = json.loads(out[out.find("{"):out.rfind("}") + 1])
+        except Exception:
+            data = None
+    base = training_plan(st, profile) if st else general_training(profile, mode)
+    if not isinstance(data, dict):
+        return base
+    opts = [o for o in (data.get("options") or []) if isinstance(o, dict) and o.get("name")]
+    if len(opts) < 2 or not (data.get("summary") or "").strip():
+        return base
+    sugg = _parse_str_list(json.dumps(data.get("suggestions") or [], ensure_ascii=False), 3)
+    return {
+        "title": (data.get("level") or base.get("level", "")) + " нагрузка",
+        "level": data.get("level") or base.get("level", ""),
+        "duration": data.get("duration") or base.get("duration", ""),
+        "summary": (data.get("summary") or base.get("summary", "")).strip(),
+        "why": (data.get("why") or base.get("why", "")).strip(),
+        "phase": (st.get("phase_ru", "") if st else ""),
+        "day": (st.get("day", "") if st else ""),
+        "cycle_len": (st.get("cycle_len", "") if st else ""),
+        "options": [{"name": o.get("name", ""), "benefit": o.get("benefit", ""),
+                     "how": o.get("how") or o.get("detail", "")} for o in opts[:3]],
+        "suggestions": sugg,
+    }
+
+
+def food_suggestions(dishes, ctx="", usage=None):
+    """3 коротких интересных контекстных вопроса про сегодняшнее меню — от модели."""
+    dl = ", ".join([d for d in (dishes or []) if d][:4]) or "обычные блюда"
+    prompt = ("Сегодняшнее меню: " + dl + ". " + (ctx or "") +
+              " Придумай 3 КОРОТКИХ, интересных и РАЗНЫХ вопроса от лица женщины к ассистенту по женскому здоровью. "
+              "Каждый до 40 знаков, про пользу конкретного продукта из меню в её состоянии/фазе, необычный факт или удачную замену. "
+              "Живо, не шаблонно, без слова «рецепт». Пример стиля: «польза миндаля при ПМС», «чем заменить рис вечером», «почему тянет на сладкое». "
+              "Ответь строго JSON-массивом из 3 строк, по-русски.")
+    out = _call([{"role": "system", "content": "Ты ассистент femtech-приложения. Отвечай строго JSON-массивом строк, по-русски."},
+                 {"role": "user", "content": prompt}], max_tokens=220, temperature=0.85, usage=usage)
+    return _parse_str_list(out, 3)
+
+
+def today_note(st, profile=None, recent_syms=None, mode=None, usage=None):
+    """Короткая персональная сводка на «Сегодня» + подсказки — от модели."""
+    ctx = _train_ctx(st, mode, profile)
+    sy = (" Сегодня отмечено: " + recent_syms + ".") if recent_syms else ""
+    prompt = ("Ты тёплый и точный ассистент по женскому здоровью. " + ctx + sy +
+              " Напиши короткую персональную сводку на сегодня: 2-3 живых предложения о том, как её тело сегодня "
+              "и что это значит для энергии и самочувствия, с лёгким практичным акцентом. "
+              "И 3 коротких (до 40 знаков) разных вопроса от лица женщины. Строго JSON без обрамления: "
+              '{"summary":"...","suggestions":["...","...","..."]}. По-русски, без markdown.')
+    out = _call([{"role": "system", "content": "Ты ассистент femtech-приложения. Отвечай строго JSON, по-русски, без markdown."},
+                 {"role": "user", "content": prompt}], max_tokens=430, temperature=0.55, usage=usage)
+    data = None
+    if out:
+        try:
+            data = json.loads(out[out.find("{"):out.rfind("}") + 1])
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
+        return {"summary": "", "suggestions": []}
+    sugg = _parse_str_list(json.dumps(data.get("suggestions") or [], ensure_ascii=False), 3)
+    return {"summary": (data.get("summary") or "").strip(), "suggestions": sugg}
+
+
 def explain_section(st, key, usage=None):
     if key == "training":
         return training_text(st)
