@@ -78,8 +78,14 @@ TZ = ZoneInfo(os.environ.get("AIWA_TZ", "Europe/Moscow"))
 DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") else "aiwa.db")
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
+AIWA_PRACTICE_IDS = set(x.strip() for x in (os.environ.get("AIWA_PRACTICE_IDS", "") or "").split(",") if x.strip())
+def _practice_on(cid):
+    s = str(cid)
+    if AIWA_ADMIN and s == str(AIWA_ADMIN):
+        return True
+    return s in AIWA_PRACTICE_IDS
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-09-ai-sections-v27"
+AIWA_VERSION = "2026-07-09-practice-flag-v29"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2677,7 +2683,7 @@ async def _api_data(request):
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
            "partner_linked": bool(partner_of(cid)),
            "today_log": log_get(cid, date.today().isoformat()) or {"symptoms": []},
-           "send_time": u.get("send_time") or "08:00",
+           "send_time": u.get("send_time") or "08:00", "practice": _practice_on(cid),
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
                        "activity": u.get("activity"), "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}}
     out["sym_log"] = logs_of(cid, (date.today() - timedelta(days=45)).isoformat())
