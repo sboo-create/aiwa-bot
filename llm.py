@@ -455,6 +455,49 @@ def _call_proxy(messages, max_tokens, temperature, usage, attempts=4):
             return out
     return None
 
+
+def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
+    """Один раунд OpenAI-style function-calling. Возвращает {content, tool_calls} или None,
+    если провайдер недоступен/не поддержал инструменты (тогда вызывающий откатывается к обычному ответу)."""
+    cfgs = [c for c in _proxy_configs() if not _proxy_is_messages(c.get("url"))]
+    if not cfgs:
+        return None
+    cfg = cfgs[0]
+    import time as _tt
+    STATS["calls"] += 1
+    if not _LLM_SEM.acquire(blocking=False):
+        STATS["queued"] += 1
+        _LLM_SEM.acquire()
+    t1 = _tt.time(); ok = False
+    try:
+        headers = {"Content-Type": "application/json"}
+        if cfg.get("key"): headers["Authorization"] = "Bearer " + cfg["key"]
+        if cfg.get("xkey"): headers["X-API-Key"] = cfg["xkey"]
+        payload = {"model": cfg.get("model") or PROXY_MODEL, "messages": messages,
+                   "temperature": max(0.01, temperature), "max_tokens": max_tokens,
+                   "tools": tools, "tool_choice": "auto"}
+        r = _HTTP.post(cfg["url"], headers=headers, json=payload, timeout=(6, 45), verify=False)
+        if r.status_code >= 400:
+            print("call_tools proxy error:", r.status_code, (r.text or "")[:300])
+            return None
+        data = r.json()
+        if usage is not None:
+            usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        content = msg.get("content")
+        if isinstance(content, str):
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
+        ok = True
+        return {"content": content, "tool_calls": msg.get("tool_calls")}
+    except Exception as e:
+        print("call_tools error:", e)
+        return None
+    finally:
+        _LLM_SEM.release()
+        STATS["ms"] += int((_tt.time() - t1) * 1000)
+        if not ok:
+            STATS["err"] += 1
+
 def _call_impl(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
     """Единая точка вызова модели. Движок выбирается переменной AIWA_PROVIDER."""
     aliases = {"proxy": "litellm", "stand": "gigastand", "direct": "gigastand", "adapter": "gigastand"}

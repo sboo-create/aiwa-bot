@@ -85,7 +85,7 @@ def _practice_on(cid):
         return True
     return s in AIWA_PRACTICE_IDS
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-09-practice-v35"
+AIWA_VERSION = "2026-07-09-agent-v36"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2987,6 +2987,89 @@ async def _api_chat(request):
         return _cors(web.json_response({"answer": "Я тут. Напиши вопрос про цикл, питание, нагрузку или самочувствие.", "suggestions": ["Когда овуляция?", "Что есть сегодня?"]}))
     return _cors(web.json_response(await _chat_reply(cid, u, msg)))
 
+def _agent_tools_spec():
+    return [
+        {"type": "function", "function": {"name": "cycle_status",
+            "description": "Текущая фаза цикла, день цикла, сколько дней до месячных, задержка. Вызывай для вопросов про цикл, фазу, овуляцию, ПМС, самочувствие.",
+            "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "recent_symptoms",
+            "description": "Отметки самочувствия за последние дни: симптомы, энергия, настроение.",
+            "parameters": {"type": "object", "properties": {"days": {"type": "integer", "description": "за сколько дней, по умолчанию 14"}}}}},
+        {"type": "function", "function": {"name": "today_diary",
+            "description": "Что пользовательница ела сегодня: калории и БЖУ, цель по калориям. Вызывай для вопросов про питание и калории.",
+            "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "recent_workouts",
+            "description": "Последние тренировки пользовательницы. Вызывай для вопросов про нагрузку.",
+            "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "user_profile",
+            "description": "Профиль: рост, вес, возраст, активность, цель по калориям, режим (цикл/менопауза/беременность).",
+            "parameters": {"type": "object", "properties": {}}}},
+    ]
+
+def _agent_exec(cid, name, args):
+    args = args or {}
+    try:
+        if name == "cycle_status":
+            _, st = status_of(cid)
+            if not st:
+                return {"tracked": False, "note": "цикл сейчас не отслеживается"}
+            return {"tracked": True, "phase": st.get("phase_ru"), "subphase": st.get("subphase"),
+                    "day": st.get("day"), "cycle_len": st.get("cycle_len"),
+                    "days_to_next": st.get("days_to_next"), "status": st.get("status")}
+        if name == "recent_symptoms":
+            days = int(args.get("days") or 14)
+            logs = logs_of(cid, (date.today() - timedelta(days=days)).isoformat()) or []
+            out = [{"date": l.get("date"), "symptoms": l.get("symptoms"), "energy": l.get("energy"), "mood": l.get("mood")}
+                   for l in logs if (l.get("symptoms") or l.get("energy") or l.get("mood"))]
+            return {"logs": out[-12:]}
+        if name == "today_diary":
+            dp = diary_payload(cid)
+            return {"totals": dp.get("totals"), "target": dp.get("target"), "meals_logged": len(dp.get("meals") or [])}
+        if name == "recent_workouts":
+            return {"recent": _recent_workouts_text(cid) or "нет записей"}
+        if name == "user_profile":
+            u = row(cid) or {}; p = profile_of(u) or {}
+            return {"height": p.get("height"), "weight": p.get("weight"), "age": p.get("age"),
+                    "activity": p.get("activity"), "kcal_goal": p.get("kcal_goal"), "mode": u.get("mode")}
+    except Exception as e:
+        return {"error": str(e)}
+    return {"error": "unknown tool"}
+
+async def _agent_answer(cid, u, msg, usage, rounds=3):
+    """Агентный ответ: модель сама вызывает инструменты и берёт реальные данные пользовательницы.
+    Возвращает текст или None (тогда вызывающий откатывается к обычному ответу)."""
+    sys_p = ("Ты AIWA — тёплый и точный ассистент по женскому здоровью. У тебя есть инструменты, "
+             "чтобы получить РЕАЛЬНЫЕ данные пользовательницы: цикл, симптомы, дневник еды, тренировки, профиль. "
+             "Если вопрос касается её состояния, цикла, питания, нагрузки или самочувствия — СНАЧАЛА вызови нужные инструменты, "
+             "потом дай конкретный ответ по её данным, не выдумывая. Для общих вопросов отвечай сразу. "
+             "Отвечай по-русски, тепло и по делу, без markdown и без длинных тире, медицински аккуратно.")
+    messages = [{"role": "system", "content": sys_p}]
+    for m in (hist_get(cid) or [])[-6:]:
+        messages.append({"role": ("assistant" if m.get("role") == "assistant" else "user"), "content": m.get("content") or ""})
+    messages.append({"role": "user", "content": msg})
+    tools = _agent_tools_spec()
+    for _r in range(rounds):
+        m = await asyncio.to_thread(L.call_tools, messages, tools, usage)
+        if not m:
+            return None
+        tc = m.get("tool_calls")
+        if tc:
+            messages.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": tc})
+            for call in tc:
+                fn = call.get("function") or {}
+                nm = fn.get("name") or ""
+                try:
+                    a = json.loads(fn.get("arguments") or "{}")
+                except Exception:
+                    a = {}
+                res = _agent_exec(cid, nm, a)
+                messages.append({"role": "tool", "tool_call_id": call.get("id"),
+                                 "content": json.dumps(res, ensure_ascii=False)})
+            continue
+        txt = (m.get("content") or "").strip()
+        return txt or None
+    return None
+
 async def _chat_reply(cid, u, msg):
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
     intent = match_intent(msg)
@@ -3015,18 +3098,24 @@ async def _chat_reply(cid, u, msg):
         if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage))
         return {"answer": txt, "suggestions": ["Открыть питание", "Что купить?"]}
     _, st = status_of(cid); usage = []; prof = profile_of(u)
-    if intent in ("food", "training"):
-        fq = ("Что мне есть сегодня под мою фазу/режим, возраст и самочувствие? Дай конкретные продукты или пример меню на день. Отвечай ТОЛЬКО про еду, не рассказывай про фазы цикла."
-              if intent == "food" else
-              "Какая физическая активность мне сегодня подходит и почему? Дай 2-3 конкретных варианта. Отвечай про тренировки, тему цикла не разворачивай.")
-        if st is not None:
-            ans = await asyncio.to_thread(L.answer_question, st, fq, prof, hist_get(cid), usage=usage)
+    ans = None
+    try:
+        ans = await _agent_answer(cid, u, msg, usage)
+    except Exception as _ae:
+        log.warning("agent fallback: %s", _ae); ans = None
+    if not ans:
+        if intent in ("food", "training"):
+            fq = ("Что мне есть сегодня под мою фазу/режим, возраст и самочувствие? Дай конкретные продукты или пример меню на день. Отвечай ТОЛЬКО про еду, не рассказывай про фазы цикла."
+                  if intent == "food" else
+                  "Какая физическая активность мне сегодня подходит и почему? Дай 2-3 конкретных варианта. Отвечай про тренировки, тему цикла не разворачивай.")
+            if st is not None:
+                ans = await asyncio.to_thread(L.answer_question, st, fq, prof, hist_get(cid), usage=usage)
+            else:
+                ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage)
+        elif st is not None:
+            ans = await asyncio.to_thread(L.answer_question, st, msg, prof, hist_get(cid), usage=usage)
         else:
-            ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage)
-    elif st is not None:
-        ans = await asyncio.to_thread(L.answer_question, st, msg, prof, hist_get(cid), usage=usage)
-    else:
-        ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), msg, chat_hint(cid), hist_get(cid), usage=usage)
+            ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), msg, chat_hint(cid), hist_get(cid), usage=usage)
     hist_push(cid, msg, ans)
     clean, sugg = L.split_followups(ans)
     if st is not None and len(sugg) < 2:
