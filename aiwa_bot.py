@@ -85,7 +85,7 @@ def _practice_on(cid):
         return True
     return s in AIWA_PRACTICE_IDS
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-09-practice-v34"
+AIWA_VERSION = "2026-07-09-practice-v35"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2672,6 +2672,13 @@ async def _serve_index(request):
             return web.Response(text=html_text, content_type="text/html",
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
+
+async def _serve_breath(request):
+    import os as _os
+    for p in (_os.path.join(WEB_DIR, "breath.mp3"), _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "breath.mp3")):
+        if _os.path.exists(p):
+            return web.FileResponse(p, headers={"Cache-Control": "public, max-age=86400"})
+    return web.Response(status=404)
 async def _api_data(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -4024,6 +4031,7 @@ load();
 def build_web():
     aio = web.Application(client_max_size=20 * 1024 * 1024)  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
+    aio.router.add_get("/breath.mp3", _serve_breath)
     aio.router.add_get("/health", lambda r: web.Response(text="ok " + AIWA_VERSION))
     aio.router.add_get("/admin", _admin_page)
     aio.router.add_get("/api/admin_stats", _admin_stats)
