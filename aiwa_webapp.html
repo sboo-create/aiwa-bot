@@ -378,12 +378,11 @@ body{padding-top:var(--safe-top,0px)}
 .prpl{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--roseDeep);font-weight:700;margin-top:4px}
 .prstage{position:absolute;top:43%;left:50%;transform:translate(-50%,-50%);width:300px;height:300px;display:flex;align-items:center;justify-content:center;z-index:3}
 .prring{position:absolute;inset:0}
-.prringbg{fill:none;stroke:rgba(33,28,26,.07);stroke-width:3}
-.parc{transition:none}
+.prringbg{fill:none;stroke:rgba(33,28,26,.06);stroke-width:6}
+.parc{fill:none;stroke-width:6;stroke-linecap:butt;transition:none}
 #pdot circle{filter:drop-shadow(0 2px 5px rgba(194,94,118,.45))}
-.flwr{position:relative;width:230px;height:230px;filter:drop-shadow(0 12px 24px rgba(194,94,118,.2))}
-.pet{position:absolute;left:50%;top:22px;width:42px;height:90px;margin-left:-21px;transform-origin:50% 100%;will-change:transform,opacity;background:radial-gradient(125% 78% at 50% 12%,#ffffff 0%,#FDE9EE 24%,#F5B9C6 56%,#E0879A 100%);border-radius:50% 50% 46% 46% / 62% 62% 38% 38%;box-shadow:inset 0 -9px 18px rgba(194,94,118,.22),inset 0 6px 10px rgba(255,255,255,.6)}
-.fcore{position:absolute;left:50%;top:50%;width:48px;height:48px;margin:-24px 0 0 -24px;border-radius:50%;background:radial-gradient(circle at 40% 34%,#FBE7A6,#E5A734 62%,#C98A1E);box-shadow:0 0 30px rgba(229,167,52,.5),0 0 0 7px rgba(229,167,52,.1);will-change:transform}
+#flowerSvg{width:232px;height:232px;filter:drop-shadow(0 12px 22px rgba(194,94,118,.24))}
+#flOuter,#flInner,#flCore{transform-box:fill-box;transform-origin:center}
 .prcuewrap{position:absolute;top:75%;left:0;right:0;text-align:center;z-index:4}
 #prcue{font-family:var(--serif);font-size:32px;font-weight:600;color:var(--ink);transition:opacity .3s}
 .prfoot{position:absolute;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 26px);text-align:center;z-index:4}
@@ -404,6 +403,7 @@ body{padding-top:var(--safe-top,0px)}
 .prdrow{display:flex;gap:10px;margin-top:20px}
 .prdrow button{cursor:pointer;border-radius:14px;padding:12px 22px;font-family:var(--sans);font-weight:800;font-size:14px;border:1px solid var(--line);background:#fff;color:var(--inkMid)}
 .prdrow .pri{background:var(--roseDeep);color:#fff;border-color:var(--roseDeep)}
+.prsug{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:8px}
 
 </style>
 </head>
@@ -1284,6 +1284,7 @@ var PRACT={
   benefit:['спокойствие','ниже пульс','меньше тревоги'],
   motiv:'Одна минута в день — и тело быстрее находит спокойствие само.',
   done:'Пульс ровнее, плечи ниже. Ты дала себе паузу — это уже забота о себе.',
+  sugg:['Почему 4·7·8 успокаивает?','Когда лучше её делать?'],
   pat:[['Вдох',4,'in'],['Задержка',7,'hold'],['Выдох',8,'out']]},
  sleep:{label:'Заснуть',icon:'😴',tech:'Дыхание 4·8',
   why:'Долгий выдох тормозит тело и гасит мысленный шум — так проще уснуть.',
@@ -1291,6 +1292,7 @@ var PRACT={
   benefit:['легче уснуть','расслабление','тишина в голове'],
   motiv:'Делай в кровати с закрытыми глазами — просто следуй за цветком.',
   done:'Тело замедлилось, дыхание длиннее. Позволь себе выключиться.',
+  sugg:['Как ещё лучше засыпать?','Почему помогает долгий выдох?'],
   pat:[['Вдох',4,'in'],['Выдох',8,'out']]},
  focus:{label:'Собраться',icon:'🎯',tech:'Квадрат 4·4·4·4',
   why:'Ровное дыхание по квадрату собирает внимание и убирает суету перед делом.',
@@ -1298,6 +1300,7 @@ var PRACT={
   benefit:['ясность','внимание','баланс'],
   motiv:'Две минуты перед важным делом заметно поднимают концентрацию.',
   done:'Голова яснее, суета ушла. Ты собрана — иди и сделай.',
+  sugg:['Как удержать фокус дольше?','Когда делать перед делом?'],
   pat:[['Вдох',4,'in'],['Задержка',4,'hold'],['Выдох',4,'out'],['Задержка',4,'hold']]},
  energy:{label:'Взбодриться',icon:'⚡',tech:'Дыхание 6·2',
   why:'Акцент на длинном вдохе мягко бодрит без кофеина.',
@@ -1305,6 +1308,7 @@ var PRACT={
   benefit:['бодрость','энергия','тонус'],
   motiv:'Замени утренний скролл этой минутой — тело скажет спасибо.',
   done:'Стало легче и бодрее. Ты включилась в день на своих условиях.',
+  sugg:['Как взбодриться без кофе?','Когда лучше её делать?'],
   pat:[['Вдох',6,'in'],['Выдох',2,'out']]}
 };
 var PHREC2={menstrual:'calm',follicular:'energy',ovulation:'focus',luteal:'calm'};
@@ -1348,17 +1352,27 @@ function practiceDetails(k){
  document.getElementById('hub').innerHTML=h;
 }
 function setPLen(v,el){pLen=v;var ps=el.parentNode.querySelectorAll('.trpill');for(var i=0;i<ps.length;i++)ps[i].classList.remove('sel');el.classList.add('sel');haptic('selection');}
-var PETN=7, PRC=2*Math.PI*132;
+var PRC=2*Math.PI*132;
 var pRaf=null,pRun=false,pPause=false,pStart=0,pPauseStart=0,pPausedAcc=0,pLastKey='',pLastTick=0;
 var CYCLE=[],CYCTOTAL=1;
-function buildFlower(){var h="<div class='flwr' id='flwr'>";for(var i=0;i<PETN;i++){h+="<div class='pet' id='pet"+i+"' style='transform:rotate("+(i*(360/PETN))+"deg) scale(.12);opacity:.3'></div>";}h+="<div class='fcore' id='fcore' style='transform:scale(.5)'></div></div>";return h;}
+function buildFlower(){
+ var op='',ip='';
+ for(var i=0;i<8;i++){op+="<path d='M120,118 C102,96 100,54 120,24 C140,54 138,96 120,118 Z' fill='url(#ptl)' transform='rotate("+(i*45)+" 120 120)'/>";}
+ for(var j=0;j<8;j++){ip+="<path d='M120,114 C109,99 108,70 120,50 C132,70 131,99 120,114 Z' fill='url(#ptli)' transform='rotate("+(j*45+22.5)+" 120 120)'/>";}
+ return "<svg id='flowerSvg' viewBox='0 0 240 240'><defs>"
+  +"<linearGradient id='ptl' x1='120' y1='118' x2='120' y2='24' gradientUnits='userSpaceOnUse'><stop offset='0' stop-color='#D96E86'/><stop offset='.5' stop-color='#EE9DB0'/><stop offset='1' stop-color='#FCE3E9'/></linearGradient>"
+  +"<linearGradient id='ptli' x1='120' y1='114' x2='120' y2='50' gradientUnits='userSpaceOnUse'><stop offset='0' stop-color='#E88CA2'/><stop offset='1' stop-color='#FFF2F5'/></linearGradient>"
+  +"<radialGradient id='ctr' cx='.4' cy='.35' r='.72'><stop offset='0' stop-color='#FCEAAF'/><stop offset='.55' stop-color='#EAAF3E'/><stop offset='1' stop-color='#C98A1E'/></radialGradient></defs>"
+  +"<g id='flOuter'>"+op+"</g><g id='flInner'>"+ip+"</g>"
+  +"<g id='flCore'><circle cx='120' cy='120' r='17' fill='url(#ctr)'/></g></svg>";
+}
 function buildArcs(){
  var g=PRACT[curGoal];CYCLE=[];var off=0,lastV=0;
  g.pat.forEach(function(st){var v0,v1;if(st[2]==='in'){v0=0;v1=1;}else if(st[2]==='out'){v0=1;v1=0;}else{v0=lastV;v1=lastV;}CYCLE.push({label:st[0],dur:st[1],kind:st[2],off:off,v0:v0,v1:v1});off+=st[1];lastV=v1;});
  CYCTOTAL=off;
- var GAP=8,html='',frac=0;
+ var GAP=12,html='',frac=0;
  CYCLE.forEach(function(st){var lf=st.dur/CYCTOTAL,len=lf*PRC-GAP,col=(st.kind==='hold')?'#E5A734':'#C25E76';
-  html+="<circle class='parc' cx='150' cy='150' r='132' fill='none' stroke='"+col+"' stroke-width='4' stroke-linecap='round' stroke-dasharray='"+len.toFixed(1)+" "+(PRC-len).toFixed(1)+"' stroke-dashoffset='"+(-(frac*PRC)-GAP/2).toFixed(1)+"' opacity='0.5'/>";
+  html+="<circle class='parc' cx='150' cy='150' r='132' stroke='"+col+"' stroke-dasharray='"+len.toFixed(1)+" "+(PRC-len).toFixed(1)+"' stroke-dashoffset='"+(-(frac*PRC)-GAP/2).toFixed(1)+"' opacity='0.62'/>";
   frac+=lf;});
  return html;
 }
@@ -1372,15 +1386,14 @@ function startBreath(){
   +"<div class='prstage'><svg class='prring' viewBox='0 0 300 300'><circle class='prringbg' cx='150' cy='150' r='132'/><g transform='rotate(-90 150 150)'>"+arcs+"</g><g id='pdot' transform='rotate(0 150 150)'><circle cx='150' cy='18' r='7.5' fill='#fff' stroke='#C25E76' stroke-width='3'/></g></svg>"+buildFlower()+"</div>"
   +"<div class='prcuewrap'><div id='prcue'>Приготовься…</div></div>"
   +"<div class='prfoot'><div id='prtime'>"+pFmt(pLen)+"</div><div class='prctrls'><button class='prcbtn' id='prsnd' onclick='toggleSnd()'>♪̶</button><button class='prcbtn big' id='prpause' onclick='togglePause()'>❚❚</button></div></div>"
-  +"<div class='prdone' id='prdone'><div class='prchk'>✽</div><h3>Готово</h3><div class='prdb' id='prdb'></div><div class='prdcard'><div class='prdtag'>Айва</div><div class='prda' id='prda'></div></div><div class='prdm' id='prdm'></div><div class='prdrow'><button onclick='startBreath()'>Ещё раз</button><button class='pri' onclick='closePractice()'>Готово</button></div></div></div>";
+  +"<div class='prdone' id='prdone'><div class='prchk'>✽</div><h3>Отлично!</h3><div class='prdcard'><div class='prdtag'>Айва · разбор</div><div class='prda' id='prda'></div></div><div class='prsug' id='prsug'></div><div class='prdrow'><button onclick='startBreath()'>Ещё раз</button><button class='pri' onclick='closePractice()'>Готово</button></div></div></div>";
  var ov=document.getElementById('practice');ov.innerHTML=h;ov.classList.remove('hidden');
  fallPetals(8);pSoundOn=false;
  pRun=true;pPause=false;pPausedAcc=0;pStart=performance.now();pLastKey='';pLastTick=0;
- haptic('impact','medium');
+ haptic('impact','heavy');
  pRaf=requestAnimationFrame(frame);
 }
 function pFmt(s){s=Math.round(s);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
-function pEase(x){return x<0.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2;}
 function frame(){
  if(!pRun)return;pRaf=requestAnimationFrame(frame);if(pPause)return;
  var nowp=performance.now(),e=(nowp-pStart-pPausedAcc)/1000;
@@ -1392,28 +1405,27 @@ function frame(){
  var cue=document.getElementById('prcue');if(cue&&cue.textContent!==st.label)cue.textContent=st.label;
  var key=Math.floor(e/CYCTOTAL)+':'+st.off;
  if(key!==pLastKey){pLastKey=key;onPhase(st);pLastTick=nowp;}
- if((st.kind==='in'||st.kind==='out')&&nowp-pLastTick>=470){pLastTick=nowp;haptic('impact','light');}
- var v=st.v0+(st.v1-st.v0)*pEase(lp);
- var pulse=1,glowP=0;
- if(st.kind==='hold'){var th=cp-st.off,rem=st.dur-th,amp=0.06*Math.min(1,th/0.7)*Math.min(1,rem/0.7);pulse=1+amp*Math.sin(th*2*Math.PI/2.4);glowP=amp/0.06;}
+ if(nowp-pLastTick>=520){if(st.kind==='in'){pLastTick=nowp;haptic('impact','light');}else if(st.kind==='out'){pLastTick=nowp;haptic('impact','soft');}}
+ var v=st.v0+(st.v1-st.v0)*lp;
+ var pulse=1;
+ if(st.kind==='hold'){var th=cp-st.off,rem=st.dur-th,amp=0.05*Math.min(1,th/0.7)*Math.min(1,rem/0.7);pulse=1+amp*Math.sin(th*2*Math.PI/2.4);}
  applyFlower(v,pulse);
- var gl=document.getElementById('prglow');if(gl){var gs=0.72+0.5*v+0.08*glowP*Math.sin((cp)*2*Math.PI/2.4);gl.style.transform='translate(-50%,-50%) scale('+gs.toFixed(3)+')';gl.style.opacity=(0.5+0.4*v).toFixed(3);}
+ var gl=document.getElementById('prglow');if(gl){gl.style.transform='translate(-50%,-50%) scale('+(0.74+0.5*v).toFixed(3)+')';gl.style.opacity=(0.5+0.4*v).toFixed(3);}
 }
 function applyFlower(v,pulse){
- for(var i=0;i<PETN;i++){var op=Math.max(0,Math.min(1,(v-i*0.045)/0.7)),ee=pEase(op);
-  var p=document.getElementById('pet'+i);if(p){p.style.transform='rotate('+(i*(360/PETN))+'deg) scale('+((0.12+0.88*ee)*pulse).toFixed(3)+')';p.style.opacity=(0.3+0.7*ee).toFixed(3);}}
- var c=document.getElementById('fcore');if(c)c.style.transform='scale('+((0.5+0.5*v)*pulse).toFixed(3)+')';
+ var o=document.getElementById('flOuter');if(o)o.style.transform='rotate('+(-12+12*v).toFixed(2)+'deg) scale('+((0.34+0.66*v)*pulse).toFixed(3)+')';
+ var n=document.getElementById('flInner');if(n){n.style.transform='rotate('+(12-12*v).toFixed(2)+'deg) scale('+((0.2+0.72*v)*pulse).toFixed(3)+')';n.style.opacity=(0.35+0.65*v).toFixed(3);}
+ var c=document.getElementById('flCore');if(c)c.style.transform='scale('+((0.5+0.5*v)*pulse).toFixed(3)+')';
 }
 function onPhase(st){
- if(st.kind==='in'){haptic('impact','medium');breathSound('in',st.dur);}
- else if(st.kind==='out'){haptic('impact','medium');breathSound('out',st.dur);dropOne();}
+ if(st.kind==='in'){haptic('impact','heavy');breathSound('in',st.dur);}
+ else if(st.kind==='out'){haptic('impact','rigid');breathSound('out',st.dur);dropOne();}
  else haptic('impact','soft');
 }
 function togglePause(){if(!pRun)return;pPause=!pPause;var b=document.getElementById('prpause');if(pPause){pPauseStart=performance.now();if(b)b.textContent='▶';}else{pPausedAcc+=performance.now()-pPauseStart;pLastTick=performance.now();if(b)b.textContent='❚❚';}haptic('selection');}
 function finishBreath(){pRun=false;if(pRaf)cancelAnimationFrame(pRaf);var g=PRACT[curGoal];
- var a=document.getElementById('prdb');if(a)a.textContent=g.benefit.join(' · ');
  var b=document.getElementById('prda');if(b)b.textContent=g.done;
- var c=document.getElementById('prdm');if(c)c.textContent=g.motiv;
+ var sg=document.getElementById('prsug');if(sg){sg.innerHTML=(g.sugg||[]).map(function(q){return "<button class='chip' onclick='closePractice();go(\"chat\");setTimeout(function(){send("+JSON.stringify(q)+");},170)'>"+esc(q)+"</button>";}).join('');}
  var d=document.getElementById('prdone');if(d)d.classList.add('show');haptic('impact','heavy');}
 function closePractice(){pRun=false;if(pRaf)cancelAnimationFrame(pRaf);var ov=document.getElementById('practice');if(ov){ov.classList.add('hidden');ov.innerHTML='';}}
 function fallPetals(n){var host=document.getElementById('prpetfx');if(!host)return;for(var i=0;i<n;i++){var p=document.createElement('div');p.className='pfp';p.style.left=(Math.random()*100)+'%';p.style.animationDuration=(11+Math.random()*8)+'s';p.style.animationDelay=(Math.random()*11)+'s';host.appendChild(p);}}
