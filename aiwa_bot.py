@@ -85,7 +85,7 @@ def _practice_on(cid):
         return True
     return s in AIWA_PRACTICE_IDS
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-09-practice-v30"
+AIWA_VERSION = "2026-07-09-practice-v31"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
