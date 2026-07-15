@@ -85,7 +85,7 @@ def _practice_on(cid):
         return True
     return s in AIWA_PRACTICE_IDS
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-09-agent-v36"
+AIWA_VERSION = "2026-07-09-agent-v38"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1927,6 +1927,7 @@ def aggregate_stats():
     L.append("ВОВЛЕЧЁННОСТЬ")
     L.append("Событий на DAU: " + str(e["events_per_dau"]) + " = " + str(e["events_total"]) + " событий / " + str(e["active_user_days"]) + " активных·дней" + wow(g.get("events")))
     L.append("События по источнику: приложение " + str(e["by_source"]["app"]) + ", чат " + str(e["by_source"]["chat"]))
+    L.append("Тул-коллов " + str(e["toolcalls_total"]) + " (на DAU " + str(e["toolcalls_per_dau"]) + ") · прил " + str(ts.get("app", 0)) + ", чат " + str(ts.get("chat", 0)) + ", авто " + str(ts.get("auto", 0)) + wow(g.get("toolcalls")))
     L.append("Топ действий: " + (", ".join(str(k) + " " + str(vv) for k, vv in e["actions_top"][:6]) or "нет"))
     ss = e["sessions"]
     L.append("Сессии за период: всего " + str(ss["count"]) + ", на DAU " + str(ss["per_dau"]) + ", длина " + str(ss["avg_len_min"]) + " мин, действий/сессия " + str(ss["events_per"]))
@@ -3035,40 +3036,46 @@ def _agent_exec(cid, name, args):
         return {"error": str(e)}
     return {"error": "unknown tool"}
 
-async def _agent_answer(cid, u, msg, usage, rounds=3):
-    """Агентный ответ: модель сама вызывает инструменты и берёт реальные данные пользовательницы.
+async def _agent_answer(cid, u, msg, usage):
+    """Агентный ответ в два этапа:
+    1) модель через инструменты сама добывает реальные данные пользовательницы (реальные тул-колы);
+    2) финальный ответ пишется прежним качественным промптом (answer_question/general_answer) с этими данными.
     Возвращает текст или None (тогда вызывающий откатывается к обычному ответу)."""
-    sys_p = ("Ты AIWA — тёплый и точный ассистент по женскому здоровью. У тебя есть инструменты, "
-             "чтобы получить РЕАЛЬНЫЕ данные пользовательницы: цикл, симптомы, дневник еды, тренировки, профиль. "
-             "Если вопрос касается её состояния, цикла, питания, нагрузки или самочувствия — СНАЧАЛА вызови нужные инструменты, "
-             "потом дай конкретный ответ по её данным, не выдумывая. Для общих вопросов отвечай сразу. "
-             "Отвечай по-русски, тепло и по делу, без markdown и без длинных тире, медицински аккуратно.")
-    messages = [{"role": "system", "content": sys_p}]
-    for m in (hist_get(cid) or [])[-6:]:
-        messages.append({"role": ("assistant" if m.get("role") == "assistant" else "user"), "content": m.get("content") or ""})
-    messages.append({"role": "user", "content": msg})
+    plan_sys = ("Ты — планировщик ассистента по женскому здоровью. Реши, какие инструменты нужны, чтобы ответить "
+                "на вопрос пользовательницы по её РЕАЛЬНЫМ данным (цикл, симптомы, дневник еды, тренировки, профиль), и вызови их. "
+                "Если вопрос общий и данные не нужны — не вызывай инструменты. Сам развёрнутый ответ не пиши, только выбери инструменты.")
+    messages = [{"role": "system", "content": plan_sys}, {"role": "user", "content": msg}]
     tools = _agent_tools_spec()
-    for _r in range(rounds):
-        m = await asyncio.to_thread(L.call_tools, messages, tools, usage)
+    gathered = []
+    for _r in range(2):
+        m = await asyncio.to_thread(L.call_tools, messages, tools, usage, 0.2, 480)
         if not m:
-            return None
+            return None if _r == 0 else await _agent_final(cid, u, msg, gathered, usage)
         tc = m.get("tool_calls")
-        if tc:
-            messages.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": tc})
-            for call in tc:
-                fn = call.get("function") or {}
-                nm = fn.get("name") or ""
-                try:
-                    a = json.loads(fn.get("arguments") or "{}")
-                except Exception:
-                    a = {}
-                res = _agent_exec(cid, nm, a)
-                messages.append({"role": "tool", "tool_call_id": call.get("id"),
-                                 "content": json.dumps(res, ensure_ascii=False)})
-            continue
-        txt = (m.get("content") or "").strip()
-        return txt or None
-    return None
+        if not tc:
+            break
+        messages.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": tc})
+        for call in tc:
+            fn = call.get("function") or {}
+            nm = fn.get("name") or ""
+            try:
+                a = json.loads(fn.get("arguments") or "{}")
+            except Exception:
+                a = {}
+            res = _agent_exec(cid, nm, a)
+            gathered.append(nm + ": " + json.dumps(res, ensure_ascii=False))
+            messages.append({"role": "tool", "tool_call_id": call.get("id"),
+                             "content": json.dumps(res, ensure_ascii=False)})
+    return await _agent_final(cid, u, msg, gathered, usage)
+
+async def _agent_final(cid, u, msg, gathered, usage):
+    _, st = status_of(cid); prof = profile_of(u)
+    q = msg
+    if gathered:
+        q = msg + "\n\nВот её актуальные данные из приложения — обязательно опирайся на них и приводи конкретные числа: " + " | ".join(gathered)
+    if st is not None:
+        return await asyncio.to_thread(L.answer_question, st, q, prof, hist_get(cid), usage=usage)
+    return await asyncio.to_thread(L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid), usage=usage)
 
 async def _chat_reply(cid, u, msg):
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
@@ -4079,6 +4086,11 @@ function render(){
   h+=chartCard('cEng','События по дням',DEF.evtot);
   h+="<div class='sec-h'>События по источнику"+ic('Приложение vs чат — где пользователи совершают действия.')+"</div>";
   h+=tbl(['Источник','Событий'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
+  h+="<div class='sec-h'>Тул-коллы (вызовы модели)"+ic('Все обращения к модели: шаги агента (инструменты) + финальный ответ. Растут с агентными ответами.')+"</div>";
+  h+="<div class='grid'>"+card('Тул-коллов на DAU',e.toolcalls_per_dau,e.toolcalls_total+' вызовов',DEF.tcdau,g.toolcalls)+card('Всего тул-коллов',e.toolcalls_total,'за период',null,g.toolcalls)+"</div>";
+  h+=tbl(['Источник','Тул-коллов'],[['Приложение',ts.app||0],['Чат',ts.chat||0],['Авто/пуши',ts.auto||0],['Прочее',ts.other||0]]);
+  h+="<div class='sec-h'>Тул-коллы по фиче</div>";
+  h+=tbl(['Фича','Вызовов'],(e.toolcalls_by_meta||[]).map(function(x){return [x[0],x[1]];}));
   h+="<div class='sec-h'>Топ действий</div>";
   h+=tbl(['Действие','Кол-во'],e.actions_top.map(function(x){return [x[0],x[1]];}));
   var ss=e.sessions;
