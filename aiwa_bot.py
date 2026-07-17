@@ -82,7 +82,7 @@ AIWA_PRACTICE_IDS = set(x.strip() for x in (os.environ.get("AIWA_PRACTICE_IDS", 
 def _practice_on(cid):
     return True  # практика доступна всем
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-13-v49"
+AIWA_VERSION = "2026-07-13-v51"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -581,7 +581,7 @@ DIET = [("veg", "Вегетарианство"), ("vegan", "Веган"), ("nola
 DIETD = dict(DIET)
 def profile_of(u):
     if u and u.get("height") and u.get("weight") and u.get("age"):
-        return {"height": u["height"], "weight": u["weight"], "age": u["age"], "activity": u.get("activity") or 3,
+        return {"height": u["height"], "weight": u["weight"], "age": u["age"], "activity": u.get("activity") or 2,
                 "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}
     return None
 def diet_human(code_csv):
@@ -1429,6 +1429,16 @@ def _proactive_signals(cid, slot="eve"):
         log.warning("proactive_signals: %s", e)
     return out
 
+_PA_TAB = {"no_move": "train", "low_protein": "food"}
+_PA_ACTION = {"no_move": ("Да, собери тренировку", "train"),
+              "low_protein": ("Что съесть на ужин?", "food")}
+def _pa_deeplink(wu, key):
+    tab = _PA_TAB.get(key)
+    if not wu or not tab:
+        return wu
+    sep = "&" if "?" in wu else "?"
+    return wu + sep + "tab=" + tab
+
 async def _proactive_pick_and_send(cid, slot, shadow, context):
     u = row(cid)
     if not is_onboarded(u):
@@ -1452,7 +1462,14 @@ async def _proactive_pick_and_send(cid, slot, shadow, context):
         ev(cid, "proactive", meta="shadow:" + best["key"])
     else:
         wu = webapp_url(u) or AIWA_WEBAPP_URL
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=wu))]]) if wu else None
+        wu = _pa_deeplink(wu, best["key"])
+        rows = []
+        _act = _PA_ACTION.get(best["key"])
+        if _act:
+            rows.append([InlineKeyboardButton(_act[0], callback_data="pado:" + _act[1])])
+        if wu:
+            rows.append([InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=wu))])
+        kb = InlineKeyboardMarkup(rows) if rows else None
         await context.bot.send_message(cid, text, reply_markup=kb)
         _pa_mark(cid, best["key"]); _pa_logrow(cid, best["key"], best["score"], 1, text)
         ev(cid, "broadcast", meta="proactive:" + best["key"])
@@ -2645,6 +2662,27 @@ async def handle_text(update, context, txt):
 # ---------- callbacks ----------
 async def on_cb(update, context):
     q = update.callback_query; await q.answer(); cid = q.message.chat.id; data = q.data
+    if data.startswith("pado:"):
+        _intent = data.split(":", 1)[1]
+        _u = row(cid)
+        if not is_onboarded(_u):
+            return await q.message.reply_text("Сначала настрой Айву: /start.")
+        _QQ = {"train": "Собери мне короткую тренировку примерно на 10 минут под мою фазу цикла и сегодняшнее самочувствие. Дай конкретные упражнения с подходами и повторами.",
+               "food": "Что съесть, чтобы добрать белок к ужину, под мою фазу? Дай 2-3 конкретных варианта."}
+        _query = _QQ.get(_intent)
+        if not _query:
+            return
+        await context.bot.send_chat_action(cid, "typing")
+        try:
+            _res = await _chat_reply(cid, _u, _query)
+            _ans = _res.get("answer") if isinstance(_res, dict) else None
+        except Exception as _e:
+            log.warning("pado reply: %s", _e); _ans = None
+        if not _ans:
+            _ans = "Не получилось собрать прямо сейчас, попробуй ещё раз чуть позже."
+        _wu = webapp_url(_u) or AIWA_WEBAPP_URL
+        _kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=_wu))]]) if _wu else None
+        return await context.bot.send_message(cid, _ans, reply_markup=_kb)
     if data == "go_start": return await begin_onboard(cid, q.message)
     if data == "keep":
         u_keep = row(cid)
@@ -3167,7 +3205,7 @@ async def _api_profile(request):
     _u2 = row(cid)
     return _cors(web.json_response({"ok": True,
         "profile": {"height": int(cm), "weight": kg, "age": age, "kcal_goal": _u2.get("kcal_goal")}, "cycle_len": _u2.get("cycle_len"),
-        "kcal_base": calc_calories(int(cm), kg, age, _u2.get("activity") or 3)[0]}))
+        "kcal_base": calc_calories(int(cm), kg, age, _u2.get("activity") or 2)[0]}))
 async def _api_meal(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -3805,9 +3843,26 @@ async def _api_prefs(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     note = (body.get("diet_note") or "").strip()[:300]
-    upsert(cid, diet_note=note); menu_cache_clear(cid)
+    upsert(cid, diet_note=note)
+    if "kcal_goal" in body:
+        g = body.get("kcal_goal")
+        if g in (None, "", 0, "0"):
+            upsert(cid, kcal_goal=None)
+        else:
+            try:
+                gi = int(float(str(g).replace(",", ".")))
+                upsert(cid, kcal_goal=(gi if 800 <= gi <= 6000 else None))
+            except (TypeError, ValueError):
+                pass
+    menu_cache_clear(cid)
     ev(cid, "manual", meta="web_prefs")
-    return _cors(web.json_response({"ok": True, "diet_note": note}))
+    _up = row(cid); _kb = None
+    try:
+        if _up.get("height") and _up.get("weight") and _up.get("age"):
+            _kb = calc_calories(_up["height"], _up["weight"], _up["age"], _up.get("activity") or 2)[0]
+    except Exception:
+        _kb = None
+    return _cors(web.json_response({"ok": True, "diet_note": note, "kcal_goal": _up.get("kcal_goal"), "kcal_base": _kb}))
 
 async def _api_settime(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
