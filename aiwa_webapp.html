@@ -1386,7 +1386,7 @@ function startBreath(){
   +"<div class='prhead'><div class='prpt'>"+esc(g.tech)+"</div><div class='prpl'>"+esc(g.label)+"</div></div>"
   +"<div class='prstage'><svg class='prring' viewBox='0 0 300 300'><defs><linearGradient id='ringGrad' x1='40' y1='20' x2='260' y2='280' gradientUnits='userSpaceOnUse'><stop offset='0' stop-color='#FFF4E2'/><stop offset='0.5' stop-color='#F6B86E'/><stop offset='1' stop-color='#E8912A'/></linearGradient></defs><circle class='prringbg' cx='150' cy='150' r='138'/><g transform='rotate(-90 150 150)'>"+arcs+"</g><g id='pdot' transform='rotate(0 150 150)'><circle cx='150' cy='12' r='6.5' fill='#fff' stroke='#E8912A' stroke-width='2.5'/></g></svg>"+buildFlower()+"</div>"
   +"<div class='prcuewrap'><div id='prcue'>Приготовься…</div></div>"
-  +"<div class='prfoot'><div id='prtime'>"+pFmt(pLen)+"</div><div class='prctrls'><button class='prcbtn' id='prsnd' onclick='toggleSnd()'>♪̶</button><button class='prcbtn big' id='prpause' onclick='togglePause()'>❚❚</button></div></div>"
+  +"<div class='prfoot'><div id='prtime'>"+pFmt(pLen)+"</div><div class='prctrls'><button class='prcbtn big' id='prpause' onclick='togglePause()'>❚❚</button></div></div>"
   +"<div class='prdone' id='prdone'><div class='prchk'>✽</div><h3>Отлично!</h3><div class='prdcard'><div class='prdtag'>Айва · разбор</div><div class='prda' id='prda'></div></div><div class='prsug' id='prsug'></div><div class='prdrow'><button onclick='startBreath()'>Ещё раз</button><button class='pri' onclick='closePractice()'>Готово</button></div></div></div>";
  var ov=document.getElementById('practice');ov.innerHTML=h;ov.classList.remove('hidden');
  fallPetals(8);pSoundOn=false;
@@ -1420,8 +1420,8 @@ function applyFlower(v,pulse){
  var c=document.getElementById('flCore');if(c)c.style.transform='scale('+((0.5+0.5*v)*pulse).toFixed(3)+')';
 }
 function onPhase(st){
- if(st.kind==='in'){haptic('impact','heavy');breathSound('in',st.dur);}
- else if(st.kind==='out'){haptic('impact','rigid');breathSound('out',st.dur);dropOne();}
+ if(st.kind==='in'){haptic('impact','heavy');}
+ else if(st.kind==='out'){haptic('impact','rigid');dropOne();}
  else haptic('impact','soft');
 }
 function togglePause(){if(!pRun)return;pPause=!pPause;var b=document.getElementById('prpause');if(pPause){pPauseStart=performance.now();if(b)b.textContent='▶';}else{pPausedAcc+=performance.now()-pPauseStart;pLastTick=performance.now();if(b)b.textContent='❚❚';}haptic('selection');}

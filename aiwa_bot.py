@@ -82,7 +82,7 @@ AIWA_PRACTICE_IDS = set(x.strip() for x in (os.environ.get("AIWA_PRACTICE_IDS", 
 def _practice_on(cid):
     return True  # практика доступна всем
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-10-v41"
+AIWA_VERSION = "2026-07-10-v42"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1436,9 +1436,12 @@ async def proactive_job_mid(context):
 async def proactive_job_eve(context):
     await proactive_job(context, "eve")
 
-async def _proactive_preview(limit=25):
-    rows = []; composed = 0
+async def _proactive_preview(compose_limit=4, scan_limit=500):
+    rows = []; composed = 0; scanned = 0
     for cid in all_users():
+        if scanned >= scan_limit:
+            break
+        scanned += 1
         try:
             u = row(cid)
             if not is_onboarded(u):
@@ -1447,12 +1450,14 @@ async def _proactive_preview(limit=25):
             if not cands:
                 continue
             best = max(cands, key=lambda x: x["score"])
-            if composed < limit:
+            text = ""
+            if composed < compose_limit:
                 _u = []
-                text = await asyncio.to_thread(L.proactive_compose, best["topic"], best.get("data", ""), _u)
+                try:
+                    text = await asyncio.to_thread(L.proactive_compose, best["topic"], best.get("data", ""), _u)
+                except Exception:
+                    text = ""
                 composed += 1
-            else:
-                text = "(превью: текст не компоновался — лимит)"
             rows.append((cid, best["key"], best["score"], (text or "").strip()))
         except Exception as e:
             log.warning("proactive_preview: %s", e)
@@ -1462,14 +1467,28 @@ async def proactive_cmd(update, context):
     cid = update.effective_chat.id
     if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
         return await update.message.reply_text("Команда только для админа.")
-    await update.message.reply_text("Считаю дай-ран проактива по реальным данным…")
-    rows = await _proactive_preview()
-    if not rows:
-        return await update.message.reply_text("Сегодня ни одного проактивного сообщения не сработало бы (сигналов выше порога нет).")
-    blocks = ["• user %s · %s (%s)\n%s" % (r[0], r[1], r[2], r[3][:400]) for r in rows[:20]]
-    await update.message.reply_text(("Проактив — дай-ран (кому что ушло бы сегодня, порог %s):\n\n" % PROACTIVE_MIN) + "\n\n".join(blocks))
-    await update.message.reply_text("Всего сработало бы: %s. Живая отправка: AIWA_PROACTIVE=%s, SHADOW=%s. Реальную отправку включает AIWA_PROACTIVE=1 + AIWA_PROACTIVE_SHADOW=0." % (
-        len(rows), os.environ.get("AIWA_PROACTIVE", "0"), os.environ.get("AIWA_PROACTIVE_SHADOW", "1")))
+    try:
+        await update.message.reply_text("Считаю дай-ран проактива по реальным данным… (несколько примеров с текстом, остальное — сигналами)")
+        rows = await _proactive_preview()
+        if not rows:
+            return await update.message.reply_text("Сегодня ни одного проактивного сообщения не сработало бы (сигналов выше порога %s нет)." % PROACTIVE_MIN)
+        blocks = []
+        for r in rows[:25]:
+            line = "• user %s · %s (%s)" % (r[0], r[1], r[2])
+            if r[3]:
+                line += "\n" + r[3][:400]
+            blocks.append(line)
+        msg = ("Проактив — дай-ран (порог %s). Сработало бы у %s:\n\n" % (PROACTIVE_MIN, len(rows))) + "\n\n".join(blocks)
+        for i in range(0, len(msg), 3500):
+            await update.message.reply_text(msg[i:i + 3500])
+        await update.message.reply_text("Живая отправка: AIWA_PROACTIVE=%s, SHADOW=%s. Реальную отправку включает AIWA_PROACTIVE=1 + AIWA_PROACTIVE_SHADOW=0." % (
+            os.environ.get("AIWA_PROACTIVE", "0"), os.environ.get("AIWA_PROACTIVE_SHADOW", "1")))
+    except Exception as e:
+        log.warning("proactive_cmd: %s", e)
+        try:
+            await update.message.reply_text("Дай-ран упал с ошибкой: %s" % e)
+        except Exception:
+            pass
 
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
@@ -3744,14 +3763,15 @@ def _ev_lbl(m):
 
 _TC_LBL = {"summary": "Сводки (утро)", "answer": "Ответы в чате", "menu": "Меню питания", "food_photo": "Фото еды",
            "food_text": "Еда текстом", "meal": "Замена блюда", "workout": "Разбор тренировки", "diary_reco": "Совет по дневнику",
-           "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру"}
+           "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру",
+           "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "practice_done": "Разбор практики", "proactive_compose": "Проактив-сообщение", "menu": "Меню питания"}
 def _tc_lbl(m): return _TC_LBL.get(m, m or "прочее")
-_TC_APP = ("menu", "food_photo", "food_text", "meal", "workout", "diary_reco", "webapp", "training_section")
+_TC_APP = ("menu", "food_photo", "food_text", "meal", "workout", "diary_reco", "webapp", "training_section", "today_note", "food_suggest", "training_today", "practice_done")
 _TC_CHAT = ("answer", "general", "partner_q")
 def _tc_src(m):
     if m in _TC_APP: return "app"
     if m in _TC_CHAT: return "chat"
-    if m == "summary": return "auto"
+    if m in ("summary", "proactive_compose", "today_note"): return "auto"
     return "other"
 
 def analytics_data(days=7, frm=None, to=None):
