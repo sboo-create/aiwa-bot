@@ -82,7 +82,7 @@ AIWA_PRACTICE_IDS = set(x.strip() for x in (os.environ.get("AIWA_PRACTICE_IDS", 
 def _practice_on(cid):
     return True  # практика доступна всем
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-13-v46"
+AIWA_VERSION = "2026-07-13-v49"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -212,6 +212,7 @@ def db():
         ts TEXT, signal TEXT, score INTEGER DEFAULT 0, sent INTEGER DEFAULT 0, text TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS proactive_state(chat_id INTEGER, signal TEXT, last_ts TEXT, PRIMARY KEY(chat_id, signal))")
     c.execute("CREATE TABLE IF NOT EXISTS memory(chat_id INTEGER, mkey TEXT, mval TEXT, updated TEXT, PRIMARY KEY(chat_id, mkey))")
+    c.execute("CREATE TABLE IF NOT EXISTS referrals(chat_id INTEGER PRIMARY KEY, source TEXT, ts TEXT)")
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0"):
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
@@ -1362,6 +1363,14 @@ def _with_memory(cid, q):
         return q + "\n\nЧто ты уже знаешь о ней из прошлых разговоров (долгая память) — учитывай, но не перечисляй вслух без надобности: " + mt
     return q
 
+def _ref_touch(cid, src):
+    """Первое касание источника перехода (deep-link ?start=<source>)."""
+    try:
+        c = db(); c.execute("INSERT OR IGNORE INTO referrals(chat_id, source, ts) VALUES(?,?,?)",
+                            (cid, src, datetime.now(TZ).isoformat())); c.commit(); c.close()
+    except Exception as e:
+        log.warning("ref_touch: %s", e)
+
 def _proactive_signals(cid, slot="eve"):
     out = []
     try:
@@ -2039,6 +2048,10 @@ async def start(update, context):
     cid = update.effective_chat.id
     if context.args and context.args[0].startswith("p_"):
         return await partner_join(context, cid, update.message, context.args[0][2:])
+    if context.args and context.args[0] and not context.args[0].startswith("p_"):
+        _src = re.sub(r"[^a-z0-9_]", "", (context.args[0] or "").lower())[:32]
+        if _src:
+            _ref_touch(cid, _src); ev(cid, "ref", meta="src:" + _src)
     if is_partner(cid) and not is_onboarded(row(cid)):
         return await update.message.reply_text(PARTNER_INFO)
     if is_onboarded(row(cid)):
@@ -2192,6 +2205,32 @@ def aggregate_stats():
     L.append("Латентность p50 " + str(qd["p50"]) + " / p95 " + str(qd["p95"]) + " мс")
     L.append("Токены " + str(qd["tokens"]) + ", оценка $" + str(qd["cost_usd"]))
     return "\n".join(L)
+
+async def refs_cmd(update, context):
+    cid = update.effective_chat.id
+    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
+        return await update.message.reply_text("Команда только для админа.")
+    try:
+        c = db(); rows = c.execute("SELECT source, chat_id FROM referrals").fetchall(); c.close()
+    except Exception:
+        rows = []
+    from collections import defaultdict
+    agg = defaultdict(lambda: [0, 0])
+    for src, ccid in rows:
+        agg[src][0] += 1
+        if is_onboarded(row(ccid)): agg[src][1] += 1
+    if not agg:
+        return await update.message.reply_text(
+            "Пока нет переходов по ссылкам с меткой.\nРаздавай ссылку вида:\nhttps://t.me/" + (BOT_USERNAME or "<bot>") + "?start=ИСТОЧНИК")
+    lines = ["Переходы по меткам (перешли \u2192 настроили Айву):", ""]
+    tot_all = 0; onb_all = 0
+    for src, (tot, onb) in sorted(agg.items(), key=lambda x: -x[1][0]):
+        tot_all += tot; onb_all += onb
+        cr = (str(round(onb * 100 / tot)) + "%") if tot else "0%"
+        lines.append("\u2022 " + src + ": " + str(tot) + " \u2192 " + str(onb) + " (" + cr + ")")
+    lines.append("")
+    lines.append("Итого: " + str(tot_all) + " \u2192 " + str(onb_all))
+    await update.message.reply_text("\n".join(lines))
 
 async def stats_cmd(update, context):
     cid = update.effective_chat.id
@@ -2857,8 +2896,11 @@ async def on_startup(app):
         _fh, _fm = map(int, os.environ.get("AIWA_FOOD_PUSH_TIME", "14:00").split(":"))
     except (ValueError, AttributeError):
         _fh, _fm = 14, 0
-    app.job_queue.run_daily(food_reminder_job, time=dtime(_fh, _fm, tzinfo=TZ), name="food_reminder_all")
-    log.info("food reminder scheduled %02d:%02d, workers: %d", _fh, _fm, _fw)
+    if not _proactive_enabled():
+        app.job_queue.run_daily(food_reminder_job, time=dtime(_fh, _fm, tzinfo=TZ), name="food_reminder_all")
+        log.info("food reminder scheduled %02d:%02d, workers: %d", _fh, _fm, _fw)
+    else:
+        log.info("food reminder suppressed (proactive engine on)")
     TRAIN_Q = asyncio.Queue()
     for _ in range(_fw):
         asyncio.create_task(train_worker(app))
@@ -2866,19 +2908,26 @@ async def on_startup(app):
         _th, _tm = map(int, os.environ.get("AIWA_TRAIN_PUSH_TIME", "19:00").split(":"))
     except (ValueError, AttributeError):
         _th, _tm = 19, 0
-    app.job_queue.run_daily(train_reminder_job, time=dtime(_th, _tm, tzinfo=TZ), name="train_reminder_all")
-    log.info("train reminder scheduled %02d:%02d", _th, _tm)
+    if not _proactive_enabled():
+        app.job_queue.run_daily(train_reminder_job, time=dtime(_th, _tm, tzinfo=TZ), name="train_reminder_all")
+        log.info("train reminder scheduled %02d:%02d", _th, _tm)
+    else:
+        log.info("train reminder suppressed (proactive engine on)")
     try:
         _ph, _pm = map(int, os.environ.get("AIWA_PHASE_PUSH_TIME", "11:30").split(":"))
     except (ValueError, AttributeError):
         _ph, _pm = 11, 30
-    app.job_queue.run_daily(phase_transition_job, time=dtime(_ph, _pm, tzinfo=TZ), name="phase_transition")
+    if not _proactive_enabled():
+        app.job_queue.run_daily(phase_transition_job, time=dtime(_ph, _pm, tzinfo=TZ), name="phase_transition")
     try:
         _rh, _rm = map(int, os.environ.get("AIWA_REACT_TIME", "18:30").split(":"))
     except (ValueError, AttributeError):
         _rh, _rm = 18, 30
-    app.job_queue.run_daily(reactivation_job, time=dtime(_rh, _rm, tzinfo=TZ), name="reactivation")
-    log.info("phase push %02d:%02d, reactivation %02d:%02d", _ph, _pm, _rh, _rm)
+    if not _proactive_enabled():
+        app.job_queue.run_daily(reactivation_job, time=dtime(_rh, _rm, tzinfo=TZ), name="reactivation")
+        log.info("phase push %02d:%02d, reactivation %02d:%02d", _ph, _pm, _rh, _rm)
+    else:
+        log.info("phase/reactivation pushes suppressed (proactive engine on)")
     if _proactive_enabled():
         try:
             app.job_queue.run_daily(proactive_job_mid, time=dtime(13, 0, tzinfo=TZ), name="proactive_mid")
@@ -4463,7 +4512,7 @@ async def run_all():
     global BOT_APP; BOT_APP = app
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
