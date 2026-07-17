@@ -982,6 +982,34 @@ def proactive_compose(topic, data_note, usage=None):
     return _clean(out, "")
 
 
+def memory_extract(user_msg, ai_msg, existing="", usage=None):
+    """Выделяет из реплики устойчивые факты о пользовательнице для долгой памяти.
+    Возвращает список dict {key, value} (может быть пустым)."""
+    prompt = ("Ты ведёшь долгую память ассистента по женскому здоровью. Из ДИАЛОГА ниже выдели устойчивые, "
+              "полезные надолго факты о пользовательнице: цели, предпочтения (еда, тренировки), что ей НЕ подходит "
+              "или что плохо переносит, ограничения/диагнозы, привычки, важные обстоятельства жизни. "
+              "НЕ сохраняй: сиюминутное настроение, разовые события, вопросы, общеизвестное, то что уже есть в памяти. "
+              "Уже в памяти: " + (existing or "пусто") + ". "
+              "Реплика пользовательницы: " + (user_msg or "") + " || Ответ ассистента: " + (ai_msg or "") + ". "
+              "Верни СТРОГО JSON-массив, максимум 3 элемента, каждый вида {\"key\":\"короткий ярлык\",\"value\":\"факт кратко\"}. "
+              "Если сохранять нечего — верни []. Только JSON, без пояснений.")
+    out = _call([{"role": "system", "content": "Ты извлекаешь факты. Отвечай только валидным JSON-массивом."},
+                 {"role": "user", "content": prompt}], max_tokens=240, temperature=0.1, usage=usage)
+    if not out:
+        return []
+    try:
+        m = re.search(r"\[.*\]", out, re.S)
+        arr = json.loads(m.group(0)) if m else []
+    except Exception:
+        return []
+    res = []
+    if isinstance(arr, list):
+        for it in arr:
+            if isinstance(it, dict) and it.get("key") and it.get("value"):
+                res.append({"key": str(it["key"]).strip()[:48], "value": str(it["value"]).strip()[:220]})
+    return res[:3]
+
+
 def practice_reflection(goal, minutes, phase_ru, usage=None):
     goals = {"calm": "успокоиться", "sleep": "заснуть", "focus": "собраться", "energy": "взбодриться"}
     g = goals.get(goal, goal or "подышать")

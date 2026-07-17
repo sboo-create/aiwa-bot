@@ -82,7 +82,7 @@ AIWA_PRACTICE_IDS = set(x.strip() for x in (os.environ.get("AIWA_PRACTICE_IDS", 
 def _practice_on(cid):
     return True  # практика доступна всем
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-10-v43"
+AIWA_VERSION = "2026-07-13-v46"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -211,6 +211,7 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS proactive_log(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
         ts TEXT, signal TEXT, score INTEGER DEFAULT 0, sent INTEGER DEFAULT 0, text TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS proactive_state(chat_id INTEGER, signal TEXT, last_ts TEXT, PRIMARY KEY(chat_id, signal))")
+    c.execute("CREATE TABLE IF NOT EXISTS memory(chat_id INTEGER, mkey TEXT, mval TEXT, updated TEXT, PRIMARY KEY(chat_id, mkey))")
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0"):
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
@@ -1323,6 +1324,43 @@ def _pa_logrow(cid, key, score, sent, text):
                             (cid, datetime.now(TZ).isoformat(), key, int(score), int(sent), text or "")); c.commit(); c.close()
     except Exception as e:
         log.warning("pa_logrow: %s", e)
+
+# ---------- долгая память (living profile) ----------
+MEM_MAX = 40
+def mem_all(cid):
+    try:
+        c = db(); rows = c.execute("SELECT mkey, mval, updated FROM memory WHERE chat_id=? ORDER BY updated DESC", (cid,)).fetchall(); c.close()
+        return [{"key": r[0], "value": r[1], "updated": r[2]} for r in rows]
+    except Exception:
+        return []
+def mem_set(cid, key, val):
+    key = (key or "").strip().lower()[:48]; val = (val or "").strip()[:220]
+    if not key or not val:
+        return False
+    try:
+        c = db()
+        c.execute("INSERT OR REPLACE INTO memory(chat_id, mkey, mval, updated) VALUES(?,?,?,?)",
+                  (cid, key, val, datetime.now(TZ).isoformat()))
+        c.execute("DELETE FROM memory WHERE chat_id=? AND mkey NOT IN (SELECT mkey FROM memory WHERE chat_id=? ORDER BY updated DESC LIMIT ?)",
+                  (cid, cid, MEM_MAX))
+        c.commit(); c.close(); return True
+    except Exception as e:
+        log.warning("mem_set: %s", e); return False
+def mem_delete(cid, key):
+    try:
+        c = db(); c.execute("DELETE FROM memory WHERE chat_id=? AND mkey=?", (cid, (key or "").strip().lower())); c.commit(); c.close(); return True
+    except Exception:
+        return False
+def mem_text(cid, limit=16):
+    rows = mem_all(cid)[:limit]
+    if not rows:
+        return ""
+    return "; ".join((r["key"] + ": " + r["value"]) for r in rows)
+def _with_memory(cid, q):
+    mt = mem_text(cid)
+    if mt:
+        return q + "\n\nЧто ты уже знаешь о ней из прошлых разговоров (долгая память) — учитывай, но не перечисляй вслух без надобности: " + mt
+    return q
 
 def _proactive_signals(cid, slot="eve"):
     out = []
@@ -2889,12 +2927,6 @@ async def _serve_index(request):
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
 
-async def _serve_breath(request):
-    import os as _os
-    for p in (_os.path.join(WEB_DIR, "breath.mp3"), _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "breath.mp3")):
-        if _os.path.exists(p):
-            return web.FileResponse(p, headers={"Cache-Control": "public, max-age=86400"})
-    return web.Response(status=404)
 async def _api_data(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -3231,6 +3263,12 @@ def _agent_tools_spec():
         {"type": "function", "function": {"name": "user_profile",
             "description": "Профиль: рост, вес, возраст, активность, цель по калориям, режим (цикл/менопауза/беременность).",
             "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "recall",
+            "description": "Достать, что ассистент уже знает о пользовательнице из долгой памяти (её предпочтения, цели, что ей не подходит, важные факты). Вызывай в начале, если персональный контекст поможет ответить точнее.",
+            "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "remember",
+            "description": "Сохранить в долгую память ОДИН устойчивый факт о пользовательнице (предпочтение, цель, ограничение, что плохо переносит, привычка). НЕ сохраняй разовое, сиюминутное или уже известное.",
+            "parameters": {"type": "object", "properties": {"key": {"type": "string", "description": "короткий ярлык факта, напр. 'цель', 'не любит', 'плохо переносит'"}, "value": {"type": "string", "description": "сам факт кратко"}}, "required": ["key", "value"]}}},
     ]
 
 def _agent_exec(cid, name, args):
@@ -3258,6 +3296,12 @@ def _agent_exec(cid, name, args):
             u = row(cid) or {}; p = profile_of(u) or {}
             return {"height": p.get("height"), "weight": p.get("weight"), "age": p.get("age"),
                     "activity": p.get("activity"), "kcal_goal": p.get("kcal_goal"), "mode": u.get("mode")}
+        if name == "recall":
+            return {"memory": mem_all(cid)[:16] or "пока пусто"}
+        if name == "remember":
+            ok = mem_set(cid, args.get("key"), args.get("value"))
+            if ok: ev(cid, "remember", meta="agent")
+            return {"saved": bool(ok)}
     except Exception as e:
         return {"error": str(e)}
     return {"error": "unknown tool"}
@@ -3299,9 +3343,22 @@ async def _agent_final(cid, u, msg, gathered, usage):
     q = msg
     if gathered:
         q = msg + "\n\nВот её актуальные данные из приложения — обязательно опирайся на них и приводи конкретные числа: " + " | ".join(gathered)
+    q = _with_memory(cid, q)
     if st is not None:
         return await asyncio.to_thread(L.answer_question, st, q, prof, hist_get(cid), usage=usage)
     return await asyncio.to_thread(L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid), usage=usage)
+
+async def _memory_learn(cid, umsg, amsg):
+    """Фоновая выжимка устойчивых фактов из диалога в долгую память (не блокирует ответ)."""
+    try:
+        existing = mem_text(cid, 30); usage = []
+        facts = await asyncio.to_thread(L.memory_extract, umsg, amsg, existing, usage)
+        for f in (facts or []):
+            mem_set(cid, f.get("key"), f.get("value"))
+        if usage:
+            ev(cid, "memory_learn", tokens=sum(usage), meta="auto", calls=len(usage))
+    except Exception as e:
+        log.warning("memory_learn: %s", e)
 
 async def _chat_reply(cid, u, msg):
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
@@ -3341,14 +3398,15 @@ async def _chat_reply(cid, u, msg):
             fq = ("Что мне есть сегодня под мою фазу/режим, возраст и самочувствие? Дай конкретные продукты или пример меню на день. Отвечай ТОЛЬКО про еду, не рассказывай про фазы цикла."
                   if intent == "food" else
                   "Какая физическая активность мне сегодня подходит и почему? Дай 2-3 конкретных варианта. Отвечай про тренировки, тему цикла не разворачивай.")
+            fq = _with_memory(cid, fq)
             if st is not None:
                 ans = await asyncio.to_thread(L.answer_question, st, fq, prof, hist_get(cid), usage=usage)
             else:
                 ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage)
         elif st is not None:
-            ans = await asyncio.to_thread(L.answer_question, st, msg, prof, hist_get(cid), usage=usage)
+            ans = await asyncio.to_thread(L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid), usage=usage)
         else:
-            ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), msg, chat_hint(cid), hist_get(cid), usage=usage)
+            ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid), usage=usage)
     hist_push(cid, msg, ans)
     clean, sugg = L.split_followups(ans)
     if st is not None and len(sugg) < 2:
@@ -3357,6 +3415,10 @@ async def _chat_reply(cid, u, msg):
                 if e not in sugg and len(sugg) < 2: sugg.append(e)
         except Exception: pass
     ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage))
+    try:
+        asyncio.create_task(_memory_learn(cid, msg, clean))
+    except Exception:
+        pass
     return {"answer": clean, "suggestions": sugg[:2]}
 
 async def _api_voice(request):
@@ -3764,14 +3826,14 @@ def _ev_lbl(m):
 _TC_LBL = {"summary": "Сводки (утро)", "answer": "Ответы в чате", "menu": "Меню питания", "food_photo": "Фото еды",
            "food_text": "Еда текстом", "meal": "Замена блюда", "workout": "Разбор тренировки", "diary_reco": "Совет по дневнику",
            "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру",
-           "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "practice_done": "Разбор практики", "proactive_compose": "Проактив-сообщение", "menu": "Меню питания"}
+           "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "practice_done": "Разбор практики", "proactive_compose": "Проактив-сообщение", "memory_learn": "Память: запись (ИИ)", "menu": "Меню питания"}
 def _tc_lbl(m): return _TC_LBL.get(m, m or "прочее")
 _TC_APP = ("menu", "food_photo", "food_text", "meal", "workout", "diary_reco", "webapp", "training_section", "today_note", "food_suggest", "training_today", "practice_done")
 _TC_CHAT = ("answer", "general", "partner_q")
 def _tc_src(m):
     if m in _TC_APP: return "app"
     if m in _TC_CHAT: return "chat"
-    if m in ("summary", "proactive_compose", "today_note"): return "auto"
+    if m in ("summary", "proactive_compose", "today_note", "memory_learn"): return "auto"
     return "other"
 
 def analytics_data(days=7, frm=None, to=None):
@@ -4360,7 +4422,6 @@ load();
 def build_web():
     aio = web.Application(client_max_size=20 * 1024 * 1024)  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
-    aio.router.add_get("/breath.mp3", _serve_breath)
     aio.router.add_get("/health", lambda r: web.Response(text="ok " + AIWA_VERSION))
     aio.router.add_get("/admin", _admin_page)
     aio.router.add_get("/api/admin_stats", _admin_stats)

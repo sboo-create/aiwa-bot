@@ -761,17 +761,6 @@ function drawCal(){
 }
 function ayvaCard(text){return "<div class='ayva'><div class='ayva-top'><span class='blossom' id='sl'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+esc(text||"")+"</div></div></div></div>";}
 var loadedFood=false,loadedTrain=false,FOOD_DATA=null;
-var FOOD_ALTS=[
- [{time:"08:00",dish:"Омлет с сыром и зеленью",note:"белок и сытость",kcal:"380 ккал"},{time:"08:00",dish:"Яичница с томатами",note:"белок",kcal:"360 ккал"},{time:"08:00",dish:"Тост с яйцом и сыром",note:"белок и жиры",kcal:"390 ккал"}],
- [{time:"13:00",dish:"Курица с рисом и салатом",note:"белок и углеводы",kcal:"550 ккал"},{time:"13:00",dish:"Говядина с гречкой",note:"железо и белок",kcal:"560 ккал"},{time:"13:00",dish:"Рыба с картофелем",note:"омега-3 и белок",kcal:"530 ккал"}],
- [{time:"16:00",dish:"Греческий йогурт с орехами",note:"белок и магний",kcal:"220 ккал"},{time:"16:00",dish:"Сыр и цельнозерновой хлеб",note:"белок",kcal:"220 ккал"},{time:"16:00",dish:"Варёное яйцо и овощи",note:"белок",kcal:"180 ккал"}],
- [{time:"20:00",dish:"Индейка с овощами",note:"лёгкий белок",kcal:"470 ккал"},{time:"20:00",dish:"Лосось с овощами",note:"омега-3",kcal:"520 ккал"},{time:"20:00",dish:"Куриная грудка с салатом",note:"белок",kcal:"450 ккал"}]
-];
-function localMealSwap(i,avoid){var pool=FOOD_ALTS[i]||FOOD_ALTS[0],a=(avoid||"").toLowerCase();for(var n=0;n<pool.length;n++){var m=pool[(new Date().getDate()+i+n)%pool.length];if(m.dish.toLowerCase()!==a)return Object.assign({},m);}return Object.assign({},pool[0]);}
-function paintMeal(i,mm){
-  var dish=document.getElementById("meal-dish-"+i),note=document.getElementById("meal-note-"+i),ico=document.getElementById("meal-ico-"+i),tm=document.getElementById("meal-time-"+i);
-  if(tm)tm.textContent=mm.time||"";if(dish)dish.textContent=mm.dish||"";if(note)note.textContent=(mm.note||"белок и сытость")+(mm.kcal?(" · "+mm.kcal):"");if(ico)ico.textContent=mealIcon(mm,i);
-}
 async function addReco(btn,i){
   var mm=FOOD_DATA&&FOOD_DATA.menu&&FOOD_DATA.menu.meals?FOOD_DATA.menu.meals[i]:null;
   if(!mm||!mm.dish){toast('Нет блюда');return;}
@@ -783,17 +772,6 @@ async function addReco(btn,i){
   if(btn){btn.disabled=false;btn.textContent='Добавить';}
   if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.title)||mm.dish)+' · '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}
   else toast((r&&r.message)||'Не получилось добавить');
-}
-async function replaceMeal(btn,i){
-  haptic("impact","light");
-  var orig=null;if(btn){orig=btn.innerHTML;btn.disabled=true;btn.style.opacity=".65";btn.innerHTML="<span class='miniload'></span>";}
-  var mm=FOOD_DATA&&FOOD_DATA.menu&&FOOD_DATA.menu.meals?FOOD_DATA.menu.meals[i]:null;
-  var r=await api("/api/meal",{slot:i,dish:mm&&mm.dish});
-  var nm=(r&&r.meal&&r.meal.dish)?r.meal:localMealSwap(i,mm&&mm.dish);
-  FOOD_DATA=FOOD_DATA||{menu:{meals:[]}};FOOD_DATA.menu=FOOD_DATA.menu||{meals:[]};FOOD_DATA.menu.meals[i]=nm;
-  paintMeal(i,nm);
-  if(btn){btn.disabled=false;btn.style.opacity="";btn.innerHTML=orig||"Заменить";}
-  toast("Заменила блюдо");
 }
 async function renderFood(){
   var el=document.getElementById('scr-food');if(loadedFood)return;
@@ -828,16 +806,6 @@ function suggChips(list){
   if(!a.length)return '';
   var h="<div class='chips' style='margin:4px 0 16px'>";
   a.forEach(function(s){s=(''+s).trim();h+="<button class='chip' onclick='go(\"chat\");setTimeout(function(){send("+JSON.stringify(s)+");},120)'>"+esc(s)+"</button>";});
-  h+="</div>";return h;
-}
-function dishChips(r){
-  var meals=(r&&r.menu&&r.menu.meals)||[];if(!meals.length)return '';
-  var seen={},items=[];
-  meals.forEach(function(mm){var d=(mm&&mm.dish||'').trim();if(!d)return;var kw=d.split(' ')[0].replace(/[,.:;]+$/,'');if(kw.length<3)kw=d;var key=kw.toLowerCase();if(seen[key])return;seen[key]=1;items.push({kw:kw,dish:d});});
-  items=items.slice(0,3);if(!items.length)return '';
-  var T=[{l:"польза?",q:"Чем полезно блюдо «%d» в моём меню сегодня? Ответь коротко."},{l:"замена?",q:"Чем можно заменить «%d», если не хочется? Дай пару вариантов под мою фазу."},{l:"рецепт?",q:"Как проще и вкуснее приготовить «%d»? Короткий рецепт."},{l:"порция?",q:"Какая примерно порция «%d» под мою дневную норму?"}];
-  var h="<div class='chips' style='margin:4px 0 16px'>";
-  items.forEach(function(it,i){var t=T[i%T.length];var q=t.q.replace('%d',it.dish);h+="<button class='chip' onclick='go(\"chat\");setTimeout(function(){send("+JSON.stringify(q)+");},120)'>"+esc(it.kw)+": "+t.l+"</button>";});
   h+="</div>";return h;
 }
 function renderDiaryBox(){var box=document.getElementById('diarybox');if(box)box.innerHTML=diaryHTML();}
@@ -902,7 +870,6 @@ async function uploadFoodPhoto(file){toast('Сжимаю и разбираю ф�
 function toggleFoodText(){var b=document.getElementById('foodtextbox');if(!b)return;b.classList.toggle('hidden');var i=document.getElementById('foodtextin');if(i&&!b.classList.contains('hidden'))setTimeout(function(){i.focus();},50);}
 async function sendFoodText(){var i=document.getElementById('foodtextin');var t=(i&&i.value||'').trim();if(!t)return;i.value='';toast('Считаю…');showFoodLoading();var r=await api('/api/food_text',{text:t});hideFoodLoading();if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}else toast((r&&r.message)||'Не поняла блюдо');}
 async function delMeal(id){var r=await api('/api/diary_del',{id:id});if(_applyDiary(r))haptic('selection');}
-async function scaleMeal(id,delta){var m=((DIARY&&DIARY.meals)||[]).filter(function(x){return x.id===id;})[0];if(!m||!m.grams)return;var ng=Math.max(10,m.grams+delta);var r=await api('/api/diary_scale',{id:id,grams:ng});if(_applyDiary(r))haptic('selection');}
 async function diaryReco(){var box=document.getElementById('diarreco');if(box)box.innerHTML=thinkHTML('Айва смотрит дневник');var r=await api('/api/diary_reco',{});if(box)box.textContent=(r&&r.text)||'Не получилось, попробуй позже.';}
 (function(){var f=document.getElementById('foodfile');if(f)f.addEventListener('change',onFoodFile);})();
 async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",hormones:["Без данных о цикле Айва не делает выводы о фазе.","Главные ориентиры: боль, кровотечение, слабость, сон и восстановление.","При беременности, сильной боли, головокружении или обильном кровотечении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли, рывков и глубокого пресса"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости, боли или обильного кровотечения",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка",suggestions:["Мало сил сегодня?","Что после нагрузки?","Можно при боли?"]};}
@@ -1253,23 +1220,6 @@ function bloaderHTML(cls){var p="";for(var i=0;i<5;i++){p+="<span class='bp' sty
 function thinkHTML(label){return "<span class='thinkrow'>"+bloaderHTML('sm')+"<span class='think'>"+(label||"Айва думает")+"<span></span><span></span><span></span></span></span>";}
 function startThink(){var i=0;return setInterval(function(){i=(i+1)%THINKS.length;var ns=document.querySelectorAll('.think .tt');for(var k=0;k<ns.length;k++){(function(e){e.style.opacity='0';setTimeout(function(){e.textContent=THINKS[i];e.style.opacity='1';},230);})(ns[k]);}},2700);}
 function placeAvatar(){var g=document.querySelector('#scr-today .greet');if(!g)return;if(g.parentNode&&g.parentNode.classList&&g.parentNode.classList.contains('greetrow'))return;var wrap=document.createElement('div');wrap.className='greetrow';g.parentNode.insertBefore(wrap,g);wrap.appendChild(g);var av=document.createElement('div');av.className='avatar';av.id='avatar';av.textContent=(NAME&&NAME.trim())?NAME.trim().charAt(0):'•';av.onclick=openHub;wrap.appendChild(av);}
-function pastCal(){
-  var pp=(D&&D.past_periods)||[];if(!pp.length)return "";
-  var set={};
-  pp.forEach(function(p){var s=new Date(p.start+"T00:00:00");var e=p.end?new Date(p.end+"T00:00:00"):new Date(s.getTime()+4*86400000);for(var d=new Date(s);d<=e;d.setDate(d.getDate()+1)){set[isoOf(d)]=true;}});
-  var html="<div class='card'><div class='sec' style='margin-top:0'>Календарь месячных</div>";
-  for(var mo=2;mo>=0;mo--){
-    var base=new Date(today.getFullYear(),today.getMonth()-mo,1),y=base.getFullYear(),m=base.getMonth();
-    var fw=(new Date(y,m,1).getDay()+6)%7,dim=new Date(y,m+1,0).getDate();
-    html+="<div class='sec' style='font-size:14px;margin:14px 0 8px'>"+MNOM[m]+" "+y+"</div><div class='cal'>";
-    WD.forEach(function(w){html+="<div class='wd'>"+w+"</div>";});
-    for(var i=0;i<fw;i++)html+="<div class='day empty'></div>";
-    for(var d2=1;d2<=dim;d2++){var iso=isoOf(new Date(y,m,d2));html+="<div class='day'"+(set[iso]?" style='background:"+COL.men+";color:#fff'":"")+">"+d2+"</div>";}
-    html+="</div>";
-  }
-  html+="<div class='legend'><div class='lg'><span class='dot' style='background:"+COL.men+"'></span>Месячные</div></div></div>";
-  return html;
-}
 function periodHistory(){var pp=(D&&D.past_periods)||[];if(!pp.length)return "";var arr=[];for(var i=pp.length-1;i>=0;i--){var p=pp[i];var len=(i<pp.length-1)?Math.round((new Date(pp[i+1].start+"T00:00:00")-new Date(pp[i].start+"T00:00:00"))/86400000):null;arr.push("<div class='mealcard'><div class='mealico'>🩸</div><div style='min-width:0'><div class='ds'>с "+fmtD(p.start)+(p.end?(" по "+fmtD(p.end)):"")+"</div><div class='mealwhy'>"+((len&&len>=15&&len<=90)?("цикл "+len+" дней"):"отмеченные месячные")+"</div></div></div>");}return "<div class='card'><div class='sec' style='margin-top:0'>История месячных</div>"+expandList(arr,3,"Показать ещё циклы")+"</div>";}
 function expandList(arr,shown,label){if(arr.length<=shown)return arr.join("");var id="ex"+Math.floor(Math.random()*1e6),n=arr.length-shown,more=label+" ("+n+")";return arr.slice(0,shown).join("")+"<div id='"+id+"' class='hidden'>"+arr.slice(shown).join("")+"</div><button class='chip' style='margin:8px 2px 0' onclick=\"var e=document.getElementById('"+id+"');e.classList.toggle('hidden');this.textContent=e.classList.contains('hidden')?'"+more+"':'Свернуть';\">"+more+"</button>";}
 function symptomDiary(){var logs=(D&&D.sym_log)||[];logs=logs.filter(function(l){return (l.symptoms&&l.symptoms.length)||l.energy||l.mood;});if(!logs.length)return "<div class='emptygraph'>Пока нет отметок. Отмечай самочувствие и симптомы на экране «Сегодня» — здесь появится дневник.</div>";logs=logs.slice().reverse();var arr=logs.map(function(l){var syms=(l.symptoms||[]).map(symLabel).filter(Boolean);var meta=[];if(l.energy)meta.push("энергия "+(LVL[l.energy]||""));if(l.mood)meta.push("настроение "+(MLVL[l.mood]||""));var chips=syms.map(function(s){return "<span class='nutrichip'>"+esc(s)+"</span>";}).join("");return "<div class='mealcard'><div class='mealico'>📝</div><div style='min-width:0'><div class='ds'>"+fmtD(l.date)+"</div>"+(meta.length?"<div class='mealwhy'>"+meta.join(" · ")+"</div>":"")+(chips?"<div class='foodchips' style='margin-top:6px'>"+chips+"</div>":"")+"</div></div>";});return expandList(arr,3,"Показать ещё");}
@@ -1329,7 +1279,7 @@ function practiceCardHTML(){
   +"<div class='pcbody'><div class='pctitle'>Практика дня</div><div class='pcsub'>"+esc(g.tech)+" · дыхание · 2 мин</div></div>"
   +"<div class='pcgo'>Начать ›</div></div>";
 }
-var curGoal='calm', pLen=120, pSoundOn=false;
+var curGoal='calm', pLen=120;
 function openPractice(){haptic('impact','light');curGoal=practiceRec();practiceChooser();}
 function practiceChooser(){
  var rec=practiceRec();
@@ -1389,7 +1339,7 @@ function startBreath(){
   +"<div class='prfoot'><div id='prtime'>"+pFmt(pLen)+"</div><div class='prctrls'><button class='prcbtn big' id='prpause' onclick='togglePause()'>❚❚</button></div></div>"
   +"<div class='prdone' id='prdone'><div class='prchk'>✽</div><h3>Отлично!</h3><div class='prdcard'><div class='prdtag'>Айва · разбор</div><div class='prda' id='prda'></div></div><div class='prsug' id='prsug'></div><div class='prdrow'><button onclick='startBreath()'>Ещё раз</button><button class='pri' onclick='closePractice()'>Готово</button></div></div></div>";
  var ov=document.getElementById('practice');ov.innerHTML=h;ov.classList.remove('hidden');
- fallPetals(8);pSoundOn=false;
+ fallPetals(8);
  pRun=true;pPause=false;pPausedAcc=0;pLastKey='';pLastTick=0;
  applyFlower(0,1);
  var seq=['Приготовься','3','2','1'],idx=0;
@@ -1433,23 +1383,6 @@ function finishBreath(){pRun=false;if(pRaf)cancelAnimationFrame(pRaf);var g=PRAC
 function closePractice(){pRun=false;if(pRaf)cancelAnimationFrame(pRaf);if(pPrepTO)clearTimeout(pPrepTO);var ov=document.getElementById('practice');if(ov){ov.classList.add('hidden');ov.innerHTML='';}}
 function fallPetals(n){var host=document.getElementById('prpetfx');if(!host)return;for(var i=0;i<n;i++){var p=document.createElement('div');p.className='pfp';p.style.left=(Math.random()*100)+'%';p.style.animationDuration=(11+Math.random()*8)+'s';p.style.animationDelay=(Math.random()*11)+'s';host.appendChild(p);}}
 function dropOne(){var host=document.getElementById('prpetfx');if(!host)return;var p=document.createElement('div');p.className='pfp';p.style.left=(44+Math.random()*12)+'%';p.style.top='40%';p.style.animationDuration=(4.8+Math.random()*1.6)+'s';host.appendChild(p);setTimeout(function(){if(p.parentNode)p.parentNode.removeChild(p);},7000);}
-var actx=null,noiseBuf=null,brBuf=null,brLoad=false;
-function ensureAudio(){if(actx)return;try{actx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){return;}
- var n=Math.floor(actx.sampleRate*2);noiseBuf=actx.createBuffer(1,n,actx.sampleRate);var d=noiseBuf.getChannelData(0),last=0,mx=0;
- for(var i=0;i<n;i++){var w=Math.random()*2-1;last=0.99*last+0.01*w;d[i]=last;if(Math.abs(last)>mx)mx=Math.abs(last);}
- var kf=0.7/(mx||1);for(var j=0;j<n;j++)d[j]*=kf;}
-function loadBreath(){if(brBuf||brLoad||!actx)return;brLoad=true;try{fetch('/breath.mp3').then(function(r){return r.arrayBuffer();}).then(function(a){actx.decodeAudioData(a,function(buf){brBuf=buf;},function(){brLoad=false;});}).catch(function(){brLoad=false;});}catch(e){brLoad=false;}}
-function breathSound(kind,dur){if(!pSoundOn||!actx)return;
- if(brBuf){var D=brBuf.duration,mid=D*0.46,start=(kind==='in')?0:mid,seg=(kind==='in')?mid:(D-mid),play=Math.min(seg,dur+0.4);
-  var src=actx.createBufferSource();src.buffer=brBuf;var g=actx.createGain();g.gain.value=0;src.connect(g);g.connect(actx.destination);
-  var t=actx.currentTime,pk=0.6,fi=Math.min(0.35,play*0.25),fo=Math.min(0.55,play*0.4);
-  g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(pk,t+fi);g.gain.setValueAtTime(pk,t+Math.max(fi,play-fo));g.gain.linearRampToValueAtTime(0,t+play);
-  try{src.start(t,start,play);}catch(e){try{src.start(t);}catch(e2){}}return;}
- var s2=actx.createBufferSource();s2.buffer=noiseBuf;s2.loop=true;var lp=actx.createBiquadFilter();lp.type='lowpass';lp.Q.value=0.3;var g2=actx.createGain();g2.gain.value=0;s2.connect(lp);lp.connect(g2);g2.connect(actx.destination);var t2=actx.currentTime,pk2=0.035;
- if(kind==='in'){g2.gain.setValueAtTime(0,t2);g2.gain.linearRampToValueAtTime(pk2,t2+dur*0.82);g2.gain.linearRampToValueAtTime(0,t2+dur);lp.frequency.setValueAtTime(240,t2);lp.frequency.linearRampToValueAtTime(520,t2+dur);}
- else{g2.gain.setValueAtTime(0,t2);g2.gain.linearRampToValueAtTime(pk2,t2+dur*0.24);g2.gain.linearRampToValueAtTime(0,t2+dur);lp.frequency.setValueAtTime(500,t2);lp.frequency.linearRampToValueAtTime(220,t2+dur);}
- s2.start(t2);s2.stop(t2+dur+0.06);}
-function toggleSnd(){pSoundOn=!pSoundOn;var b=document.getElementById('prsnd');if(b)b.textContent=pSoundOn?'♪':'♪̶';if(pSoundOn){ensureAudio();if(actx&&actx.state==='suspended')actx.resume();loadBreath();}haptic('selection');}
 
 function boot(){renderToday();go('today');}
 if(INIT){api('/api/data',{name:NAME}).then(function(d){if(d&&d.onboarded){D=d;boot();}else{showNeedOnboard();}});}
