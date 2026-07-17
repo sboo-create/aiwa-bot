@@ -82,7 +82,7 @@ AIWA_PRACTICE_IDS = set(x.strip() for x in (os.environ.get("AIWA_PRACTICE_IDS", 
 def _practice_on(cid):
     return True  # практика доступна всем
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-10-v42"
+AIWA_VERSION = "2026-07-10-v43"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1290,8 +1290,8 @@ def _proactive_on(cid):
     if not _proactive_enabled():
         return False
     raw = (os.environ.get("AIWA_PROACTIVE_IDS", "") or "").strip()
-    if raw.lower() == "all":
-        return True
+    if not raw or raw.lower() == "all":
+        return True  # по умолчанию — все пользователи
     ids = set(x.strip() for x in raw.split(",") if x.strip())
     if AIWA_ADMIN:
         ids.add(str(AIWA_ADMIN))
