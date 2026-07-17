@@ -954,7 +954,7 @@ def today_note(st, profile=None, recent_syms=None, mode=None, usage=None):
     prompt = ("Ты тёплый и точный ассистент по женскому здоровью. " + ctx + sy +
               " Напиши короткую персональную сводку на сегодня: 2-3 живых предложения о том, как её тело сегодня "
               "и что это значит для энергии и самочувствия, с лёгким практичным акцентом. "
-              "И 3 коротких (до 40 знаков) разных вопроса от лица женщины. Строго JSON без обрамления: "
+              "И 3 коротких (до 40 знаков) разных вопроса от лица женщины — только про тело, цикл, фазу, питание, нагрузку, сон или самочувствие (не продуктивность и не быт). Строго JSON без обрамления: "
               '{"summary":"...","suggestions":["...","...","..."]}. По-русски, без markdown.')
     out = _call([{"role": "system", "content": "Ты ассистент femtech-приложения. Отвечай строго JSON, по-русски, без markdown."},
                  {"role": "user", "content": prompt}], max_tokens=430, temperature=0.55, usage=usage)
@@ -968,6 +968,30 @@ def today_note(st, profile=None, recent_syms=None, mode=None, usage=None):
         return {"summary": "", "suggestions": []}
     sugg = _parse_str_list(json.dumps(data.get("suggestions") or [], ensure_ascii=False), 3)
     return {"summary": (data.get("summary") or "").strip(), "suggestions": sugg}
+
+
+def proactive_compose(topic, data_note, usage=None):
+    """Короткое проактивное сообщение (Айва пишет первой) по выбранному сигналу и данным пользовательницы."""
+    prompt = ("Ты AIWA — тёплый и точный ассистент по женскому здоровью. Составь ОДНО короткое проактивное сообщение "
+              "пользовательнице (ты пишешь ей первой) по теме: " + (topic or "поддержка") + ". "
+              "Её актуальные данные: " + (data_note or "нет") + ". "
+              "Сделай личным и конкретным (используй данные), тёплым и по делу, максимум 300 знаков, и ОБЯЗАТЕЛЬНО заверши вопросом, "
+              "чтобы завязать диалог. Без markdown, без длинных тире, по-русски, без приветствия если это не первое сообщение дня.")
+    out = _call([{"role": "system", "content": "Ты AIWA. Пиши коротко, тепло, по-русски, без markdown."},
+                 {"role": "user", "content": prompt}], max_tokens=220, temperature=0.6, usage=usage)
+    return _clean(out, "")
+
+
+def practice_reflection(goal, minutes, phase_ru, usage=None):
+    goals = {"calm": "успокоиться", "sleep": "заснуть", "focus": "собраться", "energy": "взбодриться"}
+    g = goals.get(goal, goal or "подышать")
+    prompt = ("Пользовательница только что закончила дыхательную практику (цель: " + g + ", " + str(minutes) + " мин). "
+              + (("Её фаза цикла сейчас: " + str(phase_ru) + ". ") if phase_ru else "")
+              + "Напиши короткий тёплый разбор-итог от Айвы: 2 предложения — что это дало её телу и состоянию "
+              "и мягкая мотивация делать это регулярно. Конкретно и по-доброму, без пафоса, без markdown, по-русски.")
+    out = _call([{"role": "system", "content": "Ты AIWA. Пиши коротко, тепло, по-русски, без markdown."},
+                 {"role": "user", "content": prompt}], max_tokens=180, temperature=0.6, usage=usage)
+    return _clean(out, "")
 
 
 def explain_section(st, key, usage=None):

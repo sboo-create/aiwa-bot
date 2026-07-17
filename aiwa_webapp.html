@@ -383,7 +383,6 @@ body{padding-top:var(--safe-top,0px)}
 #pdot circle{filter:drop-shadow(0 2px 5px rgba(194,94,118,.45))}
 #flowerSvg{position:relative;z-index:2;width:232px;height:232px;filter:drop-shadow(0 12px 22px rgba(194,94,118,.24))}
 #flOuter,#flInner,#flCore{transform-box:fill-box;transform-origin:center}
-.praura{position:absolute;left:50%;top:50%;width:250px;height:250px;transform:translate(-50%,-50%);border-radius:50%;background:radial-gradient(circle,rgba(232,132,150,.30) 0%,rgba(242,170,120,.18) 45%,transparent 66%);filter:blur(20px);pointer-events:none;z-index:1}
 .prcuewrap{position:absolute;top:75%;left:0;right:0;text-align:center;z-index:4}
 #prcue{font-family:var(--serif);font-size:32px;font-weight:600;color:var(--ink);transition:opacity .3s}
 .prfoot{position:absolute;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 26px);text-align:center;z-index:4}
@@ -919,12 +918,12 @@ async function renderTrain(){var el=document.getElementById('scr-train');if(load
 var TREX={
  'Силовая':{w:true,groups:{
   'Ноги':[['Присед',40],['Жим ногами',80],['Выпады',16],['Болгарские',14],['Румынская тяга',40],['Разгибания',30],['Сгибания',25],['Икры',40]],
-  'Спина':[['Вертикальная тяга',35],['Горизонтальная тяга',35],['Тяга в наклоне',30],['Становая',50],['Подтягивания',0],['Гиперэкстензия',0]],
-  'Грудь':[['Жим лёжа',30],['Жим гантелей',18],['Жим в наклоне',22],['Сведения',14],['Отжимания',0]],
+  'Спина':[['Вертикальная тяга',35],['Горизонтальная тяга',35],['Тяга в наклоне',30],['Становая',50],['Подтягивания',0,'b'],['Гиперэкстензия',0,'b']],
+  'Грудь':[['Жим лёжа',30],['Жим гантелей',18],['Жим в наклоне',22],['Сведения',14],['Отжимания',0,'b']],
   'Плечи':[['Жим стоя',20],['Махи в стороны',8],['Махи в наклоне',8],['Протяжка',20]],
-  'Ягодицы':[['Ягодичный мост',45],['Отведение бедра',20],['Мах ногой',12],['Плие-присед',30]],
+  'Ягодицы':[['Ягодичный мост',45],['Отведение бедра',20],['Мах ногой',12,'b'],['Плие-присед',30]],
   'Руки':[['Бицепс',12],['Молоток',12],['Разгибания трицепс',15],['Французский жим',18]],
-  'Кор':[['Планка',0],['Скручивания',0],['Подъём ног',0],['Русский твист',8]],
+  'Кор':[['Планка',0,'t'],['Скручивания',0,'b'],['Подъём ног',0,'b'],['Русский твист',8,'b']],
   'Своё':[]
  }},
  'Кардио':{w:false,flat:['Бег','Велотренажёр','Эллипс','Гребля','Скакалка']},
@@ -997,16 +996,17 @@ function openLog(pre){
   trpills('trType',Object.keys(TREX),'type');trpills('trDur',['15 мин','30 мин','45 мин','60+ мин'],'dur');trpills('trRpe',['Легко','Нормально','Тяжело'],'rpe');trRenderEx();renderWhen();
 }
 function trpills(id,arr,field){var host=document.getElementById(id);if(!host)return;host.innerHTML='';arr.forEach(function(v){var b=document.createElement('div');b.className='trpill'+(trcur[field]===v?' sel':'');b.textContent=v;b.onclick=function(){trcur[field]=v;[].forEach.call(host.children,function(c){c.classList.remove('sel');});b.classList.add('sel');if(field==='type')trRenderEx();};host.appendChild(b);});}
-function exRowHTML(name,w,strength,group){
+function _trF(lab,i,name,field,val,delta){var idp=(field==='w'?'w':field==='sets'?'s':'r');var im=(field==='w'?'decimal':'numeric');return "<span class='trstep'><span class='trwlab'>"+lab+"</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'"+field+"',"+(-delta)+")\">\u2212</button><input class='trwvi' id='"+idp+i+"' inputmode='"+im+"' value='"+val+"' onclick='event.stopPropagation()' oninput=\"trInput('"+name+"',"+i+",'"+field+"',this.value)\"><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'"+field+"',"+delta+")\">\uFF0B</button></span>";}
+function exRowHTML(name,w,kind,group){
   var i=_trIdx++;
-  trcur.ex[name]={sel:false,w:0,sets:3,reps:10,group:group,strength:strength};
+  trcur.ex[name]={sel:false,w:0,sets:3,reps:(kind==='t'?30:10),group:group,strength:!!kind,kind:(kind||''),timed:(kind==='t')};
   var steps="";
-  if(strength){
-    steps="<div class='trws'>"
-     +"<span class='trstep'><span class='trwlab'>вес</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'w',-2.5)\">−</button><input class='trwvi' id='w"+i+"' inputmode='decimal' value='' placeholder='0' onclick='event.stopPropagation()' oninput=\"trInput('"+name+"',"+i+",'w',this.value)\"><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'w',2.5)\">＋</button></span>"
-     +"<span class='trstep'><span class='trwlab'>подх</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'sets',-1)\">−</button><input class='trwvi' id='s"+i+"' inputmode='numeric' value='3' onclick='event.stopPropagation()' oninput=\"trInput('"+name+"',"+i+",'sets',this.value)\"><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'sets',1)\">＋</button></span>"
-     +"<span class='trstep'><span class='trwlab'>повт</span><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'reps',-1)\">−</button><input class='trwvi' id='r"+i+"' inputmode='numeric' value='10' onclick='event.stopPropagation()' oninput=\"trInput('"+name+"',"+i+",'reps',this.value)\"><button class='trwb' onclick=\"trStep(event,'"+name+"',"+i+",'reps',1)\">＋</button></span>"
-     +"</div>";
+  if(kind){
+    var f="";
+    if(kind==='w')f+=_trF('вес',i,name,'w','',2.5);
+    f+=_trF('подх',i,name,'sets','3',1);
+    f+=(kind==='t')?_trF('сек',i,name,'reps','30',5):_trF('повт',i,name,'reps','10',1);
+    steps="<div class='trws'>"+f+"</div>";
   }
   return "<div class='trrow' id='row"+i+"'><div class='trhd' onclick=\"trTog('"+name+"',"+i+")\"><div class='trck'>✓</div><div class='trnm'>"+esc(name)+"</div></div>"+steps+"</div>";
 }
@@ -1022,7 +1022,7 @@ function trRenderEx(){
   if(d.w){
     Object.keys(d.groups).forEach(function(g){
       html+="<div class='trgrp' id='trgrp-"+g+"'><div class='trgh' onclick=\"trToggleGrp('"+g+"')\"><span>"+g+"</span><span class='trgc' id='trgc-"+g+"'>0</span><span class='trgar'>▾</span></div><div class='trgb' id='trgb-"+g+"' style='display:none'>";
-      d.groups[g].forEach(function(it){ html+=exRowHTML(it[0],it[1],true,g); });
+      d.groups[g].forEach(function(it){ html+=exRowHTML(it[0],it[1],(it[2]||'w'),g); });
       html+=customAdderHTML(g);
       html+="</div></div>";
     });
@@ -1041,7 +1041,7 @@ function trAddCustom(tag){
   var inp=document.getElementById('trcin-'+tag);var nm=(inp&&inp.value||'').trim();if(!nm){toast('Впиши название');return;}
   var strength=(trcur.type==='Силовая');var group=(trcur.type==='Своё')?'Своё':(strength?tag:trcur.type);
   var box=document.getElementById('trgb-'+tag)||document.getElementById('trgb-flat')||document.getElementById('trgb-Своё');
-  var holder=document.createElement('div');holder.innerHTML=exRowHTML(nm,0,strength,group);var node=holder.firstChild;
+  var holder=document.createElement('div');holder.innerHTML=exRowHTML(nm,0,(strength?'w':false),group);var node=holder.firstChild;
   var adder=box.querySelector('.trcustom');if(adder)box.insertBefore(node,adder);else box.appendChild(node);
   // auto-select the custom exercise
   var o=trcur.ex[nm];if(o){o.sel=true;node.classList.add('sel');updGrp(group);}
@@ -1050,7 +1050,7 @@ function trAddCustom(tag){
 async function saveWorkout(){
   var sel=Object.keys(trcur.ex).filter(function(k){return trcur.ex[k].sel;});
   if(!sel.length){toast('Отметь хотя бы одно упражнение');return;}
-  var items=sel.map(function(k){var o=trcur.ex[k];return {name:k,weight:o.strength?o.w:null,sets:o.strength?o.sets:null,reps:o.strength?o.reps:null,group:o.group||null};});
+  var items=sel.map(function(k){var o=trcur.ex[k];return {name:k,weight:(o.kind==='w'?o.w:null),sets:o.strength?o.sets:null,reps:o.strength?o.reps:null,unit:(o.timed?'sec':null),group:o.group||null};});
   var tp=(trcur.type==='Своё')?(((document.getElementById('trCustomType')||{}).value||trcur.customType||'').trim()||'Тренировка'):trcur.type;
   toast('Айва разбирает тренировку…');
   var r=await api('/api/workout',{type:tp,items:items,duration:trcur.dur,rpe:trcur.rpe,date:trcur.date});
@@ -1372,7 +1372,7 @@ function buildArcs(){
  g.pat.forEach(function(st){var v0,v1;if(st[2]==='in'){v0=0;v1=1;}else if(st[2]==='out'){v0=1;v1=0;}else{v0=lastV;v1=lastV;}CYCLE.push({label:st[0],dur:st[1],kind:st[2],off:off,v0:v0,v1:v1});off+=st[1];lastV=v1;});
  CYCTOTAL=off;
  var GAP=12,html='',frac=0;
- CYCLE.forEach(function(st){var lf=st.dur/CYCTOTAL,len=lf*PRC-GAP,col=(st.kind==='hold')?'#EAC27E':'#E79AAE';
+ CYCLE.forEach(function(st){var lf=st.dur/CYCTOTAL,len=lf*PRC-GAP,col='#211C1A';
   html+="<circle class='parc' cx='150' cy='150' r='132' stroke='"+col+"' stroke-dasharray='"+len.toFixed(1)+" "+(PRC-len).toFixed(1)+"' stroke-dashoffset='"+(-(frac*PRC)-GAP/2).toFixed(1)+"' opacity='0.85'/>";
   frac+=lf;});
  return html;
@@ -1384,7 +1384,7 @@ function startBreath(){
  var h="<div class='pracov'><div class='prglow' id='prglow'></div><div class='prpetfx' id='prpetfx'></div>"
   +"<button class='prclose' onclick='closePractice()'>✕</button>"
   +"<div class='prhead'><div class='prpt'>"+esc(g.tech)+"</div><div class='prpl'>"+esc(g.label)+"</div></div>"
-  +"<div class='prstage'><div class='praura' id='praura'></div><svg class='prring' viewBox='0 0 300 300'><circle class='prringbg' cx='150' cy='150' r='132'/><g transform='rotate(-90 150 150)'>"+arcs+"</g><g id='pdot' transform='rotate(0 150 150)'><circle cx='150' cy='18' r='6' fill='#fff' stroke='#E0879A' stroke-width='2.5'/></g></svg>"+buildFlower()+"</div>"
+  +"<div class='prstage'><svg class='prring' viewBox='0 0 300 300'><circle class='prringbg' cx='150' cy='150' r='132'/><g transform='rotate(-90 150 150)'>"+arcs+"</g><g id='pdot' transform='rotate(0 150 150)'><circle cx='150' cy='18' r='6' fill='#fff' stroke='#211C1A' stroke-width='2'/></g></svg>"+buildFlower()+"</div>"
   +"<div class='prcuewrap'><div id='prcue'>Приготовься…</div></div>"
   +"<div class='prfoot'><div id='prtime'>"+pFmt(pLen)+"</div><div class='prctrls'><button class='prcbtn' id='prsnd' onclick='toggleSnd()'>♪̶</button><button class='prcbtn big' id='prpause' onclick='togglePause()'>❚❚</button></div></div>"
   +"<div class='prdone' id='prdone'><div class='prchk'>✽</div><h3>Отлично!</h3><div class='prdcard'><div class='prdtag'>Айва · разбор</div><div class='prda' id='prda'></div></div><div class='prsug' id='prsug'></div><div class='prdrow'><button onclick='startBreath()'>Ещё раз</button><button class='pri' onclick='closePractice()'>Готово</button></div></div></div>";
@@ -1412,7 +1412,7 @@ function frame(){
  var pulse=1;
  if(st.kind==='hold'){var th=cp-st.off,rem=st.dur-th,amp=0.05*Math.min(1,th/0.7)*Math.min(1,rem/0.7);pulse=1+amp*Math.sin(th*2*Math.PI/2.4);}
  applyFlower(v,pulse);
- var gl=document.getElementById('prglow');if(gl){gl.style.transform='translate(-50%,-50%) scale('+(0.74+0.5*v).toFixed(3)+')';gl.style.opacity=(0.5+0.4*v).toFixed(3);}var au=document.getElementById('praura');if(au)au.style.transform='translate(-50%,-50%) scale('+(0.62+0.6*v).toFixed(3)+')';
+ var gl=document.getElementById('prglow');if(gl){gl.style.transform='translate(-50%,-50%) scale('+(0.74+0.5*v).toFixed(3)+')';gl.style.opacity=(0.5+0.4*v).toFixed(3);}
 }
 function applyFlower(v,pulse){
  var o=document.getElementById('flOuter');if(o)o.style.transform='rotate('+(-12+12*v).toFixed(2)+'deg) scale('+((0.34+0.66*v)*pulse).toFixed(3)+')';
@@ -1427,6 +1427,7 @@ function onPhase(st){
 function togglePause(){if(!pRun)return;pPause=!pPause;var b=document.getElementById('prpause');if(pPause){pPauseStart=performance.now();if(b)b.textContent='▶';}else{pPausedAcc+=performance.now()-pPauseStart;pLastTick=performance.now();if(b)b.textContent='❚❚';}haptic('selection');}
 function finishBreath(){pRun=false;if(pRaf)cancelAnimationFrame(pRaf);var g=PRACT[curGoal];
  var b=document.getElementById('prda');if(b)b.textContent=g.done;
+ try{api('/api/practice_done',{goal:curGoal,minutes:Math.round(pLen/60)}).then(function(r){if(r&&r.text){var bb=document.getElementById('prda');if(bb)bb.textContent=r.text;}}).catch(function(){});}catch(e){}
  var sg=document.getElementById('prsug');if(sg){sg.innerHTML=(g.sugg||[]).map(function(q){return "<button class='chip' onclick='closePractice();go(\"chat\");setTimeout(function(){send("+JSON.stringify(q)+");},170)'>"+esc(q)+"</button>";}).join('');}
  var d=document.getElementById('prdone');if(d)d.classList.add('show');haptic('impact','heavy');}
 function closePractice(){pRun=false;if(pRaf)cancelAnimationFrame(pRaf);if(pPrepTO)clearTimeout(pPrepTO);var ov=document.getElementById('practice');if(ov){ov.classList.add('hidden');ov.innerHTML='';}}

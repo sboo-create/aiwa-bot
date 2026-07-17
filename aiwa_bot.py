@@ -80,12 +80,9 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 AIWA_PRACTICE_IDS = set(x.strip() for x in (os.environ.get("AIWA_PRACTICE_IDS", "") or "").split(",") if x.strip())
 def _practice_on(cid):
-    s = str(cid)
-    if AIWA_ADMIN and s == str(AIWA_ADMIN):
-        return True
-    return s in AIWA_PRACTICE_IDS
+    return True  # практика доступна всем
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-09-agent-v38"
+AIWA_VERSION = "2026-07-10-v39"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -211,6 +208,9 @@ def db():
         grams INTEGER, items TEXT, source TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS workouts(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, d TEXT, ts TEXT,
         type TEXT, items TEXT, duration TEXT, rpe TEXT, note TEXT, review TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS proactive_log(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
+        ts TEXT, signal TEXT, score INTEGER DEFAULT 0, sent INTEGER DEFAULT 0, text TEXT)""")
+    c.execute("CREATE TABLE IF NOT EXISTS proactive_state(chat_id INTEGER, signal TEXT, last_ts TEXT, PRIMARY KEY(chat_id, signal))")
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0"):
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
@@ -1281,6 +1281,195 @@ async def push_checkin(context, cid):
         ev(cid, "broadcast", meta="checkin_push")
     except Exception as e:
         log.warning("checkin push %s: %s", cid, e)
+
+# ================= Проактивный движок =================
+PROACTIVE_MIN = int(os.environ.get("AIWA_PROACTIVE_MIN", "40"))
+def _proactive_enabled():
+    return os.environ.get("AIWA_PROACTIVE", "0") in ("1", "true", "True", "yes", "on")
+def _proactive_on(cid):
+    if not _proactive_enabled():
+        return False
+    raw = (os.environ.get("AIWA_PROACTIVE_IDS", "") or "").strip()
+    if raw.lower() == "all":
+        return True
+    ids = set(x.strip() for x in raw.split(",") if x.strip())
+    if AIWA_ADMIN:
+        ids.add(str(AIWA_ADMIN))
+    return str(cid) in ids
+def _pa_recent(cid, key, days):
+    try:
+        c = db(); r = c.execute("SELECT last_ts FROM proactive_state WHERE chat_id=? AND signal=?", (cid, key)).fetchone(); c.close()
+        if not r or not r[0]:
+            return False
+        return (date.today() - date.fromisoformat(r[0][:10])).days < max(1, int(days))
+    except Exception:
+        return False
+def _pa_mark(cid, key):
+    try:
+        c = db(); c.execute("INSERT OR REPLACE INTO proactive_state(chat_id,signal,last_ts) VALUES(?,?,?)",
+                            (cid, key, datetime.now(TZ).isoformat())); c.commit(); c.close()
+    except Exception as e:
+        log.warning("pa_mark: %s", e)
+def _pa_logged_today(cid):
+    try:
+        c = db(); r = c.execute("SELECT COUNT(*) FROM proactive_log WHERE chat_id=? AND ts>=?",
+                               (cid, date.today().isoformat())).fetchone(); c.close()
+        return bool(r and r[0])
+    except Exception:
+        return False
+def _pa_logrow(cid, key, score, sent, text):
+    try:
+        c = db(); c.execute("INSERT INTO proactive_log(chat_id,ts,signal,score,sent,text) VALUES(?,?,?,?,?,?)",
+                            (cid, datetime.now(TZ).isoformat(), key, int(score), int(sent), text or "")); c.commit(); c.close()
+    except Exception as e:
+        log.warning("pa_logrow: %s", e)
+
+def _proactive_signals(cid, slot="eve"):
+    out = []
+    try:
+        u = row(cid); _, st = status_of(cid); today = date.today()
+        tlog = log_get(cid, today.isoformat()) or {}
+        ylog = log_get(cid, (today - timedelta(days=1)).isoformat()) or {}
+        badY = (ylog.get("energy") == 1) or (ylog.get("mood") == 1) or any(x in (ylog.get("symptoms") or []) for x in ("anx", "low", "tired", "irrit"))
+        checkedToday = bool(tlog.get("energy") or tlog.get("mood") or (tlog.get("symptoms")))
+        if badY and not checkedToday:
+            out.append({"key": "felt_bad", "score": 78, "cooldown": 2,
+                        "topic": "вчера ей было тяжело (низкая энергия/настроение или тревожные симптомы) — мягко спроси, как она сегодня, и предложи поддержку",
+                        "data": "вчера энергия=%s, настроение=%s, симптомы=%s" % (ylog.get("energy"), ylog.get("mood"), ",".join(ylog.get("symptoms") or []))})
+        if st and st.get("days_to_next") in (2, 3, 4) and (u.get("mode") in (None, "cycle")):
+            out.append({"key": "pms_soon", "score": 66, "cooldown": 18,
+                        "topic": "через %s дня ожидаются месячные, приближается ПМС — тёплое предупреждение и что поможет" % st.get("days_to_next"),
+                        "data": "фаза %s, до месячных %s дн" % (st.get("phase_ru"), st.get("days_to_next"))})
+        logs = logs_of(cid, (today - timedelta(days=4)).isoformat()) or []
+        lowe = [l for l in logs if l.get("energy") == 1]
+        if len(lowe) >= 2:
+            out.append({"key": "low_energy", "score": 70, "cooldown": 3,
+                        "topic": "несколько дней подряд низкая энергия — поддержи и мягко предложи разгрузку или дыхательную практику",
+                        "data": "низкая энергия в %s из последних дней" % len(lowe)})
+        rw = workouts_recent(cid, days=12, limit=3) or []
+        if rw:
+            try:
+                gap = (today - date.fromisoformat(rw[0].get("d"))).days
+            except Exception:
+                gap = 99
+            if gap >= 5:
+                out.append({"key": "no_move", "score": 46, "cooldown": 4,
+                            "topic": "давно не было тренировки (%s дн) — мягко пригласи подвигаться под её фазу" % gap,
+                            "data": "последняя тренировка %s дней назад, фаза %s" % (gap, (st or {}).get("phase_ru"))})
+        try:
+            streak = streak_of(cid)
+        except Exception:
+            streak = 0
+        if streak in (3, 7, 14, 30):
+            out.append({"key": "streak_%s" % streak, "score": 56, "cooldown": 1,
+                        "topic": "коротко и по-взрослому отметь, что она %s дней подряд ведёт отметки, и спокойно предложи продолжить — без слащавости, без фраз вроде порадуй себя" % streak,
+                        "data": "стрик %s дней" % streak})
+        if slot == "eve":
+            try:
+                dp = diary_payload(cid); tot = dp.get("totals") or {}; tgt = dp.get("target") or {}
+                if tgt.get("protein") and (tot.get("protein") is not None) and tot["protein"] < 0.5 * tgt["protein"]:
+                    out.append({"key": "low_protein", "score": 40, "cooldown": 3,
+                                "topic": "сегодня мало белка к вечеру — подскажи добавить белок к ужину",
+                                "data": "белок %s из %s г" % (round(tot.get("protein", 0)), round(tgt.get("protein", 0)))})
+            except Exception:
+                pass
+            ph = (st or {}).get("phase")
+            if ph in ("luteal", "menstrual"):
+                out.append({"key": "practice_eve", "score": 34, "cooldown": 1,
+                            "topic": "вечер %s фазы — мягко предложи короткую дыхательную практику на расслабление" % ("лютеиновой" if ph == "luteal" else "менструальной"),
+                            "data": "фаза %s" % (st or {}).get("phase_ru")})
+    except Exception as e:
+        log.warning("proactive_signals: %s", e)
+    return out
+
+async def _proactive_pick_and_send(cid, slot, shadow, context):
+    u = row(cid)
+    if not is_onboarded(u):
+        return None
+    if _pa_logged_today(cid):
+        return None
+    cands = [c for c in _proactive_signals(cid, slot) if not _pa_recent(cid, c["key"], c.get("cooldown", 2))]
+    cands = [c for c in cands if c["score"] >= PROACTIVE_MIN]
+    if not cands:
+        return None
+    best = max(cands, key=lambda x: x["score"])
+    _u = []
+    text = await asyncio.to_thread(L.proactive_compose, best["topic"], best.get("data", ""), _u)
+    if _u:
+        ev(cid, "tokens", sum(_u), meta="proactive_compose", calls=len(_u))
+    text = (text or "").strip()
+    if not text:
+        return None
+    if shadow:
+        _pa_mark(cid, best["key"]); _pa_logrow(cid, best["key"], best["score"], 0, text)
+        ev(cid, "proactive", meta="shadow:" + best["key"])
+    else:
+        wu = webapp_url(u) or AIWA_WEBAPP_URL
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=wu))]]) if wu else None
+        await context.bot.send_message(cid, text, reply_markup=kb)
+        _pa_mark(cid, best["key"]); _pa_logrow(cid, best["key"], best["score"], 1, text)
+        ev(cid, "broadcast", meta="proactive:" + best["key"])
+    return (best["key"], best["score"], text)
+
+async def proactive_job(context, slot):
+    if not _proactive_enabled():
+        return
+    shadow = os.environ.get("AIWA_PROACTIVE_SHADOW", "1") not in ("0", "false", "False", "no", "off")
+    delay = float(os.environ.get("AIWA_PROACTIVE_DELAY", "0.3"))
+    n = 0
+    for cid in all_users():
+        try:
+            if not _proactive_on(cid):
+                continue
+            r = await _proactive_pick_and_send(cid, slot, shadow, context)
+            if r:
+                n += 1
+                await asyncio.sleep(delay)
+        except Forbidden:
+            pass
+        except Exception as e:
+            log.warning("proactive_job(%s): %s", slot, e)
+    log.info("proactive %s: %s (%s)", slot, n, "shadow" if shadow else "sent")
+
+async def proactive_job_mid(context):
+    await proactive_job(context, "mid")
+async def proactive_job_eve(context):
+    await proactive_job(context, "eve")
+
+async def _proactive_preview(limit=25):
+    rows = []; composed = 0
+    for cid in all_users():
+        try:
+            u = row(cid)
+            if not is_onboarded(u):
+                continue
+            cands = [c for c in _proactive_signals(cid, "eve") if c["score"] >= PROACTIVE_MIN]
+            if not cands:
+                continue
+            best = max(cands, key=lambda x: x["score"])
+            if composed < limit:
+                _u = []
+                text = await asyncio.to_thread(L.proactive_compose, best["topic"], best.get("data", ""), _u)
+                composed += 1
+            else:
+                text = "(превью: текст не компоновался — лимит)"
+            rows.append((cid, best["key"], best["score"], (text or "").strip()))
+        except Exception as e:
+            log.warning("proactive_preview: %s", e)
+    return rows
+
+async def proactive_cmd(update, context):
+    cid = update.effective_chat.id
+    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
+        return await update.message.reply_text("Команда только для админа.")
+    await update.message.reply_text("Считаю дай-ран проактива по реальным данным…")
+    rows = await _proactive_preview()
+    if not rows:
+        return await update.message.reply_text("Сегодня ни одного проактивного сообщения не сработало бы (сигналов выше порога нет).")
+    blocks = ["• user %s · %s (%s)\n%s" % (r[0], r[1], r[2], r[3][:400]) for r in rows[:20]]
+    await update.message.reply_text(("Проактив — дай-ран (кому что ушло бы сегодня, порог %s):\n\n" % PROACTIVE_MIN) + "\n\n".join(blocks))
+    await update.message.reply_text("Всего сработало бы: %s. Живая отправка: AIWA_PROACTIVE=%s, SHADOW=%s. Реальную отправку включает AIWA_PROACTIVE=1 + AIWA_PROACTIVE_SHADOW=0." % (
+        len(rows), os.environ.get("AIWA_PROACTIVE", "0"), os.environ.get("AIWA_PROACTIVE_SHADOW", "1")))
 
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
@@ -2633,6 +2822,13 @@ async def on_startup(app):
         _rh, _rm = 18, 30
     app.job_queue.run_daily(reactivation_job, time=dtime(_rh, _rm, tzinfo=TZ), name="reactivation")
     log.info("phase push %02d:%02d, reactivation %02d:%02d", _ph, _pm, _rh, _rm)
+    if _proactive_enabled():
+        try:
+            app.job_queue.run_daily(proactive_job_mid, time=dtime(13, 0, tzinfo=TZ), name="proactive_mid")
+            app.job_queue.run_daily(proactive_job_eve, time=dtime(19, 30, tzinfo=TZ), name="proactive_eve")
+            log.info("proactive engine ON (shadow=%s)", os.environ.get("AIWA_PROACTIVE_SHADOW", "1"))
+        except Exception as _pe:
+            log.warning("proactive schedule: %s", _pe)
     asyncio.create_task(load_logger(app))
     asyncio.create_task(model_probe(app))
     n = catchup = 0
@@ -2964,6 +3160,17 @@ async def _api_section(request):
     _su = []; plan = await asyncio.to_thread(L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
     if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su))
     return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
+async def _api_practice_done(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    goal = str(body.get("goal") or "")[:20]; mins = int(_num(body.get("minutes")) or 2)
+    _, st = status_of(cid); ph = (st or {}).get("phase_ru") or (u.get("mode") or "")
+    _u = []; txt = await asyncio.to_thread(L.practice_reflection, goal, mins, ph, _u)
+    if _u: ev(cid, "answered", tokens=sum(_u), meta="practice_done", calls=len(_u))
+    return _cors(web.json_response({"text": txt}))
+
 async def _api_today(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -3515,6 +3722,7 @@ _EV_LBL = {
     "web_train_profile": "Профиль тренировок", "web_pa": "Отметка близости", "web_diary_del": "Удаление из дневника",
     "web_diary_edit": "Правка в дневнике", "web_diary_scale": "Граммовка в дневнике", "web_diary_slot": "Перенос приёма",
     "web_today": "Открыла «Сегодня»", "food_suggest": "Идеи по питанию", "training_today": "Разбор нагрузки", "today_note": "Сводка дня",
+    "practice_done": "Разбор практики", "proactive_compose": "Проактив-сообщение",
     "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
     "answer": "Вопрос в чате", "general": "Вопрос в чате", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
     "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",
@@ -4139,6 +4347,7 @@ def build_web():
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/today", _api_today)
+    aio.router.add_post("/api/practice_done", _api_practice_done)
     aio.router.add_post("/api/chat", _api_chat)
     aio.router.add_post("/api/voice", _api_voice)
     aio.router.add_post("/api/food_photo", _api_food_photo)
@@ -4173,7 +4382,7 @@ async def run_all():
     global BOT_APP; BOT_APP = app
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
