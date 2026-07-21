@@ -83,7 +83,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-21-v53"
+AIWA_VERSION = "2026-07-21-v54"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1520,6 +1520,7 @@ async def _proactive_preview(compose_limit=4, scan_limit=500):
                 except Exception:
                     text = ""
                 composed += 1
+                if _u: ev(cid, "tokens", sum(_u), meta="proactive_preview", calls=len(_u))
             rows.append((cid, best["key"], best["score"], (text or "").strip()))
         except Exception as e:
             log.warning("proactive_preview: %s", e)
@@ -2011,9 +2012,10 @@ async def push_partner(context, woman_cid):
             return await context.bot.send_message(pid, partner_delay_text(st, hint))
         except Exception as e:
             return log.warning("partner delay push: %s", e)
-    text = None
-    try: text = await asyncio.to_thread(L.partner_brief, st, hint)
+    text = None; _pu = []
+    try: text = await asyncio.to_thread(L.partner_brief, st, hint, _pu)
     except Exception as e: log.warning("partner_brief: %s", e)
+    if _pu: ev(woman_cid, "tokens", sum(_pu), meta="partner_brief", calls=len(_pu))
     if not text: text = partner_text(st, hint)
     try:
         await context.bot.send_message(pid, text)
@@ -2491,7 +2493,8 @@ async def handle_text(update, context, txt):
         d = parse_date(txt)
         if not d:
             if is_question_like(txt):
-                a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
+                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+                ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq))
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: напиши дату начала последних месячных, например 25.05.2026. Потом даты можно редактировать в приложении.")
             return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
         upsert(cid, pending_date=d.isoformat(), state="await_len")
@@ -2504,7 +2507,8 @@ async def handle_text(update, context, txt):
             n = int(txt); assert 20 <= n <= 60
         except (ValueError, AssertionError):
             if is_question_like(txt):
-                a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
+                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+                ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq))
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? Обычно это 21-35 дней, но у многих бывает иначе.")
             return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь точно, напиши примерное значение, потом его можно поправить. Если цикл нерегулярный, можно начать заново через /start и выбрать «Нет регулярного цикла».")
         finish_onboarding(context, cid, u["pending_date"], n)
@@ -2537,7 +2541,8 @@ async def handle_text(update, context, txt):
             assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80
         except Exception:
             if is_question_like(txt):
-                a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
+                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+                ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq))
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
         upsert(cid, height=int(cm), weight=kg, age=age, state="await_activity")
@@ -2667,7 +2672,8 @@ async def handle_text(update, context, txt):
         return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt)
     if is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
-        a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
+        _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+        ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq))
         await update.message.reply_text(fit_tg(L.split_followups(a)[0]))
     await need_onboard(update.message)
 
@@ -3912,7 +3918,7 @@ _EV_LBL = {
     "web_train_profile": "Профиль тренировок", "web_pa": "Отметка близости", "web_diary_del": "Удаление из дневника",
     "web_diary_edit": "Правка в дневнике", "web_diary_scale": "Граммовка в дневнике", "web_diary_slot": "Перенос приёма",
     "web_today": "Открыла «Сегодня»", "food_suggest": "Идеи по питанию", "training_today": "Разбор нагрузки", "today_note": "Сводка дня",
-    "proactive_compose": "Проактив-сообщение",
+    "proactive_compose": "Проактив-сообщение", "partner_brief": "Партнёрский пуш", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
     "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
     "answer": "Вопрос в чате", "general": "Вопрос в чате", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
     "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",
@@ -3935,14 +3941,15 @@ def _ev_lbl(m):
 _TC_LBL = {"summary": "Сводки (утро)", "answer": "Ответы в чате", "menu": "Меню питания", "food_photo": "Фото еды",
            "food_text": "Еда текстом", "meal": "Замена блюда", "workout": "Разбор тренировки", "diary_reco": "Совет по дневнику",
            "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру",
-           "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "proactive_compose": "Проактив-сообщение", "memory_learn": "Память: запись (ИИ)", "menu": "Меню питания"}
+           "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "proactive_compose": "Проактив-сообщение", "memory_learn": "Память: запись (ИИ)", "menu": "Меню питания",
+           "partner_brief": "Партнёрский пуш (ИИ)", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон"}
 def _tc_lbl(m): return _TC_LBL.get(m, m or "прочее")
 _TC_APP = ("menu", "food_photo", "food_text", "meal", "workout", "diary_reco", "webapp", "training_section", "today_note", "food_suggest", "training_today")
-_TC_CHAT = ("answer", "general", "partner_q")
+_TC_CHAT = ("answer", "general", "partner_q", "onboard_q")
 def _tc_src(m):
     if m in _TC_APP: return "app"
     if m in _TC_CHAT: return "chat"
-    if m in ("summary", "proactive_compose", "today_note", "memory_learn"): return "auto"
+    if m in ("summary", "proactive_compose", "proactive_preview", "today_note", "memory_learn", "partner_brief"): return "auto"
     return "other"
 
 def analytics_data(days=7, frm=None, to=None):
