@@ -83,7 +83,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-21-v55"
+AIWA_VERSION = "2026-07-21-v57"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -3454,7 +3454,7 @@ async def _memory_learn(cid, umsg, amsg):
         for f in (facts or []):
             mem_set(cid, f.get("key"), f.get("value"))
         if usage:
-            ev(cid, "memory_learn", tokens=sum(usage), meta="auto", calls=len(usage))
+            ev(cid, "memory_learn", tokens=sum(usage), meta="memory_learn", calls=len(usage))
     except Exception as e:
         log.warning("memory_learn: %s", e)
 
@@ -3942,15 +3942,27 @@ _TC_LBL = {"summary": "Сводки (утро)", "answer": "Ответы в ча
            "food_text": "Еда текстом", "meal": "Замена блюда", "workout": "Разбор тренировки", "diary_reco": "Совет по дневнику",
            "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру",
            "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "proactive_compose": "Проактив-сообщение", "memory_learn": "Память: запись (ИИ)", "menu": "Меню питания",
-           "partner_brief": "Партнёрский пуш (ИИ)", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон"}
+           "partner_brief": "Партнёрский пуш (ИИ)", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
+           "auto": "Память: запись (ИИ)"}
 def _tc_lbl(m): return _TC_LBL.get(m, m or "прочее")
 _TC_APP = ("menu", "food_photo", "food_text", "meal", "workout", "diary_reco", "webapp", "training_section", "today_note", "food_suggest", "training_today")
 _TC_CHAT = ("answer", "general", "partner_q", "onboard_q")
 def _tc_src(m):
     if m in _TC_APP: return "app"
     if m in _TC_CHAT: return "chat"
-    if m in ("summary", "proactive_compose", "proactive_preview", "today_note", "memory_learn", "partner_brief"): return "auto"
+    if m in ("summary", "proactive_compose", "proactive_preview", "today_note", "memory_learn", "auto", "partner_brief"): return "auto"
     return "other"
+
+def _feat_of(action, meta):
+    """К какому разделу продукта относится событие — для подсчёта уникальных пользователей по фичам."""
+    m = str(meta or "")
+    if m in ("view_train", "web_training", "web_train_profile", "workout"): return "Нагрузка"
+    if m in ("view_food", "web_food", "web_diary", "food_log", "web_meal_replace", "web_diary_del",
+             "web_diary_edit", "web_diary_scale", "web_diary_slot") or m.startswith("food"): return "Питание"
+    if m == "view_chat" or (action == "answered" and m in ("webapp", "answer", "general")): return "Чат"
+    if m in ("view_stats", "web_partner"): return "Статистика"
+    if m in ("view_today", "web_today", "web_checkin", "web_period") or m.startswith("ci:"): return "Сегодня"
+    return None
 
 def analytics_data(days=7, frm=None, to=None):
     """Чистый слой аналитики (спека v2). tool-calls = Σ calls (все хопы к модели)."""
@@ -3982,6 +3994,7 @@ def analytics_data(days=7, frm=None, to=None):
     wide = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=? AND ts<=?", (wmin, until_ts)).fetchall()
     first_rows = c.execute("SELECT chat_id, MIN(ts) FROM events WHERE action IN ('command','button','suggest','manual','answered','voice','fallback') GROUP BY chat_id").fetchall()
     goalrows = c.execute("SELECT DISTINCT chat_id, meta FROM events WHERE action='goal'").fetchall()
+    refrows = c.execute("SELECT source, chat_id, ts FROM referrals").fetchall()
     pmin = datetime.combine(since - timedelta(days=span), dtime.min).isoformat()
     pmax = datetime.combine(since - timedelta(days=1), dtime.max).isoformat()
     prev = c.execute("SELECT chat_id, ts, action, calls FROM events WHERE ts>=? AND ts<=?", (pmin, pmax)).fetchall()
@@ -4003,7 +4016,8 @@ def analytics_data(days=7, frm=None, to=None):
     answered = fallback = errors = tokens = tool_total = ev_total = 0
     lat = []; sess = defaultdict(list); modeseg = defaultdict(set); mode_active_day = defaultdict(lambda: defaultdict(set))
     bcast = Counter(); ans_by_day = Counter(); err_by_day = Counter(); tool_src = Counter()
-    push_days = defaultdict(set); act_days = defaultdict(set); new_by_day = Counter()
+    push_days = defaultdict(set); act_days = defaultdict(set); new_by_day = Counter(); gper = defaultdict(set)
+    feat_users = defaultdict(set); feat_events = Counter()
     for cid, ts, action, tok, meta, ms, calls in evs:
         d = dparse(ts); iso = d.isoformat(); tokens += (tok or 0)
         if calls:
@@ -4017,9 +4031,12 @@ def analytics_data(days=7, frm=None, to=None):
             if ms: lat.append(ms)
         elif action == "fallback": fallback += 1
         elif action == "error": errors += 1; err_by_day[iso] += 1
+        elif action == "goal": gper[meta or ""].add(cid)
         if action in ACTIVE:
             ev_total += 1; events_by_day[iso] += 1; active_by_day[iso].add(cid); act_days[cid].add(d)
             actions[_ev_lbl(meta or action)] += 1
+            _ft = _feat_of(action, meta)
+            if _ft: feat_users[_ft].add(cid); feat_events[_ft] += 1
             m = umode.get(cid, "cycle"); mode_active_day[iso][m].add(cid); modeseg[m].add(cid)
             ev_src["app" if (meta and str(meta).startswith(APP_PREF)) else "chat"] += 1
             _st = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
@@ -4067,6 +4084,19 @@ def analytics_data(days=7, frm=None, to=None):
             if d in act_days.get(cid, set()): popen += 1
     gset = defaultdict(set)
     for cid, meta in goalrows: gset[meta].add(cid)
+    ref_agg = {}
+    for src, rcid, rts in refrows:
+        a = ref_agg.setdefault(src or "(без метки)", [0, 0, 0])
+        a[0] += 1
+        try:
+            if is_onboarded(row(rcid)): a[1] += 1
+        except Exception: pass
+        try:
+            if since <= dparse(rts) <= until: a[2] += 1
+        except Exception: pass
+    referrals_out = [{"src": k, "total": v[0], "onboarded": v[1],
+                      "conv": round(v[1] * 100 / v[0]) if v[0] else 0, "new_period": v[2]}
+                     for k, v in sorted(ref_agg.items(), key=lambda x: -x[1][0])]
     def pct(a, pp):
         a = sorted(a); return a[min(len(a) - 1, int(len(a) * pp))] if a else 0
     onboarded = len(fa)
@@ -4107,15 +4137,18 @@ def analytics_data(days=7, frm=None, to=None):
             "toolcalls_per_dau": round(tool_total / active_user_days, 2) if active_user_days else 0,
             "by_source": {"chat": ev_src.get("chat", 0), "app": ev_src.get("app", 0)},
             "actions_top": actions.most_common(12), "toolcalls_by_meta": [[_tc_lbl(k), v] for k, v in tool_meta.most_common(10)],
+            "features": sorted([{"name": k, "users": len(v), "events": feat_events[k]} for k, v in feat_users.items()],
+                               key=lambda x: -x["users"]),
             "sessions": {"count": sc, "per_dau": round(sc / active_user_days, 2) if active_user_days else 0,
                          "avg_len_min": round(sum(slens) / len(slens) / 60, 1) if slens else 0,
                          "events_per": round(sum(sevs) / len(sevs), 1) if sevs else 0}},
         "product": {
             "broadcasts": dict(bcast),
             "push_open": {"sent": ptot, "opened": popen, "rate": round(popen / ptot * 100) if ptot else 0},
-            "funnel": {"new_users": new_users, "onboarded": onboarded,
-                       "got_summary": len(gset.get("summary", set())), "logged_food": len(gset.get("food_log", set())),
-                       "logged_workout": len(gset.get("workout", set()))},
+            "funnel": {"new_users": new_users, "onboarded": active_period,
+                       "got_summary": len(gper.get("summary", set())), "logged_food": len(gper.get("food_log", set())),
+                       "logged_workout": len(gper.get("workout", set()))},
+            "referrals": referrals_out,
             "adoption": {"food": len(gset.get("food_log", set())), "workout": len(gset.get("workout", set())),
                          "partner": len(set(p[1] for p in partners))}},
         "quality": {
@@ -4224,6 +4257,9 @@ function mkLine(id,keys){var el=document.getElementById(id);if(!el)return;if(!wi
  CH.push(new Chart(el,{type:'line',data:{labels:labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}},tooltip:{enabled:true}},scales:{y:{beginAtZero:true,grid:{color:'#EEF1F5'},ticks:{font:{size:11}}},x:{grid:{display:false},ticks:{font:{size:11},maxRotation:0,autoSkip:true,maxTicksLimit:9}}}}}));}
 function clearCharts(){CH.forEach(function(c){try{c.destroy();}catch(e){}});CH=[];}
 function pctv(x){return x==null?'—':x+'%';}
+function bLbl(k){var M={'sent':'Утренняя сводка','queued':'Поставлено в очередь','blocked':'Бот заблокирован','checkin_push':'Пуш чек-ина','food_reminder_sent':'Пуш про питание','train_reminder_sent':'Пуш про тренировку','phase_push':'Смена фазы','reactivation_sent':'Реактивация','announce_sent':'Анонс','meno_update_sent':'Мено-дайджест'};if(M[k])return M[k];
+ if(k&&k.indexOf('proactive:')===0){var S={'pms_soon':'скоро ПМС','no_move':'нет движения','low_energy':'мало энергии','felt_bad':'плохое самочувствие','low_protein':'мало белка','practice_eve':'вечерняя практика'};var s=k.slice(10);if(S[s])return 'Проактив: '+S[s];if(s.indexOf('streak_')===0)return 'Проактив: стрик '+s.slice(7)+' дн.';return 'Проактив: '+s;}
+ return k;}
 function render(){
  clearCharts();var v=document.getElementById('view');if(!D){v.textContent='нет данных';return;}v.className='';
  var g=D.growth||{};
@@ -4252,6 +4288,8 @@ function render(){
    card('Всего событий',e.events_total,'за период',DEF.evtot,g.events)+
    card('Активные·дни',e.active_user_days,'знаменатель «на DAU»',DEF.aud)+"</div>";
   h+=chartCard('cEng','События по дням',DEF.evtot);
+  h+="<div class='sec-h'>Разделы: сколько людей пользуются"+ic('Уникальные пользователи за выбранный период, которые совершали действия в каждом разделе. Один человек может быть в нескольких разделах.')+"</div>";
+  h+=tbl(['Раздел','Людей','Из активных','Событий'],(e.features||[]).map(function(x){var ap=D.audience&&D.audience.active_period;return [x.name,x.users,(ap?Math.round(x.users/ap*100)+'%':'—'),x.events];}));
   h+="<div class='sec-h'>События по источнику"+ic('Приложение vs чат — где пользователи совершают действия.')+"</div>";
   h+=tbl(['Источник','Событий'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
   h+="<div class='sec-h'>Тул-коллы (вызовы модели)"+ic('Все обращения к модели: шаги агента (инструменты) + финальный ответ. Растут с агентными ответами.')+"</div>";
@@ -4268,11 +4306,13 @@ function render(){
  } else if(TAB==='prod'){
   var pr=D.product,po=pr.push_open,h='';
   h+="<div class='grid'>"+card('Конверсия пуш→открытие',po.rate+'%',po.opened+' из '+po.sent+' пушей',DEF.push)+card('Отправлено пушей',po.sent,'за период',null)+"</div>";
+  h+="<div class='sec-h'>Источники переходов"+ic('Реферальные метки из ссылок вида t.me/бот?start=МЕТКА. Первое касание: пользовательница закрепляется за той меткой, по которой пришла впервые. «Перешли» и «Настроили» — за всё время, «Новых» — за выбранный период.')+"</div>";
+  h+=tbl(['Метка','Перешли','Настроили','Конверсия','Новых за период'],(pr.referrals||[]).map(function(r){return [esc(r.src),r.total,r.onboarded,r.conv+'%',r.new_period];}));
   h+="<div class='sec-h'>Рассылки по типам</div>";
-  h+=tbl(['Тип','Кол-во'],Object.keys(pr.broadcasts).sort(function(a,b){return pr.broadcasts[b]-pr.broadcasts[a];}).map(function(k){return [k,pr.broadcasts[k]];}));
+  h+=tbl(['Тип','Кол-во'],Object.keys(pr.broadcasts).sort(function(a,b){return pr.broadcasts[b]-pr.broadcasts[a];}).map(function(k){return [bLbl(k),pr.broadcasts[k]];}));
   var f=pr.funnel;
-  h+="<div class='sec-h'>Воронка активации"+ic('Путь: новые → активные → первая сводка → первый лог еды → первая тренировка.')+"</div>";
-  h+=tbl(['Этап','Пользователей'],[['Новые за период',f.new_users],['Активные (совершали действия)',f.onboarded],['Получили сводку',f.got_summary],['Записали еду',f.logged_food],['Отметили тренировку',f.logged_workout]]);
+  h+="<div class='sec-h'>Воронка за период"+ic('Все этапы считаются в выбранном периоде: новые пользователи → кто совершал действия → кто открывал сводку → кто записал еду → кто отметил тренировку.')+"</div>";
+  h+=tbl(['Этап','Пользователей'],[['Новые за период',f.new_users],['Активные за период',f.onboarded],['Открывали сводку',f.got_summary],['Записали еду',f.logged_food],['Отметили тренировку',f.logged_workout]]);
   v.innerHTML=h;
  } else {
   var qd=D.quality,h='';
