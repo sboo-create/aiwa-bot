@@ -83,7 +83,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-21-v54"
+AIWA_VERSION = "2026-07-21-v55"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -260,7 +260,7 @@ def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0):
     c = db(); c.execute("INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n,calls) VALUES(?,?,?,?,?,?,?,?)",
-        (cid, datetime.now().isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls))); c.commit(); c.close()
+        (cid, datetime.now(TZ).isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls))); c.commit(); c.close()
 
 def _num(x, d=0):
     try:
@@ -3920,7 +3920,7 @@ _EV_LBL = {
     "web_today": "Открыла «Сегодня»", "food_suggest": "Идеи по питанию", "training_today": "Разбор нагрузки", "today_note": "Сводка дня",
     "proactive_compose": "Проактив-сообщение", "partner_brief": "Партнёрский пуш", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
     "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
-    "answer": "Вопрос в чате", "general": "Вопрос в чате", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
+    "answer": "Вопрос в чате", "general": "Вопрос в чате", "webapp": "Вопрос в приложении", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
     "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",
 }
 def _ev_lbl(m):
@@ -3958,7 +3958,7 @@ def analytics_data(days=7, frm=None, to=None):
     ACTIVE = ("command", "button", "suggest", "manual", "answered", "voice", "fallback")
     APP_PREF = ("web_", "view_", "app_open")
     PUSH_META = ("sent", "checkin_push", "food_reminder_sent", "train_reminder_sent", "phase_push", "reactivation_sent", "announce_sent", "meno_update_sent")
-    today = datetime.now().date()
+    today = dtoday()
     try: days = int(days)
     except (TypeError, ValueError): days = 7
     if frm and to:
@@ -4022,7 +4022,10 @@ def analytics_data(days=7, frm=None, to=None):
             actions[_ev_lbl(meta or action)] += 1
             m = umode.get(cid, "cycle"); mode_active_day[iso][m].add(cid); modeseg[m].add(cid)
             ev_src["app" if (meta and str(meta).startswith(APP_PREF)) else "chat"] += 1
-            sess[cid].append(datetime.fromisoformat(ts) if isinstance(ts, str) else ts)
+            _st = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
+            # старые события писались без таймзоны, новые — с ней; без приведения их нельзя вычитать друг из друга
+            if getattr(_st, "tzinfo", None) is not None: _st = _st.astimezone(TZ).replace(tzinfo=None)
+            sess[cid].append(_st)
             if created_by.get(cid) == d: new_by_day[iso] += 1
     active_user_days = sum(len(x) for x in active_by_day.values())
     abw = defaultdict(set)
@@ -4088,7 +4091,7 @@ def analytics_data(days=7, frm=None, to=None):
     ans_tot = answered + fallback + errors
     return {
         "since": since.isoformat(), "until": until.isoformat(), "span": span,
-        "updated": datetime.now().strftime("%d.%m %H:%M"),
+        "updated": datetime.now(TZ).strftime("%d.%m %H:%M"),
         "audience": {
             "dau": dau, "wau": wau, "mau": mau, "avg_dau": round(avg_dau, 1),
             "avg_wau": round(sum(x["wau"] for x in series) / len(series), 1) if series else 0,
@@ -4128,247 +4131,6 @@ def analytics_data(days=7, frm=None, to=None):
             "toolcalls": (round((tool_total - pv_tool) / pv_tool * 100) if pv_tool else None),
             "avg_dau": (round((avg_dau - (pv_aud / span)) / (pv_aud / span) * 100) if pv_aud else None)},
         "series": series,
-    }
-
-def admin_dashboard_data(days=30, frm=None, to=None):
-    from collections import Counter, defaultdict
-    ACTIVE = ("manual", "button", "suggest", "command", "answered", "fallback", "voice")
-    today = datetime.now().date()   # naive, как в /stats бота — чтобы дни и DAU совпадали
-    try: days = int(days)
-    except (TypeError, ValueError): days = 30
-    if frm and to:
-        try:
-            since = date.fromisoformat(str(frm)); until = date.fromisoformat(str(to))
-            if until < since: since, until = until, since
-        except Exception:
-            until = today; since = today - timedelta(days=max(1, min(180, days)) - 1)
-    else:
-        days = max(1, min(180, days)); until = today; since = today - timedelta(days=days - 1)
-    span = (until - since).days + 1
-    since_ts = datetime.combine(since, dtime.min).isoformat()
-    until_ts = datetime.combine(until, dtime.max).isoformat()
-    c = db()
-    users = c.execute("SELECT chat_id, created, last_period, cycle_len, mode FROM users").fetchall()
-    events = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, n, calls FROM events WHERE ts>=? AND ts<=? ORDER BY ts",
-                       (since_ts, until_ts)).fetchall()
-    partners = c.execute("SELECT partner_id, woman_id, created FROM partners").fetchall()
-    logs = c.execute("SELECT log_date, symptoms FROM logs WHERE log_date>=? AND log_date<=? ORDER BY log_date DESC",
-                     (since.isoformat(), until.isoformat())).fetchall()
-    amin = datetime.combine(today - timedelta(days=29), dtime.min).isoformat()
-    arows = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=?", (amin,)).fetchall()
-    wmin = datetime.combine(since - timedelta(days=29), dtime.min).isoformat()
-    wide_rows = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=? AND ts<=?", (wmin, until_ts)).fetchall()
-    first_rows = c.execute("SELECT chat_id, MIN(ts) FROM events WHERE action IN ('manual','button','suggest','command','answered','fallback','voice') GROUP BY chat_id").fetchall()
-    c.close()
-    def dparse(ts):
-        try: return datetime.fromisoformat(ts).date()
-        except Exception: return today
-    def pct(a, p):
-        a = sorted(a); return a[min(len(a) - 1, int(len(a) * p))] if a else 0
-    def in_period(ts): return bool(ts) and since <= dparse(ts) <= until
-    umode = {cid: (mode or "cycle") for cid, _, _, _, mode in users}
-
-    active_by_day = defaultdict(set); active_mode_day = defaultdict(lambda: defaultdict(set))
-    signups_by_day = Counter(); answers_by_day = Counter(); errors_by_day = Counter()
-    bcast_by_day = defaultdict(Counter)
-    bcast = Counter(); bcast_today = Counter(); actions = Counter(); goals = Counter(); modes = Counter()
-    answers = fallback = errors = tokens = reqs = 0; lat = []; input_lens = []
-    llm_calls = 0; tool_calls = 0; sess_ts = defaultdict(list)
-    reqs_by_day = Counter(); tools_by_day = Counter(); mode_llm = Counter(); mode_tool = Counter(); tool_top = Counter()
-    events_by_day = Counter()
-    TOOL_LABEL = {"menu": "меню", "answer": "ответ в чате", "summary": "сводка", "meal": "замена блюда"}
-    MESSAGE_ACTIONS = ("answered", "manual", "suggest", "voice"); ud_tools = Counter()
-    for _, _, _, _, mode in users: modes[mode or "cycle"] += 1
-    for cid, ts, action, tok, meta, ms, n, calls in events:
-        _m = umode.get(cid, "cycle")
-        llm_calls += (calls or 0); mode_llm[_m] += (calls or 0)
-        _iso0 = dparse(ts).isoformat()
-        if calls: reqs_by_day[_iso0] += calls
-        if action == "tokens" or action == "voice" or (action == "answered" and meta in ("partner_q", "webapp")):
-            tool_calls += 1; tools_by_day[_iso0] += 1; mode_tool[_m] += 1; ud_tools[(cid, _iso0)] += 1
-            if action == "tokens": _lbl = TOOL_LABEL.get(meta, "генерация")
-            elif action == "voice": _lbl = "голос"
-            elif meta == "webapp": _lbl = "чат в приложении"
-            else: _lbl = "ответ партнёру"
-            tool_top[_lbl] += 1
-        if action in ACTIVE:
-            sess_ts[cid].append(((datetime.fromisoformat(ts) if isinstance(ts, str) else ts), action in MESSAGE_ACTIONS))
-        d = dparse(ts); iso = d.isoformat()
-        if action in ACTIVE:
-            active_by_day[iso].add(cid); active_mode_day[iso][umode.get(cid, "cycle")].add(cid)
-            if n: input_lens.append(n)
-        if action == "signup": signups_by_day[iso] += 1
-        if action == "broadcast":
-            key = meta or "unknown"; bcast[key] += 1; bcast_by_day[iso][key] += 1
-            if d == today: bcast_today[key] += 1
-        if action == "answered":
-            answers += 1; answers_by_day[iso] += 1
-            if ms: lat.append(ms)
-        if action == "fallback": fallback += 1
-        if action == "error": errors += 1; errors_by_day[iso] += 1
-        if tok: tokens += tok
-        if action in ("answered", "fallback", "command", "button", "manual", "suggest", "voice"):
-            reqs += 1; events_by_day[iso] += 1
-        if action == "goal": goals[meta or "goal"] += 1
-        label = (action + ":" + meta) if meta and action in ("manual", "goal", "broadcast") else (meta or action)
-        actions[label] += 1
-    abd = defaultdict(set)
-    for cid, ts, action in arows:
-        if action in ACTIVE: abd[dparse(ts).isoformat()].add(cid)
-    def active(n):
-        cut = today - timedelta(days=n - 1)
-        return len(set().union(*[s for ds, s in abd.items() if date.fromisoformat(ds) >= cut]) if abd else set())
-    mode_union = defaultdict(set)
-    for iso, mm in active_mode_day.items():
-        for m, s in mm.items(): mode_union[m] |= s
-    # --- латентность, онбординг, воронка ---
-    lat.sort(); p50 = pct(lat, 0.5); p95 = pct(lat, 0.95)
-    onboarded = sum(1 for _, _, lp, cl, md in users if (lp and cl) or md in ("irregular", "none", "meno", "preg"))
-    new_users = sum(1 for _, created, _, _, _ in users if in_period(created))
-    active_period = len(set().union(*active_by_day.values()) if active_by_day else set())
-    app_users = len(set(cid for cid, _, action, _, meta, _, _, _ in events
-                        if meta in ("webapp", "web_checkin", "web_period", "web_pa", "web_profile", "web_meal")))
-    got_summary = len(set(cid for cid, _, action, _, meta, _, _, _ in events if action == "goal" and meta == "summary"))
-    partner_new = sum(1 for _, _, created in partners if in_period(created))
-    ans_tot = answers + fallback + errors
-    success_rate = round(answers / ans_tot * 100) if ans_tot else 0
-    avg_input = round(sum(input_lens) / len(input_lens)) if input_lens else 0
-    checkin_sent = bcast["checkin_push"]; checkin_done = goals["checkin"]
-    checkin_rate = round(checkin_done / checkin_sent * 100) if checkin_sent else 0
-    # --- широкое окно активности: скользящие WAU/MAU и «новые vs вернувшиеся» ---
-    abw = defaultdict(set)
-    for cid, ts, action in wide_rows:
-        if action in ACTIVE: abw[dparse(ts).isoformat()].add(cid)
-    first_active = {}
-    for cid, mn in first_rows:
-        if mn: first_active[cid] = dparse(mn).isoformat()
-    def win_union(dd, nd):
-        acc = set(); k = dd - timedelta(days=nd - 1)
-        while k <= dd:
-            acc |= abw.get(k.isoformat(), set()); k += timedelta(days=1)
-        return acc
-    # --- сессии (разрыв > 30 мин = новая сессия), распределения, сессии/день ---
-    GAP = 1800; sessions = 0; slens = []; sevs = []; sessions_by_day = Counter()
-    eng_sessions = 0; msgs_total = 0
-    def _close(cur):
-        nonlocal sessions, eng_sessions, msgs_total
-        sessions += 1
-        slens.append((cur[-1][0] - cur[0][0]).total_seconds()); sevs.append(len(cur))
-        sessions_by_day[cur[0][0].date().isoformat()] += 1
-        _mc = sum(1 for _x in cur if _x[1])
-        if _mc: eng_sessions += 1
-        msgs_total += _mc
-    for _cid, _tl in sess_ts.items():
-        _tl.sort(key=lambda x: x[0]); _cur = []
-        for _t in _tl:
-            if _cur and (_t[0] - _cur[-1][0]).total_seconds() > GAP:
-                _close(_cur); _cur = []
-            _cur.append(_t)
-        if _cur: _close(_cur)
-    sess_users = len(sess_ts)
-    spu = sessions / sess_users if sess_users else 0
-    avg_slen = (sum(slens) / len(slens) / 60) if slens else 0
-    avg_sev = (sum(sevs) / len(sevs)) if sevs else 0
-    def hist(vals, bins):
-        out = []
-        for lab, lo, hi in bins:
-            out.append([lab, sum(1 for v in vals if v >= lo and (hi is None or v < hi))])
-        return out
-    ev_hist = hist(sevs, [("1", 1, 2), ("2", 2, 3), ("3", 3, 4), ("4", 4, 5), ("5", 5, 6), ("6+", 6, None)])
-    dur_hist = hist([x / 60 for x in slens], [("<1 мин", 0, 1), ("1–3", 1, 3), ("3–10", 3, 10), ("10–30", 10, 30), ("30+", 30, None)])
-    # --- средний DAU и сегменты по типу цикла ---
-    active_user_days = sum(len(x) for x in active_by_day.values())
-    avg_dau = active_user_days / span if span else 0
-    mode_aud = Counter()
-    for _iso, _mm in active_mode_day.items():
-        for _m, _sset in _mm.items(): mode_aud[_m] += len(_sset)
-    seg_avg_dau = sorted(((m, round(v / span, 1)) for m, v in mode_aud.items()), key=lambda x: -x[1])
-    seg_active = {m: len(s) for m, s in mode_union.items()}
-    seg_dau = {m: len(s) for m, s in active_mode_day.get(today.isoformat(), {}).items()}
-    segments = []
-    for m in sorted(set(list(modes) + list(seg_active) + list(mode_aud)), key=lambda x: -modes.get(x, 0)):
-        aud = mode_aud.get(m, 0); reqm = mode_llm.get(m, 0) or mode_tool.get(m, 0)
-        segments.append({"mode": m, "users": modes.get(m, 0), "active": seg_active.get(m, 0),
-            "avg_dau": round(aud / span, 1) if span else 0,
-            "intensity_req": round(reqm / aud, 2) if aud else 0,
-            "intensity_tool": round(mode_tool.get(m, 0) / aud, 2) if aud else 0})
-    # --- пропускная способность ---
-    reqs_total = llm_calls or tool_calls
-    per_dau_req = reqs_total / active_user_days if active_user_days else 0
-    per_dau_tool = tool_calls / active_user_days if active_user_days else 0
-    per_sess_req = reqs_total / sessions if sessions else 0
-    per_sess_tool = tool_calls / sessions if sessions else 0
-    dau_now = active(1); wau_now = active(7); mau_now = active(30)
-    stickiness = round(dau_now / mau_now * 100) if mau_now else 0
-    events_total = reqs
-    ev_per_dau = events_total / active_user_days if active_user_days else 0
-    ev_per_dau_today = events_by_day[today.isoformat()] / dau_now if dau_now else 0
-    # --- симптомы + временной ряд со скользящими метриками ---
-    symptom_counts = Counter()
-    for _, ss in logs:
-        for s in (ss or "").split(","):
-            if s: symptom_counts[symptom_label(s)] += 1
-    series = []
-    d = since
-    while d <= until:
-        iso = d.isoformat()
-        dset = abw.get(iso, set()); dau_d = len(dset)
-        mau_d = len(win_union(d, 30)); wau_d = len(win_union(d, 7))
-        new_d = sum(1 for cid in dset if first_active.get(cid) == iso)
-        series.append({"date": iso[5:], "active": dau_d, "dau": dau_d, "wau": wau_d, "mau": mau_d,
-                       "stick": round(dau_d / mau_d * 100) if mau_d else 0,
-                       "new": new_d, "returning": dau_d - new_d,
-                       "signups": signups_by_day[iso], "answers": answers_by_day[iso], "errors": errors_by_day[iso],
-                       "reqs": reqs_by_day[iso], "tools": tools_by_day[iso], "sessions": sessions_by_day[iso], "events": events_by_day[iso],
-                       "modes": {m: len(s) for m, s in active_mode_day.get(iso, {}).items()}})
-        d += timedelta(days=1)
-    # --- сводные KPI: средний WAU, запросы/инференс на активного·день, медиана, воронка ---
-    avg_wau = (sum(x["wau"] for x in series) / len(series)) if series else 0
-    _udv = [ud_tools.get((cid, iso), 0) for iso, sset in active_by_day.items() for cid in sset]
-    def _median(v):
-        v = sorted(v); nn = len(v)
-        if not nn: return 0
-        return v[nn // 2] if nn % 2 else (v[nn // 2 - 1] + v[nn // 2]) / 2
-    req_med = _median(_udv)
-    req_per_dau = tool_calls / active_user_days if active_user_days else 0
-    inf_per_dau = llm_calls / active_user_days if active_user_days else 0
-    sess_per_dau = sessions / active_user_days if active_user_days else 0
-    msg_per_dau = msgs_total / active_user_days if active_user_days else 0
-    eng_pct = round(eng_sessions / sessions * 100) if sessions else 0
-    msg_per_sess = round(msgs_total / eng_sessions, 1) if eng_sessions else 0
-    return {
-        "updated": datetime.now().strftime("%d.%m %H:%M"),
-        "period_days": span, "since": since.isoformat(), "until": until.isoformat(),
-        "users": len(users), "onboarded": onboarded, "new_users": new_users, "active_period": active_period,
-        "dau": dau_now, "wau": wau_now, "mau": mau_now, "avg_dau": round(avg_dau, 1), "stickiness": stickiness,
-        "partners": len(partners), "partner_new": partner_new, "partner_women": len(set(p[1] for p in partners)),
-        "broadcast": {"scheduled": len(all_users()), "queued": bcast["queued"], "sent": bcast["sent"], "error": bcast["error"],
-            "today_queued": bcast_today["queued"], "today_sent": bcast_today["sent"], "today_error": bcast_today["error"], "blocked": bcast["blocked"], "today_blocked": bcast_today["blocked"]},
-        "model": {"answers": answers, "fallback": fallback, "errors": errors, "tokens": tokens,
-            "p50_ms": p50, "p95_ms": p95, "success_rate": success_rate, "avg_input": avg_input},
-        "funnel": {"new_users": new_users, "onboarded_total": onboarded, "active_period": active_period,
-            "got_summary": got_summary, "app_users": app_users, "partner_new": partner_new},
-        "proactivity": {"checkin_sent": checkin_sent, "checkin_done": checkin_done, "checkin_rate": checkin_rate},
-        "seg_avg_dau": seg_avg_dau, "segments": segments,
-        "kpi": {"avg_wau": round(avg_wau, 1), "sess_per_dau": round(sess_per_dau, 2),
-            "msg_per_dau": round(msg_per_dau, 1), "req_per_dau": round(req_per_dau, 1),
-            "req_per_dau_median": round(req_med, 1), "inf_per_dau": round(inf_per_dau, 1),
-            "messages": msgs_total, "inf_measured": bool(llm_calls),
-            "ev_per_dau": round(ev_per_dau, 1), "ev_per_dau_today": round(ev_per_dau_today, 1), "events_total": events_total},
-        "funnel_act": {"sessions": sessions, "engaged": eng_sessions, "engaged_pct": eng_pct,
-            "messages": msgs_total, "per_session": msg_per_sess},
-        "throughput": {"llm_calls": llm_calls, "tool_calls": tool_calls, "reqs_total": reqs_total,
-            "calls_measured": bool(llm_calls), "active_user_days": active_user_days,
-            "per_dau_req": round(per_dau_req, 2), "per_dau_tool": round(per_dau_tool, 2),
-            "per_sess_req": round(per_sess_req, 2), "per_sess_tool": round(per_sess_tool, 2)},
-        "tools_top": tool_top.most_common(10),
-        "sessions": {"count": sessions, "users": sess_users, "per_user": round(spu, 2),
-            "avg_len_min": round(avg_slen, 1), "events_per": round(avg_sev, 1),
-            "per_day": round(sessions / span, 1) if span else 0,
-            "dist_events": ev_hist, "dist_duration": dur_hist},
-        "seg_dau": Counter(seg_dau).most_common(), "seg_active": Counter(seg_active).most_common(),
-        "modes": modes.most_common(), "actions": actions.most_common(14), "goals": goals.most_common(10),
-        "symptoms": symptom_counts.most_common(12), "days": series,
     }
 
 async def _admin_stats(request):
@@ -4457,7 +4219,7 @@ function chip(g){if(g==null)return '';var c=g>0?'up':(g<0?'dn':'zero');var ar=g>
 function card(label,val,sub,def,growth){return "<div class='mc'><div class='ml'>"+label+ic(def)+"</div><div class='mv'>"+(val==null?'—':val)+(growth!==undefined?chip(growth):'')+"</div>"+(sub?"<div class='ms'>"+sub+"</div>":"")+"</div>";}
 function tbl(head,rows){if(!rows||!rows.length)return "<div class='ms' style='margin-bottom:16px'>нет данных за период</div>";return "<table class='tb'><tr>"+head.map(function(h){return "<th>"+h+"</th>";}).join('')+"</tr>"+rows.map(function(r){return "<tr>"+r.map(function(c){return "<td>"+c+"</td>";}).join('')+"</tr>";}).join('')+"</table>";}
 function chartCard(id,title,def){return "<div class='chartcard'><div class='ct'>"+title+ic(def)+"</div><div style='height:230px'><canvas id='"+id+"'></canvas></div></div>";}
-function mkLine(id,keys){var el=document.getElementById(id);if(!el||!window.Chart)return;var labels=D.series.map(function(p){return p.date;});
+function mkLine(id,keys){var el=document.getElementById(id);if(!el)return;if(!window.Chart){el.parentNode.innerHTML="<div class='ms'>График не отрисовался: не загрузился Chart.js с CDN. Все цифры выше корректны.</div>";return;}var labels=D.series.map(function(p){return p.date;});
  var ds=keys.map(function(k){return {label:k.label,data:D.series.map(function(p){return p[k.key]||0;}),borderColor:k.color,backgroundColor:k.color,tension:.3,pointRadius:3,pointHoverRadius:6,borderWidth:2,fill:false};});
  CH.push(new Chart(el,{type:'line',data:{labels:labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}},tooltip:{enabled:true}},scales:{y:{beginAtZero:true,grid:{color:'#EEF1F5'},ticks:{font:{size:11}}},x:{grid:{display:false},ticks:{font:{size:11},maxRotation:0,autoSkip:true,maxTicksLimit:9}}}}}));}
 function clearCharts(){CH.forEach(function(c){try{c.destroy();}catch(e){}});CH=[];}
