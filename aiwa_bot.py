@@ -75,14 +75,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("aiwa")
 TZ = ZoneInfo(os.environ.get("AIWA_TZ", "Europe/Moscow"))
+def dtoday():
+    """«Сегодня» в часовом поясе пользовательниц (МСК), а не сервера: Railway живёт в UTC,
+    и серверная дата после полуночи по Москве ещё показывает вчера."""
+    return datetime.now(TZ).date()
 DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") else "aiwa.db")
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
-AIWA_PRACTICE_IDS = set(x.strip() for x in (os.environ.get("AIWA_PRACTICE_IDS", "") or "").split(",") if x.strip())
-def _practice_on(cid):
-    return True  # практика доступна всем
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-13-v51"
+AIWA_VERSION = "2026-07-21-v53"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -238,12 +239,13 @@ def db():
     return c
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
             "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
             "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12],
-            "mode": r[13] or "cycle", "diet_note": r[14] or "", "period_end": r[15], "period_len": r[16]}
+            "mode": r[13] or "cycle", "diet_note": r[14] or "", "period_end": r[15], "period_len": r[16],
+            "train_profile": r[17], "kcal_goal": r[18], "last_phase_notified": r[19], "last_reactivation": r[20]}
 
 def upsert(cid, **kw):
     c = db()
@@ -302,7 +304,7 @@ def slot_for_now():
     return "snack"
 
 def meal_add(cid, rec, d=None):
-    d = d or date.today().isoformat()
+    d = d or dtoday().isoformat()
     slot = rec.get("slot") or slot_for_now()
     c = db(); mid = c.execute(
         "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -334,7 +336,7 @@ def meal_edit(cid, mid, **kw):
     c = db(); c.execute("UPDATE meals SET " + ", ".join(sets) + " WHERE chat_id=? AND id=?", vals); c.commit(); c.close(); return True
 
 def meals_of(cid, d=None):
-    d = d or date.today().isoformat()
+    d = d or dtoday().isoformat()
     c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,slot FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
     return [{"id": x[0], "ts": x[1], "title": x[2], "kcal": x[3], "protein": x[4], "fat": x[5], "carbs": x[6],
              "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9], "slot": (x[10] or "snack")} for x in r]
@@ -363,7 +365,7 @@ def workout_calories(wtype, duration, rpe, weight_kg):
     return int(round(met * w * (mins / 60.0)))
 
 def workout_add(cid, rec, d=None):
-    d = d or date.today().isoformat()
+    d = d or dtoday().isoformat()
     c = db()
     cur = c.execute("INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note,review,kcal,muscles) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (cid, d, datetime.now(TZ).isoformat(), rec.get("type", ""), json.dumps(rec.get("items", []), ensure_ascii=False),
@@ -372,13 +374,13 @@ def workout_add(cid, rec, d=None):
     wid = cur.lastrowid; c.commit(); c.close(); return wid
 
 def workouts_of(cid, d=None):
-    d = d or date.today().isoformat()
+    d = d or dtoday().isoformat()
     c = db(); r = c.execute("SELECT id,ts,type,items,duration,rpe,note,review,kcal,muscles FROM workouts WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
     return [{"id": x[0], "ts": x[1], "type": x[2], "items": json.loads(x[3] or "[]"), "duration": x[4],
              "rpe": x[5], "note": x[6], "review": x[7], "kcal": x[8], "muscles": x[9]} for x in r]
 
 def workouts_recent(cid, days=10, limit=8):
-    cut = (date.today() - timedelta(days=days)).isoformat()
+    cut = (dtoday() - timedelta(days=days)).isoformat()
     c = db(); r = c.execute("SELECT d,type,items,duration,rpe FROM workouts WHERE chat_id=? AND d>=? ORDER BY ts DESC LIMIT ?", (cid, cut, limit)).fetchall(); c.close()
     return [{"d": x[0], "type": x[1], "items": json.loads(x[2] or "[]"), "duration": x[3], "rpe": x[4]} for x in r]
 
@@ -536,9 +538,9 @@ def parse_date(t):
         mon = _month_ru(ml.group(2))
         if mon:
             try:
-                day = int(ml.group(1)); yr = int(ml.group(3)) if ml.group(3) else date.today().year
+                day = int(ml.group(1)); yr = int(ml.group(3)) if ml.group(3) else dtoday().year
                 d = date(yr, mon, day)
-                if not ml.group(3) and d > date.today(): d = d.replace(year=d.year - 1)
+                if not ml.group(3) and d > dtoday(): d = d.replace(year=d.year - 1)
                 return d
             except ValueError: pass
     t = t.strip().replace("/", ".").replace("-", ".").replace(" ", ".").replace(",", ".")
@@ -553,8 +555,8 @@ def parse_date(t):
         try:
             d = datetime.strptime(t if "." in t else digits, fmt).date()
             if fmt in ("%d.%m", "%d%m"):
-                d = d.replace(year=date.today().year)
-                if d > date.today(): d = d.replace(year=d.year - 1)
+                d = d.replace(year=dtoday().year)
+                if d > dtoday(): d = d.replace(year=d.year - 1)
             return d
         except ValueError: continue
     return None
@@ -916,9 +918,10 @@ async def need_onboard(t):
     if cid: upsert(cid, state=None)
     await t.reply_text("Чтобы Айва давала персональные рекомендации, выбери, что сейчас ближе: ведёшь цикл или нет регулярного цикла.", reply_markup=ONB_KB)
 _last_start = {}
-async def begin_onboard(cid, msg):
+async def begin_onboard(cid, msg, force=False):
     now = time.time()
-    if now - _last_start.get(cid, 0) < 4: return   # не показываем приветствие дважды подряд
+    # дебаунс только для повторного /start; явный тап по кнопке (force) должен отвечать всегда
+    if not force and now - _last_start.get(cid, 0) < 4: return
     _last_start[cid] = now
     if not row(cid): ev(cid, "signup")
     upsert(cid, state=None, pending_date=None)
@@ -929,7 +932,7 @@ async def send_infographic(bot, cid):
     u, st = status_of(cid)
     if not st: return
     try:
-        png = await asyncio.to_thread(IMG.render_cycle, date.fromisoformat(u["last_period"]), u["cycle_len"], date.today())
+        png = await asyncio.to_thread(IMG.render_cycle, date.fromisoformat(u["last_period"]), u["cycle_len"], dtoday())
         bio = io.BytesIO(png); bio.name = "cycle.png"
         await bot.send_photo(cid, photo=bio, caption=f"AIWA · {st['subphase']} {st['phase_ru'].lower()}, день {st['day']}. Месячные через ~{st['days_to_next']} дн.")
     except Exception as e: log.warning("infographic: %s", e)
@@ -947,7 +950,7 @@ _MENU_CACHE = {}
 def _menu_key(cid, st, prof, mode):
     diet = ((prof.get("diet") if prof else "") or "", (prof.get("diet_note") if prof else "") or "")
     phase = (st.get("phase") if st else ("mode:" + str(mode)))
-    return (cid, date.today().isoformat(), phase, diet)
+    return (cid, dtoday().isoformat(), phase, diet)
 def menu_cached(cid, st, prof, target, mode=None, usage=None):
     """Дневной кэш меню: обращаемся к модели максимум раз в день на юзера, дальше — мгновенно."""
     key = _menu_key(cid, st, prof, mode)
@@ -967,7 +970,7 @@ def menu_cache_clear(cid):
 
 _SUM_CACHE = {}
 def _prune_day(cache):
-    today = date.today().isoformat()
+    today = dtoday().isoformat()
     if len(cache) > 1500:
         for k in [k for k in list(cache) if k[1] != today]:
             cache.pop(k, None)
@@ -1114,7 +1117,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     ev(cid, "tokens", sum(usage), meta="answer", calls=len(usage))
 
 async def push_general(context, cid):
-    u = row(cid); usage = []; _ds = date.today().isoformat()
+    u = row(cid); usage = []; _ds = dtoday().isoformat()
     _key = (cid, _ds, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
     body = _SUM_CACHE.get(_key)
     if body is None:
@@ -1188,7 +1191,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         upsert(cid, state="await_time")
         return await msg.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 08:00.", reply_markup=time_kb())
     if intent == "checkin":
-        log_ensure(cid, date.today().isoformat())
+        log_ensure(cid, dtoday().isoformat())
         return await msg.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
     if intent == "history":
         return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
@@ -1204,7 +1207,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         if not (is_cycle(u2) and u2.get("last_period")):
             return await msg.reply_text("Сначала отметь начало последних месячных, тогда посчитаю их длину. Кнопка «Отметить месячные» в Меню.")
         mdt = _DATE_RE.search(txt or "")
-        end = (parse_date(mdt.group(0)) if mdt else None) or date.today()
+        end = (parse_date(mdt.group(0)) if mdt else None) or dtoday()
         ln = (end - date.fromisoformat(u2["last_period"])).days + 1
         if 1 <= ln <= 10:
             cyc_set_end(cid, u2["last_period"], end.isoformat())
@@ -1256,7 +1259,7 @@ async def push_summary(context, cid, with_image=True):
     if not st: return
     if st["status"] != "normal": return await send_delay(context, cid, st)
     if with_image: await send_infographic(context.bot, cid)
-    usage = []; _ds = date.today().isoformat()
+    usage = []; _ds = dtoday().isoformat()
     _key = (cid, _ds, st.get("phase"), str(log_get(cid, _ds) or ""))
     body = _SUM_CACHE.get(_key)
     if body is None:
@@ -1276,7 +1279,7 @@ async def push_checkin(context, cid):
     try:
         u = row(cid)
         if not is_onboarded(u): return
-        log_ensure(cid, date.today().isoformat())
+        log_ensure(cid, dtoday().isoformat())
         await context.bot.send_message(cid,
             "Как ты сегодня? Отметь за 10 секунд — подстрою совет дня под твоё реальное состояние.\n\nКакая энергия?",
             reply_markup=en_kb("e"))
@@ -1303,7 +1306,7 @@ def _pa_recent(cid, key, days):
         c = db(); r = c.execute("SELECT last_ts FROM proactive_state WHERE chat_id=? AND signal=?", (cid, key)).fetchone(); c.close()
         if not r or not r[0]:
             return False
-        return (date.today() - date.fromisoformat(r[0][:10])).days < max(1, int(days))
+        return (dtoday() - date.fromisoformat(r[0][:10])).days < max(1, int(days))
     except Exception:
         return False
 def _pa_mark(cid, key):
@@ -1315,7 +1318,7 @@ def _pa_mark(cid, key):
 def _pa_logged_today(cid):
     try:
         c = db(); r = c.execute("SELECT COUNT(*) FROM proactive_log WHERE chat_id=? AND ts>=?",
-                               (cid, date.today().isoformat())).fetchone(); c.close()
+                               (cid, dtoday().isoformat())).fetchone(); c.close()
         return bool(r and r[0])
     except Exception:
         return False
@@ -1374,7 +1377,7 @@ def _ref_touch(cid, src):
 def _proactive_signals(cid, slot="eve"):
     out = []
     try:
-        u = row(cid); _, st = status_of(cid); today = date.today()
+        u = row(cid); _, st = status_of(cid); today = dtoday()
         tlog = log_get(cid, today.isoformat()) or {}
         ylog = log_get(cid, (today - timedelta(days=1)).isoformat()) or {}
         badY = (ylog.get("energy") == 1) or (ylog.get("mood") == 1) or any(x in (ylog.get("symptoms") or []) for x in ("anx", "low", "tired", "irrit"))
@@ -1420,11 +1423,6 @@ def _proactive_signals(cid, slot="eve"):
                                 "data": "белок %s из %s г" % (round(tot.get("protein", 0)), round(tgt.get("protein", 0)))})
             except Exception:
                 pass
-            ph = (st or {}).get("phase")
-            if ph in ("luteal", "menstrual"):
-                out.append({"key": "practice_eve", "score": 34, "cooldown": 1,
-                            "topic": "вечер %s фазы — мягко предложи короткую дыхательную практику на расслабление" % ("лютеиновой" if ph == "luteal" else "менструальной"),
-                            "data": "фаза %s" % (st or {}).get("phase_ru")})
     except Exception as e:
         log.warning("proactive_signals: %s", e)
     return out
@@ -1649,7 +1647,7 @@ def train_reminder_text(cid):
 async def push_food_reminder(context, cid):
     u = row(cid)
     if not is_onboarded(u): return
-    if meals_of(cid, date.today().isoformat()): return   # уже отметила еду сегодня — не дёргаем
+    if meals_of(cid, dtoday().isoformat()): return   # уже отметила еду сегодня — не дёргаем
     wu = webapp_url(u) or AIWA_WEBAPP_URL
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🍎 Отметить еду", web_app=WebAppInfo(url=wu))]]) if wu else None
     await context.bot.send_message(cid, food_reminder_text(cid), reply_markup=kb)
@@ -1658,7 +1656,7 @@ async def push_food_reminder(context, cid):
 async def push_train_reminder(context, cid):
     u = row(cid)
     if not is_onboarded(u): return
-    if workouts_of(cid, date.today().isoformat()): return   # уже отметила тренировку — не дёргаем
+    if workouts_of(cid, dtoday().isoformat()): return   # уже отметила тренировку — не дёргаем
     wu = webapp_url(u) or AIWA_WEBAPP_URL
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏋️ Отметить тренировку", web_app=WebAppInfo(url=wu))]]) if wu else None
     await context.bot.send_message(cid, train_reminder_text(cid), reply_markup=kb)
@@ -2096,7 +2094,7 @@ async def menu(update, context):
 async def checkin_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
-    log_ensure(cid, date.today().isoformat())
+    log_ensure(cid, dtoday().isoformat())
     await update.message.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
 async def period_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
@@ -2542,7 +2540,7 @@ async def handle_text(update, context, txt):
                 a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None)
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
-        upsert(cid, height=int(cm), weight=kg, age=age, state=None)
+        upsert(cid, height=int(cm), weight=kg, age=age, state="await_activity")
         return await update.message.reply_text("Принято 💪 Какой у тебя уровень физической активности?\n\n"
             "• Минимальная — сидячий образ жизни, почти без спорта\n"
             "• Лёгкая — лёгкие тренировки 1–3 раза в неделю\n"
@@ -2551,11 +2549,25 @@ async def handle_text(update, context, txt):
             "• Очень высокая — спорт плюс физическая работа\n\n"
             "Это нужно, чтобы точнее считать калории и питание.", reply_markup=ACT_KB)
 
+    if state == "await_activity":
+        # раньше этот шаг принимал только кнопки: написавшая словами выпадала из онбординга в общий чат
+        _low = txt.lower()
+        _act = None
+        for _pat, _lvl in (("очень высок", 5), ("минимал", 1), ("лёгк", 2), ("легк", 2), ("умерен", 3), ("средн", 3), ("высок", 4)):
+            if _pat in _low: _act = _lvl; break
+        if _act is None:
+            _md = re.fullmatch(r"[1-5]", _low.strip())
+            if _md: _act = int(_low.strip())
+        if _act is None:
+            return await update.message.reply_text("Выбери уровень активности кнопкой ниже — так точнее.", reply_markup=ACT_KB)
+        upsert(cid, activity=_act, state="await_diet")
+        return await update.message.reply_text("Есть ограничения в еде? Отметь кнопками или напиши своё текстом (например «без свинины, без сахара»), потом Готово.", reply_markup=diet_kb(set()))
+
     if state == "await_symptom_custom":
         code = symptom_code(txt)
         if not code:
             return await update.message.reply_text("Напиши симптом коротко, например «тошнота» или «ломота».")
-        today_s = date.today().isoformat()
+        today_s = dtoday().isoformat()
         log_add_symptom(cid, today_s, code)
         upsert(cid, state=None)
         ev(cid, "manual", meta="custom_symptom", n=len(txt))
@@ -2661,7 +2673,10 @@ async def handle_text(update, context, txt):
 
 # ---------- callbacks ----------
 async def on_cb(update, context):
-    q = update.callback_query; await q.answer(); cid = q.message.chat.id; data = q.data
+    q = update.callback_query; await q.answer()
+    if not q.message:  # у сообщений старше ~48ч Telegram не присылает message — без защиты тут AttributeError
+        return
+    cid = q.message.chat.id; data = q.data
     if data.startswith("pado:"):
         _intent = data.split(":", 1)[1]
         _u = row(cid)
@@ -2683,7 +2698,7 @@ async def on_cb(update, context):
         _wu = webapp_url(_u) or AIWA_WEBAPP_URL
         _kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=_wu))]]) if _wu else None
         return await context.bot.send_message(cid, _ans, reply_markup=_kb)
-    if data == "go_start": return await begin_onboard(cid, q.message)
+    if data == "go_start": return await begin_onboard(cid, q.message, force=True)
     if data == "keep":
         u_keep = row(cid)
         return await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u_keep, not is_cycle(u_keep)))
@@ -2723,7 +2738,7 @@ async def on_cb(update, context):
     if not st and not is_onboarded(u):
         return await need_onboard(q.message)
     general = st is None
-    today_s = date.today().isoformat()
+    today_s = dtoday().isoformat()
     if data == "menu":
         await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u, general))
     elif data == "today":
@@ -3024,11 +3039,11 @@ async def _api_data(request):
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
            "partner_linked": bool(partner_of(cid)),
-           "today_log": log_get(cid, date.today().isoformat()) or {"symptoms": []},
-           "send_time": u.get("send_time") or "08:00", "practice": _practice_on(cid),
+           "today_log": log_get(cid, dtoday().isoformat()) or {"symptoms": []},
+           "send_time": u.get("send_time") or "08:00",
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
                        "activity": u.get("activity"), "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}}
-    out["sym_log"] = logs_of(cid, (date.today() - timedelta(days=45)).isoformat())
+    out["sym_log"] = logs_of(cid, (dtoday() - timedelta(days=45)).isoformat())
     out["past_periods"] = periods_of(cid)
     try:
         _pr = profile_of(u)
@@ -3086,8 +3101,8 @@ async def _api_period(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     action = body.get("action"); ds = body.get("date")
-    try: d = date.fromisoformat(ds) if ds else date.today()
-    except Exception: d = date.today()
+    try: d = date.fromisoformat(ds) if ds else dtoday()
+    except Exception: d = dtoday()
     if action == "start":
         db_mark_period(cid, d.isoformat()); ev(cid, "manual", meta="web_period_start")
         return _cors(web.json_response({"ok": True}))
@@ -3140,15 +3155,15 @@ async def _api_pa(request):
     ds = body.get("date")
     try: d = date.fromisoformat(ds)
     except Exception: return _cors(web.json_response({"error": "bad date"}, status=400))
-    if d > date.today(): return _cors(web.json_response({"marked": False, "skip": True}))
+    if d > dtoday(): return _cors(web.json_response({"marked": False, "skip": True}))
     marked = pa_toggle(cid, d.isoformat()); ev(cid, "manual", meta="web_pa")
     return _cors(web.json_response({"marked": marked}))
 async def _api_checkin(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    ds = body.get("date") or date.today().isoformat()
+    ds = body.get("date") or dtoday().isoformat()
     try: date.fromisoformat(ds)
-    except Exception: ds = date.today().isoformat()
+    except Exception: ds = dtoday().isoformat()
     log_ensure(cid, ds)
     if body.get("energy"):
         try: log_set(cid, ds, energy=max(1, min(3, int(body["energy"]))))
@@ -3255,7 +3270,7 @@ def _recent_workouts_text(cid):
     return "; ".join(parts)
 
 def _recent_syms_text(cid):
-    lg = log_get(cid, date.today().isoformat()) or {}
+    lg = log_get(cid, dtoday().isoformat()) or {}
     out = []
     e = lg.get("energy"); m = lg.get("mood")
     if e: out.append("энергия " + {1: "низкая", 2: "средняя", 3: "высокая"}.get(e, str(e)))
@@ -3298,17 +3313,6 @@ async def _api_section(request):
     _su = []; plan = await asyncio.to_thread(L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
     if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su))
     return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
-async def _api_practice_done(request):
-    body = await request.json(); cid = _verify_init(body.get("initData", ""))
-    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    u = row(cid)
-    if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
-    goal = str(body.get("goal") or "")[:20]; mins = int(_num(body.get("minutes")) or 2)
-    _, st = status_of(cid); ph = (st or {}).get("phase_ru") or (u.get("mode") or "")
-    _u = []; txt = await asyncio.to_thread(L.practice_reflection, goal, mins, ph, _u)
-    if _u: ev(cid, "answered", tokens=sum(_u), meta="practice_done", calls=len(_u))
-    return _cors(web.json_response({"text": txt}))
-
 async def _api_today(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -3370,7 +3374,7 @@ def _agent_exec(cid, name, args):
                     "days_to_next": st.get("days_to_next"), "status": st.get("status")}
         if name == "recent_symptoms":
             days = int(args.get("days") or 14)
-            logs = logs_of(cid, (date.today() - timedelta(days=days)).isoformat()) or []
+            logs = logs_of(cid, (dtoday() - timedelta(days=days)).isoformat()) or []
             out = [{"date": l.get("date"), "symptoms": l.get("symptoms"), "energy": l.get("energy"), "mood": l.get("mood")}
                    for l in logs if (l.get("symptoms") or l.get("energy") or l.get("mood"))]
             return {"logs": out[-12:]}
@@ -3400,6 +3404,7 @@ async def _agent_answer(cid, u, msg, usage):
     Возвращает текст или None (тогда вызывающий откатывается к обычному ответу)."""
     plan_sys = ("Ты — планировщик ассистента по женскому здоровью. Реши, какие инструменты нужны, чтобы ответить "
                 "на вопрос пользовательницы по её РЕАЛЬНЫМ данным (цикл, симптомы, дневник еды, тренировки, профиль), и вызови их. "
+                "Если это приветствие, благодарность, болтовня или общий вопрос не про её здоровье и данные (фильмы, быт, отношения, работа) — НЕ вызывай НИКАКИЕ инструменты, включая cycle_status. "
                 "Если вопрос общий и данные не нужны — не вызывай инструменты. Сам развёрнутый ответ не пиши, только выбери инструменты.")
     messages = [{"role": "system", "content": plan_sys}, {"role": "user", "content": msg}]
     tools = _agent_tools_spec()
@@ -3429,7 +3434,7 @@ async def _agent_final(cid, u, msg, gathered, usage):
     _, st = status_of(cid); prof = profile_of(u)
     q = msg
     if gathered:
-        q = msg + "\n\nВот её актуальные данные из приложения — обязательно опирайся на них и приводи конкретные числа: " + " | ".join(gathered)
+        q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про здоровье, цикл, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
     q = _with_memory(cid, q)
     if st is not None:
         return await asyncio.to_thread(L.answer_question, st, q, prof, hist_get(cid), usage=usage)
@@ -3907,7 +3912,7 @@ _EV_LBL = {
     "web_train_profile": "Профиль тренировок", "web_pa": "Отметка близости", "web_diary_del": "Удаление из дневника",
     "web_diary_edit": "Правка в дневнике", "web_diary_scale": "Граммовка в дневнике", "web_diary_slot": "Перенос приёма",
     "web_today": "Открыла «Сегодня»", "food_suggest": "Идеи по питанию", "training_today": "Разбор нагрузки", "today_note": "Сводка дня",
-    "practice_done": "Разбор практики", "proactive_compose": "Проактив-сообщение",
+    "proactive_compose": "Проактив-сообщение",
     "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
     "answer": "Вопрос в чате", "general": "Вопрос в чате", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
     "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",
@@ -3930,9 +3935,9 @@ def _ev_lbl(m):
 _TC_LBL = {"summary": "Сводки (утро)", "answer": "Ответы в чате", "menu": "Меню питания", "food_photo": "Фото еды",
            "food_text": "Еда текстом", "meal": "Замена блюда", "workout": "Разбор тренировки", "diary_reco": "Совет по дневнику",
            "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру",
-           "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "practice_done": "Разбор практики", "proactive_compose": "Проактив-сообщение", "memory_learn": "Память: запись (ИИ)", "menu": "Меню питания"}
+           "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "proactive_compose": "Проактив-сообщение", "memory_learn": "Память: запись (ИИ)", "menu": "Меню питания"}
 def _tc_lbl(m): return _TC_LBL.get(m, m or "прочее")
-_TC_APP = ("menu", "food_photo", "food_text", "meal", "workout", "diary_reco", "webapp", "training_section", "today_note", "food_suggest", "training_today", "practice_done")
+_TC_APP = ("menu", "food_photo", "food_text", "meal", "workout", "diary_reco", "webapp", "training_section", "today_note", "food_suggest", "training_today")
 _TC_CHAT = ("answer", "general", "partner_q")
 def _tc_src(m):
     if m in _TC_APP: return "app"
@@ -4532,7 +4537,6 @@ def build_web():
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/today", _api_today)
-    aio.router.add_post("/api/practice_done", _api_practice_done)
     aio.router.add_post("/api/chat", _api_chat)
     aio.router.add_post("/api/voice", _api_voice)
     aio.router.add_post("/api/food_photo", _api_food_photo)

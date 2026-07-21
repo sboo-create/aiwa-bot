@@ -181,6 +181,8 @@ def _stand_auth(force=False):
                 exp = _t.time() + 1500
             if exp > 1e12:
                 exp = exp / 1000.0
+            elif exp < 1e6:  # это относительный TTL в секундах, а не абсолютная метка времени
+                exp = _t.time() + exp
             _stand_tok["token"] = str(token)
             _stand_tok["exp"] = exp
             return _stand_tok["token"]
@@ -549,7 +551,8 @@ def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2):
     t1 = _tt.time(); out = None
     try:
         out = _call_impl(messages, max_tokens, temperature, usage, attempts)
-        if not out and len(str(messages)) > 3000:
+        # компакт-ретрай только для чисто текстовых сообщений: vision-контент (список) он бы выбросил
+        if not out and len(str(messages)) > 3000 and all(isinstance(m.get("content"), str) for m in (messages or []) if m.get("content") is not None):
             print("LLM compact retry")
             out = _call_impl(_compact_messages(messages), min(max_tokens, 650), min(temperature, 0.35), usage, 1)
         return out
@@ -609,7 +612,9 @@ def _ctx_note(st, profile):
         ov = max(12, st['cycle_len'] - 14)
         note = (f"Данные пользовательницы по циклу: сегодня день {st['day']} из {st['cycle_len']}, фаза {st['subphase']} {st['phase_ru'].lower()}. "
                 f"До следующих месячных примерно {st['days_to_next']} дн. Овуляция ориентировочно на {ov} день цикла, фертильное окно примерно за 5 дней до овуляции. "
-                f"Когда спрашивают про овуляцию, фертильность, день цикла или сколько до месячных - отвечай этими конкретными числами про неё, а не общими словами.")
+                f"Когда спрашивают про овуляцию, фертильность, день цикла или сколько до месячных - отвечай этими конкретными числами про неё, а не общими словами. "
+                f"ВАЖНО: эти данные - фоновая справка. Используй их ТОЛЬКО если вопрос про цикл, самочувствие, питание, тренировки или здоровье. "
+                f"Если сообщение - приветствие, болтовня, благодарность или общий вопрос (фильмы, быт, отношения, работа), НЕ упоминай день цикла, фазу и месячные вообще.")
     if profile:
         bits = []
         if profile.get("height"): bits.append(f"рост {profile['height']} см")
@@ -642,6 +647,7 @@ def answer_question(st, question, profile=None, history=None, usage=None):
     msgs = [{"role": "system", "content": SYSTEM + (("\n\n" + note) if note else "") + _history_note(history)}]
     msgs.append({"role": "user", "content": (
         "НОВЫЙ ВОПРОС, НА КОТОРЫЙ НУЖНО ОТВЕТИТЬ СЕЙЧАС:\n" + question + "\n\n"
+        "СНАЧАЛА определи тип сообщения. Если это приветствие, благодарность, болтовня или просто общение без вопроса про здоровье - ответь коротко (1-3 предложения), тепло и по-человечески, БЕЗ упоминания цикла, фаз, месячных и медицины, и сразу переходи к строке СЛЕДУЮЩИЕ. Все требования ниже про подробность - только для содержательных вопросов. "
         "Дай подробный, качественный ответ с медицинским обоснованием, как грамотный и тёплый гинеколог простыми словами. "
         "Отвечай строго по заданному вопросу, без лишних разделов. Начни с уместного эмодзи. Разбивай на части и используй пункты «• » только там, где это реально нужно по теме. НЕ добавляй разделы про питание, нагрузку или общие рекомендации, если вопрос не про них. Давай конкретику (продукты, нормы, числа) там, где уместно. Безрецептурные препараты можно назвать, но без конкретных доз. "
         "Если вопрос про питание или тренировки - СРАЗУ отвечай по сути: конкретные продукты или пример меню на день, либо конкретные упражнения; привязку к фазе цикла давай кратко и только если это реально важно, НЕ уводи ответ в рассказ про цикл. Если вопрос про цикл, беременность, гормоны, фертильность или самочувствие - можешь коротко привязать к её данным (день цикла, фаза, до месячных), потом разверни тему по существу. "
@@ -1010,18 +1016,6 @@ def memory_extract(user_msg, ai_msg, existing="", usage=None):
     return res[:3]
 
 
-def practice_reflection(goal, minutes, phase_ru, usage=None):
-    goals = {"calm": "успокоиться", "sleep": "заснуть", "focus": "собраться", "energy": "взбодриться"}
-    g = goals.get(goal, goal or "подышать")
-    prompt = ("Пользовательница только что закончила дыхательную практику (цель: " + g + ", " + str(minutes) + " мин). "
-              + (("Её фаза цикла сейчас: " + str(phase_ru) + ". ") if phase_ru else "")
-              + "Напиши короткий тёплый разбор-итог от Айвы: 2 предложения — что это дало её телу и состоянию "
-              "и мягкая мотивация делать это регулярно. Конкретно и по-доброму, без пафоса, без markdown, по-русски.")
-    out = _call([{"role": "system", "content": "Ты AIWA. Пиши коротко, тепло, по-русски, без markdown."},
-                 {"role": "user", "content": prompt}], max_tokens=180, temperature=0.6, usage=usage)
-    return _clean(out, "")
-
-
 def explain_section(st, key, usage=None):
     if key == "training":
         return training_text(st)
@@ -1210,19 +1204,41 @@ MEAL_POOLS = {
   "d": [("Лосось с овощами","омега-3 и B6","520 ккал"),("Индейка с тушёными овощами","белок","470 ккал"),("Рыба с овощным рагу","омега-3","480 ккал"),("Куриная грудка с салатом","белок","450 ккал")],
  },
 }
+def _kcal_num(s):
+    m = re.search(r"\d+", str(s or ""))
+    return int(m.group()) if m else 0
+
+def _scale_menu(menu, target):
+    """Подгоняет калории блюд и БЖУ дня под рассчитанную норму пользовательницы (target = (ккал, белок, жиры, углеводы)).
+    Без этого меню из пулов/модели живёт своей жизнью и не сходится с нормой на экране."""
+    if not (menu and target and target[0]):
+        return menu
+    meals = menu.get("meals") or []
+    total = sum(_kcal_num(m.get("kcal")) for m in meals)
+    if total:
+        f = float(target[0]) / total
+        if abs(f - 1) > 0.05:
+            for m in meals:
+                k = _kcal_num(m.get("kcal"))
+                if k: m["kcal"] = "%d ккал" % (int(round(k * f / 10.0)) * 10)
+    if len(target) >= 4 and target[1] and target[2] and target[3]:
+        menu["macros"] = {"protein": "%d г" % round(target[1]), "fat": "%d г" % round(target[2]), "carbs": "%d г" % round(target[3])}
+    return menu
+
 def menu_today(st, profile=None, target=None, usage=None):
     # Без диет-ограничений отдаём готовый набор под фазу (без обращения к модели, экономим лимит).
     has_diet = bool(profile and (profile.get("diet") or profile.get("diet_note")))
+    phase_key = (st or {}).get("phase")
     if not has_diet:
         import datetime as _dt
         seed = _dt.date.today().toordinal()
-        phase = st["phase"] if st["phase"] in MEAL_POOLS else "follicular"
+        phase = phase_key if phase_key in MEAL_POOLS else "follicular"
         pools = MEAL_POOLS[phase]; times = {"b": "08:00", "l": "13:00", "s": "16:00", "d": "20:00"}
         meals = []
         for idx, k in enumerate(("b", "l", "s", "d")):
             opt = pools[k][(seed + idx) % len(pools[k])]
             meals.append({"time": times[k], "dish": opt[0], "note": opt[1], "kcal": opt[2]})
-        return {"macros": dict(CURATED_MACROS.get(phase, CURATED_MACROS["follicular"])), "meals": meals}
+        return _scale_menu({"macros": dict(CURATED_MACROS.get(phase, CURATED_MACROS["follicular"])), "meals": meals}, target)
     extra = ""
     if target:
         extra += (f" Ориентир по дню: примерно {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, "
@@ -1246,11 +1262,11 @@ def menu_today(st, profile=None, target=None, usage=None):
             meals = data.get("meals") or []
             dishes = [(m.get("dish") or "").strip().lower() for m in meals]
             if len(meals) >= 4 and len(set(d for d in dishes if d)) >= 3:
-                return data
+                return _scale_menu(data, target)
         except Exception:
             pass
     import copy
-    return copy.deepcopy(CURATED_MENU.get(st["phase"], CURATED_MENU["follicular"]))
+    return _scale_menu(copy.deepcopy(CURATED_MENU.get(phase_key, CURATED_MENU["follicular"])), target)
 
 
 def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
@@ -1289,12 +1305,22 @@ def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
     pool = MEAL_POOLS[phase][k]
     seed = _dt.date.today().toordinal() + idx + 1
     avoid_s = (avoid or "").strip().lower()
+    def _fit(opt):
+        # Приводим калории блюда к доле от нормы дня, как это делает _scale_menu для всего меню
+        m = {"time": times[k], "dish": opt[0], "note": opt[1], "kcal": opt[2]}
+        if target and target[0]:
+            base = sum(_kcal_num(x.get("kcal")) for x in CURATED_MENU.get(phase, CURATED_MENU["follicular"])["meals"])
+            if base:
+                f = float(target[0]) / base
+                kc = _kcal_num(opt[2])
+                if kc and abs(f - 1) > 0.05:
+                    m["kcal"] = "%d ккал" % (int(round(kc * f / 10.0)) * 10)
+        return m
     for off in range(len(pool)):
         opt = pool[(seed + off) % len(pool)]
         if opt[0].strip().lower() != avoid_s:
-            return {"time": times[k], "dish": opt[0], "note": opt[1], "kcal": opt[2]}
-    opt = pool[seed % len(pool)]
-    return {"time": times[k], "dish": opt[0], "note": opt[1], "kcal": opt[2]}
+            return _fit(opt)
+    return _fit(pool[seed % len(pool)])
 
 
 
@@ -1392,11 +1418,11 @@ def general_menu(profile, mode, target=None, usage=None):
             meals = data.get("meals") or []
             dishes = [(m.get("dish") or "").strip().lower() for m in meals]
             if len(meals) >= 4 and len(set(d for d in dishes if d)) >= 3:
-                return data
+                return _scale_menu(data, target)
         except Exception:
             pass
     import copy
-    return copy.deepcopy(CURATED_MENU.get("follicular"))
+    return _scale_menu(copy.deepcopy(CURATED_MENU.get("follicular")), target)
 
 def general_training(profile, mode):
     base = {

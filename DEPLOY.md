@@ -27,8 +27,10 @@
 1. В проекте Railway открой сервис → вкладка **Variables → New Variable**.
 2. Добавь по одной:
    - `BOT_TOKEN` = токен из BotFather
-   - `GROQ_API_KEY` = ключ gsk_...
-   - `AIWA_MODEL` = `llama-3.3-70b-versatile`
+   - `AIWA_PROVIDER` = `gigachat`
+   - `GIGACHAT_CREDENTIALS` = Authorization key из кабинета GigaChat
+   - `GIGACHAT_SCOPE` = `GIGACHAT_API_PERS`
+   - `GIGACHAT_MODEL` = `GigaChat-2`
    - `AIWA_TZ` = `Europe/Moscow`
 3. Railway перезапустит сервис. Во вкладке **Deploy logs** должно появиться
    `AIWA bot starting...` и `Application started`.
