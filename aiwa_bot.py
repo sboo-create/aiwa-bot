@@ -16,10 +16,11 @@ from telegram.ext import (Application, CommandHandler, MessageHandler,
 from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter, Forbidden
 from aiohttp import web
 import hmac as _hmac, hashlib as _hashlib
-from urllib.parse import parse_qsl as _pqsl
+from urllib.parse import parse_qsl as _pqsl, urlsplit as _urlsplit
 
 import cycle as C
 import llm as L
+import analytics_v2 as A2
 
 class KBS:
     PRIMARY = "primary"
@@ -36,6 +37,7 @@ except Exception as e:
     RPT = None; print("report off:", e)
 BOT_USERNAME = None
 BOT_APP = None  # ссылка на PTB Application для веб-обработчиков
+APP_READY = False
 BCAST_Q = None  # очередь утренней рассылки (троттлинг под лимиты LLM-провайдера)
 BCAST_PENDING = set()
 FOOD_Q = None   # очередь обеденного пуша про еду
@@ -81,9 +83,10 @@ def dtoday():
     return datetime.now(TZ).date()
 DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") else "aiwa.db")
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
+L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-22-v68"
+AIWA_VERSION = "2026-07-22-v69-security-analytics"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -108,9 +111,9 @@ MENO_UPDATE_TEXT = (
 )
 def webapp_url(u):
     if not AIWA_WEBAPP_URL: return None
-    if u and u.get("last_period") and u.get("cycle_len") and u.get("mode", "cycle") == "cycle":
-        sep = "&" if "?" in AIWA_WEBAPP_URL else "?"
-        return f"{AIWA_WEBAPP_URL}{sep}d={u['last_period']}&c={u['cycle_len']}"
+    # Health data must not travel in URLs: it leaks into browser history,
+    # access logs and referrers. The authenticated /api/data response already
+    # provides everything the mini app needs.
     return AIWA_WEBAPP_URL
 def menu_kb_for(u, general=False):
     base = GENERAL_MENU_KB if general else MENU_KB
@@ -152,14 +155,18 @@ ABOUT_TEXT = ("🌸 Я AIWA, ИИ-ассистент по женскому зд�
  "Умею: утренние сводки по фазе цикла, персональное питание и тренировки, ответы на вопросы про здоровье, "
  "отслеживание симптомов, выписку для врача и партнёрский режим. Опираюсь на медицинские рекомендации и персонализируюсь под тебя.\n\n"
  "Быстрые действия есть в Меню, а календарь, симптомы, питание, нагрузка и статистика живут в приложении. Можно писать или наговаривать вопросы прямо в чат.")
-PRIVACY_TEXT = ("🔒 Про данные: храню минимум, дату последних месячных, длину цикла, твои чек-ины и время рассылки, чтобы считать фазу. "
- "Это не передаётся третьим лицам. Удалить все данные и отключиться можно командой /stop в любой момент.")
+PRIVACY_TEXT = ("🔒 Про данные: Айва хранит данные профиля и отмеченные тобой сведения о цикле, самочувствии, питании, "
+ "нагрузке и переписке, чтобы персонализировать ответы и работу приложения. Для генерации ответов, распознавания фото и речи "
+ "необходимые данные могут передаваться подключённым ИИ- и речевым провайдерам. Данные не используются Айвой для рекламы. "
+ "Удалить сохранённые данные и отключиться можно командой /stop в любой момент.")
 PARTNER_HELLO = ("💛 Привет! Ты подключился как партнёр в AIWA.\n\n"
  "Каждое утро я буду присылать тебе короткий апдейт: что может происходить с её самочувствием, как поддержать, что предложить из еды или быта, и один факт про цикл, гормоны или женское здоровье.\n\n"
  "Ты не увидишь её календарь и личные разделы, только бережную сводку поддержки. Отключить доступ можно в любой момент: /unlink.")
 PARTNER_INFO = ("💛 Ты в партнёрском режиме AIWA. Я присылаю ежедневный апдейт о самочувствии, поддержке, питании и фактах про цикл. "
  "Своего меню и календаря тут нет, они в её приложении. Отключить: /unlink.")
-TECH_TEXT = ("🤖 Я работаю на GigaChat. GigaChat, это мультимодальная диалоговая нейросеть, разработанная Сбером. На её основе я считаю фазу цикла, собираю утреннюю сводку и отвечаю на вопросы про здоровье. Данные о тебе не передаются третьим лицам и не используются для обучения; храню только то, что нужно для расчёта цикла, и всё можно удалить командой /stop.")
+TECH_TEXT = ("🤖 Я использую подключённые ИИ-модели и речевые сервисы, включая GigaChat и SaluteSpeech, чтобы собирать сводки, "
+ "отвечать на вопросы, распознавать фото и голос. Необходимая часть запроса передаётся соответствующему провайдеру. "
+ "Сохранённые в Айве данные можно удалить командой /stop.")
 PHASES_TEXT = (
  "🌸 Четыре фазы цикла\n\n"
  "🩸 Менструальная, дни 1-5\n"
@@ -214,6 +221,7 @@ def db():
     c.execute("CREATE TABLE IF NOT EXISTS proactive_state(chat_id INTEGER, signal TEXT, last_ts TEXT, PRIMARY KEY(chat_id, signal))")
     c.execute("CREATE TABLE IF NOT EXISTS memory(chat_id INTEGER, mkey TEXT, mval TEXT, updated TEXT, PRIMARY KEY(chat_id, mkey))")
     c.execute("CREATE TABLE IF NOT EXISTS referrals(chat_id INTEGER PRIMARY KEY, source TEXT, ts TEXT)")
+    A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0"):
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
@@ -247,20 +255,41 @@ def row(cid):
             "mode": r[13] or "cycle", "diet_note": r[14] or "", "period_end": r[15], "period_len": r[16],
             "train_profile": r[17], "kcal_goal": r[18], "last_phase_notified": r[19], "last_reactivation": r[20]}
 
+_USER_UPDATE_COLUMNS = frozenset({"activity", "age", "cycle_len", "diet", "diet_note", "height", "kcal_goal",
+    "last_period", "last_phase_notified", "last_reactivation", "mode", "partner_code", "pending_date",
+    "period_end", "period_len", "send_time", "state", "train_profile", "weight"})
 def upsert(cid, **kw):
+    unknown = set(kw) - _USER_UPDATE_COLUMNS
+    if unknown:
+        raise ValueError("unknown user fields: " + ", ".join(sorted(unknown)))
     c = db()
     if not c.execute("SELECT 1 FROM users WHERE chat_id=?", (cid,)).fetchone():
         c.execute("INSERT INTO users(chat_id,created) VALUES(?,?)", (cid, datetime.now().isoformat()))
-    for k, v in kw.items(): c.execute(f"UPDATE users SET {k}=? WHERE chat_id=?", (v, cid))
+    # Dynamic identifier is safe because every key was checked against _USER_UPDATE_COLUMNS.
+    for k, v in kw.items(): c.execute(f"UPDATE users SET {k}=? WHERE chat_id=?", (v, cid))  # nosec B608
     c.commit(); c.close()
 
 def add_sugg(cid, q):
     c = db(); sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?)", (cid, q)).lastrowid; c.commit(); c.close(); return sid
 def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
-def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0):
+def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None):
     c = db(); c.execute("INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n,calls) VALUES(?,?,?,?,?,?,?,?)",
-        (cid, datetime.now(TZ).isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls))); c.commit(); c.close()
+        (cid, datetime.now(TZ).isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls)))
+    try:
+        A2.insert_legacy_event(c, cid, action, meta=meta, latency_ms=ms, app_version=AIWA_VERSION, request_id=request_id)
+    except Exception as exc:
+        # Analytics must never break a product action; the legacy write remains.
+        log.warning("events_v2 write failed: %s", exc)
+    c.commit(); c.close()
+
+async def llm_to_thread(cid, purpose, func, *args, request_id=None, **kwargs):
+    """Run a provider call with a shared trace id and pseudonymous user key."""
+    request_id = request_id or ("r_" + secrets.token_hex(16))
+    def run():
+        with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose):
+            return func(*args, **kwargs)
+    return await asyncio.to_thread(run)
 
 def _num(x, d=0):
     try:
@@ -333,7 +362,8 @@ def meal_edit(cid, mid, **kw):
             sets.append(col + "=?"); vals.append(kw[k])
     if not sets: return False
     vals += [cid, int(mid)]
-    c = db(); c.execute("UPDATE meals SET " + ", ".join(sets) + " WHERE chat_id=? AND id=?", vals); c.commit(); c.close(); return True
+    # SET identifiers come exclusively from the fixed cols mapping above.
+    c = db(); c.execute("UPDATE meals SET " + ", ".join(sets) + " WHERE chat_id=? AND id=?", vals); c.commit(); c.close(); return True  # nosec B608
 
 def meals_of(cid, d=None):
     d = d or dtoday().isoformat()
@@ -432,8 +462,12 @@ def log_get(cid, d):
 def log_ensure(cid, d):
     c = db(); c.execute("INSERT OR IGNORE INTO logs(chat_id,log_date,symptoms) VALUES(?,?,'')", (cid, d)); c.commit(); c.close()
 def log_set(cid, d, **kw):
+    unknown = set(kw) - {"energy", "mood", "symptoms"}
+    if unknown:
+        raise ValueError("unknown log fields: " + ", ".join(sorted(unknown)))
     log_ensure(cid, d); c = db()
-    for k, v in kw.items(): c.execute(f"UPDATE logs SET {k}=? WHERE chat_id=? AND log_date=?", (v, cid, d))
+    # Dynamic identifier is safe because every key was checked above.
+    for k, v in kw.items(): c.execute(f"UPDATE logs SET {k}=? WHERE chat_id=? AND log_date=?", (v, cid, d))  # nosec B608
     c.commit(); c.close()
 def log_toggle(cid, d, code):
     lg = log_get(cid, d) or {"symptoms": []}; s = set(lg["symptoms"]); s.symmetric_difference_update({code}); log_set(cid, d, symptoms=",".join(sorted(s)))
@@ -458,8 +492,13 @@ def meno_users():
     c = db(); rows = c.execute("SELECT chat_id FROM users WHERE mode='meno'").fetchall(); c.close(); return [x[0] for x in rows]
 def del_user(cid):
     c = db()
-    for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg"): c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))
-    c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid)); c.commit(); c.close()
+    for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
+              "proactive_log", "proactive_state", "memory", "referrals"):
+        c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))  # nosec B608
+    c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid))
+    A2.delete_user(c, cid)
+    c.commit(); c.close()
+    CHAT_HIST.pop(cid, None)
 def chatlog_add(cid, role, text):
     if not text: return
     c = db()
@@ -1113,7 +1152,7 @@ async def _send_voice_reply(context, cid, text):
     """Озвучка ответа. Молча пропускаем, если синтез недоступен — текст уже отправлен."""
     try:
         _ti = {}
-        audio = await asyncio.to_thread(L.synthesize, text, _ti)
+        audio = await llm_to_thread(cid, "tts", L.synthesize, text, _ti)
         if not audio:
             return
         how = "tts:salute"
@@ -1153,7 +1192,7 @@ async def push_general(context, cid):
     _key = (cid, _ds, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
     body = _SUM_CACHE.get(_key)
     if body is None:
-        body = await asyncio.to_thread(L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
+        body = await llm_to_thread(cid, "daily_summary", L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
         if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
     if not body:
         body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
@@ -1295,7 +1334,7 @@ async def push_summary(context, cid, with_image=True):
     _key = (cid, _ds, st.get("phase"), str(log_get(cid, _ds) or ""))
     body = _SUM_CACHE.get(_key)
     if body is None:
-        body = await asyncio.to_thread(L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
+        body = await llm_to_thread(cid, "daily_summary", L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
         if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
     if not body:
         body = "💛 Сводка на сегодня готова. Открой приложение, чтобы посмотреть календарь, симптомы, питание и нагрузку."
@@ -1481,7 +1520,7 @@ async def _proactive_pick_and_send(cid, slot, shadow, context):
         return None
     best = max(cands, key=lambda x: x["score"])
     _u = []
-    text = await asyncio.to_thread(L.proactive_compose, best["topic"], best.get("data", ""), _u)
+    text = await llm_to_thread(cid, "proactive_message", L.proactive_compose, best["topic"], best.get("data", ""), _u)
     if _u:
         ev(cid, "tokens", sum(_u), meta="proactive_compose", calls=len(_u))
     text = (text or "").strip()
@@ -1548,7 +1587,7 @@ async def _proactive_preview(compose_limit=4, scan_limit=500):
             if composed < compose_limit:
                 _u = []
                 try:
-                    text = await asyncio.to_thread(L.proactive_compose, best["topic"], best.get("data", ""), _u)
+                    text = await llm_to_thread(cid, "proactive_message", L.proactive_compose, best["topic"], best.get("data", ""), _u)
                 except Exception:
                     text = ""
                 composed += 1
@@ -1602,7 +1641,12 @@ def mark_period(context, cid, iso):
     schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
-    task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    request_id = kwargs.pop("_request_id", None) or ("r_" + secrets.token_hex(16))
+    purpose = kwargs.pop("_purpose", None) or getattr(fn, "__name__", "llm_call").lstrip("_")
+    def run():
+        with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose):
+            return fn(*args, **kwargs)
+    task = asyncio.create_task(asyncio.to_thread(run))
     while not task.done():
         try: await context.bot.send_chat_action(cid, "typing")
         except Exception: pass
@@ -1722,7 +1766,7 @@ def streak_of(cid):
     """Дней подряд с активностью (еда, тренировка или чек-ин), заканчивая сегодня или вчера."""
     c = db(); days = set()
     for tbl in ("meals", "workouts"):
-        for (d,) in c.execute(f"SELECT DISTINCT d FROM {tbl} WHERE chat_id=?", (cid,)):
+        for (d,) in c.execute(f"SELECT DISTINCT d FROM {tbl} WHERE chat_id=?", (cid,)):  # nosec B608
             if d: days.add(d)
     for (d,) in c.execute("SELECT DISTINCT log_date FROM logs WHERE chat_id=? AND (energy IS NOT NULL OR (symptoms IS NOT NULL AND symptoms<>''))", (cid,)):
         if d: days.add(d)
@@ -2045,7 +2089,7 @@ async def push_partner(context, woman_cid):
         except Exception as e:
             return log.warning("partner delay push: %s", e)
     text = None; _pu = []
-    try: text = await asyncio.to_thread(L.partner_brief, st, hint, _pu)
+    try: text = await llm_to_thread(woman_cid, "partner_brief", L.partner_brief, st, hint, _pu)
     except Exception as e: log.warning("partner_brief: %s", e)
     if _pu: ev(woman_cid, "tokens", sum(_pu), meta="partner_brief", calls=len(_pu))
     if not text: text = partner_text(st, hint)
@@ -2064,8 +2108,8 @@ async def addcycles_cmd(update, context):
 async def partner_entry(context, cid, msg):
     global BOT_USERNAME
     u = row(cid); code = u.get("partner_code")
-    if not code:
-        code = secrets.token_hex(4); set_partner_code(cid, code)
+    if not code or len(code) < 24:
+        code = secrets.token_urlsafe(24); set_partner_code(cid, code)
     if not BOT_USERNAME:
         try: BOT_USERNAME = (await context.bot.get_me()).username
         except Exception: BOT_USERNAME = None
@@ -2462,7 +2506,7 @@ async def on_voice(update, context):
     await context.bot.send_chat_action(cid, "typing")
     try:
         f = await context.bot.get_file(update.message.voice.file_id)
-        ba = await f.download_as_bytearray(); txt = await asyncio.to_thread(L.transcribe, bytes(ba), "voice.ogg", _sti)
+        ba = await f.download_as_bytearray(); txt = await llm_to_thread(cid, "stt", L.transcribe, bytes(ba), "voice.ogg", _sti)
     except Exception as e:
         log.warning("voice: %s", e)
     if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1)
@@ -2505,7 +2549,7 @@ async def on_photo(update, context):
         return await update.message.reply_text("Не смогла скачать фото, попробуй ещё раз.")
     prof = profile_of(u); usage = []
     try:
-        parsed = await asyncio.to_thread(L.analyze_food, bytes(ba), "food.jpg", prof, usage)
+        parsed = await llm_to_thread(cid, "food_vision", L.analyze_food, bytes(ba), "food.jpg", prof, usage)
     except Exception as e:
         log.warning("on_photo analyze %s: %s", cid, e); parsed = None
     ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
@@ -2559,9 +2603,9 @@ async def handle_text(update, context, txt):
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
         if wu and wu.get("mode") == "preg" and wu.get("last_period"):
-            ans = await asyncio.to_thread(L.partner_preg_answer, C.preg_status(wu["last_period"]), txt, last_hint(wid), usage=usage)
+            ans = await llm_to_thread(cid, "partner_answer", L.partner_preg_answer, C.preg_status(wu["last_period"]), txt, last_hint(wid), usage=usage)
         elif wst:
-            ans = await asyncio.to_thread(L.partner_answer, wst, txt, last_hint(wid), usage=usage)
+            ans = await llm_to_thread(cid, "partner_answer", L.partner_answer, wst, txt, last_hint(wid), usage=usage)
         else:
             return await update.message.reply_text(PARTNER_INFO)
         ev(cid, "answered", tokens=sum(usage), meta="partner_q", ms=int((time.monotonic()-t0)*1000), n=len(txt), calls=len(usage))
@@ -3093,15 +3137,23 @@ def _verify_init(init_data):
         dcs = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
         secret = _hmac.new(b"WebAppData", os.environ["BOT_TOKEN"].encode(), _hashlib.sha256).digest()
         calc = _hmac.new(secret, dcs.encode(), _hashlib.sha256).hexdigest()
-        if calc != rh: return None
+        if not _hmac.compare_digest(calc, rh): return None
+        auth_date = int(pairs.get("auth_date") or 0)
+        max_age = max(60, int(os.environ.get("AIWA_INIT_DATA_MAX_AGE_SECONDS", "86400")))
+        now = int(time.time())
+        # Reject replayed credentials and implausible timestamps from the future.
+        if not auth_date or auth_date < now - max_age or auth_date > now + 60:
+            return None
         import json as _j
         return _j.loads(pairs.get("user", "{}")).get("id")
     except Exception as e:
         log.warning("init verify: %s", e); return None
 def _cors(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     resp.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "no-referrer"
     return resp
 async def _serve_index(request):
     BD = os.path.dirname(os.path.abspath(__file__))
@@ -3314,7 +3366,7 @@ async def _api_meal(request):
     if st is None:
         st = {"phase": "follicular", "phase_ru": "фолликулярная", "subphase": "общая", "day": ""}
     prof = profile_of(u); target = profile_kcal(prof) if prof else None; usage = []
-    meal = await asyncio.to_thread(L.replace_meal, st, body.get("slot", 0), body.get("dish"), prof, target, usage)
+    meal = await llm_to_thread(cid, "meal_replacement", L.replace_meal, st, body.get("slot", 0), body.get("dish"), prof, target, usage)
     ev(cid, "button", meta="web_meal_replace"); ev(cid, "tokens", sum(usage), meta="meal", calls=len(usage))
     return _cors(web.json_response({"meal": meal}))
 async def _api_partner(request):
@@ -3328,8 +3380,8 @@ async def _api_partner(request):
         ev(cid, "manual", meta="web_partner_unlink")
         return _cors(web.json_response({"ok": True, "linked": False}))
     code = u.get("partner_code")
-    if not code:
-        code = secrets.token_hex(4); set_partner_code(cid, code)
+    if not code or len(code) < 24:
+        code = secrets.token_urlsafe(24); set_partner_code(cid, code)
     link = f"https://t.me/{BOT_USERNAME}?start=p_{code}" if BOT_USERNAME else ""
     pid = partner_of(cid)
     ev(cid, "button", meta="web_partner")
@@ -3372,29 +3424,29 @@ async def _api_section(request):
     if st is None:
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
         if kind == "food":
-            _usage = []; menu = await asyncio.to_thread(menu_cached, cid, None, prof, target, u.get("mode"), _usage)
+            _usage = []; menu = await llm_to_thread(cid, "menu_generation", menu_cached, cid, None, prof, target, u.get("mode"), _usage)
             if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage))
             if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
             txt = {"meno": "В менопаузе на первый план выходят кости, сон и сердце. Делай упор на белок (рыба, яйца, творог, курица) и кальций с витамином D (молочное, сардины, зелень), добавляй магний и B6 (гречка, орехи, тёмный шоколад) для сна и приливов, и омега-3 из жирной рыбы. Меньше быстрых сахаров, кофеина и алкоголя — они усиливают приливы.",
                    "preg": "В беременности важно закрыть потребность в фолиевой кислоте, железе, кальции и белке. Ешь зелень и бобовые (фолаты), красное мясо и гречку (железо), молочное (кальций), рыбу с омега-3 и белок в каждый приём. Избегай сырого мяса и рыбы, непастеризованного, печени в избытке, алкоголя и лишнего кофеина.",
                    "irregular": "Без чёткого цикла опирайся на стабильный сахар и сытость. Белок в каждый приём (яйца, рыба, птица, творог), сложные углеводы (гречка, рис, овощи), магний и железо — это держит энергию и настроение ровными в течение дня.",
                    "none": "Сбалансированно и просто: белок в каждый приём, овощи и зелень, сложные углеводы, полезные жиры (рыба, орехи) и достаточно воды. Меньше резких скачков сахара — стабильнее энергия и меньше тяги к перекусам."}.get(u.get("mode"), "Сбалансированное питание на день: белок, овощи, сложные углеводы и вода.")
-            _su = []; sugg = await asyncio.to_thread(L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, None), _su)
+            _su = []; sugg = await llm_to_thread(cid, "food_suggestions", L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, None), _su)
             if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su))
             return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt, "suggestions": sugg}))
-        _su = []; plan = await asyncio.to_thread(L.training_today, None, prof, _recent_workouts_text(cid), u.get("mode"), _su)
+        _su = []; plan = await llm_to_thread(cid, "training_recommendation", L.training_today, None, prof, _recent_workouts_text(cid), u.get("mode"), _su)
         if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su))
         return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
     if kind == "food":
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
-        _usage = []; menu = await asyncio.to_thread(menu_cached, cid, st, prof, target, None, _usage)
+        _usage = []; menu = await llm_to_thread(cid, "menu_generation", menu_cached, cid, st, prof, target, None, _usage)
         if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage))
         if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
         text = st["content"]["food"]
-        _su = []; sugg = await asyncio.to_thread(L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, st), _su)
+        _su = []; sugg = await llm_to_thread(cid, "food_suggestions", L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, st), _su)
         if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su))
         return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text, "suggestions": sugg}))
-    _su = []; plan = await asyncio.to_thread(L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
+    _su = []; plan = await llm_to_thread(cid, "training_recommendation", L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
     if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su))
     return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
 async def _api_today(request):
@@ -3404,7 +3456,7 @@ async def _api_today(request):
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
     _, st = status_of(cid); ev(cid, "button", meta="web_today")
     _su = []
-    note = await asyncio.to_thread(L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), _su)
+    note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), _su)
     if _su: ev(cid, "tokens", sum(_su), meta="today_note", calls=len(_su))
     return _cors(web.json_response(note))
 
@@ -3481,7 +3533,7 @@ def _agent_exec(cid, name, args):
         return {"error": str(e)}
     return {"error": "unknown tool"}
 
-async def _agent_answer(cid, u, msg, usage):
+async def _agent_answer(cid, u, msg, usage, request_id):
     """Агентный ответ в два этапа:
     1) модель через инструменты сама добывает реальные данные пользовательницы (реальные тул-колы);
     2) финальный ответ пишется прежним качественным промптом (answer_question/general_answer) с этими данными.
@@ -3494,9 +3546,9 @@ async def _agent_answer(cid, u, msg, usage):
     tools = _agent_tools_spec()
     gathered = []
     for _r in range(2):
-        m = await asyncio.to_thread(L.call_tools, messages, tools, usage, 0.2, 480)
+        m = await llm_to_thread(cid, "tool_plan", L.call_tools, messages, tools, usage, 0.2, 480, request_id=request_id)
         if not m:
-            return None if _r == 0 else await _agent_final(cid, u, msg, gathered, usage)
+            return None if _r == 0 else await _agent_final(cid, u, msg, gathered, usage, request_id)
         tc = m.get("tool_calls")
         if not tc:
             break
@@ -3512,23 +3564,23 @@ async def _agent_answer(cid, u, msg, usage):
             gathered.append(nm + ": " + json.dumps(res, ensure_ascii=False))
             messages.append({"role": "tool", "tool_call_id": call.get("id"),
                              "content": json.dumps(res, ensure_ascii=False)})
-    return await _agent_final(cid, u, msg, gathered, usage)
+    return await _agent_final(cid, u, msg, gathered, usage, request_id)
 
-async def _agent_final(cid, u, msg, gathered, usage):
+async def _agent_final(cid, u, msg, gathered, usage, request_id):
     _, st = status_of(cid); prof = profile_of(u)
     q = msg
     if gathered:
         q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про здоровье, цикл, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
     q = _with_memory(cid, q)
     if st is not None:
-        return await asyncio.to_thread(L.answer_question, st, q, prof, hist_get(cid), usage=usage)
-    return await asyncio.to_thread(L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid), usage=usage)
+        return await llm_to_thread(cid, "final_answer", L.answer_question, st, q, prof, hist_get(cid), usage=usage, request_id=request_id)
+    return await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid), usage=usage, request_id=request_id)
 
 async def _memory_learn(cid, umsg, amsg):
     """Фоновая выжимка устойчивых фактов из диалога в долгую память (не блокирует ответ)."""
     try:
         existing = mem_text(cid, 30); usage = []
-        facts = await asyncio.to_thread(L.memory_extract, umsg, amsg, existing, usage)
+        facts = await llm_to_thread(cid, "memory_extract", L.memory_extract, umsg, amsg, existing, usage)
         for f in (facts or []):
             mem_set(cid, f.get("key"), f.get("value"))
         if usage:
@@ -3564,9 +3616,10 @@ async def _chat_reply(cid, u, msg):
         if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage))
         return {"answer": txt, "suggestions": ["Открыть питание", "Что купить?"]}
     _, st = status_of(cid); usage = []; prof = profile_of(u)
+    request_id = "r_" + secrets.token_hex(16)
     ans = None
     try:
-        ans = await _agent_answer(cid, u, msg, usage)
+        ans = await _agent_answer(cid, u, msg, usage, request_id)
     except Exception as _ae:
         log.warning("agent fallback: %s", _ae); ans = None
     if not ans:
@@ -3576,13 +3629,13 @@ async def _chat_reply(cid, u, msg):
                   "Какая физическая активность мне сегодня подходит и почему? Дай 2-3 конкретных варианта. Отвечай про тренировки, тему цикла не разворачивай.")
             fq = _with_memory(cid, fq)
             if st is not None:
-                ans = await asyncio.to_thread(L.answer_question, st, fq, prof, hist_get(cid), usage=usage)
+                ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, fq, prof, hist_get(cid), usage=usage, request_id=request_id)
             else:
-                ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage)
+                ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage, request_id=request_id)
         elif st is not None:
-            ans = await asyncio.to_thread(L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid), usage=usage)
+            ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid), usage=usage, request_id=request_id)
         else:
-            ans = await asyncio.to_thread(L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid), usage=usage)
+            ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid), usage=usage, request_id=request_id)
     hist_push(cid, msg, ans)
     clean, sugg = L.split_followups(ans)
     if st is not None and len(sugg) < 2:
@@ -3590,7 +3643,7 @@ async def _chat_reply(cid, u, msg):
             for e in L.followups(st, msg, clean):
                 if e not in sugg and len(sugg) < 2: sugg.append(e)
         except Exception: pass
-    ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage))
+    ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage), request_id=request_id)
     try:
         asyncio.create_task(_memory_learn(cid, msg, clean))
     except Exception:
@@ -3617,7 +3670,7 @@ async def _api_voice(request):
     if not raw:
         return _cors(web.json_response({"transcript": "", "answer": "Пустая запись, попробуй ещё раз.", "suggestions": []}))
     _sti = {}
-    txt = await asyncio.to_thread(L.transcribe, bytes(raw), fn, _sti)
+    txt = await llm_to_thread(cid, "stt", L.transcribe, bytes(raw), fn, _sti)
     if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1)
     if not txt:
         return _cors(web.json_response({"transcript": "", "answer": "Не расслышала, попробуй ещё раз или напиши текстом.", "suggestions": []}))
@@ -3655,7 +3708,7 @@ async def answer_diary(cid, usage=None):
     summ = diary_reco_summary(cid)
     if not summ:
         return "За сегодня в дневнике пусто. Сфоткай еду или напиши, что съела — посчитаю калории и подскажу, чего добрать."
-    return await asyncio.to_thread(L.diary_reco, summ, (usage if usage is not None else []))
+    return await llm_to_thread(cid, "diary_recommendation", L.diary_reco, summ, (usage if usage is not None else []))
 
 async def log_food_from_text(cid, u, text):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
@@ -3666,7 +3719,7 @@ async def log_food_from_text(cid, u, text):
     if not food:
         food = text
     usage = []
-    parsed = await asyncio.to_thread(L.analyze_food_text, food, profile_of(u), usage)
+    parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, food, profile_of(u), usage)
     ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage))
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
@@ -3701,7 +3754,7 @@ async def _api_food_photo(request):
         return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
     prof = profile_of(u); usage = []
     try:
-        parsed = await asyncio.to_thread(L.analyze_food, raw, fn, prof, usage)
+        parsed = await llm_to_thread(cid, "food_vision", L.analyze_food, raw, fn, prof, usage)
     except Exception as e:
         log.warning("food_photo analyze %s: %s", cid, e); parsed = None
     ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
@@ -3731,7 +3784,7 @@ async def _api_food_text(request):
     if not txt: return _cors(web.json_response({"ok": False, "message": "Напиши, что съела."}))
     prof = profile_of(u); usage = []
     try:
-        parsed = await asyncio.to_thread(L.analyze_food_text, txt, prof, usage)
+        parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, txt, prof, usage)
     except Exception as e:
         log.warning("food_text analyze %s: %s", cid, e); parsed = None
     ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage))
@@ -3799,7 +3852,7 @@ async def _api_workout(request):
     _, st = status_of(cid); phase_ru = (st or {}).get("phase_ru") if st else None
     usage = []
     try:
-        review = await asyncio.to_thread(L.training_review, wk, workouts_recent(cid), phase_ru, u.get("mode"), train_profile_get(cid), usage)
+        review = await llm_to_thread(cid, "workout_review", L.training_review, wk, workouts_recent(cid), phase_ru, u.get("mode"), train_profile_get(cid), usage)
     except Exception as e:
         review = ""; log.warning("train review %s: %s", cid, e)
     wk["review"] = review
@@ -3984,11 +4037,14 @@ async def _api_report(request):
 
 async def _api_opts(request): return _cors(web.Response())
 
+_ADMIN_COOKIE = "aiwa_admin_session"
 def _admin_key_ok(request):
-    expected = os.environ.get("AIWA_ADMIN_KEY") or AIWA_ADMIN
-    if not expected:
+    # Telegram admin chat id and the HTTP dashboard secret are separate
+    # credentials. There is deliberately no fallback from one to the other.
+    expected = os.environ.get("AIWA_ADMIN_KEY")
+    if not expected or len(expected) < 32:
         return False
-    got = request.query.get("key") or request.headers.get("X-Admin-Key") or ""
+    got = request.headers.get("X-Admin-Key") or request.cookies.get(_ADMIN_COOKIE) or ""
     return _hmac.compare_digest(str(got), str(expected))
 
 _EV_LBL = {
@@ -4081,6 +4137,10 @@ def analytics_data(days=7, frm=None, to=None):
     pmin = datetime.combine(since - timedelta(days=span), dtime.min).isoformat()
     pmax = datetime.combine(since - timedelta(days=1), dtime.max).isoformat()
     prev = c.execute("SELECT chat_id, ts, action, calls FROM events WHERE ts>=? AND ts<=?", (pmin, pmax)).fetchall()
+    llm_rows = c.execute("""SELECT provider,model,purpose,status,latency_ms,input_tokens,output_tokens,
+                                   cached_tokens,total_tokens,user_key,request_id,reported_cost,cost_unit
+                            FROM llm_calls WHERE occurred_at>=? AND occurred_at<=?""",
+                         (since_ts, until_ts)).fetchall()
     c.close()
     _ACT = ("command", "button", "suggest", "manual", "answered", "voice", "fallback")
     pv_events = 0; pv_tool = 0; pv_days = defaultdict(set)
@@ -4202,6 +4262,21 @@ def analytics_data(days=7, frm=None, to=None):
             "stick": (round(len(active_by_day.get(iso, set())) / len(win_union(d, 30)) * 100) if len(win_union(d, 30)) else 0)})
         d += timedelta(days=1)
     ans_tot = answered + fallback + errors
+    llm_providers = defaultdict(lambda: {"calls": 0, "success": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+    llm_lat = []; llm_success = 0; llm_in = llm_out = llm_cached = llm_total = 0
+    llm_users = set(); llm_requests = set(); llm_reported_cost = 0.0; llm_cost_units = set()
+    for provider, model, purpose, status, latency_ms, inp, out, cached, total, ukey, reqid, reported_cost, cost_unit in llm_rows:
+        key = (provider or "unknown") + (" / " + model if model else "")
+        item = llm_providers[key]; item["calls"] += 1
+        if status == "success": item["success"] += 1; llm_success += 1
+        item["input_tokens"] += int(inp or 0); item["output_tokens"] += int(out or 0); item["total_tokens"] += int(total or 0)
+        llm_in += int(inp or 0); llm_out += int(out or 0); llm_cached += int(cached or 0); llm_total += int(total or 0)
+        if latency_ms: llm_lat.append(int(latency_ms))
+        if ukey: llm_users.add(ukey)
+        if reqid: llm_requests.add(reqid)
+        if reported_cost is not None: llm_reported_cost += float(reported_cost)
+        if cost_unit: llm_cost_units.add(cost_unit)
+    llm_calls = len(llm_rows)
     return {
         "since": since.isoformat(), "until": until.isoformat(), "span": span,
         "updated": datetime.now(TZ).strftime("%d.%m %H:%M"),
@@ -4241,6 +4316,14 @@ def analytics_data(days=7, frm=None, to=None):
             "error_rate": round(errors / ans_tot * 100) if ans_tot else 0,
             "p50": pct(lat, 0.5), "p95": pct(lat, 0.95),
             "tokens": tokens, "cost_usd": round(tokens / 1e6 * PRICE, 2)},
+        "quality_v2": {
+            "available": bool(llm_calls), "calls": llm_calls, "successful": llm_success,
+            "success_rate": round(llm_success / llm_calls * 100) if llm_calls else 0,
+            "requests": len(llm_requests), "users": len(llm_users),
+            "input_tokens": llm_in, "output_tokens": llm_out, "cached_tokens": llm_cached,
+            "total_tokens": llm_total, "p50": pct(llm_lat, 0.5), "p95": pct(llm_lat, 0.95),
+            "reported_cost": round(llm_reported_cost, 6), "cost_units": sorted(llm_cost_units),
+            "providers": [{"name": name, **vals} for name, vals in sorted(llm_providers.items(), key=lambda x: -x[1]["calls"])]},
         "toolcalls_by_source": {"app": tool_src.get("app", 0), "chat": tool_src.get("chat", 0), "auto": tool_src.get("auto", 0),
                                 "stt": tool_src.get("stt", 0), "other": tool_src.get("other", 0)},
         "growth": {
@@ -4259,7 +4342,10 @@ async def _admin_stats(request):
 
 async def _admin_page(request):
     if not _admin_key_ok(request):
-        return web.Response(text="forbidden", status=403)
+        login = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIWA · Вход</title><style>body{font:16px system-ui;background:#f6f8fa;margin:0;display:grid;place-items:center;min-height:100vh}.c{background:#fff;padding:28px;border-radius:18px;box-shadow:0 12px 40px #0001;width:min(360px,calc(100% - 40px))}h1{font-size:20px}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:10px;margin-top:10px}input{border:1px solid #ddd}button{border:0;background:#14181f;color:#fff;font-weight:700}</style>
+<form class="c" method="post" action="/admin/login"><h1>AIWA · Аналитика</h1><input type="password" name="key" autocomplete="current-password" placeholder="Admin key" required><button type="submit">Войти</button></form>"""
+        return web.Response(text=login, content_type="text/html", headers={"Cache-Control": "no-store"})
     html_text = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AIWA · Аналитика</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
@@ -4309,7 +4395,7 @@ h1{font-size:20px;margin:0}
 </div>
 <div id="defpop"></div>
 <script>
-var q=new URLSearchParams(location.search), key=q.get('key')||'', DAYS=Number(q.get('days'))||7, FROM=q.get('from')||'', TO=q.get('to')||'', D=null, TAB='aud', CH=[];
+var q=new URLSearchParams(location.search), DAYS=Number(q.get('days'))||7, FROM=q.get('from')||'', TO=q.get('to')||'', D=null, TAB='aud', CH=[];
 var C={dau:'#2F6BED',wau:'#1E9E54',mau:'#E8912A',stick:'#7C5CD0',ev:'#2F6BED',tc:'#7C5CD0',ans:'#1E9E54',err:'#DC5A5A'};
 var DEF={
  dau:"Уникальные активные за день. Активный = минимум одно действие пользователя (кнопки, команды, ответы, голос, ручной ввод) в чате или приложении. Получение пуша активностью НЕ считается.",
@@ -4399,8 +4485,9 @@ function render(){
   h+=tbl(['Этап','Пользователей'],[['Новые за период',f.new_users],['Активные за период',f.onboarded],['Открывали сводку',f.got_summary],['Записали еду',f.logged_food],['Отметили тренировку',f.logged_workout]]);
   v.innerHTML=h;
  } else {
-  var qd=D.quality,h='';
-  h+="<div class='grid'>"+card('Успешность ответов',qd.success_rate+'%',qd.answered+' ответов',DEF.succ)+card('Фолбэки',qd.fallback,qd.fallback_rate+'% от попыток',null)+card('Ошибки',qd.errors,qd.error_rate+'% от попыток',null)+card('Латентность',qd.p50+' / '+qd.p95+' мс','p50 / p95',DEF.lat)+card('Токены',qd.tokens,'≈ $'+qd.cost_usd,DEF.tok)+"</div>";
+  var qd=D.quality,q2=D.quality_v2||{},h='';
+  if(q2.available){h+="<div class='sec-h'>AI-вызовы · точный учёт v2</div><div class='grid'>"+card('Provider calls',q2.calls,q2.requests+' пользовательских запросов',null)+card('Успешность вызовов',q2.success_rate+'%',q2.successful+' успешных',DEF.succ)+card('Input tokens',q2.input_tokens,'cached '+q2.cached_tokens,DEF.tok)+card('Output tokens',q2.output_tokens,'всего '+q2.total_tokens,DEF.tok)+card('Reported cost',q2.reported_cost,(q2.cost_units||[]).join(', ')||'провайдер не вернул стоимость',DEF.tok)+card('Латентность',q2.p50+' / '+q2.p95+' мс','p50 / p95',DEF.lat)+"</div>";h+=tbl(['Провайдер / модель','Вызовов','Успешных','Input','Output'],(q2.providers||[]).map(function(x){return [esc(x.name),x.calls,x.success,x.input_tokens,x.output_tokens];}));}
+  h+="<div class='sec-h'>Legacy-метрики</div><div class='grid'>"+card('Успешность ответов',qd.success_rate+'%',qd.answered+' ответов',DEF.succ)+card('Фолбэки',qd.fallback,qd.fallback_rate+'% от попыток',null)+card('Ошибки',qd.errors,qd.error_rate+'% от попыток',null)+card('Латентность',qd.p50+' / '+qd.p95+' мс','p50 / p95',DEF.lat)+card('Токены',qd.tokens,'≈ $'+qd.cost_usd,DEF.tok)+"</div>";
   h+=chartCard('cQ','Ответы и ошибки по дням',DEF.succ);
   v.innerHTML=h;mkLine('cQ',[{key:'answered',label:'Ответы',color:C.ans},{key:'errors',label:'Ошибки',color:C.err}]);
  }
@@ -4416,16 +4503,53 @@ function bar(){
 function upURL(){history.replaceState(null,'','?'+q.toString());}
 function toCSV(){if(!D)return;var head=['date','dau','wau','mau','events','toolcalls','answered','errors','new','stickiness_pct'];var lines=[head.join(',')];D.series.forEach(function(p){lines.push([p.full,p.dau,p.wau,p.mau,p.events,p.toolcalls,p.answered,p.errors,p.new,p.stick].join(','));});var blob=new Blob(['﻿'+lines.join('\n')],{type:'text/csv;charset=utf-8'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='aiwa_analytics_'+D.since+'_'+D.until+'.csv';document.body.appendChild(a);a.click();a.remove();}
 document.addEventListener('click',function(e){var pp=document.getElementById('defpop');if(e.target&&e.target.classList&&e.target.classList.contains('ic')){var r=e.target.getBoundingClientRect();pp.textContent=e.target.getAttribute('data-def')||'';pp.style.display='block';pp.style.left=Math.max(8,Math.min(window.innerWidth-312,r.left-140))+'px';pp.style.top=(r.bottom+window.scrollY+7)+'px';e.stopPropagation();}else{pp.style.display='none';}});
-async function load(){var v=document.getElementById('view');v.className='loading';v.textContent='Собираю аналитику…';bar();tabsBar();try{var u='/api/admin_stats?key='+encodeURIComponent(key)+(FROM&&TO?('&from='+FROM+'&to='+TO):('&days='+DAYS));var r=await fetch(u);var d=await r.json();if(d.error){v.textContent='Нет доступа';return;}D=d;var span=d.span;document.getElementById('per').textContent='Период: '+d.since+' → '+d.until+' ('+span+' дн.) · обновлено '+d.updated;render();}catch(e){v.className='loading';v.textContent='Ошибка загрузки: '+e.message;}}
+async function load(){var v=document.getElementById('view');v.className='loading';v.textContent='Собираю аналитику…';bar();tabsBar();try{var u='/api/admin_stats?'+(FROM&&TO?('from='+FROM+'&to='+TO):('days='+DAYS));var r=await fetch(u,{credentials:'same-origin'});var d=await r.json();if(d.error){v.textContent='Нет доступа';return;}D=d;var span=d.span;document.getElementById('per').textContent='Период: '+d.since+' → '+d.until+' ('+span+' дн.) · обновлено '+d.updated;render();}catch(e){v.className='loading';v.textContent='Ошибка загрузки: '+e.message;}}
 load();
 </script>"""
     return web.Response(text=html_text, content_type="text/html")
 
+async def _admin_login(request):
+    expected = os.environ.get("AIWA_ADMIN_KEY") or ""
+    try:
+        data = await request.post()
+        got = str(data.get("key") or "")
+    except Exception:
+        got = ""
+    if len(expected) < 32 or not _hmac.compare_digest(got, expected):
+        await asyncio.sleep(0.25)
+        return web.Response(text="forbidden", status=403)
+    resp = web.HTTPFound("/admin")
+    resp.set_cookie(_ADMIN_COOKIE, expected, max_age=8 * 3600, httponly=True,
+                    secure=True, samesite="Strict", path="/")
+    return resp
+
+@web.middleware
+async def _security_headers(request, handler):
+    response = await handler(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    origin = request.headers.get("Origin")
+    configured = {x.strip().rstrip("/") for x in os.environ.get("AIWA_ALLOWED_ORIGINS", "").split(",") if x.strip()}
+    if AIWA_WEBAPP_URL:
+        parsed = _urlsplit(AIWA_WEBAPP_URL)
+        if parsed.scheme and parsed.netloc:
+            configured.add(parsed.scheme + "://" + parsed.netloc)
+    if origin and origin.rstrip("/") in configured:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    return response
+
+async def _health(request):
+    status = 200 if APP_READY else 503
+    return web.json_response({"status": "ok" if APP_READY else "starting", "version": AIWA_VERSION}, status=status)
+
 def build_web():
-    aio = web.Application(client_max_size=20 * 1024 * 1024)  # фото до ~20 МБ
+    aio = web.Application(client_max_size=20 * 1024 * 1024, middlewares=[_security_headers])  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
-    aio.router.add_get("/health", lambda r: web.Response(text="ok " + AIWA_VERSION))
+    aio.router.add_get("/health", _health)
     aio.router.add_get("/admin", _admin_page)
+    aio.router.add_post("/admin/login", _admin_login)
     aio.router.add_get("/api/admin_stats", _admin_stats)
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
@@ -4473,8 +4597,10 @@ async def run_all():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     runner = web.AppRunner(build_web()); await runner.setup()
     port = int(os.environ.get("PORT", "8080"))
-    site = web.TCPSite(runner, "0.0.0.0", port); await site.start()
+    # Binding to all interfaces is required inside the Railway container.
+    site = web.TCPSite(runner, "0.0.0.0", port); await site.start()  # nosec B104
     await app.initialize(); await on_startup(app); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    global APP_READY; APP_READY = True
     log.info("AIWA bot + web on :%s", port)
     await asyncio.Event().wait()
 

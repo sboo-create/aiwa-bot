@@ -212,5 +212,7 @@ def render_training(st):
     buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
 
 if __name__=="__main__":
-    open("/tmp/pwapp/anim/info_v2.png","wb").write(render_cycle(date(2026,5,25),29,date(2026,6,17)))
-    print("wrote info_v2.png")
+    import tempfile
+    with tempfile.NamedTemporaryFile(prefix="aiwa-cycle-", suffix=".png", delete=False) as fh:
+        fh.write(render_cycle(date(2026,5,25),29,date(2026,6,17)))
+        print("wrote", fh.name)

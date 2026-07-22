@@ -32,6 +32,10 @@
    - `GIGACHAT_SCOPE` = `GIGACHAT_API_PERS`
    - `GIGACHAT_MODEL` = `GigaChat-2`
    - `AIWA_TZ` = `Europe/Moscow`
+   - `AIWA_ADMIN` = Telegram chat ID администратора команд бота
+   - `AIWA_ADMIN_KEY` = отдельная случайная строка длиной не меньше 32 символов
+   - `AIWA_ANALYTICS_SALT` = ещё одна отдельная случайная строка длиной не меньше 32 символов
+   - `AIWA_DB` = `/data/aiwa.db`
 3. Railway перезапустит сервис. Во вкладке **Deploy logs** должно появиться
    `AIWA bot starting...` и `Application started`.
 
@@ -39,10 +43,20 @@
 Напиши боту в Телеграме `/start` — он ответит и пришлёт сводку. Готово, работает 24/7.
 
 ## Важные нюансы
-- **Данные (aiwa.db)** на Railway сбрасываются при передеплое. Для прототипа ок;
-  чтобы хранить пользователей надёжно — позже добавим Railway Volume или Postgres.
+- **Данные (aiwa.db)** должны лежать на Railway Volume. Подключи volume к сервису с mount path
+  `/data`, задай `AIWA_DB=/data/aiwa.db`, включи backups и проверь восстановление на staging.
 - **Один экземпляр.** Не запускай бота одновременно в двух местах (облако + Mac) —
   Telegram отдаёт апдейты только одному поллеру, будет конфликт `getUpdates`.
+- В Railway настрой healthcheck path `/health`. Он отвечает `200` только после запуска
+  Telegram polling и планировщиков, а во время старта возвращает `503`.
+- Сначала создай отдельный staging environment с другим Telegram-ботом, БД и ключами.
+- TLS проверяется по умолчанию. Для внутреннего CA используй `GIGACHAT_CA_BUNDLE_FILE` или
+  `LITELLM_CA_BUNDLE_FILE`; не отключай проверку сертификата в production.
+- Если mini app и API находятся на разных доменах, перечисли точные origins в
+  `AIWA_ALLOWED_ORIGINS`. Значение `*` не используется.
+- Дашборд открывается по `/admin`: ключ вводится в форме и сохраняется в защищённой HttpOnly
+  cookie на 8 часов. Ключи в URL запрещены, потому что URL попадают в access logs. Старый
+  опубликованный ключ нужно заменить до деплоя.
 
 ## Альтернативы
 - **Render** → New → **Background Worker** из того же GitHub-репо, start command

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Сводка, ответы и динамические саджесты через GigaChat/LiteLLM."""
-import os, re, json, requests, unicodedata, threading
+import os, re, json, requests, unicodedata, threading, contextvars, uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
 
 # переиспользуем TCP/TLS-соединения к провайдеру вместо нового хендшейка на каждый вызов
 _HTTP = requests.Session()
@@ -10,6 +12,72 @@ try:
 except Exception:
     pass
 
+_USAGE_SINK = None
+_CALL_CONTEXT = contextvars.ContextVar("aiwa_llm_call_context", default={})
+
+def set_usage_sink(sink):
+    """Register a best-effort callback receiving one record per provider call."""
+    global _USAGE_SINK
+    _USAGE_SINK = sink
+
+@contextmanager
+def call_context(user_key=None, request_id=None, purpose=None):
+    token = _CALL_CONTEXT.set({"user_key": user_key, "request_id": request_id, "purpose": purpose})
+    try:
+        yield
+    finally:
+        _CALL_CONTEXT.reset(token)
+
+def _capture_usage(usage_list, data, provider, model, started, status="success", retry_index=0, fallback_from=None):
+    """Normalize OpenAI-, Anthropic- and GigaChat-style usage fields."""
+    import time as _t
+    raw = data.get("usage") or {} if isinstance(data, dict) else {}
+    inp = int(raw.get("prompt_tokens") or raw.get("input_tokens") or 0)
+    out = int(raw.get("completion_tokens") or raw.get("output_tokens") or 0)
+    total = int(raw.get("total_tokens") or (inp + out))
+    details = raw.get("prompt_tokens_details") or raw.get("input_tokens_details") or {}
+    cached = int(details.get("cached_tokens") or raw.get("cache_read_input_tokens") or 0)
+    reported_cost = raw.get("cost")
+    try: reported_cost = float(reported_cost) if reported_cost is not None else None
+    except (TypeError, ValueError): reported_cost = None
+    if usage_list is not None:
+        usage_list.append(total)
+    if _USAGE_SINK:
+        ctx = _CALL_CONTEXT.get() or {}
+        record = {
+            "call_id": str(uuid.uuid4()), "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "user_key": ctx.get("user_key"), "request_id": ctx.get("request_id"),
+            "purpose": ctx.get("purpose"), "provider": provider, "model": model,
+            "status": status, "latency_ms": int((_t.time() - started) * 1000),
+            "input_tokens": inp, "output_tokens": out, "cached_tokens": cached,
+            "total_tokens": total, "retry_index": retry_index, "fallback_from": fallback_from,
+            "reported_cost": reported_cost, "cost_unit": ("provider_credit" if reported_cost is not None else None),
+            "meta": {"reasoning_tokens": int((raw.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)},
+        }
+        try:
+            _USAGE_SINK(record)
+        except Exception as exc:
+            print("usage sink error:", exc)
+
+def _capture_failure(provider, model, started, status, retry_index=0):
+    _capture_usage(None, {}, provider, model, started, status=status, retry_index=retry_index)
+
+def _capture_media(provider, model, started, status, purpose, meta=None):
+    import time as _t
+    if not _USAGE_SINK:
+        return
+    ctx = _CALL_CONTEXT.get() or {}
+    record = {
+        "call_id": str(uuid.uuid4()), "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "user_key": ctx.get("user_key"), "request_id": ctx.get("request_id"),
+        "purpose": ctx.get("purpose") or purpose, "provider": provider, "model": model,
+        "status": status, "latency_ms": int((_t.time() - started) * 1000), "meta": meta or {},
+    }
+    try:
+        _USAGE_SINK(record)
+    except Exception as exc:
+        print("usage sink error:", exc)
+
 PROVIDER = os.environ.get("AIWA_PROVIDER", "litellm").lower()
 GIGA_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat-2")
 GIGA_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
@@ -18,11 +86,7 @@ GIGA_CHAT = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
 GIGA_FILES = "https://gigachat.devices.sberbank.ru/api/v1/files"
 GIGA_VISION_MODEL = os.environ.get("GIGACHAT_VISION_MODEL", GIGA_MODEL)
 _GIGA_CA = os.environ.get("GIGACHAT_CA_BUNDLE_FILE")
-_GIGA_VERIFY = _GIGA_CA if _GIGA_CA else False
-if _GIGA_VERIFY is False:
-    try:
-        import urllib3; urllib3.disable_warnings()
-    except Exception: pass
+_GIGA_VERIFY = _GIGA_CA if _GIGA_CA else os.environ.get("GIGACHAT_SSL_VERIFY", "true").strip().lower() not in {"0", "false", "no", "off"}
 _giga_tok = {"token": None, "exp": 0.0}
 
 def _giga_auth():
@@ -56,24 +120,27 @@ def _call_giga(messages, max_tokens, temperature, usage, attempts=4):
         return None
     wait = 1.5
     for i in range(attempts):
+        started = _t.time()
         try:
             r = _HTTP.post(GIGA_CHAT,
                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"},
                 json={"model": GIGA_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
                 timeout=(6, float(os.environ.get("GIGACHAT_CHAT_TIMEOUT_SECONDS") or "45")), verify=_GIGA_VERIFY)
             if r.status_code == 401:
+                _capture_failure("gigachat", GIGA_MODEL, started, "http_401", i)
                 _giga_tok["token"] = None; tok = _giga_auth()
                 if not tok: return None
                 continue
             if r.status_code == 429:
+                _capture_failure("gigachat", GIGA_MODEL, started, "http_429", i)
                 _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             r.raise_for_status(); data = r.json()
-            if usage is not None:
-                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            _capture_usage(usage, data, "gigachat", GIGA_MODEL, started, retry_index=i)
             txt = (data["choices"][0]["message"]["content"] or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
             return txt or None
         except Exception as e:
+            _capture_failure("gigachat", GIGA_MODEL, started, "error", i)
             print("Giga error:", e)
             if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             return None
@@ -93,7 +160,7 @@ def _env_bool(name, default):
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 def _stand_verify():
-    raw = os.environ.get("GIGACHAT_STAND_SSL_VERIFY") or os.environ.get("GIGACHAT_SSL_VERIFY") or "false"
+    raw = os.environ.get("GIGACHAT_STAND_SSL_VERIFY") or os.environ.get("GIGACHAT_SSL_VERIFY") or "true"
     raw = raw.strip()
     if raw.lower() in {"0", "false", "no", "off"}:
         return False
@@ -204,6 +271,7 @@ def _call_gigastand(messages, max_tokens, temperature, usage, attempts=3):
         return None
     wait = 1.5
     for i in range(attempts):
+        started = _t.time()
         tok = _stand_auth(force=(i > 0 and i == attempts - 1))
         if not tok:
             return None
@@ -220,24 +288,27 @@ def _call_gigastand(messages, max_tokens, temperature, usage, attempts=3):
                 timeout=(6, float(os.environ.get("GIGACHAT_STAND_TIMEOUT") or os.environ.get("GIGACHAT_CHAT_TIMEOUT_SECONDS") or "60")),
                 verify=_stand_verify())
             if r.status_code == 401:
+                _capture_failure("gigastand", _stand_model_name(), started, "http_401", i)
                 _stand_tok["token"] = None
                 if i < attempts - 1:
                     continue
             if r.status_code == 429:
+                _capture_failure("gigastand", _stand_model_name(), started, "http_429", i)
                 _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             if r.status_code >= 400:
+                _capture_failure("gigastand", _stand_model_name(), started, "http_%s" % r.status_code, i)
                 print("GigaStand chat error:", r.status_code, (r.text or "")[:500])
                 if i < attempts - 1:
                     _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
                 return None
             data = r.json()
-            if usage is not None:
-                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            _capture_usage(usage, data, "gigastand", _stand_model_name(), started, retry_index=i)
             txt = _response_text(data)
             txt = (txt or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
             return txt or None
         except Exception as e:
+            _capture_failure("gigastand", _stand_model_name(), started, "error", i)
             print("GigaStand chat error:", e)
             if i < attempts - 1:
                 _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
@@ -357,16 +428,24 @@ def _focus(st):
     return FOCI[st["day"] % len(FOCI)]
 
 
-PROXY_URL = os.environ.get("LITELLM_URL", "https://94.139.253.119:8002/litellm/v1/chat/completions")
-PROXY_MODEL = os.environ.get("LITELLM_MODEL", "gigachat-3-ultra")
-FALLBACK_PROXY_URL = "https://104.168.54.196:4000/litellm/v1/messages?beta=true"
+_OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
+PROXY_URL = os.environ.get("LITELLM_URL") or ("https://openrouter.ai/api/v1/chat/completions" if _OPENROUTER_KEY else "")
+PROXY_MODEL = os.environ.get("LITELLM_MODEL") or os.environ.get("OPENROUTER_MODEL") or (None if _OPENROUTER_KEY else "gigachat-3-ultra")
+FALLBACK_PROXY_URL = ""  # no implicit third-party endpoints; configure the fallback explicitly
+def _proxy_verify():
+    raw = (os.environ.get("LITELLM_CA_BUNDLE_FILE") or os.environ.get("LITELLM_SSL_VERIFY") or "true").strip()
+    if raw.lower() in {"0", "false", "no", "off"}: return False
+    if raw.lower() in {"1", "true", "yes", "on"}: return True
+    return raw
 def _proxy_is_messages(url=None):
     return "/messages" in ((url or PROXY_URL) or "")
 
 def _proxy_payload(messages, max_tokens, temperature, url=None, model=None):
     model = model or PROXY_MODEL
     if not _proxy_is_messages(url):
-        return {"model": model, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
+        payload = {"messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
+        if model: payload["model"] = model
+        return payload
     system = "\n\n".join((m.get("content") or "") for m in messages if m.get("role") == "system").strip()
     mm = []
     for m in messages:
@@ -376,7 +455,8 @@ def _proxy_payload(messages, max_tokens, temperature, url=None, model=None):
         if role not in ("user", "assistant"):
             role = "user"
         mm.append({"role": role, "content": m.get("content") or ""})
-    payload = {"model": model, "messages": mm, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
+    payload = {"messages": mm, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
+    if model: payload["model"] = model
     if system:
         payload["system"] = system
     return payload
@@ -403,8 +483,12 @@ def _response_text(data):
     return None
 
 def _proxy_configs():
-    key = os.environ.get("LITELLM_KEY"); xkey = os.environ.get("LITELLM_XKEY")
-    cfgs = [{"name": "litellm", "url": PROXY_URL, "model": PROXY_MODEL, "key": key, "xkey": xkey}]
+    key = os.environ.get("LITELLM_KEY") or _OPENROUTER_KEY; xkey = os.environ.get("LITELLM_XKEY")
+    is_openrouter = bool(_OPENROUTER_KEY and not os.environ.get("LITELLM_URL"))
+    cfgs = [{"name": ("openrouter" if is_openrouter else "litellm"), "url": PROXY_URL, "model": PROXY_MODEL,
+             "key": key, "xkey": xkey,
+             "referer": os.environ.get("OPENROUTER_HTTP_REFERER"),
+             "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA"}]
     fb_key = os.environ.get("LITELLM_FALLBACK_KEY") or os.environ.get("AIWA_LLM_FALLBACK_KEY")
     fb_xkey = os.environ.get("LITELLM_FALLBACK_XKEY") or os.environ.get("AIWA_LLM_FALLBACK_XKEY")
     fb_url = os.environ.get("LITELLM_FALLBACK_URL") or os.environ.get("AIWA_LLM_FALLBACK_URL") or FALLBACK_PROXY_URL
@@ -423,26 +507,33 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
     headers = {"Content-Type": "application/json"}
     if cfg.get("key"): headers["Authorization"] = f"Bearer {cfg['key']}"
     if cfg.get("xkey"): headers["X-API-Key"] = cfg["xkey"]
+    if cfg.get("referer"): headers["HTTP-Referer"] = cfg["referer"]
+    if cfg.get("title"): headers["X-OpenRouter-Title"] = cfg["title"]
     wait = 1.5
     for i in range(attempts):
+        started = _t.time()
         try:
             r = _HTTP.post(cfg["url"], headers=headers,
                 json=_proxy_payload(messages, max_tokens, temperature, cfg["url"], cfg.get("model")),
-                timeout=(6, 30), verify=False)
+                timeout=(6, 30), verify=_proxy_verify())
             if r.status_code == 429:
+                _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, "http_429", i)
                 _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             if r.status_code >= 400:
+                _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, "http_%s" % r.status_code, i)
                 print("Proxy error:", cfg.get("name"), r.status_code, (r.text or "")[:500])
                 if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
                 return None
             data = r.json()
-            if usage is not None:
-                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            actual_provider = data.get("provider") or cfg.get("name") or "litellm"
+            actual_model = data.get("model") or cfg.get("model")
+            _capture_usage(usage, data, actual_provider, actual_model, started, retry_index=i)
             txt = _response_text(data)
             txt = (txt or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
             return txt or None
         except Exception as e:
+            _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, "error", i)
             print("Proxy error:", cfg.get("name"), e)
             if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             return None
@@ -475,16 +566,20 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
         headers = {"Content-Type": "application/json"}
         if cfg.get("key"): headers["Authorization"] = "Bearer " + cfg["key"]
         if cfg.get("xkey"): headers["X-API-Key"] = cfg["xkey"]
-        payload = {"model": cfg.get("model") or PROXY_MODEL, "messages": messages,
-                   "temperature": max(0.01, temperature), "max_tokens": max_tokens,
+        if cfg.get("referer"): headers["HTTP-Referer"] = cfg["referer"]
+        if cfg.get("title"): headers["X-OpenRouter-Title"] = cfg["title"]
+        payload = {"messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens,
                    "tools": tools, "tool_choice": "auto"}
-        r = _HTTP.post(cfg["url"], headers=headers, json=payload, timeout=(6, 45), verify=False)
+        if cfg.get("model") or PROXY_MODEL: payload["model"] = cfg.get("model") or PROXY_MODEL
+        r = _HTTP.post(cfg["url"], headers=headers, json=payload, timeout=(6, 45), verify=_proxy_verify())
         if r.status_code >= 400:
+            _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), t1, "http_%s" % r.status_code)
             print("call_tools proxy error:", r.status_code, (r.text or "")[:300])
             return None
         data = r.json()
-        if usage is not None:
-            usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+        actual_provider = data.get("provider") or cfg.get("name") or "litellm"
+        actual_model = data.get("model") or cfg.get("model")
+        _capture_usage(usage, data, actual_provider, actual_model, t1)
         msg = (data.get("choices") or [{}])[0].get("message") or {}
         content = msg.get("content")
         if isinstance(content, str):
@@ -492,6 +587,7 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
         ok = True
         return {"content": content, "tool_calls": msg.get("tool_calls")}
     except Exception as e:
+        _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), t1, "error")
         print("call_tools error:", e)
         return None
     finally:
@@ -502,7 +598,7 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
 
 def _call_impl(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
     """Единая точка вызова модели. Движок выбирается переменной AIWA_PROVIDER."""
-    aliases = {"proxy": "litellm", "stand": "gigastand", "direct": "gigastand", "adapter": "gigastand"}
+    aliases = {"proxy": "litellm", "openrouter": "litellm", "stand": "gigastand", "direct": "gigastand", "adapter": "gigastand"}
     primary = aliases.get(PROVIDER, PROVIDER)
     providers = [primary] + [p for p in ("litellm", "gigastand", "gigachat") if p != primary]
     for i, p in enumerate(providers):
@@ -1494,29 +1590,33 @@ def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=No
         return None
     messages = [{"role": "user", "content": prompt, "attachments": [file_id]}]
     for i in range(3):
+        started = _t.time()
         try:
             r = _HTTP.post(GIGA_CHAT,
                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"},
                 json={"model": GIGA_VISION_MODEL, "messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens},
                 timeout=(6, float(os.environ.get("GIGACHAT_VISION_TIMEOUT_SECONDS") or "70")), verify=_GIGA_VERIFY)
             if r.status_code == 401:
+                _capture_failure("gigachat_vision", GIGA_VISION_MODEL, started, "http_401", i)
                 _giga_tok["token"] = None; tok = _giga_auth()
                 if not tok: return None
                 continue
             if r.status_code == 429:
+                _capture_failure("gigachat_vision", GIGA_VISION_MODEL, started, "http_429", i)
                 _t.sleep(2 * (i + 1)); continue
             if r.status_code != 200:
+                _capture_failure("gigachat_vision", GIGA_VISION_MODEL, started, "http_%s" % r.status_code, i)
                 _FOOD_ERR["msg"] = f"vision {r.status_code}: {(r.text or '')[:140]} (модель {GIGA_VISION_MODEL})"
                 print("FOOD vision HTTP", r.status_code, (r.text or "")[:400], "| model:", GIGA_VISION_MODEL)
                 if i < 2:
                     _t.sleep(2 * (i + 1)); continue
                 return None
             data = r.json()
-            if usage is not None:
-                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            _capture_usage(usage, data, "gigachat_vision", GIGA_VISION_MODEL, started, retry_index=i)
             txt = (data["choices"][0]["message"]["content"] or "").strip()
             return re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip() or None
         except Exception as e:
+            _capture_failure("gigachat_vision", GIGA_VISION_MODEL, started, "error", i)
             print("FOOD vision EXC:", repr(e)[:300])
             if i < 2: _t.sleep(2 * (i + 1)); continue
             return None
@@ -1820,9 +1920,11 @@ def synthesize(text, info=None):
             _SALUTE_ERR["tts"] = ""
             if isinstance(info, dict):
                 info["ms"] = int((_t.time() - t0) * 1000); info["chars"] = len(body)
+            _capture_media("salute", SALUTE_VOICE, t0, "success", "tts", {"characters": len(body)})
             return audio or None
         except Exception as e:
             if not _SALUTE_ERR["tts"]: _SALUTE_ERR["tts"] = str(e)[:200]
+            _capture_media("salute", SALUTE_VOICE, t0, "error", "tts", {"characters": len(body)})
             print("Salute TTS error:", e); return None
     return None
 
@@ -1867,4 +1969,7 @@ def transcribe(audio_bytes, filename="voice.ogg", info=None):
     if isinstance(info, dict):
         info["provider"] = used or "none"
         info["ms"] = int((_t.time() - t0) * 1000)
+    model = SALUTE_MODEL if used == "salute" else ("whisper-large-v3-turbo" if used == "groq" else None)
+    _capture_media(used or "none", model, t0, "success" if txt else "error", "stt",
+                   {"audio_bytes": len(audio_bytes or b""), "format": ext})
     return txt
