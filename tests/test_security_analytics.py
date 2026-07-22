@@ -87,10 +87,32 @@ class SecurityAnalyticsTests(unittest.TestCase):
 
         self.assertEqual(len(batch), 1)
         self.assertEqual(batch[0]["name"], "screen_viewed")
-        self.assertEqual(batch[0]["properties"], {"screen": "food"})
+        self.assertEqual(batch[0]["payload_version"], 2)
+        self.assertEqual({k: batch[0]["properties"][k] for k in (
+            "screen", "provenance", "confidence", "source_schema", "payload_version"
+        )}, {"screen": "food", "provenance": "observed", "confidence": "high",
+             "source_schema": "events_v2", "payload_version": 2})
         self.assertNotIn(str(cid), json.dumps(batch))
         a2.traction_ack(bot.DB, [batch[0]["event_id"]])
         a2.seed_traction_outbox(bot.DB)
+        self.assertEqual(a2.traction_batch(bot.DB), [])
+
+    def test_traction_payload_upgrade_is_requeued_once(self):
+        conn = sqlite3.connect(bot.DB)
+        a2.init_schema(conn)
+        a2._queue_traction(conn, "evt", time.time(), "u_safe", "app_opened", {}, 1)
+        conn.commit(); conn.close()
+        a2.traction_ack(bot.DB, ["evt"])
+
+        conn = sqlite3.connect(bot.DB)
+        a2.init_schema(conn)
+        a2._queue_traction(conn, "evt", time.time(), "u_safe", "app_opened",
+                           {"provenance": "observed"}, 2)
+        conn.commit(); conn.close()
+
+        batch = a2.traction_batch(bot.DB)
+        self.assertEqual([(x["event_id"], x["payload_version"]) for x in batch], [("evt", 2)])
+        a2.traction_ack(bot.DB, ["evt"])
         self.assertEqual(a2.traction_batch(bot.DB), [])
 
     def test_delete_user_removes_every_user_owned_table_and_memory(self):
@@ -259,6 +281,10 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn.commit()
         conn.close()
         bot.ev(cid, "onboarding_completed", meta="irregular")
+        conn = sqlite3.connect(bot.DB)
+        conn.execute("UPDATE events SET ts='2026-07-22T12:00:00' WHERE chat_id=?", (cid,))
+        conn.execute("UPDATE events_v2 SET occurred_at='2026-07-22T12:00:00' WHERE user_key=?", (a2.user_key(cid),))
+        conn.commit(); conn.close()
 
         with mock.patch.object(bot, "dtoday", return_value=date(2026, 7, 22)):
             data = bot.analytics_data(days=1)

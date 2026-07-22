@@ -66,11 +66,13 @@ SCHEMA = (
         occurred_at REAL NOT NULL,
         device_id TEXT NOT NULL,
         name TEXT NOT NULL,
-        properties_json TEXT NOT NULL DEFAULT '{}'
+        properties_json TEXT NOT NULL DEFAULT '{}',
+        payload_version INTEGER NOT NULL DEFAULT 1
     )""",
     """CREATE TABLE IF NOT EXISTS traction_sent(
         event_id TEXT PRIMARY KEY,
-        sent_at REAL NOT NULL
+        sent_at REAL NOT NULL,
+        payload_version INTEGER NOT NULL DEFAULT 1
     )""",
     "CREATE INDEX IF NOT EXISTS ix_traction_outbox_time ON traction_outbox(occurred_at)",
 )
@@ -82,6 +84,12 @@ def init_schema(conn):
     for column in ("reported_cost REAL", "cost_unit TEXT"):
         try:
             conn.execute("ALTER TABLE llm_calls ADD COLUMN " + column)
+        except sqlite3.OperationalError:
+            pass
+    for table, column in (("traction_outbox", "payload_version INTEGER NOT NULL DEFAULT 1"),
+                          ("traction_sent", "payload_version INTEGER NOT NULL DEFAULT 1")):
+        try:
+            conn.execute("ALTER TABLE " + table + " ADD COLUMN " + column)
         except sqlite3.OperationalError:
             pass
 
@@ -145,17 +153,38 @@ def _legacy_event_name(action, meta):
         return "assistant_message_sent", None
     if action == "tokens":
         return "ai_usage_recorded", None
+    if action in {"broadcast", "proactive", "reactivation"}:
+        return "push_sent", None
+    if action == "goal" and text == "summary":
+        return "summary_opened", None
+    if action == "goal" and text == "food_log":
+        return "meal_add_completed", None
+    if action == "goal" and text == "workout":
+        return "workout_add_completed", None
+    if action == "error":
+        return "error", None
     return "legacy_" + str(action or "unknown")[:48], None
 
 
-def _queue_traction(conn, event_id, occurred_at, device_id, name, properties=None):
+def _queue_traction(conn, event_id, occurred_at, device_id, name, properties=None, payload_version=2):
     if not device_id:
         return
+    payload_version = max(1, int(payload_version or 1))
+    sent = conn.execute("SELECT payload_version FROM traction_sent WHERE event_id=?", (event_id,)).fetchone()
+    if sent and int(sent[0] or 1) >= payload_version:
+        return
     conn.execute(
-        """INSERT OR IGNORE INTO traction_outbox(event_id,occurred_at,device_id,name,properties_json)
-           SELECT ?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM traction_sent WHERE event_id=?)""",
+        """INSERT INTO traction_outbox(event_id,occurred_at,device_id,name,properties_json,payload_version)
+           VALUES(?,?,?,?,?,?)
+           ON CONFLICT(event_id) DO UPDATE SET
+             occurred_at=excluded.occurred_at,
+             device_id=excluded.device_id,
+             name=excluded.name,
+             properties_json=excluded.properties_json,
+             payload_version=excluded.payload_version
+           WHERE excluded.payload_version > traction_outbox.payload_version""",
         (event_id, float(occurred_at), device_id, name,
-         json.dumps(properties or {}, ensure_ascii=False, separators=(",", ":")), event_id),
+         json.dumps(properties or {}, ensure_ascii=False, separators=(",", ":")), payload_version),
     )
 
 
@@ -190,7 +219,12 @@ def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_vers
     )
     external_props = dict(props)
     if screen: external_props["screen"] = screen
-    _queue_traction(conn, event_id, occurred.timestamp(), key, event_name, external_props)
+    external_props.update({"provenance": "observed", "confidence": "high",
+                           "source_schema": "events_v2", "payload_version": 2})
+    if request_id: external_props["request_id"] = request_id
+    if latency_ms: external_props["latency_ms"] = int(latency_ms)
+    if app_version: external_props["app_version"] = app_version
+    _queue_traction(conn, event_id, occurred.timestamp(), key, event_name, external_props, 2)
     return event_id
 
 
@@ -232,7 +266,20 @@ def persist_llm_call(db_path, record):
         )
         _queue_traction(conn, "llm_" + call_id, _epoch(occurred_at), record.get("user_key"), "ai_call", {
             "provider": provider, "model": model, "purpose": purpose, "status": status,
-        })
+            "request_id": record.get("request_id"),
+            "latency_ms": int(record.get("latency_ms") or 0),
+            "input_tokens": int(record.get("input_tokens") or 0),
+            "output_tokens": int(record.get("output_tokens") or 0),
+            "cached_tokens": int(record.get("cached_tokens") or 0),
+            "total_tokens": int(record.get("total_tokens") or 0),
+            "retry_index": int(record.get("retry_index") or 0),
+            "fallback_from": record.get("fallback_from"),
+            "reported_cost": record.get("reported_cost"),
+            "cost_unit": record.get("cost_unit"),
+            "estimated_cost_usd": record.get("estimated_cost_usd"),
+            "provenance": "observed", "confidence": "high",
+            "source_schema": "llm_calls", "payload_version": 2,
+        }, 2)
         conn.commit()
     except Exception as exc:
         log.warning("llm call analytics write failed: %s", exc)
@@ -251,12 +298,29 @@ def seed_traction_outbox(db_path):
             try: props = json.loads(props_json or "{}")
             except (TypeError, ValueError): props = {}
             if screen: props.setdefault("screen", screen)
-            _queue_traction(conn, event_id, _epoch(occurred_at), key, name, props)
-        for call_id, occurred_at, key, provider, model, purpose, status in conn.execute(
-                "SELECT call_id,occurred_at,user_key,provider,model,purpose,status FROM llm_calls"):
+            props.setdefault("provenance", "observed")
+            props.setdefault("confidence", "high")
+            props.setdefault("source_schema", "events_v2")
+            props["payload_version"] = 2
+            _queue_traction(conn, event_id, _epoch(occurred_at), key, name, props, 2)
+        for row in conn.execute(
+                """SELECT call_id,occurred_at,user_key,request_id,provider,model,purpose,status,
+                          latency_ms,input_tokens,output_tokens,cached_tokens,total_tokens,retry_index,
+                          fallback_from,reported_cost,cost_unit,estimated_cost_usd FROM llm_calls"""):
+            (call_id, occurred_at, key, request_id, provider, model, purpose, status,
+             latency_ms, input_tokens, output_tokens, cached_tokens, total_tokens, retry_index,
+             fallback_from, reported_cost, cost_unit, estimated_cost_usd) = row
             _queue_traction(conn, "llm_" + call_id, _epoch(occurred_at), key, "ai_call", {
                 "provider": provider, "model": model, "purpose": purpose, "status": status,
-            })
+                "request_id": request_id, "latency_ms": int(latency_ms or 0),
+                "input_tokens": int(input_tokens or 0), "output_tokens": int(output_tokens or 0),
+                "cached_tokens": int(cached_tokens or 0), "total_tokens": int(total_tokens or 0),
+                "retry_index": int(retry_index or 0), "fallback_from": fallback_from,
+                "reported_cost": reported_cost, "cost_unit": cost_unit,
+                "estimated_cost_usd": estimated_cost_usd,
+                "provenance": "observed", "confidence": "high",
+                "source_schema": "llm_calls", "payload_version": 2,
+            }, 2)
         conn.commit()
     finally:
         conn.close()
@@ -267,17 +331,19 @@ def traction_batch(db_path, limit=200):
     try:
         init_schema(conn)
         rows = conn.execute(
-            "SELECT event_id,occurred_at,device_id,name,properties_json FROM traction_outbox "
+            "SELECT event_id,occurred_at,device_id,name,properties_json,payload_version FROM traction_outbox "
             "ORDER BY occurred_at,event_id LIMIT ?", (max(1, min(int(limit), 500)),)
         ).fetchall()
     finally:
         conn.close()
     out = []
-    for event_id, occurred_at, device_id, name, properties_json in rows:
+    for event_id, occurred_at, device_id, name, properties_json, payload_version in rows:
         try: properties = json.loads(properties_json or "{}")
         except (TypeError, ValueError): properties = {}
+        properties.setdefault("payload_version", int(payload_version or 1))
         out.append({"event_id": event_id, "ts": occurred_at, "device_id": device_id,
-                    "name": name, "properties": properties})
+                    "name": name, "properties": properties,
+                    "payload_version": int(payload_version or 1)})
     return out
 
 
@@ -287,8 +353,17 @@ def traction_ack(db_path, event_ids):
     conn = sqlite3.connect(db_path, timeout=30)
     try:
         init_schema(conn); now = datetime.now(timezone.utc).timestamp()
-        conn.executemany("INSERT OR IGNORE INTO traction_sent(event_id,sent_at) VALUES(?,?)",
-                         [(event_id, now) for event_id in ids])
+        versions = {}
+        for event_id in ids:
+            row = conn.execute(
+                "SELECT payload_version FROM traction_outbox WHERE event_id=?", (event_id,)
+            ).fetchone()
+            versions[event_id] = int(row[0] or 1) if row else 1
+        conn.executemany(
+            """INSERT INTO traction_sent(event_id,sent_at,payload_version) VALUES(?,?,?)
+               ON CONFLICT(event_id) DO UPDATE SET sent_at=excluded.sent_at,
+                 payload_version=MAX(traction_sent.payload_version,excluded.payload_version)""",
+            [(event_id, now, int(versions.get(event_id, 1) or 1)) for event_id in ids])
         conn.executemany("DELETE FROM traction_outbox WHERE event_id=?", [(event_id,) for event_id in ids])
         conn.commit()
     finally:
