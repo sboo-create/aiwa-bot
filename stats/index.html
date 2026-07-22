@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AIWA · Disrupt Analytics</title>
+  <style>
+    :root{font:15px Inter,system-ui,sans-serif;color:#172033;background:#f6f7f9}body{margin:0;padding:28px}
+    main{max-width:1100px;margin:auto}h1{margin:0 0 6px}.muted{color:#697386}.bar{display:flex;gap:8px;margin:20px 0}
+    button{border:1px solid #d8dde7;background:white;border-radius:9px;padding:8px 13px;cursor:pointer}.on{background:#ff7a45;color:white;border-color:#ff7a45}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.card{background:white;border:1px solid #e4e7ed;border-radius:14px;padding:17px}
+    .label{font-size:13px;color:#697386}.value{font-size:29px;font-weight:750;margin-top:7px}.status{margin-top:18px;color:#697386}
+  </style>
+</head>
+<body><main><h1>AIWA</h1><div class="muted">Продуктовая аналитика без медицинских данных и Telegram ID</div>
+  <div class="bar"><button data-days="1" class="on">24 часа</button><button data-days="7">7 дней</button><button data-days="30">30 дней</button></div>
+  <section id="cards" class="grid"></section><div id="status" class="status">Загрузка…</div>
+</main><script>
+const cards=document.getElementById('cards'),status=document.getElementById('status');
+async function load(days){status.textContent='Загрузка…';const r=await fetch('summary?days='+days,{cache:'no-store'});const d=await r.json();
+ const o=d.overview||{};const values=[['Ever used',o.ever_used],['DAU',o.dau],['WAU',o.wau],['MAU',o.mau],['Sessions / DAU',o.sessions_per_dau],['Tools / DAU',o.tools_per_dau]];
+ cards.innerHTML=values.map(x=>`<article class="card"><div class="label">${x[0]}</div><div class="value">${x[1]??'—'}</div></article>`).join('');
+ status.textContent='Обновлено '+new Date(d.updated_at).toLocaleString('ru-RU')+' · событий за окно: '+d.events+' · ошибок: '+d.errors;}
+document.querySelectorAll('button').forEach(b=>b.onclick=()=>{document.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));load(b.dataset.days)});load(1);
+</script></body></html>

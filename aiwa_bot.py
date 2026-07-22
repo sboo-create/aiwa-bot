@@ -15,6 +15,7 @@ from telegram.ext import (Application, CommandHandler, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
 from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter, Forbidden
 from aiohttp import web
+import requests
 import hmac as _hmac, hashlib as _hashlib
 from urllib.parse import parse_qsl as _pqsl, urlsplit as _urlsplit
 
@@ -86,7 +87,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-22-v70-traction-metrics"
+AIWA_VERSION = "2026-07-22-v71-telegram-traction-hotfix"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -285,7 +286,8 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
         (cid, datetime.now(TZ).isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls),
          int(tin), int(tout), model or None))
     try:
-        A2.insert_legacy_event(c, cid, action, meta=meta, latency_ms=ms, app_version=AIWA_VERSION, request_id=request_id)
+        A2.insert_legacy_event(c, cid, action, meta=meta, latency_ms=ms,
+                               app_version=AIWA_VERSION, request_id=request_id, calls=calls)
     except Exception as exc:
         # Analytics must never break a product action; the legacy write remains.
         log.warning("events_v2 write failed: %s", exc)
@@ -1130,12 +1132,49 @@ async def send_guide(context, cid, g):
         log.warning("guide: %s", e)
         with open(path, "rb") as fh: await context.bot.send_photo(cid, photo=fh, caption=g["title"])
 
-def fit_tg(text, limit=4000):
-    if not text or len(text) <= limit: return text
-    cut = text[:limit]
-    p = max(cut.rfind(". "), cut.rfind(".\n"), cut.rfind("!\n"), cut.rfind("\n\n"), cut.rfind("! "), cut.rfind("? "))
-    if p > limit * 0.6: cut = cut[:p + 1]
-    return cut.rstrip()
+TG_MESSAGE_LIMIT = 4096
+# Leave room for Telegram entity parsing and for a short quoted question.
+TG_TEXT_CHUNK = 3600
+TG_QUOTE_LIMIT = 700
+
+def _tg_units(text):
+    """Telegram entity offsets and limits use UTF-16 code units."""
+    return len((text or "").encode("utf-16-le")) // 2
+
+def _tg_prefix_len(text, limit):
+    """Largest Python string prefix that fits into ``limit`` UTF-16 units."""
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _tg_units(text[:mid]) <= limit: lo = mid
+        else: hi = mid - 1
+    return lo
+
+def split_tg(text, limit=TG_TEXT_CHUNK, first_limit=None):
+    """Split a Telegram message without dropping content or breaking sentences when possible."""
+    if not text: return []
+    out = []; rest = str(text); current_limit = int(first_limit or limit)
+    while rest:
+        if _tg_units(rest) <= current_limit:
+            out.append(rest); break
+        hard = max(1, _tg_prefix_len(rest, current_limit))
+        window = rest[:hard]; floor = max(1, int(hard * 0.55))
+        boundaries = [m.end() for m in re.finditer(r"\n\n|\n|(?<=[.!?])\s+|\s+", window)]
+        cut = max((p for p in boundaries if p >= floor), default=hard)
+        out.append(rest[:cut]); rest = rest[cut:]; current_limit = int(limit)
+    return out
+
+def _clip_tg(text, limit=TG_QUOTE_LIMIT):
+    text = str(text or "")
+    if _tg_units(text) <= limit: return text
+    keep = max(1, _tg_prefix_len(text, max(1, limit - 1)))
+    return text[:keep].rstrip() + "…"
+
+async def reply_long(message, text, reply_markup=None):
+    """Reply with every chunk; interactive buttons belong only to the final part."""
+    parts = split_tg(text) or [str(text or "")]
+    for i, part in enumerate(parts):
+        await message.reply_text(part, reply_markup=(reply_markup if i == len(parts) - 1 else None))
 def chat_hint(cid):
     base = last_hint(cid) or ""
     u = row(cid)
@@ -1179,18 +1218,22 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
     clean, sugg = sf(text) if sf else (text, [])
-    clean = fit_tg(clean)
     if len(sugg) < 2:
         try:
             for e in L.followups(st, basis_q, clean):
                 if e not in sugg and len(sugg) < 2: sugg.append(e)
         except Exception: pass
     kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label)
-    if quote:
-        body = f"<blockquote>{html.escape(quote)}</blockquote>\n{html.escape(clean)}"
-        await context.bot.send_message(cid, body, reply_markup=kb, parse_mode="HTML")
-    else:
-        await context.bot.send_message(cid, clean, reply_markup=kb)
+    quote_text = _clip_tg(quote) if quote else None
+    first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
+    parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        if i == 0 and quote_text:
+            body = f"<blockquote>{html.escape(quote_text)}</blockquote>\n{html.escape(part)}"
+            await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
+        else:
+            await context.bot.send_message(cid, part, reply_markup=(kb if last else None))
     ev(cid, "tokens", sum(usage), meta="answer", calls=len(usage), usage=usage)
     if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
         await _send_voice_reply(context, cid, clean)
@@ -1898,7 +1941,7 @@ def finish_onboarding(context, cid, last_period_iso, n):
     cyc_add(cid, last_period_iso); schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 
 async def welcome_finish(context, cid, msg):
-    ev(cid, "activated", meta=(row(cid).get("mode") or "cycle"))
+    ev(cid, "onboarding_completed", meta=(row(cid).get("mode") or "cycle"))
     await msg.reply_text("Готово. " + schedule_text(cid, "08:00") + "\n\nВремя меняется в Меню. Историю прошлых циклов можно добавить позже командой /addcycles.",
         reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     await push_summary(context, cid)
@@ -2155,6 +2198,7 @@ async def start(update, context):
             _ref_touch(cid, _src); ev(cid, "ref", meta="src:" + _src)
     if is_partner(cid) and not is_onboarded(row(cid)):
         return await update.message.reply_text(PARTNER_INFO)
+    ev(cid, "command", meta="start")
     if is_onboarded(row(cid)):
         return await update.message.reply_text(
             "У тебя уже настроен цикл, данные на месте. Продолжить или начать настройку заново?",
@@ -2599,7 +2643,7 @@ async def handle_text(update, context, txt):
         await context.bot.send_chat_action(cid, "typing")
         _, _qst = status_of(cid)
         a = await think_llm(context, cid, L.answer_question, _qst, txt, profile_of(u), None)
-        await update.message.reply_text(fit_tg(L.split_followups(a)[0]))
+        await reply_long(update.message, L.split_followups(a)[0])
         return await update.message.reply_text("А теперь вернёмся к настройке. " + VALUE_STATES[state])
 
     if is_partner(cid) and not is_onboarded(u):
@@ -2626,7 +2670,7 @@ async def handle_text(update, context, txt):
             if is_question_like(txt):
                 _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
-                return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: напиши дату начала последних месячных, например 25.05.2026. Потом даты можно редактировать в приложении.")
+                return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши дату начала последних месячных, например 25.05.2026. Потом даты можно редактировать в приложении.")
             return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
         upsert(cid, pending_date=d.isoformat(), state="await_len")
         return await update.message.reply_text(
@@ -2640,7 +2684,7 @@ async def handle_text(update, context, txt):
             if is_question_like(txt):
                 _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
-                return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? Обычно это 21-35 дней, но у многих бывает иначе.")
+                return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? Обычно это 21-35 дней, но у многих бывает иначе.")
             return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь точно, напиши примерное значение, потом его можно поправить. Если цикл нерегулярный, можно начать заново через /start и выбрать «Нет регулярного цикла».")
         finish_onboarding(context, cid, u["pending_date"], n)
         note = ""
@@ -2674,7 +2718,7 @@ async def handle_text(update, context, txt):
             if is_question_like(txt):
                 _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
-                return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
+                return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
         upsert(cid, height=int(cm), weight=kg, age=age, state="await_activity")
         return await update.message.reply_text("Принято 💪 Какой у тебя уровень физической активности?\n\n"
@@ -2805,7 +2849,7 @@ async def handle_text(update, context, txt):
         await context.bot.send_chat_action(cid, "typing")
         _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
         ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
-        await update.message.reply_text(fit_tg(L.split_followups(a)[0]))
+        await reply_long(update.message, L.split_followups(a)[0])
     await need_onboard(update.message)
 
 # ---------- callbacks ----------
@@ -2814,6 +2858,8 @@ async def on_cb(update, context):
     if not q.message:  # у сообщений старше ~48ч Telegram не присылает message — без защиты тут AttributeError
         return
     cid = q.message.chat.id; data = q.data
+    # Onboarding has several early returns, so record the tap before routing.
+    ev(cid, "suggest" if data.startswith("q:") else "button", meta=data)
     if data.startswith("pado:"):
         _intent = data.split(":", 1)[1]
         _u = row(cid)
@@ -2870,7 +2916,6 @@ async def on_cb(update, context):
         return await q.message.reply_text(
             "Поняла. Айва не будет считать стандартные фазы цикла, но всё равно сможет давать персональные рекомендации по самочувствию, питанию и движению.\n\n"
             "Чтобы советы были точнее, напиши рост, вес и возраст через пробел. Например: 168 60 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
-    ev(cid, "suggest" if data.startswith("q:") else "button", meta=data)
     u, st = status_of(cid)
     if not st and not is_onboarded(u):
         return await need_onboard(q.message)
@@ -3042,6 +3087,36 @@ async def model_probe(app):
                 f"Служебная проверка модели не получила ответ.\nОтвет/ошибка: {out or 'пусто'}", cooldown=600)
         await asyncio.sleep(interval)
 
+async def traction_worker():
+    """Durable, privacy-safe delivery to the external Disrupt Analytics module."""
+    url = os.environ.get("AIWA_TRACTION_URL", "").strip()
+    token = os.environ.get("AIWA_TRACTION_TOKEN", "").strip()
+    try:
+        await asyncio.to_thread(A2.seed_traction_outbox, DB)
+    except Exception as exc:
+        log.warning("traction seed failed: %s", exc)
+    if not url:
+        log.info("traction delivery disabled: AIWA_TRACTION_URL is not set")
+        return
+    delay = 2
+    while True:
+        try:
+            batch = await asyncio.to_thread(A2.traction_batch, DB, 200)
+            if not batch:
+                delay = 2; await asyncio.sleep(10); continue
+            headers = {"Content-Type": "application/json"}
+            if token: headers["X-Ingest-Token"] = token
+            def _post():
+                return requests.post(url, json={"events": batch}, headers=headers, timeout=10)
+            response = await asyncio.to_thread(_post)
+            if response.status_code < 200 or response.status_code >= 300:
+                raise RuntimeError("HTTP " + str(response.status_code))
+            await asyncio.to_thread(A2.traction_ack, DB, [item["event_id"] for item in batch])
+            log.info("traction delivered: %d", len(batch)); delay = 2
+        except Exception as exc:
+            log.warning("traction delivery failed: %s", exc)
+            await asyncio.sleep(delay); delay = min(delay * 2, 300)
+
 async def on_startup(app):
     global BOT_USERNAME, BCAST_Q, FOOD_Q, TRAIN_Q
     try:
@@ -3127,6 +3202,7 @@ async def on_startup(app):
             log.warning("proactive schedule: %s", _pe)
     asyncio.create_task(load_logger(app))
     asyncio.create_task(model_probe(app))
+    asyncio.create_task(traction_worker())
     n = catchup = 0
     for cid in all_users():
         u = row(cid) or {}
@@ -4089,6 +4165,7 @@ def _refresh_admin_session(request, response):
     return response
 
 _EV_LBL = {
+    "start": "Начала настройку", "onboarding_completed": "Завершила настройку",
     "app_open": "Открыла приложение", "web_food": "Открыла меню", "web_diary": "Открыла дневник",
     "web_checkin": "Чек-ин (в приложении)", "web_training": "Открыла тренировки", "web_meal_replace": "Замена блюда",
     "web_partner": "Партнёр", "web_profile": "Профиль", "web_prefs": "Предпочтения по еде", "web_settime": "Время сводки",
@@ -4147,7 +4224,7 @@ def _feat_of(action, meta):
 def analytics_data(days=7, frm=None, to=None):
     """Чистый слой аналитики (спека v2). tool-calls = Σ calls (все хопы к модели)."""
     from collections import Counter, defaultdict
-    ACTIVE = ("command", "button", "suggest", "manual", "answered", "voice", "fallback")
+    ACTIVE = ("command", "button", "suggest", "manual", "answered", "voice", "fallback", "onboarding_completed")
     APP_PREF = ("web_", "view_", "app_open")
     PUSH_META = ("sent", "checkin_push", "food_reminder_sent", "train_reminder_sent", "phase_push", "reactivation_sent", "announce_sent", "meno_update_sent")
     today = dtoday()
@@ -4172,7 +4249,7 @@ def analytics_data(days=7, frm=None, to=None):
     partners = c.execute("SELECT partner_id, woman_id FROM partners").fetchall()
     wmin = datetime.combine(until - timedelta(days=120), dtime.min).isoformat()
     wide = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=? AND ts<=?", (wmin, until_ts)).fetchall()
-    first_rows = c.execute("SELECT chat_id, MIN(ts) FROM events WHERE action IN ('command','button','suggest','manual','answered','voice','fallback') GROUP BY chat_id").fetchall()
+    first_rows = c.execute("SELECT chat_id, MIN(ts) FROM events WHERE action IN ('command','button','suggest','manual','answered','voice','fallback','onboarding_completed') GROUP BY chat_id").fetchall()
     goalrows = c.execute("SELECT DISTINCT chat_id, meta FROM events WHERE action='goal'").fetchall()
     refrows = c.execute("SELECT source, chat_id, ts FROM referrals").fetchall()
     pmin = datetime.combine(since - timedelta(days=span), dtime.min).isoformat()
@@ -4183,7 +4260,7 @@ def analytics_data(days=7, frm=None, to=None):
                             FROM llm_calls WHERE occurred_at>=? AND occurred_at<=?""",
                          (since_ts, until_ts)).fetchall()
     c.close()
-    _ACT = ("command", "button", "suggest", "manual", "answered", "voice", "fallback")
+    _ACT = ("command", "button", "suggest", "manual", "answered", "voice", "fallback", "onboarding_completed")
     pv_events = 0; pv_tool = 0; pv_days = defaultdict(set)
     for cid, ts, action, calls in prev:
         if calls: pv_tool += calls

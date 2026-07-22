@@ -1,10 +1,13 @@
+import asyncio
 import hashlib
 import hmac
+import html
 import json
 import os
 import sqlite3
 import tempfile
 import time
+import types
 import unittest
 from datetime import date
 from unittest import mock
@@ -75,6 +78,20 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(row[1:4], ("screen_viewed", "webapp", "food"))
         self.assertNotIn("987654321", row[0])
         self.assertEqual(json.loads(row[4]), {})
+
+    def test_external_traction_outbox_is_pseudonymous_and_idempotent(self):
+        cid = 987654321
+        bot.ev(cid, "button", meta="view_food")
+
+        batch = a2.traction_batch(bot.DB)
+
+        self.assertEqual(len(batch), 1)
+        self.assertEqual(batch[0]["name"], "screen_viewed")
+        self.assertEqual(batch[0]["properties"], {"screen": "food"})
+        self.assertNotIn(str(cid), json.dumps(batch))
+        a2.traction_ack(bot.DB, [batch[0]["event_id"]])
+        a2.seed_traction_outbox(bot.DB)
+        self.assertEqual(a2.traction_batch(bot.DB), [])
 
     def test_delete_user_removes_every_user_owned_table_and_memory(self):
         cid = 77
@@ -189,6 +206,72 @@ class SecurityAnalyticsTests(unittest.TestCase):
                          "https://proxy.example/v1/chat/completions")
         self.assertEqual(llm._chat_completions_url("https://proxy.example/v1/chat/completions"),
                          "https://proxy.example/v1/chat/completions")
+
+    def test_long_telegram_text_is_split_without_losing_content(self):
+        text = (("🌿 Длинный ответ с полезными пояснениями. " * 140) + "\n\n") * 3
+
+        parts = bot.split_tg(text)
+
+        self.assertGreater(len(parts), 1)
+        self.assertEqual("".join(parts), text)
+        self.assertTrue(all(bot._tg_units(part) <= bot.TG_TEXT_CHUNK for part in parts))
+
+    def test_send_answer_quotes_first_chunk_and_buttons_last(self):
+        answer = (("💡 Абзац без потери текста. " * 130) + "\n\n") * 3
+        fake_bot = mock.AsyncMock()
+        context = types.SimpleNamespace(bot=fake_bot)
+        keyboard = object()
+
+        with mock.patch.object(bot.L, "split_followups", return_value=(answer, ["Ещё?", "Почему?"])), \
+                mock.patch.object(bot, "sugg_kb", return_value=keyboard), \
+                mock.patch.object(bot, "ev"), \
+                mock.patch.object(bot, "_voice_reply_on", return_value=False):
+            asyncio.run(bot.send_answer(context, 7, answer, None, "q", quote="❓" * 1000))
+
+        calls = fake_bot.send_message.await_args_list
+        self.assertGreater(len(calls), 1)
+        delivered = []
+        for i, call in enumerate(calls):
+            body = call.args[1]
+            if i == 0:
+                self.assertEqual(call.kwargs["parse_mode"], "HTML")
+                quoted, first = body.split("</blockquote>\n", 1)
+                visible = html.unescape(quoted.split("<blockquote>", 1)[1]) + "\n" + html.unescape(first)
+                delivered.append(html.unescape(first))
+            else:
+                visible = body
+                delivered.append(body)
+            self.assertLessEqual(bot._tg_units(visible), bot.TG_MESSAGE_LIMIT)
+            self.assertIs(call.kwargs.get("reply_markup"), keyboard if i == len(calls) - 1 else None)
+        self.assertEqual("".join(delivered), answer)
+
+    def test_chat_answers_target_about_three_thousand_characters(self):
+        with mock.patch.object(llm, "_call", return_value="Готовый ответ") as call:
+            llm.answer_question(None, "Почему?", {})
+        self.assertEqual(call.call_args.kwargs["max_tokens"], 900)
+        self.assertIn("НЕ превышай 3000 знаков", call.call_args.args[0][-1]["content"])
+
+    def test_onboarding_completion_counts_as_traction_activity(self):
+        cid = 700
+        conn = bot.db()
+        conn.execute("INSERT INTO users(chat_id,created,mode) VALUES(?,?,?)",
+                     (cid, "2026-07-22T08:00:00", "irregular"))
+        conn.commit()
+        conn.close()
+        bot.ev(cid, "onboarding_completed", meta="irregular")
+
+        with mock.patch.object(bot, "dtoday", return_value=date(2026, 7, 22)):
+            data = bot.analytics_data(days=1)
+
+        self.assertEqual(data["audience"]["ever_used"], 1)
+        self.assertEqual(data["audience"]["dau"], 1)
+        self.assertEqual(data["engagement"]["sessions"]["count"], 1)
+        conn = sqlite3.connect(bot.DB)
+        event_name = conn.execute(
+            "SELECT event_name FROM events_v2 WHERE user_key=?", (a2.user_key(cid),)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(event_name, "onboarding_completed")
 
     def test_traction_metrics_count_people_sessions_and_tools(self):
         conn = bot.db()
