@@ -41,6 +41,14 @@ class FakeRequest:
         self.cookies = cookies or {}
 
 
+class FakeJsonRequest:
+    def __init__(self, body):
+        self.body = body
+
+    async def json(self):
+        return self.body
+
+
 class SecurityAnalyticsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -178,6 +186,90 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM events_v2 WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 0)
         conn.close()
         self.assertNotIn(cid, bot.CHAT_HIST)
+
+    def test_delete_tombstone_blocks_late_writes_across_reactivation(self):
+        cid = 78
+        first_generation = bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        bot.del_user(cid)
+
+        self.assertFalse(bot.mem_set(cid, "condition", "sensitive-restored"))
+        self.assertFalse(bot.hist_push(cid, "private", "late answer"))
+        self.assertFalse(bot.ev(cid, "user_message", meta="text"))
+        self.assertIsNone(bot.meal_add(cid, {"title": "late", "kcal": 1, "protein": 0,
+                                              "fat": 0, "carbs": 0, "items": []}))
+
+        next_generation = bot._activate_user(cid)
+        self.assertGreater(next_generation, first_generation)
+        self.assertFalse(bot._user_write_allowed(cid, first_generation))
+        self.assertTrue(bot._user_write_allowed(cid, next_generation))
+
+        with mock.patch.object(bot, "llm_to_thread", new=mock.AsyncMock(
+                return_value=[{"key": "condition", "value": "old-task-restored"}])):
+            asyncio.run(bot._memory_learn(cid, "old", "old", first_generation))
+
+        conn = bot.db()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM memory WHERE chat_id=?", (cid,)).fetchone()[0], 0)
+        conn.close()
+
+    def test_late_llm_usage_is_rejected_after_delete_and_restart(self):
+        cid = 79
+        old_generation = bot._activate_user(cid)
+        record = {
+            "call_id": "late-call", "user_key": a2.user_key(cid),
+            "user_generation": old_generation, "provider": "test", "model": "test/model",
+            "status": "success", "occurred_at": "2026-07-23T00:00:00+00:00",
+        }
+        bot.del_user(cid)
+        a2.persist_llm_call(bot.DB, record)
+        new_generation = bot._activate_user(cid)
+        a2.persist_llm_call(bot.DB, record)
+
+        conn = bot.db()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM llm_calls WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 0)
+        conn.close()
+
+        fresh = dict(record, call_id="fresh-call", user_generation=new_generation)
+        a2.persist_llm_call(bot.DB, fresh)
+        conn = bot.db()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM llm_calls WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 1)
+        conn.close()
+
+    def test_canonical_chat_checkin_and_summary_event_semantics(self):
+        cid = 80
+        bot.ev(cid, "user_message", meta="text")
+        bot.ev(cid, "assistant_message", meta="webapp")
+        bot.ev(cid, "voice", meta="voice")
+        bot.ev(cid, "suggest", meta="q:legacy")
+        bot.ev(cid, "manual", meta="web_checkin")
+        bot.ev(cid, "goal", meta="summary")
+        bot.ev(cid, "summary_open", meta="daily_summary")
+
+        conn = bot.db()
+        names = [row[0] for row in conn.execute(
+            "SELECT event_name FROM events_v2 WHERE user_key=? ORDER BY rowid", (a2.user_key(cid),)
+        )]
+        conn.close()
+        self.assertEqual(names, [
+            "user_message_sent", "assistant_message_sent", "user_message_sent",
+            "legacy_message_interaction", "checkin_updated", "summary_delivered", "summary_opened",
+        ])
+
+    def test_track_records_flow_when_form_is_opened(self):
+        cid = 81
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        with mock.patch.object(bot, "_verify_init", return_value=cid):
+            asyncio.run(bot._api_track(FakeJsonRequest({"initData": "signed", "flow": "food"})))
+            asyncio.run(bot._api_track(FakeJsonRequest({"initData": "signed", "flow": "workout"})))
+            asyncio.run(bot._api_track(FakeJsonRequest({"initData": "signed", "flow": "not_allowed"})))
+
+        conn = bot.db()
+        names = [row[0] for row in conn.execute(
+            "SELECT event_name FROM events_v2 WHERE user_key=? ORDER BY rowid", (a2.user_key(cid),)
+        )]
+        conn.close()
+        self.assertEqual(names, ["food_flow_started", "workout_flow_started"])
 
     def test_http_admin_keeps_legacy_key_but_prefers_separate_secret(self):
         old_admin = bot.AIWA_ADMIN
