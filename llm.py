@@ -1637,12 +1637,75 @@ def diary_reco(summary, usage=None):
                         max_tokens=500, temperature=0.4, usage=usage),
                   "Пока мало данных за день. Добавь пару приёмов, и я подскажу, чего не хватает.")
 
-def transcribe(audio_bytes, filename="voice.ogg"):
-    """Распознавание голосового через Groq Whisper."""
+SALUTE_OAUTH = (os.environ.get("SBER_SALUTE_OAUTH_URL") or os.environ.get("SALUTE_SPEECH_OAUTH_URL")
+                or "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
+SALUTE_STT = (os.environ.get("SBER_SALUTE_RECOGNIZE_URL") or os.environ.get("SALUTE_SPEECH_URL")
+              or "https://smartspeech.sber.ru/rest/v1/speech:recognize")
+SALUTE_SCOPE = os.environ.get("SALUTE_SPEECH_SCOPE") or os.environ.get("SBER_SALUTE_SCOPE") or "SALUTE_SPEECH_PERS"
+# voice_messaging — модель SaluteSpeech под голосовые сообщения (короткая спонтанная речь), general — универсальная
+SALUTE_MODEL = os.environ.get("SBER_SALUTE_RECOGNITION_MODEL") or os.environ.get("SALUTE_SPEECH_MODEL") or "general"
+_salute_tok = {"token": None, "exp": 0.0}
+# Форматы, которые SaluteSpeech принимает напрямую. Голосовые Telegram — ogg/opus, попадают сюда.
+_SALUTE_MIME = {"ogg": "audio/ogg;codecs=opus", "oga": "audio/ogg;codecs=opus",
+                "opus": "audio/ogg;codecs=opus", "mp3": "audio/mpeg", "flac": "audio/flac"}
+
+def _salute_auth(force=False):
+    """OAuth SaluteSpeech — та же схема, что у GigaChat, но свой scope и свой кэш токена."""
+    import time as _t, uuid
+    if not force and _salute_tok["token"] and _salute_tok["exp"] - 60 > _t.time():
+        return _salute_tok["token"]
+    creds = (os.environ.get("SBER_SALUTE_AUTH_KEY") or os.environ.get("SALUTE_SPEECH_CREDENTIALS")
+             or os.environ.get("SALUTE_SPEECH_KEY"))
+    if not creds:
+        cid = os.environ.get("SALUTE_SPEECH_CLIENT_ID"); sec = os.environ.get("SALUTE_SPEECH_CLIENT_SECRET")
+        if cid and sec:
+            import base64
+            creds = base64.b64encode(f"{cid}:{sec}".encode()).decode()
+    if not creds:
+        return None
+    try:
+        r = _HTTP.post(SALUTE_OAUTH,
+            headers={"Authorization": f"Basic {creds}", "RqUID": str(uuid.uuid4()),
+                     "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            data={"scope": SALUTE_SCOPE}, timeout=30, verify=_GIGA_VERIFY)
+        r.raise_for_status(); d = r.json()
+        _salute_tok["token"] = d["access_token"]
+        exp = d.get("expires_at", 0)
+        _salute_tok["exp"] = (exp / 1000) if exp > 1e12 else (exp or (_t.time() + 1500))
+        return _salute_tok["token"]
+    except Exception as e:
+        print("Salute auth error:", e); return None
+
+def _transcribe_salute(audio_bytes, ext):
+    mime = _SALUTE_MIME.get(ext)
+    if not mime:
+        return None            # формат не поддерживается синхронным API — уходим на фолбэк
+    tok = _salute_auth()
+    if not tok:
+        return None
+    import uuid
+    params = {"model": SALUTE_MODEL, "language": "ru-RU"}
+    for attempt in (1, 2):
+        try:
+            r = _HTTP.post(SALUTE_STT, params=params,
+                headers={"Authorization": "Bearer " + tok, "Content-Type": mime, "RqUID": str(uuid.uuid4())},
+                data=audio_bytes, timeout=(6, 60), verify=_GIGA_VERIFY)
+            if r.status_code == 401 and attempt == 1:
+                tok = _salute_auth(force=True)      # токен протух — перевыпустить и повторить
+                if not tok: return None
+                continue
+            r.raise_for_status()
+            res = r.json().get("result") or []
+            txt = " ".join(x for x in res if x).strip()
+            return txt or None
+        except Exception as e:
+            print("Salute STT error:", e); return None
+    return None
+
+def _transcribe_groq(audio_bytes, filename, ext):
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         return None
-    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "ogg").lower()
     mime = {"ogg": "audio/ogg", "oga": "audio/ogg", "webm": "audio/webm", "mp4": "audio/mp4",
             "m4a": "audio/mp4", "mp3": "audio/mpeg", "wav": "audio/wav"}.get(ext, "audio/ogg")
     try:
@@ -1654,3 +1717,71 @@ def transcribe(audio_bytes, filename="voice.ogg"):
         return (r.json().get("text") or "").strip() or None
     except Exception as e:
         print("STT error:", e); return None
+
+SALUTE_TTS = (os.environ.get("SBER_SALUTE_SYNTH_URL") or os.environ.get("SALUTE_SPEECH_SYNTH_URL")
+              or "https://smartspeech.sber.ru/rest/v1/text:synthesize")
+SALUTE_VOICE = os.environ.get("AIWA_TTS_VOICE") or "Nec_24000"   # женский голос «Наталья»
+TTS_MAXCHARS = int(os.environ.get("AIWA_TTS_MAXCHARS", "700"))
+
+def _tts_trim(text, limit=None):
+    """Готовит текст к озвучке: убирает эмодзи и маркеры списка, режет по границе предложения."""
+    lim = TTS_MAXCHARS if limit is None else limit
+    t = re.sub(r"[^\w\s.,!?;:()«»\"'\-–—/%°]", " ", text or "", flags=re.U)
+    t = re.sub(r"\s*[•·]\s*", ". ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) <= lim:
+        return t
+    cut = t[:lim]
+    m = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
+    return (cut[:m + 1] if m > lim * 0.4 else cut).strip()
+
+def synthesize(text, info=None):
+    """Текст -> голосовое (ogg/opus для Telegram) через SaluteSpeech. None, если синтез недоступен."""
+    import time as _t, uuid
+    if not text or not text.strip():
+        return None
+    t0 = _t.time()
+    body = _tts_trim(text)
+    if not body:
+        return None
+    tok = _salute_auth()
+    if not tok:
+        return None
+    for attempt in (1, 2):
+        try:
+            r = _HTTP.post(SALUTE_TTS, params={"format": "opus", "voice": SALUTE_VOICE},
+                headers={"Authorization": "Bearer " + tok, "Content-Type": "application/text",
+                         "RqUID": str(uuid.uuid4())},
+                data=body.encode("utf-8"), timeout=(6, 60), verify=_GIGA_VERIFY)
+            if r.status_code == 401 and attempt == 1:
+                tok = _salute_auth(force=True)
+                if not tok: return None
+                continue
+            r.raise_for_status()
+            audio = r.content
+            if isinstance(info, dict):
+                info["ms"] = int((_t.time() - t0) * 1000); info["chars"] = len(body)
+            return audio or None
+        except Exception as e:
+            print("Salute TTS error:", e); return None
+    return None
+
+def transcribe(audio_bytes, filename="voice.ogg", info=None):
+    """Распознавание голосового. Провайдер выбирается AIWA_STT: salute | groq | auto (по умолчанию).
+    В auto сначала пробуем SaluteSpeech (тот же контур, что GigaChat), при неудаче или неподдержанном
+    формате (webm из мини-аппа) уходим на Groq Whisper. В info кладём, кто реально распознал — для аналитики."""
+    import time as _t
+    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "ogg").lower()
+    mode = (os.environ.get("AIWA_STT", "auto") or "auto").lower()
+    t0 = _t.time()
+    used = None; txt = None
+    if mode in ("auto", "salute", "salutespeech", "sber"):
+        txt = _transcribe_salute(audio_bytes, ext)
+        if txt: used = "salute"
+    if not txt and mode != "salute":
+        txt = _transcribe_groq(audio_bytes, filename, ext)
+        if txt: used = "groq"
+    if isinstance(info, dict):
+        info["provider"] = used or "none"
+        info["ms"] = int((_t.time() - t0) * 1000)
+    return txt

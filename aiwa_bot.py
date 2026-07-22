@@ -83,7 +83,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-21-v57"
+AIWA_VERSION = "2026-07-22-v60"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1098,6 +1098,22 @@ def chat_hint(cid):
             base = (base + " " if base else "") + f"Беременность, срок примерно {stp['week']} недель, {stp['trimester']} триместр, до родов ~{max(0, stp['days_left'])} дн."
         except Exception: pass
     return base or None
+_VOICE_TURN = {}   # cid -> True, если текущий вопрос пришёл голосом: тогда ответ дублируем голосом
+def _voice_reply_on():
+    return os.environ.get("AIWA_VOICE_REPLY", "1") in ("1", "true", "True", "yes", "on")
+
+async def _send_voice_reply(context, cid, text):
+    """Озвучка ответа. Молча пропускаем, если синтез недоступен — текст уже отправлен."""
+    try:
+        _ti = {}
+        audio = await asyncio.to_thread(L.synthesize, text, _ti)
+        if not audio:
+            return
+        await context.bot.send_voice(cid, audio)
+        ev(cid, "tts", meta="tts:salute", ms=int(_ti.get("ms") or 0), n=int(_ti.get("chars") or 0), calls=1)
+    except Exception as e:
+        log.warning("voice reply: %s", e)
+
 async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None):
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
@@ -1115,6 +1131,8 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     else:
         await context.bot.send_message(cid, clean, reply_markup=kb)
     ev(cid, "tokens", sum(usage), meta="answer", calls=len(usage))
+    if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
+        await _send_voice_reply(context, cid, clean)
 
 async def push_general(context, cid):
     u = row(cid); usage = []; _ds = dtoday().isoformat()
@@ -2385,18 +2403,23 @@ async def on_text(update, context):
             reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
 
 async def on_voice(update, context):
-    cid = update.effective_chat.id; txt = None
+    cid = update.effective_chat.id; txt = None; _sti = {}
     await context.bot.send_chat_action(cid, "typing")
     try:
         f = await context.bot.get_file(update.message.voice.file_id)
-        ba = await f.download_as_bytearray(); txt = await asyncio.to_thread(L.transcribe, bytes(ba))
+        ba = await f.download_as_bytearray(); txt = await asyncio.to_thread(L.transcribe, bytes(ba), "voice.ogg", _sti)
     except Exception as e:
         log.warning("voice: %s", e)
+    if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1)
     if not txt:
         return await update.message.reply_text("Не разобрала голосовое, попробуй ещё раз или напиши текстом.")
     ev(cid, "voice", n=len(txt))
     await update.message.reply_text(f"🎙 Расслышала: «{txt}»")
-    await handle_text(update, context, txt)
+    _VOICE_TURN[cid] = True          # спросили голосом — ответим текстом и голосом
+    try:
+        await handle_text(update, context, txt)
+    finally:
+        _VOICE_TURN.pop(cid, None)   # чтобы флаг не протёк на следующий текстовый вопрос
 
 def food_card(rec, added=True):
     conf = {"low": "низкая", "medium": "средняя", "high": "высокая"}.get(rec.get("confidence"), "средняя")
@@ -3538,7 +3561,9 @@ async def _api_voice(request):
     fn = getattr(field, "filename", "voice.webm") or "voice.webm"
     if not raw:
         return _cors(web.json_response({"transcript": "", "answer": "Пустая запись, попробуй ещё раз.", "suggestions": []}))
-    txt = await asyncio.to_thread(L.transcribe, bytes(raw), fn)
+    _sti = {}
+    txt = await asyncio.to_thread(L.transcribe, bytes(raw), fn, _sti)
+    if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1)
     if not txt:
         return _cors(web.json_response({"transcript": "", "answer": "Не расслышала, попробуй ещё раз или напиши текстом.", "suggestions": []}))
     ev(cid, "voice", n=len(txt))
@@ -3919,6 +3944,7 @@ _EV_LBL = {
     "web_diary_edit": "Правка в дневнике", "web_diary_scale": "Граммовка в дневнике", "web_diary_slot": "Перенос приёма",
     "web_today": "Открыла «Сегодня»", "food_suggest": "Идеи по питанию", "training_today": "Разбор нагрузки", "today_note": "Сводка дня",
     "proactive_compose": "Проактив-сообщение", "partner_brief": "Партнёрский пуш", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
+    "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа",
     "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
     "answer": "Вопрос в чате", "general": "Вопрос в чате", "webapp": "Вопрос в приложении", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
     "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",
@@ -3943,11 +3969,13 @@ _TC_LBL = {"summary": "Сводки (утро)", "answer": "Ответы в ча
            "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру",
            "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "proactive_compose": "Проактив-сообщение", "memory_learn": "Память: запись (ИИ)", "menu": "Меню питания",
            "partner_brief": "Партнёрский пуш (ИИ)", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
-           "auto": "Память: запись (ИИ)"}
+           "auto": "Память: запись (ИИ)",
+           "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа"}
 def _tc_lbl(m): return _TC_LBL.get(m, m or "прочее")
 _TC_APP = ("menu", "food_photo", "food_text", "meal", "workout", "diary_reco", "webapp", "training_section", "today_note", "food_suggest", "training_today")
 _TC_CHAT = ("answer", "general", "partner_q", "onboard_q")
 def _tc_src(m):
+    if m and (str(m).startswith("stt:") or str(m).startswith("tts:")): return "stt"
     if m in _TC_APP: return "app"
     if m in _TC_CHAT: return "chat"
     if m in ("summary", "proactive_compose", "proactive_preview", "today_note", "memory_learn", "auto", "partner_brief"): return "auto"
@@ -4158,7 +4186,8 @@ def analytics_data(days=7, frm=None, to=None):
             "error_rate": round(errors / ans_tot * 100) if ans_tot else 0,
             "p50": pct(lat, 0.5), "p95": pct(lat, 0.95),
             "tokens": tokens, "cost_usd": round(tokens / 1e6 * PRICE, 2)},
-        "toolcalls_by_source": {"app": tool_src.get("app", 0), "chat": tool_src.get("chat", 0), "auto": tool_src.get("auto", 0), "other": tool_src.get("other", 0)},
+        "toolcalls_by_source": {"app": tool_src.get("app", 0), "chat": tool_src.get("chat", 0), "auto": tool_src.get("auto", 0),
+                                "stt": tool_src.get("stt", 0), "other": tool_src.get("other", 0)},
         "growth": {
             "events": (round((ev_total - pv_events) / pv_events * 100) if pv_events else None),
             "toolcalls": (round((tool_total - pv_tool) / pv_tool * 100) if pv_tool else None),
@@ -4294,7 +4323,7 @@ function render(){
   h+=tbl(['Источник','Событий'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
   h+="<div class='sec-h'>Тул-коллы (вызовы модели)"+ic('Все обращения к модели: шаги агента (инструменты) + финальный ответ. Растут с агентными ответами.')+"</div>";
   h+="<div class='grid'>"+card('Тул-коллов на DAU',e.toolcalls_per_dau,e.toolcalls_total+' вызовов',DEF.tcdau,g.toolcalls)+card('Всего тул-коллов',e.toolcalls_total,'за период',null,g.toolcalls)+"</div>";
-  h+=tbl(['Источник','Тул-коллов'],[['Приложение',ts.app||0],['Чат',ts.chat||0],['Авто/пуши',ts.auto||0],['Прочее',ts.other||0]]);
+  h+=tbl(['Источник','Тул-коллов'],[['Приложение',ts.app||0],['Чат',ts.chat||0],['Авто/пуши',ts.auto||0],['Голос: расшифровка и озвучка',ts.stt||0],['Прочее',ts.other||0]]);
   h+="<div class='sec-h'>Тул-коллы по фиче</div>";
   h+=tbl(['Фича','Вызовов'],(e.toolcalls_by_meta||[]).map(function(x){return [x[0],x[1]];}));
   h+="<div class='sec-h'>Топ действий</div>";
