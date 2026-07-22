@@ -1638,21 +1638,27 @@ def diary_reco(summary, usage=None):
                   "Пока мало данных за день. Добавь пару приёмов, и я подскажу, чего не хватает.")
 
 SALUTE_OAUTH = (os.environ.get("SBER_SALUTE_OAUTH_URL") or os.environ.get("SALUTE_SPEECH_OAUTH_URL")
-                or "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
+                or "https://speech.giga.chat/v1/token")
 SALUTE_STT = (os.environ.get("SBER_SALUTE_RECOGNIZE_URL") or os.environ.get("SALUTE_SPEECH_URL")
-              or "https://smartspeech.sber.ru/rest/v1/speech:recognize")
+              or "https://speech.giga.chat/rest/v1/speech:recognize")
 SALUTE_SCOPE = os.environ.get("SALUTE_SPEECH_SCOPE") or os.environ.get("SBER_SALUTE_SCOPE") or "SALUTE_SPEECH_PERS"
 # voice_messaging — модель SaluteSpeech под голосовые сообщения (короткая спонтанная речь), general — универсальная
 SALUTE_MODEL = os.environ.get("SBER_SALUTE_RECOGNITION_MODEL") or os.environ.get("SALUTE_SPEECH_MODEL") or "general"
 _salute_tok = {"token": None, "exp": 0.0}
 _SALUTE_ERR = {"auth": "", "stt": "", "tts": ""}   # последние ошибки — для команды /voicetest
+
+def _salute_is_giga():
+    """speech.giga.chat — отдельный речевой сервис: токен по /v1/token, без scope."""
+    u = (SALUTE_OAUTH or "").lower()
+    return "giga.chat" in u or u.rstrip("/").endswith("/v1/token")
 # Форматы, которые SaluteSpeech принимает напрямую. Голосовые Telegram — ogg/opus, попадают сюда.
 _SALUTE_MIME = {"ogg": "audio/ogg;codecs=opus", "oga": "audio/ogg;codecs=opus",
                 "opus": "audio/ogg;codecs=opus", "mp3": "audio/mpeg", "flac": "audio/flac"}
 
 def _norm_basic(raw):
-    """Приводит ключ Сбера к валидному Basic. Принимает и готовый Authorization key (base64),
-    и пару 'client_id:client_secret' в открытом виде. Чистит кавычки, пробелы и переносы строк."""
+    """Готовит ключ к заголовку Authorization. Чистит кавычки, пробелы, переносы и префикс Basic.
+    Пару 'client_id:client_secret' (два UUID) кодирует в base64, всё остальное отдаёт как есть —
+    у speech.giga.chat ключ непрозрачный и перекодировать его нельзя."""
     import base64, binascii
     s = (raw or "").strip().strip('"').strip("'").strip()
     if s.lower().startswith("basic "):              # снимаем префикс до чистки пробелов
@@ -1660,20 +1666,11 @@ def _norm_basic(raw):
     s = re.sub(r"\s+", "", s)                       # переносы строк при копировании в панель
     if not s:
         return None, "пусто"
-    try:                                            # уже base64 и внутри 'id:secret'?
-        dec = base64.b64decode(s + "=" * (-len(s) % 4), validate=True).decode("utf-8", "replace")
-        if ":" in dec and len(dec.split(":", 1)[0]) > 5:
-            return s, None
-    except (binascii.Error, ValueError, UnicodeDecodeError):
-        pass
-    if ":" in s:                                    # открытая пара id:secret — кодируем сами
+    if ":" in s:
         _id, _, _sec = s.partition(":")
-        if len(_id) < 20 or len(_sec) < 20:         # UUID = 36 символов; короче — это не креды
-            return None, ("это не Client ID и Secret (в них по 36 символов, а тут %d и %d). "
-                          "Скопируй Authorization key целиком из кабинета SaluteSpeech" % (len(_id), len(_sec)))
-        return base64.b64encode(s.encode()).decode(), None
-    return None, ("похоже, это только Client ID без Secret — нужен Authorization key "
-                  "(длинная base64-строка) или пара client_id:client_secret")
+        if len(_id) >= 20 and len(_sec) >= 20:      # похоже на пару UUID — кодируем сами
+            return base64.b64encode(s.encode()).decode(), None
+    return s, None                                  # готовый ключ: base64 или непрозрачный токен
 
 def _salute_auth(force=False):
     """OAuth SaluteSpeech — та же схема, что у GigaChat, но свой scope и свой кэш токена."""
@@ -1695,17 +1692,29 @@ def _salute_auth(force=False):
         _SALUTE_ERR["auth"] = "ключ в неверном формате: " + str(_bad)
         return None
     try:
-        r = _HTTP.post(SALUTE_OAUTH,
-            headers={"Authorization": f"Basic {creds}", "RqUID": str(uuid.uuid4()),
-                     "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
-            data={"scope": SALUTE_SCOPE}, timeout=30, verify=_GIGA_VERIFY)
+        headers = {"Authorization": f"Basic {creds}", "RqUID": str(uuid.uuid4()), "Accept": "application/json"}
+        if _salute_is_giga():
+            # speech.giga.chat: POST /v1/token без scope, токен приходит в поле tok
+            r = _HTTP.post(SALUTE_OAUTH, headers=headers, timeout=30, verify=_GIGA_VERIFY)
+        else:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            r = _HTTP.post(SALUTE_OAUTH, headers=headers, data={"scope": SALUTE_SCOPE},
+                           timeout=30, verify=_GIGA_VERIFY)
         if r.status_code >= 400:
             _SALUTE_ERR["auth"] = "HTTP %s: %s" % (r.status_code, (r.text or "")[:200])
         r.raise_for_status(); d = r.json()
+        tok = d.get("tok") or d.get("access_token") or d.get("token")
+        if not tok:
+            _SALUTE_ERR["auth"] = "в ответе нет токена, поля: " + ",".join(list(d.keys())[:6])
+            return None
         _SALUTE_ERR["auth"] = ""
-        _salute_tok["token"] = d["access_token"]
-        exp = d.get("expires_at", 0)
-        _salute_tok["exp"] = (exp / 1000) if exp > 1e12 else (exp or (_t.time() + 1500))
+        _salute_tok["token"] = str(tok)
+        exp = d.get("exp") or d.get("expires_at") or d.get("expires_in") or 0
+        try: exp = float(exp)
+        except (TypeError, ValueError): exp = 0
+        if exp > 1e12: exp = exp / 1000.0          # миллисекунды
+        elif exp < 1e6: exp = _t.time() + (exp or 1500)   # относительный TTL
+        _salute_tok["exp"] = exp
         return _salute_tok["token"]
     except Exception as e:
         if not _SALUTE_ERR["auth"]: _SALUTE_ERR["auth"] = str(e)[:200]
@@ -1754,7 +1763,7 @@ def _transcribe_groq(audio_bytes, filename, ext):
         print("STT error:", e); return None
 
 SALUTE_TTS = (os.environ.get("SBER_SALUTE_SYNTH_URL") or os.environ.get("SALUTE_SPEECH_SYNTH_URL")
-              or "https://smartspeech.sber.ru/rest/v1/text:synthesize")
+              or "https://speech.giga.chat/rest/v1/text:synthesize")
 SALUTE_VOICE = os.environ.get("AIWA_TTS_VOICE") or "Nec_24000"   # женский голос «Наталья»
 TTS_MAXCHARS = int(os.environ.get("AIWA_TTS_MAXCHARS", "700"))
 
@@ -1808,6 +1817,7 @@ def synthesize(text, info=None):
 def salute_diag():
     """Диагностика голосового контура для админ-команды /voicetest."""
     out = {"key": bool(os.environ.get("SBER_SALUTE_AUTH_KEY") or os.environ.get("SALUTE_SPEECH_CREDENTIALS")),
+           "mode": ("speech.giga.chat (без scope)" if _salute_is_giga() else "smartspeech.sber.ru (со scope)"),
            "scope": SALUTE_SCOPE, "model": SALUTE_MODEL, "voice": SALUTE_VOICE,
            "stt_mode": (os.environ.get("AIWA_STT", "auto") or "auto"),
            "oauth_url": SALUTE_OAUTH, "tts_url": SALUTE_TTS, "stt_url": SALUTE_STT,
@@ -1818,15 +1828,8 @@ def salute_diag():
         norm, bad = _norm_basic(raw)
         out["key_len"] = len(raw.strip())
         out["key_raw_tail"] = raw.strip()[-4:] if len(raw.strip()) > 8 else "?"
-        out["key_form"] = ("готовый base64" if (norm and re.sub(r"\s+", "", raw.strip()) == norm)
+        out["key_form"] = ("передаю как есть" if (norm and re.sub(r"\s+", "", raw.strip().strip('"').strip("'")) == norm)
                            else ("пара id:secret, закодировал сам" if norm else "непонятный: " + str(bad)))
-        if norm:                       # что реально уедет в Сбер — по длинам частей, без раскрытия секрета
-            try:
-                dec = base64.b64decode(norm + "=" * (-len(norm) % 4)).decode("utf-8", "replace")
-                a, _, b = dec.partition(":")
-                out["key_parts"] = "id %s симв + secret %s симв" % (len(a), len(b))
-            except Exception:
-                out["key_parts"] = "не разбирается"
     tok = _salute_auth(force=True)
     out["auth"] = bool(tok); out["auth_err"] = _SALUTE_ERR["auth"]
     if tok:
