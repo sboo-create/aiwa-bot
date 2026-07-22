@@ -1810,10 +1810,19 @@ def salute_diag():
            "groq": bool(os.environ.get("GROQ_API_KEY"))}
     raw = os.environ.get("SBER_SALUTE_AUTH_KEY") or os.environ.get("SALUTE_SPEECH_CREDENTIALS") or ""
     if raw:
+        import base64
         norm, bad = _norm_basic(raw)
         out["key_len"] = len(raw.strip())
+        out["key_raw_tail"] = raw.strip()[-4:] if len(raw.strip()) > 8 else "?"
         out["key_form"] = ("готовый base64" if (norm and re.sub(r"\s+", "", raw.strip()) == norm)
                            else ("пара id:secret, закодировал сам" if norm else "непонятный: " + str(bad)))
+        if norm:                       # что реально уедет в Сбер — по длинам частей, без раскрытия секрета
+            try:
+                dec = base64.b64decode(norm + "=" * (-len(norm) % 4)).decode("utf-8", "replace")
+                a, _, b = dec.partition(":")
+                out["key_parts"] = "id %s симв + secret %s симв" % (len(a), len(b))
+            except Exception:
+                out["key_parts"] = "не разбирается"
     tok = _salute_auth(force=True)
     out["auth"] = bool(tok); out["auth_err"] = _SALUTE_ERR["auth"]
     if tok:
