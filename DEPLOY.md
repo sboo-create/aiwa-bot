@@ -36,6 +36,9 @@
    - `AIWA_ADMIN_KEY` = отдельная случайная строка длиной не меньше 32 символов
    - `AIWA_ANALYTICS_SALT` = ещё одна отдельная случайная строка длиной не меньше 32 символов
    - `AIWA_DB` = `/data/aiwa.db`
+   - для OpenRouter вместо GigaChat: `AIWA_PROVIDER=openrouter`, `OPENROUTER_API_KEY`,
+     `OPENROUTER_TEXT_MODEL=deepseek/deepseek-v3.2` и
+     `OPENROUTER_VISION_MODEL=google/gemini-2.5-flash`
 3. Railway перезапустит сервис. Во вкладке **Deploy logs** должно появиться
    `AIWA bot starting...` и `Application started`.
 
@@ -55,8 +58,12 @@
 - Если mini app и API находятся на разных доменах, перечисли точные origins в
   `AIWA_ALLOWED_ORIGINS`. Значение `*` не используется.
 - Дашборд открывается по `/admin`: ключ вводится в форме и сохраняется в защищённой HttpOnly
-  cookie на 8 часов. Ключи в URL запрещены, потому что URL попадают в access logs. Старый
-  опубликованный ключ нужно заменить до деплоя.
+  cookie на 8 часов. Ключи в URL запрещены, потому что URL попадают в access logs. Пока
+  `AIWA_ADMIN_KEY` не задан, для совместимости принимается текущее значение `AIWA_ADMIN`;
+  приложение пишет предупреждение в лог. Позже лучше вынести отдельный длинный ключ.
+- Для OpenRouter текст и фото намеренно маршрутизируются в разные модели. Не используй
+  `gemini-2.5-flash-image`: это модель генерации/редактирования изображений, а для разбора
+  фотографии еды нужна обычная мультимодальная `gemini-2.5-flash`.
 
 ## Альтернативы
 - **Render** → New → **Background Worker** из того же GitHub-репо, start command

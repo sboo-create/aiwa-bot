@@ -430,7 +430,9 @@ def _focus(st):
 
 _OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
 PROXY_URL = os.environ.get("LITELLM_URL") or ("https://openrouter.ai/api/v1/chat/completions" if _OPENROUTER_KEY else "")
-PROXY_MODEL = os.environ.get("LITELLM_MODEL") or os.environ.get("OPENROUTER_MODEL") or (None if _OPENROUTER_KEY else "gigachat-3-ultra")
+PROXY_MODEL = (os.environ.get("LITELLM_MODEL") or os.environ.get("OPENROUTER_TEXT_MODEL")
+               or os.environ.get("OPENROUTER_MODEL") or (None if _OPENROUTER_KEY else "gigachat-3-ultra"))
+OPENROUTER_VISION_MODEL = os.environ.get("OPENROUTER_VISION_MODEL")
 FALLBACK_PROXY_URL = ""  # no implicit third-party endpoints; configure the fallback explicitly
 def _proxy_verify():
     raw = (os.environ.get("LITELLM_CA_BUNDLE_FILE") or os.environ.get("LITELLM_SSL_VERIFY") or "true").strip()
@@ -501,6 +503,19 @@ def _proxy_configs():
             "xkey": fb_xkey,
         })
     return [c for c in cfgs if c.get("url") and (c.get("key") or c.get("xkey"))]
+
+def _openrouter_vision_config():
+    """Separate image model so a text-only model never receives food photos."""
+    if not (_OPENROUTER_KEY and OPENROUTER_VISION_MODEL):
+        return None
+    return {
+        "name": "openrouter",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": OPENROUTER_VISION_MODEL,
+        "key": _OPENROUTER_KEY,
+        "referer": os.environ.get("OPENROUTER_HTTP_REFERER"),
+        "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA",
+    }
 
 def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
     import time as _t
@@ -1671,7 +1686,8 @@ def _parse_food(out):
             "confidence": "medium", "note": ""}
 
 def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
-    """Фото -> КБЖУ. Сначала через рабочий провайдер (OpenAI-стиль image_url, base64),
+    """Фото -> КБЖУ. Сначала через отдельную OpenRouter vision-модель, если она задана,
+    иначе через рабочий провайдер (OpenAI-стиль image_url, base64),
     затем прямой GigaChat Vision как запасной путь (если задан GIGACHAT_CREDENTIALS)."""
     import base64
     _FOOD_ERR["msg"] = ""
@@ -1680,13 +1696,18 @@ def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
         "Если это готовое блюдо — определи, что это, и оцени вес порции на глаз. Посчитай калории и БЖУ. " + _FOOD_FORMAT)
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "jpg").lower()
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
-    # 1) через рабочий провайдер (тот же канал, что и текст)
+    # 1) отдельная OpenRouter vision-модель либо тот же канал, что и текст
     try:
         b64 = base64.b64encode(image_bytes).decode()
         mm = [{"role": "user", "content": [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}]
-        out = _call(mm, max_tokens=500, temperature=0.2, usage=usage)
+        vision_cfg = _openrouter_vision_config()
+        if vision_cfg:
+            out = _call_proxy_one(vision_cfg, mm, max_tokens=500, temperature=0.2,
+                                  usage=usage, attempts=3)
+        else:
+            out = _call(mm, max_tokens=500, temperature=0.2, usage=usage)
         try: print("FOOD provider vision raw:", repr(out)[:300])
         except Exception: pass
         rec = _parse_food(out)

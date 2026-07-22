@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest import mock
 from urllib.parse import urlencode
 
 
@@ -105,14 +106,16 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn.close()
         self.assertNotIn(cid, bot.CHAT_HIST)
 
-    def test_http_admin_never_falls_back_to_telegram_chat_id(self):
+    def test_http_admin_keeps_legacy_key_but_prefers_separate_secret(self):
         old_admin = bot.AIWA_ADMIN
         old_key = os.environ.get("AIWA_ADMIN_KEY")
         bot.AIWA_ADMIN = "123"
         os.environ.pop("AIWA_ADMIN_KEY", None)
         try:
+            self.assertTrue(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: "123"})))
             self.assertFalse(bot._admin_key_ok(FakeRequest(query={"key": "123"})))
             os.environ["AIWA_ADMIN_KEY"] = "a" * 48
+            self.assertFalse(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: "123"})))
             self.assertTrue(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: "a" * 48})))
             self.assertFalse(bot._admin_key_ok(FakeRequest(query={"key": "a" * 48})))
             self.assertTrue(bot._admin_key_ok(FakeRequest(headers={"X-Admin-Key": "a" * 48})))
@@ -136,6 +139,24 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(captured[0]["input_tokens"], 100)
         self.assertEqual(captured[0]["output_tokens"], 25)
         self.assertEqual(captured[0]["request_id"], "r_test")
+
+    def test_food_photo_uses_separate_openrouter_vision_model(self):
+        old_key = llm._OPENROUTER_KEY
+        old_model = llm.OPENROUTER_VISION_MODEL
+        llm._OPENROUTER_KEY = "test-openrouter-key"
+        llm.OPENROUTER_VISION_MODEL = "google/gemini-2.5-flash"
+        answer = json.dumps({"title": "Салат", "kcal": 250, "protein": 8,
+                             "fat": 12, "carbs": 20})
+        try:
+            with mock.patch.object(llm, "_call_proxy_one", return_value=answer) as vision_call, \
+                    mock.patch.object(llm, "_call") as text_call:
+                result = llm.analyze_food(b"fake-image", "food.jpg")
+            self.assertEqual(result["title"], "Салат")
+            self.assertEqual(vision_call.call_args.args[0]["model"], "google/gemini-2.5-flash")
+            text_call.assert_not_called()
+        finally:
+            llm._OPENROUTER_KEY = old_key
+            llm.OPENROUTER_VISION_MODEL = old_model
 
 
 if __name__ == "__main__":

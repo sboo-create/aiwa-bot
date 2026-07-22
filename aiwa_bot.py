@@ -4038,11 +4038,21 @@ async def _api_report(request):
 async def _api_opts(request): return _cors(web.Response())
 
 _ADMIN_COOKIE = "aiwa_admin_session"
+_ADMIN_KEY_WARNING_SHOWN = False
+def _admin_http_secret():
+    """Compatibility bridge: prefer a separate HTTP key, keep the current admin id working."""
+    global _ADMIN_KEY_WARNING_SHOWN
+    expected = os.environ.get("AIWA_ADMIN_KEY") or AIWA_ADMIN or ""
+    if expected and len(expected) < 32 and not _ADMIN_KEY_WARNING_SHOWN:
+        log.warning("AIWA admin dashboard uses a short legacy key; rotate AIWA_ADMIN_KEY when possible")
+        _ADMIN_KEY_WARNING_SHOWN = True
+    return str(expected)
+
 def _admin_key_ok(request):
-    # Telegram admin chat id and the HTTP dashboard secret are separate
-    # credentials. There is deliberately no fallback from one to the other.
-    expected = os.environ.get("AIWA_ADMIN_KEY")
-    if not expected or len(expected) < 32:
+    # Prefer a separate HTTP secret; the Telegram admin id remains a temporary
+    # compatibility fallback until AIWA_ADMIN_KEY is configured.
+    expected = _admin_http_secret()
+    if not expected:
         return False
     got = request.headers.get("X-Admin-Key") or request.cookies.get(_ADMIN_COOKIE) or ""
     return _hmac.compare_digest(str(got), str(expected))
@@ -4509,13 +4519,13 @@ load();
     return web.Response(text=html_text, content_type="text/html")
 
 async def _admin_login(request):
-    expected = os.environ.get("AIWA_ADMIN_KEY") or ""
+    expected = _admin_http_secret()
     try:
         data = await request.post()
         got = str(data.get("key") or "")
     except Exception:
         got = ""
-    if len(expected) < 32 or not _hmac.compare_digest(got, expected):
+    if not expected or not _hmac.compare_digest(got, expected):
         await asyncio.sleep(0.25)
         return web.Response(text="forbidden", status=403)
     resp = web.HTTPFound("/admin")
