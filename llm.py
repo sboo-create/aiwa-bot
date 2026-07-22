@@ -1650,6 +1650,27 @@ _SALUTE_ERR = {"auth": "", "stt": "", "tts": ""}   # последние ошиб
 _SALUTE_MIME = {"ogg": "audio/ogg;codecs=opus", "oga": "audio/ogg;codecs=opus",
                 "opus": "audio/ogg;codecs=opus", "mp3": "audio/mpeg", "flac": "audio/flac"}
 
+def _norm_basic(raw):
+    """Приводит ключ Сбера к валидному Basic. Принимает и готовый Authorization key (base64),
+    и пару 'client_id:client_secret' в открытом виде. Чистит кавычки, пробелы и переносы строк."""
+    import base64, binascii
+    s = (raw or "").strip().strip('"').strip("'").strip()
+    if s.lower().startswith("basic "):              # снимаем префикс до чистки пробелов
+        s = s[6:]
+    s = re.sub(r"\s+", "", s)                       # переносы строк при копировании в панель
+    if not s:
+        return None, "пусто"
+    try:                                            # уже base64 и внутри 'id:secret'?
+        dec = base64.b64decode(s + "=" * (-len(s) % 4), validate=True).decode("utf-8", "replace")
+        if ":" in dec and len(dec.split(":", 1)[0]) > 5:
+            return s, None
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        pass
+    if ":" in s:                                    # открытая пара id:secret — кодируем сами
+        return base64.b64encode(s.encode()).decode(), None
+    return None, ("похоже, это только Client ID без Secret — нужен Authorization key "
+                  "(длинная base64-строка) или пара client_id:client_secret")
+
 def _salute_auth(force=False):
     """OAuth SaluteSpeech — та же схема, что у GigaChat, но свой scope и свой кэш токена."""
     import time as _t, uuid
@@ -1664,6 +1685,10 @@ def _salute_auth(force=False):
             creds = base64.b64encode(f"{cid}:{sec}".encode()).decode()
     if not creds:
         _SALUTE_ERR["auth"] = "ключ не задан (SBER_SALUTE_AUTH_KEY)"
+        return None
+    creds, _bad = _norm_basic(creds)
+    if not creds:
+        _SALUTE_ERR["auth"] = "ключ в неверном формате: " + str(_bad)
         return None
     try:
         r = _HTTP.post(SALUTE_OAUTH,
@@ -1783,6 +1808,12 @@ def salute_diag():
            "stt_mode": (os.environ.get("AIWA_STT", "auto") or "auto"),
            "oauth_url": SALUTE_OAUTH, "tts_url": SALUTE_TTS, "stt_url": SALUTE_STT,
            "groq": bool(os.environ.get("GROQ_API_KEY"))}
+    raw = os.environ.get("SBER_SALUTE_AUTH_KEY") or os.environ.get("SALUTE_SPEECH_CREDENTIALS") or ""
+    if raw:
+        norm, bad = _norm_basic(raw)
+        out["key_len"] = len(raw.strip())
+        out["key_form"] = ("готовый base64" if (norm and re.sub(r"\s+", "", raw.strip()) == norm)
+                           else ("пара id:secret, закодировал сам" if norm else "непонятный: " + str(bad)))
     tok = _salute_auth(force=True)
     out["auth"] = bool(tok); out["auth_err"] = _SALUTE_ERR["auth"]
     if tok:
