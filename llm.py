@@ -1667,6 +1667,10 @@ def _norm_basic(raw):
     except (binascii.Error, ValueError, UnicodeDecodeError):
         pass
     if ":" in s:                                    # открытая пара id:secret — кодируем сами
+        _id, _, _sec = s.partition(":")
+        if len(_id) < 20 or len(_sec) < 20:         # UUID = 36 символов; короче — это не креды
+            return None, ("это не Client ID и Secret (в них по 36 символов, а тут %d и %d). "
+                          "Скопируй Authorization key целиком из кабинета SaluteSpeech" % (len(_id), len(_sec)))
         return base64.b64encode(s.encode()).decode(), None
     return None, ("похоже, это только Client ID без Secret — нужен Authorization key "
                   "(длинная base64-строка) или пара client_id:client_secret")
