@@ -62,6 +62,24 @@ class SecurityAnalyticsTests(unittest.TestCase):
         finally:
             bot.AIWA_WEBAPP_URL = old
 
+    def test_campaign_url_contains_only_safe_attribution(self):
+        old = bot.AIWA_WEBAPP_URL
+        bot.AIWA_WEBAPP_URL = "https://example.test/app"
+        try:
+            url = bot.campaign_webapp_url({"last_period": "2026-07-01"},
+                                          "daily_summary:2026-07-23", "today")
+            self.assertEqual(url, "https://example.test/app?campaign=daily_summary:2026-07-23&tab=today")
+            self.assertNotIn("2026-07-01", url)
+        finally:
+            bot.AIWA_WEBAPP_URL = old
+
+    def test_feedback_must_match_prompt_shown_to_same_user(self):
+        answer_id = "a1b2c3d4e5f60708"
+        bot.ev(101, "feedback_prompt", meta=f"{answer_id}|webapp")
+        self.assertTrue(bot._feedback_prompt_exists(101, answer_id))
+        self.assertFalse(bot._feedback_prompt_exists(202, answer_id))
+        self.assertFalse(bot._feedback_prompt_exists(101, "ffffffffffffffff"))
+
     def test_telegram_init_data_signature_and_ttl(self):
         self.assertEqual(bot._verify_init(signed_init_data(42)), 42)
         stale = signed_init_data(42, int(time.time()) - 90_000)
@@ -96,6 +114,21 @@ class SecurityAnalyticsTests(unittest.TestCase):
         a2.traction_ack(bot.DB, [batch[0]["event_id"]])
         a2.seed_traction_outbox(bot.DB)
         self.assertEqual(a2.traction_batch(bot.DB), [])
+
+    def test_feedback_push_and_safety_events_export_only_safe_dimensions(self):
+        cid = 123
+        bot.ev(cid, "feedback_prompt", meta="abcdef|webapp")
+        bot.ev(cid, "feedback", meta="helpful|abcdef|webapp")
+        bot.ev(cid, "safety", meta="escalation|abcdef|webapp")
+        bot.ev(cid, "broadcast", meta="sent|daily_summary:2026-07-23")
+
+        batch = a2.traction_batch(bot.DB)
+        by_name = {item["name"]: item["properties"] for item in batch}
+        self.assertEqual(by_name["answer_feedback_prompted"]["answer_id"], "abcdef")
+        self.assertEqual(by_name["answer_feedback_submitted"]["rating"], "helpful")
+        self.assertEqual(by_name["safety_guidance_shown"]["safety_level"], "escalation")
+        self.assertEqual(by_name["push_sent"]["campaign_type"], "daily_summary")
+        self.assertNotIn(str(cid), json.dumps(batch))
 
     def test_traction_payload_upgrade_is_requeued_once(self):
         conn = sqlite3.connect(bot.DB)
@@ -178,7 +211,8 @@ class SecurityAnalyticsTests(unittest.TestCase):
         try:
             with llm.call_context(user_key="u_test", request_id="r_test", purpose="final_answer"):
                 llm._capture_usage(usage, {"usage": {"prompt_tokens": 100, "completion_tokens": 25,
-                                                      "total_tokens": 125}}, "provider", "model", time.time())
+                                                      "total_tokens": 125, "cost": 0.012}},
+                                   "provider", "model", time.time(), cost_unit="usd")
         finally:
             llm.set_usage_sink(old_sink)
         self.assertEqual(sum(usage), 125)
@@ -186,6 +220,8 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(captured[0]["input_tokens"], 100)
         self.assertEqual(captured[0]["output_tokens"], 25)
         self.assertEqual(captured[0]["request_id"], "r_test")
+        self.assertEqual(captured[0]["reported_cost"], 0.012)
+        self.assertEqual(captured[0]["cost_unit"], "usd")
 
     def test_food_photo_uses_separate_openrouter_vision_model(self):
         old_key = llm._OPENROUTER_KEY

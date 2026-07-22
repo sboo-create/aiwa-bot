@@ -17,7 +17,7 @@ from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter, Forbi
 from aiohttp import web
 import requests
 import hmac as _hmac, hashlib as _hashlib
-from urllib.parse import parse_qsl as _pqsl, urlsplit as _urlsplit
+from urllib.parse import parse_qsl as _pqsl, urlsplit as _urlsplit, quote as _urlquote
 
 import cycle as C
 import llm as L
@@ -87,7 +87,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-22-v71-telegram-traction-hotfix"
+AIWA_VERSION = "2026-07-23-v72-feedback-push-analytics"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -116,6 +116,18 @@ def webapp_url(u):
     # access logs and referrers. The authenticated /api/data response already
     # provides everything the mini app needs.
     return AIWA_WEBAPP_URL
+def campaign_id(kind):
+    """Stable, non-sensitive daily campaign id for push attribution."""
+    kind = re.sub(r"[^a-z0-9_:-]", "", str(kind or "push").lower())[:40] or "push"
+    return f"{kind}:{dtoday().isoformat()}"
+def campaign_webapp_url(u, campaign=None, tab=None):
+    url = webapp_url(u) or AIWA_WEBAPP_URL
+    if not url: return None
+    params = []
+    if campaign: params.append("campaign=" + _urlquote(str(campaign)[:80], safe=":_-"))
+    if tab: params.append("tab=" + _urlquote(str(tab)[:20], safe="_-"))
+    if not params: return url
+    return url + ("&" if "?" in url else "?") + "&".join(params)
 def menu_kb_for(u, general=False):
     base = GENERAL_MENU_KB if general else MENU_KB
     rows = [list(r) for r in base.inline_keyboard]
@@ -893,7 +905,7 @@ async def enqueue_broadcast(cid, meta="queued"):
     if cid in BCAST_PENDING:
         return False
     BCAST_PENDING.add(cid)
-    ev(cid, "broadcast", meta=meta)
+    ev(cid, "broadcast", meta=f"queued|{campaign_id('daily_summary')}")
     if BCAST_Q is not None:
         await BCAST_Q.put(cid)
         return True
@@ -907,16 +919,20 @@ def sym_kb(selected):
     rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in SYMPTOMS]
     rows.append([InlineKeyboardButton("Свой симптом", callback_data="ci:custom")])
     rows.append([InlineKeyboardButton("Готово", callback_data="ci:done")]); return InlineKeyboardMarkup(rows)
-def sugg_kb(cid, items, app_user=None, app_label=None):
+def sugg_kb(cid, items, app_user=None, app_label=None, feedback_id=None, campaign=None):
     def _short(t): return t if len(t) <= 28 else t[:26].rstrip(" ,.-") + "…"
     rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
     if app_user and AIWA_WEBAPP_URL:
-        rows.append([InlineKeyboardButton(app_label or APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(app_user) or AIWA_WEBAPP_URL))])
+        rows.append([InlineKeyboardButton(app_label or APP_BUTTON_TEXT,
+                     web_app=WebAppInfo(url=campaign_webapp_url(app_user, campaign)))])
+    if feedback_id:
+        rows.append([B("👍 Полезно", f"fb:helpful:{feedback_id}"),
+                     B("👎 Не помогло", f"fb:unhelpful:{feedback_id}")])
     rows.append([B("Меню", "menu", KBS.PRIMARY)]); return InlineKeyboardMarkup(rows)
-def summary_kb(u=None):
+def summary_kb(u=None, campaign=None):
     rows = []
     if AIWA_WEBAPP_URL:
-        rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
+        rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=campaign_webapp_url(u, campaign)))])
     rows.append([B("Меню", "menu")])
     return InlineKeyboardMarkup(rows)
 def summary_suggestions(st):
@@ -947,9 +963,9 @@ def general_summary_suggestions(u):
     if mode == "irregular":
         return ["Почему цикл скачет?", "Что отмечать?"]
     return ["Что важно сегодня?", "Что отметить?"]
-def summary_sugg_kb(cid, u=None, st=None, app_label=None):
+def summary_sugg_kb(cid, u=None, st=None, app_label=None, campaign=None):
     items = summary_suggestions(st) if st is not None else general_summary_suggestions(u)
-    return sugg_kb(cid, items, app_user=u, app_label=app_label or APP_BUTTON_TEXT)
+    return sugg_kb(cid, items, app_user=u, app_label=app_label or APP_BUTTON_TEXT, campaign=campaign)
 def merge_summary_suggestions(u=None, st=None, extra=None):
     items = [x for x in (extra or []) if x]
     fallback = summary_suggestions(st) if st is not None else general_summary_suggestions(u)
@@ -1214,6 +1230,37 @@ async def _send_voice_reply(context, cid, text):
     except Exception as e:
         log.warning("voice reply: %s", e)
 
+def _safety_level(text):
+    """Classify only the presence of safety guidance; never store answer text."""
+    value = str(text or "").lower()
+    if re.search(r"\b(103|112)\b|вызов\w*\s+скор\w*|неотложн\w*\s+помощ", value):
+        return "emergency"
+    if re.search(r"обрат\w*\s+(?:за\s+)?(?:медицинск\w*\s+помощ\w*|к\s+врач\w*)|"
+                 r"связ\w*\s+с\s+врач\w*|запис\w*\s+к\s+врач\w*", value):
+        return "escalation"
+    if re.search(r"не\s+(?:является\s+)?диагноз\w*|не\s+став\w*\s+диагноз", value):
+        return "disclaimer"
+    return None
+
+def _instrument_feedback_prompt(cid, answer, channel="bot"):
+    answer_id = secrets.token_hex(8)
+    ev(cid, "feedback_prompt", meta=f"{answer_id}|{channel}")
+    level = _safety_level(answer)
+    if level:
+        ev(cid, "safety", meta=f"{level}|{answer_id}|{channel}")
+    return answer_id
+
+def _feedback_prompt_exists(cid, answer_id):
+    """Accept feedback only for an answer actually shown to this user."""
+    c = db()
+    try:
+        return c.execute(
+            "SELECT 1 FROM events WHERE chat_id=? AND action='feedback_prompt' AND meta LIKE ? LIMIT 1",
+            (cid, answer_id + "|%"),
+        ).fetchone() is not None
+    finally:
+        c.close()
+
 async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None):
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
@@ -1223,7 +1270,8 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
             for e in L.followups(st, basis_q, clean):
                 if e not in sugg and len(sugg) < 2: sugg.append(e)
         except Exception: pass
-    kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label)
+    answer_id = secrets.token_hex(8)
+    kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label, feedback_id=answer_id)
     quote_text = _clip_tg(quote) if quote else None
     first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
     parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
@@ -1234,11 +1282,15 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
             await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
         else:
             await context.bot.send_message(cid, part, reply_markup=(kb if last else None))
+    ev(cid, "feedback_prompt", meta=f"{answer_id}|bot")
+    level = _safety_level(clean)
+    if level:
+        ev(cid, "safety", meta=f"{level}|{answer_id}|bot")
     ev(cid, "tokens", sum(usage), meta="answer", calls=len(usage), usage=usage)
     if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
         await _send_voice_reply(context, cid, clean)
 
-async def push_general(context, cid):
+async def push_general(context, cid, campaign=None):
     u = row(cid); usage = []; _ds = dtoday().isoformat()
     _key = (cid, _ds, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
     body = _SUM_CACHE.get(_key)
@@ -1248,11 +1300,13 @@ async def push_general(context, cid):
     if not body:
         body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
     clean, extra = L.split_followups(body)
-    kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u, app_label=APP_BUTTON_TEXT)
+    kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u,
+                 app_label=APP_BUTTON_TEXT, campaign=campaign)
     await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
         reply_markup=kb, parse_mode="HTML")
     if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
     ev(cid, "goal", meta="summary")
+    if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
 
 async def send_general(context, cid, key):
     u = row(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
@@ -1374,9 +1428,9 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         upsert(cid, state="await_period_date")
         return await msg.reply_text("Напиши дату начала последних месячных, например 25.05.2026, или нажми кнопку. Потом даты можно редактировать в приложении.", reply_markup=PERIOD_KB)
 
-async def push_summary(context, cid, with_image=True):
+async def push_summary(context, cid, with_image=True, campaign=None):
     u0 = row(cid)
-    if u0 and not is_cycle(u0): return await push_general(context, cid)
+    if u0 and not is_cycle(u0): return await push_general(context, cid, campaign=campaign)
     u, st = status_of(cid)
     if not st: return
     if st["status"] != "normal": return await send_delay(context, cid, st)
@@ -1390,13 +1444,15 @@ async def push_summary(context, cid, with_image=True):
     if not body:
         body = "💛 Сводка на сегодня готова. Открой приложение, чтобы посмотреть календарь, симптомы, питание и нагрузку."
     clean, extra = L.split_followups(body)
-    kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u, app_label=APP_BUTTON_TEXT)
+    kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u,
+                 app_label=APP_BUTTON_TEXT, campaign=campaign)
     await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
         reply_markup=kb, parse_mode="HTML")
     if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
     ev(cid, "goal", meta="summary")
+    if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
 
-async def push_checkin(context, cid):
+async def push_checkin(context, cid, campaign=None):
     """После утренней сводки — быстрый чек-ин. Переиспользует существующий поток ci:* (энергия→настроение→симптомы)."""
     try:
         u = row(cid)
@@ -1405,7 +1461,7 @@ async def push_checkin(context, cid):
         await context.bot.send_message(cid,
             "Как ты сегодня? Отметь за 10 секунд — подстрою совет дня под твоё реальное состояние.\n\nКакая энергия?",
             reply_markup=en_kb("e"))
-        ev(cid, "broadcast", meta="checkin_push")
+        if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
     except Exception as e:
         log.warning("checkin push %s: %s", cid, e)
 
@@ -1581,18 +1637,18 @@ async def _proactive_pick_and_send(cid, slot, shadow, context):
         _pa_mark(cid, best["key"]); _pa_logrow(cid, best["key"], best["score"], 0, text)
         ev(cid, "proactive", meta="shadow:" + best["key"])
     else:
-        wu = webapp_url(u) or AIWA_WEBAPP_URL
-        wu = _pa_deeplink(wu, best["key"])
+        _campaign = campaign_id("proactive_" + best["key"])
+        wu = campaign_webapp_url(u, _campaign, _PA_TAB.get(best["key"]))
         rows = []
         _act = _PA_ACTION.get(best["key"])
         if _act:
-            rows.append([InlineKeyboardButton(_act[0], callback_data="pado:" + _act[1])])
+            rows.append([InlineKeyboardButton(_act[0], callback_data=f"pado:{_campaign}:{_act[1]}")])
         if wu:
             rows.append([InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=wu))])
         kb = InlineKeyboardMarkup(rows) if rows else None
         await context.bot.send_message(cid, text, reply_markup=kb)
         _pa_mark(cid, best["key"]); _pa_logrow(cid, best["key"], best["score"], 1, text)
-        ev(cid, "broadcast", meta="proactive:" + best["key"])
+        ev(cid, "broadcast", meta="sent|" + _campaign)
     return (best["key"], best["score"], text)
 
 async def proactive_job(context, slot):
@@ -1712,16 +1768,15 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     if BCAST_Q is not None:
         return await enqueue_broadcast(cid)    # в очередь, обработает воркер с паузами
     try:
-        await push_summary(context, cid); await push_partner(context, cid)
-        await push_checkin(context, cid)
-        ev(cid, "broadcast", meta="sent")
+        await push_summary(context, cid, campaign=campaign_id("daily_summary")); await push_partner(context, cid)
+        await push_checkin(context, cid, campaign=campaign_id("daily_checkin"))
     except Forbidden:
-        ev(cid, "broadcast", meta="blocked")
+        ev(cid, "broadcast", meta=f"blocked|{campaign_id('daily_summary')}")
         try:
             for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
         except Exception: pass
     except Exception as e:
-        ev(cid, "broadcast", meta="error")
+        ev(cid, "broadcast", meta=f"error|{campaign_id('daily_summary')}")
         raise
 
 async def broadcast_worker(app):
@@ -1731,18 +1786,17 @@ async def broadcast_worker(app):
         cid = await BCAST_Q.get()
         try:
             ctx = _BCtx(app)
-            await push_summary(ctx, cid)
+            await push_summary(ctx, cid, campaign=campaign_id("daily_summary"))
             await push_partner(ctx, cid)
-            await push_checkin(ctx, cid)
-            ev(cid, "broadcast", meta="sent")
+            await push_checkin(ctx, cid, campaign=campaign_id("daily_checkin"))
         except Forbidden:
             try:
-                ev(cid, "broadcast", meta="blocked")
+                ev(cid, "broadcast", meta=f"blocked|{campaign_id('daily_summary')}")
                 for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
             except Exception: pass
             log.info("broadcast %s: заблокирован пользователем, снял с рассылки", cid)
         except Exception as e:
-            try: ev(cid, "broadcast", meta="error")
+            try: ev(cid, "broadcast", meta=f"error|{campaign_id('daily_summary')}")
             except Exception: pass
             log.warning("broadcast %s: %s", cid, e)
         finally:
@@ -1776,19 +1830,21 @@ async def push_food_reminder(context, cid):
     u = row(cid)
     if not is_onboarded(u): return
     if meals_of(cid, dtoday().isoformat()): return   # уже отметила еду сегодня — не дёргаем
-    wu = webapp_url(u) or AIWA_WEBAPP_URL
+    campaign = campaign_id("food_reminder")
+    wu = campaign_webapp_url(u, campaign, "food")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🍎 Отметить еду", web_app=WebAppInfo(url=wu))]]) if wu else None
     await context.bot.send_message(cid, food_reminder_text(cid), reply_markup=kb)
-    ev(cid, "broadcast", meta="food_reminder_sent")
+    ev(cid, "broadcast", meta="sent|" + campaign)
 
 async def push_train_reminder(context, cid):
     u = row(cid)
     if not is_onboarded(u): return
     if workouts_of(cid, dtoday().isoformat()): return   # уже отметила тренировку — не дёргаем
-    wu = webapp_url(u) or AIWA_WEBAPP_URL
+    campaign = campaign_id("train_reminder")
+    wu = campaign_webapp_url(u, campaign, "train")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏋️ Отметить тренировку", web_app=WebAppInfo(url=wu))]]) if wu else None
     await context.bot.send_message(cid, train_reminder_text(cid), reply_markup=kb)
-    ev(cid, "broadcast", meta="train_reminder_sent")
+    ev(cid, "broadcast", meta="sent|" + campaign)
 
 async def train_worker(app):
     delay = float(os.environ.get("AIWA_TRAIN_DELAY", "0.3"))
@@ -1860,10 +1916,11 @@ async def phase_transition_job(context: ContextTypes.DEFAULT_TYPE):
             txt = PHASE_INTRO.get(phase)
             if not txt:
                 continue
-            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            campaign = campaign_id("phase_" + phase)
+            wu = campaign_webapp_url(u, campaign)
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=wu))]]) if wu else None
             await context.bot.send_message(cid, txt, reply_markup=kb)
-            ev(cid, "broadcast", meta="phase_push"); sent += 1
+            ev(cid, "broadcast", meta="sent|" + campaign); sent += 1
             await asyncio.sleep(delay)
         except Forbidden:
             pass
@@ -1900,11 +1957,12 @@ async def reactivation_job(context: ContextTypes.DEFAULT_TYPE):
                    "follicular": "Ты в фолликулярной фазе — энергии больше обычного.",
                    "ovulation": "У тебя овуляция — пик сил.",
                    "luteal": "Ты в лютеиновой фазе — самое время на спокойный режим и белок."}.get(phase, "")
-            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            campaign = campaign_id("reactivation")
+            wu = campaign_webapp_url(u, campaign)
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=wu))]]) if wu else None
             txt = "🌸 Давно не виделись. " + (tip + " " if tip else "") + "Загляни — я собрала твою сводку и рекомендации на сегодня."
             await context.bot.send_message(cid, txt, reply_markup=kb)
-            ev(cid, "broadcast", meta="reactivation_sent"); sent += 1
+            ev(cid, "broadcast", meta="sent|" + campaign); sent += 1
             await asyncio.sleep(delay)
         except Forbidden:
             pass
@@ -2494,17 +2552,18 @@ async def meno_update_cmd(update, context):
         return await update.message.reply_text("Эта команда доступна только администратору.")
     users = meno_users()
     sent = failed = 0
+    campaign = campaign_id("meno_update")
     for uid in users:
         u = row(uid)
         try:
             await context.bot.send_message(uid, html.escape(MENO_UPDATE_TEXT),
-                reply_markup=summary_sugg_kb(uid, u), parse_mode="HTML")
-            ev(uid, "broadcast", meta="meno_update_sent")
+                reply_markup=summary_sugg_kb(uid, u, campaign=campaign), parse_mode="HTML")
+            ev(uid, "broadcast", meta="sent|" + campaign)
             sent += 1
             await asyncio.sleep(0.25)
         except Exception as e:
             failed += 1
-            ev(uid, "broadcast", meta="meno_update_error")
+            ev(uid, "broadcast", meta="error|" + campaign)
             log.warning("meno update %s: %s", uid, e)
     await update.message.reply_text(f"Пуш про мено-экран отправлен.\n\nУшло: {sent}\nОшибок: {failed}")
 
@@ -2517,16 +2576,17 @@ async def _announce_capture(update, context, cid):
         return await msg.reply_text("Рассылка отменена.")
     await msg.reply_text("Рассылаю это сообщение всем пользователям. Пришлю отчёт, когда закончу.")
     sent = failed = 0
+    campaign = campaign_id("announcement")
     for uid in all_users():
         try:
             await context.bot.copy_message(chat_id=uid, from_chat_id=cid, message_id=msg.message_id,
-                                           reply_markup=summary_kb(row(uid)))
-            ev(uid, "broadcast", meta="announce_sent"); sent += 1
+                                           reply_markup=summary_kb(row(uid), campaign=campaign))
+            ev(uid, "broadcast", meta="sent|" + campaign); sent += 1
             await asyncio.sleep(0.25)
         except Forbidden:
-            failed += 1; ev(uid, "broadcast", meta="blocked")
+            failed += 1; ev(uid, "broadcast", meta="blocked|" + campaign)
         except Exception as e:
-            failed += 1; ev(uid, "broadcast", meta="announce_error"); log.warning("announce %s: %s", uid, e)
+            failed += 1; ev(uid, "broadcast", meta="error|" + campaign); log.warning("announce %s: %s", uid, e)
     await msg.reply_text(f"Готово. Ушло: {sent}, ошибок: {failed}.")
 
 async def announce_cmd(update, context):
@@ -2591,6 +2651,7 @@ async def on_photo(update, context):
         return await _announce_capture(update, context, cid)
     if not is_onboarded(u):
         return await update.message.reply_text("Сначала настрой Айву: /start.")
+    ev(cid, "flow_start", meta="food")
     await context.bot.send_chat_action(cid, "typing")
     try:
         ph = update.message.photo
@@ -2854,14 +2915,34 @@ async def handle_text(update, context, txt):
 
 # ---------- callbacks ----------
 async def on_cb(update, context):
-    q = update.callback_query; await q.answer()
+    q = update.callback_query
     if not q.message:  # у сообщений старше ~48ч Telegram не присылает message — без защиты тут AttributeError
+        await q.answer()
         return
     cid = q.message.chat.id; data = q.data
+    if data.startswith("fb:"):
+        parts = data.split(":", 2)
+        rating = parts[1] if len(parts) > 1 else ""
+        answer_id = re.sub(r"[^a-f0-9]", "", parts[2] if len(parts) > 2 else "")[:32]
+        if rating not in {"helpful", "unhelpful"} or not answer_id or not _feedback_prompt_exists(cid, answer_id):
+            return await q.answer("Не получилось сохранить оценку")
+        ev(cid, "feedback", meta=f"{rating}|{answer_id}|bot")
+        await q.answer("Спасибо, это помогает улучшать Айву 💛")
+        rows = []
+        for row_buttons in (getattr(q.message.reply_markup, "inline_keyboard", None) or []):
+            if any(str(getattr(button, "callback_data", "") or "").startswith("fb:") for button in row_buttons):
+                continue
+            rows.append(list(row_buttons))
+        await safe_edit(q, reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+        return
+    await q.answer()
     # Onboarding has several early returns, so record the tap before routing.
     ev(cid, "suggest" if data.startswith("q:") else "button", meta=data)
     if data.startswith("pado:"):
-        _intent = data.split(":", 1)[1]
+        _parts = data.split(":")
+        _intent = _parts[-1]
+        if len(_parts) >= 4:
+            ev(cid, "push_open", meta=":".join(_parts[1:-1]))
         _u = row(cid)
         if not is_onboarded(_u):
             return await q.message.reply_text("Сначала настрой Айву: /start.")
@@ -3256,6 +3337,9 @@ async def _api_data(request):
     u = row(cid)
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
     ev(cid, "button", meta="app_open")
+    campaign = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(body.get("campaign") or ""))[:80]
+    if campaign:
+        ev(cid, "push_open", meta=campaign)
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
@@ -3557,7 +3641,21 @@ async def _api_chat(request):
     msg, addressed = strip_aiwa_address(msg)
     if addressed and not msg:
         return _cors(web.json_response({"answer": "Я тут. Напиши вопрос про цикл, питание, нагрузку или самочувствие.", "suggestions": ["Когда овуляция?", "Что есть сегодня?"]}))
-    return _cors(web.json_response(await _chat_reply(cid, u, msg)))
+    reply = await _chat_reply(cid, u, msg)
+    answer_id = _instrument_feedback_prompt(cid, reply.get("answer"), "webapp")
+    reply["answer_id"] = answer_id
+    return _cors(web.json_response(reply))
+
+async def _api_feedback(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    rating = str(body.get("rating") or "")
+    answer_id = re.sub(r"[^a-f0-9]", "", str(body.get("answer_id") or ""))[:32]
+    if rating not in {"helpful", "unhelpful"} or not answer_id or not _feedback_prompt_exists(cid, answer_id):
+        return _cors(web.json_response({"error": "bad_feedback"}, status=400))
+    ev(cid, "feedback", meta=f"{rating}|{answer_id}|webapp")
+    return _cors(web.json_response({"ok": True}))
 
 def _agent_tools_spec():
     return [
@@ -3765,6 +3863,8 @@ async def _api_voice(request):
     msg, _addr = strip_aiwa_address(txt.strip())
     if not msg: msg = txt.strip()
     reply = await _chat_reply(cid, u, msg)
+    answer_id = _instrument_feedback_prompt(cid, reply.get("answer"), "webapp")
+    reply["answer_id"] = answer_id
     reply["transcript"] = txt.strip()
     return _cors(web.json_response(reply))
 
@@ -3799,6 +3899,7 @@ async def answer_diary(cid, usage=None):
 
 async def log_food_from_text(cid, u, text):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
+    ev(cid, "flow_start", meta="food")
     slot = slot_from_text(text)
     food = re.sub(r"(?i)^\s*(айва[,\s]*)?(добав\w*|запиш\w*|занес\w*|залогир\w*|логни|отмет\w*)\b", "", text)
     food = re.sub(r"(?i)\b(в\s+дневник|в\s+еду|в\s+приём|что\s+я\s+(съел\w*|поел\w*|ел\w*)|на\s+(завтрак|обед|ужин|перекус|полдник)|в\s+(завтрак|обед|ужин|перекус))\b", " ", food)
@@ -3834,6 +3935,7 @@ async def _api_food_photo(request):
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте: /start."}, status=403))
+    ev(cid, "flow_start", meta="food")
     raw, fn = _read_upload(data.get("photo"))
     if not raw:
         return _cors(web.json_response({"ok": False, "message": "Пустое фото."}))
@@ -3869,6 +3971,7 @@ async def _api_food_text(request):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте."}, status=403))
     txt = (body.get("text") or "").strip()
     if not txt: return _cors(web.json_response({"ok": False, "message": "Напиши, что съела."}))
+    ev(cid, "flow_start", meta="food")
     prof = profile_of(u); usage = []
     try:
         parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, txt, prof, usage)
@@ -3917,6 +4020,7 @@ async def _api_workout(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    ev(cid, "flow_start", meta="workout")
     items = []; groups = []
     for i in (body.get("items") or [])[:24]:
         nm = str(i.get("name") or "").strip()[:40]
@@ -4029,6 +4133,7 @@ async def _api_food_manual(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     if not is_onboarded(row(cid)): return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву."}, status=403))
+    ev(cid, "flow_start", meta="food")
     title = (body.get("title") or "").strip()[:80]
     kcal = int(_num(body.get("kcal")))
     if not title and not kcal:
@@ -4704,6 +4809,7 @@ def build_web():
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/today", _api_today)
     aio.router.add_post("/api/chat", _api_chat)
+    aio.router.add_post("/api/feedback", _api_feedback)
     aio.router.add_post("/api/voice", _api_voice)
     aio.router.add_post("/api/food_photo", _api_food_photo)
     aio.router.add_post("/api/food_text", _api_food_text)

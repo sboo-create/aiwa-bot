@@ -50,6 +50,18 @@ class StatsModuleTests(unittest.TestCase):
         self.add("done", "u1", "onboarding_completed", ts=now - 250)
         self.add("msg", "u1", "assistant_message_sent", ts=now - 200)
         self.add("answer", "u1", "assistant_response_received", ts=now - 190)
+        self.add("feedback-prompt", "u1", "answer_feedback_prompted", {"answer_id": "a1"}, now - 185)
+        self.add("feedback", "u1", "answer_feedback_submitted",
+                 {"answer_id": "a1", "rating": "helpful"}, now - 180)
+        self.add("safety", "u1", "safety_guidance_shown",
+                 {"answer_id": "a1", "safety_level": "escalation"}, now - 179)
+        self.add("push", "u1", "push_sent",
+                 {"campaign_id": "daily_summary:2026-07-23", "campaign_type": "daily_summary"}, now - 175)
+        self.add("push-open", "u1", "push_opened",
+                 {"campaign_id": "daily_summary:2026-07-23", "campaign_type": "daily_summary"}, now - 170)
+        self.add("push-action", "u1", "summary_opened", ts=now - 165)
+        self.add("food-start", "u1", "food_flow_started", ts=now - 160)
+        self.add("food-done", "u1", "meal_add_completed", ts=now - 150)
         self.add("call1", "u1", "ai_call", {"request_id": "r1", "provider": "a", "model": "m",
                  "status": "error", "retry_index": 0, "reported_cost": 99, "cost_unit": "TOK"}, now - 199)
         self.add("call2", "u1", "ai_call", {"request_id": "r1", "provider": "b", "model": "m",
@@ -74,6 +86,14 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(health["Time to value p50"]["value"], 110)
         self.assertEqual(health["Fallback requests"]["value"], 100.0)
         self.assertTrue(all(x.get("help") for x in data["primary"]))
+        self.assertEqual(data["answer_quality"]["helpful_rate"], 100.0)
+        self.assertEqual(data["answer_quality"]["feedback_response_rate"], 100.0)
+        self.assertEqual(data["answer_quality"]["safety"]["escalation"], 1)
+        self.assertEqual(data["push_funnel"]["sent"], 1)
+        self.assertEqual(data["push_funnel"]["opened"], 1)
+        self.assertEqual(data["push_funnel"]["acted"], 1)
+        food = next(x for x in data["feature_funnels"] if x["label"] == "Питание")
+        self.assertEqual((food["started"], food["completed"], food["rate"]), (1, 1, 100.0))
 
         month = self.module.compute_dashboard(30)
         self.assertEqual(month["data_quality"]["available_days"], 1)

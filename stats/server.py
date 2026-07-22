@@ -39,6 +39,8 @@ SAFE_PROPERTIES = {
     "output_tokens", "cached_tokens", "total_tokens", "reported_cost", "cost_unit",
     "estimated_cost_usd", "feature", "provenance", "confidence", "source_schema",
     "payload_version", "app_version", "migration_batch", "token_precision",
+    "answer_id", "rating", "safety_level", "campaign_id", "campaign_type",
+    "delivery_status",
 }
 NUMERIC_PROPERTIES = {
     "calls", "retry_index", "latency_ms", "input_tokens", "output_tokens",
@@ -51,7 +53,9 @@ ALIASES = {
 }
 SYSTEM_NAMES = {
     "ai_call", "ai_usage_recorded", "legacy_ai_usage", "user_deleted", "error",
-    "legacy_error", "legacy_tokens", "legacy_broadcast", "push_sent",
+    "legacy_error", "legacy_tokens", "legacy_broadcast", "push_sent", "push_queued", "push_shadowed",
+    "push_failed", "push_opened", "answer_feedback_prompted",
+    "answer_feedback_submitted", "safety_guidance_shown",
 }
 SUCCESS = {"success", "ok", "completed"}
 VALUE_NAMES = {
@@ -308,6 +312,94 @@ def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
                         "adoption": _percent(len(users), len(selected_ids))}
                        for name, users in feature_users.items()), key=lambda x: (-x["users"], x["name"]))
 
+    def _feature_funnel(label: str, start_names: set[str], done_names: set[str], help_text: str) -> dict[str, Any]:
+        started_at: dict[str, float] = {}
+        for item in selected:
+            if item["name"] in start_names:
+                started_at.setdefault(item["device_id"], item["ts"])
+        completed = 0
+        for user, start_ts in started_at.items():
+            if any(item["device_id"] == user and item["ts"] >= start_ts and item["name"] in done_names
+                   for item in selected):
+                completed += 1
+        return {"label": label, "started": len(started_at), "completed": completed,
+                "rate": _percent(completed, len(started_at)) if started_at else None, "help": help_text}
+
+    feature_funnels = [
+        _feature_funnel("Чат с AIWA", {"assistant_message_sent"},
+                        {"assistant_response_received", "answer_feedback_prompted"},
+                        "Из написавших AIWA: получили ответ. Считаются уникальные люди, а не сообщения."),
+        _feature_funnel("Ежедневный чек-ин", {"checkin_updated", "checkin_symptom_selected"},
+                        {"checkin_completed"},
+                        "Из начавших отмечать состояние: дошли до кнопки «Готово»."),
+        _feature_funnel("Питание", {"food_flow_started"}, {"meal_add_completed"},
+                        "Из начавших добавление еды: сохранили приём пищи. Событие старта собирается с новой версии."),
+        _feature_funnel("Нагрузка", {"workout_flow_started"}, {"workout_add_completed"},
+                        "Из начавших добавление тренировки: сохранили тренировку. Событие старта собирается с новой версии."),
+    ]
+
+    prompt_rows = [item for item in selected if item["name"] == "answer_feedback_prompted"]
+    prompt_ids = {str(item["properties"].get("answer_id") or item["event_id"]) for item in prompt_rows}
+    latest_feedback: dict[str, dict[str, Any]] = {}
+    for item in selected:
+        if item["name"] != "answer_feedback_submitted":
+            continue
+        answer_id = str(item["properties"].get("answer_id") or "")
+        if answer_id and answer_id in prompt_ids:
+            latest_feedback[answer_id] = item
+    helpful = sum(item["properties"].get("rating") == "helpful" for item in latest_feedback.values())
+    unhelpful = sum(item["properties"].get("rating") == "unhelpful" for item in latest_feedback.values())
+    rated = helpful + unhelpful
+    safety_counts = Counter(str(item["properties"].get("safety_level") or "unknown") for item in selected
+                            if item["name"] == "safety_guidance_shown")
+    answer_quality = {
+        "eligible_answers": len(prompt_ids), "rated_answers": rated,
+        "feedback_response_rate": _percent(rated, len(prompt_ids)) if prompt_ids else None,
+        "helpful": helpful, "unhelpful": unhelpful,
+        "helpful_rate": _percent(helpful, rated) if rated else None,
+        "safety": {"total": sum(safety_counts.values()), "disclaimer": safety_counts["disclaimer"],
+                   "escalation": safety_counts["escalation"], "emergency": safety_counts["emergency"]},
+    }
+
+    sent_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    opened_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    events_by_user: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in selected:
+        events_by_user[item["device_id"]].append(item)
+        campaign = str(item["properties"].get("campaign_id") or "")
+        if not campaign:
+            continue
+        key = (item["device_id"], campaign)
+        if item["name"] == "push_sent":
+            if key not in sent_by_key or item["ts"] < sent_by_key[key]["ts"]:
+                sent_by_key[key] = item
+        elif item["name"] == "push_opened":
+            opened_by_key[key].append(item)
+    push_campaigns: dict[str, Counter] = defaultdict(Counter)
+    push_opened = push_acted = 0
+    for key, sent_item in sent_by_key.items():
+        user, campaign = key; campaign_type = str(sent_item["properties"].get("campaign_type") or campaign.split(":", 1)[0])
+        push_campaigns[campaign_type]["sent"] += 1
+        opens = [item for item in opened_by_key.get(key, []) if sent_item["ts"] <= item["ts"] <= sent_item["ts"] + 86400]
+        if not opens:
+            continue
+        push_opened += 1; push_campaigns[campaign_type]["opened"] += 1
+        opened_at = min(item["ts"] for item in opens)
+        acted = any(item["name"] in VALUE_NAMES and opened_at <= item["ts"] <= opened_at + 86400
+                    for item in events_by_user[user])
+        if acted:
+            push_acted += 1; push_campaigns[campaign_type]["acted"] += 1
+    push_failed = sum(item["name"] == "push_failed" for item in selected)
+    push_funnel = {
+        "sent": len(sent_by_key), "opened": push_opened, "acted": push_acted, "failed": push_failed,
+        "open_rate": _percent(push_opened, len(sent_by_key)) if sent_by_key else None,
+        "action_rate": _percent(push_acted, len(sent_by_key)) if sent_by_key else None,
+        "campaigns": [{"name": name, "sent": values["sent"], "opened": values["opened"],
+                       "acted": values["acted"], "open_rate": _percent(values["opened"], values["sent"]),
+                       "action_rate": _percent(values["acted"], values["sent"])}
+                      for name, values in sorted(push_campaigns.items(), key=lambda pair: -pair[1]["sent"])],
+    }
+
     starts: dict[str, float] = {}
     for row in selected:
         if row["name"] == "onboarding_started": starts.setdefault(row["device_id"], row["ts"])
@@ -424,7 +516,9 @@ def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
                        "events_per_session": round(sum(session_events) / len(session_events), 1) if session_events else 0,
                        "features": features,
                        "pushes_sent": len(pushes), "checkins_completed": len(checkins)},
-        "funnel": funnel, "product_health": product_health, "retention": _retention(rows),
+        "funnel": funnel, "feature_funnels": feature_funnels,
+        "product_health": product_health, "answer_quality": answer_quality,
+        "push_funnel": push_funnel, "retention": _retention(rows),
         "series": _series(rows, window_days, now, available_start),
         "ai": {"attempts": len(ai_rows), "requests": len(requests), "untraced_attempts": len(ai_rows) - request_covered,
                "successful_requests": successful_requests,
