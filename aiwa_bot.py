@@ -83,7 +83,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-22-v65"
+AIWA_VERSION = "2026-07-22-v66"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2252,6 +2252,7 @@ async def voicetest_cmd(update, context):
     L_.append(("✅" if d["key"] else "❌") + " ключ SBER_SALUTE_AUTH_KEY " + ("задан" if d["key"] else "НЕ задан")
               + (" · %s символов · %s" % (d.get("key_len"), d.get("key_form")) if d.get("key_form") else ""))
     L_.append(("✅" if d["auth"] else "❌") + " авторизация в Сбере" + ("" if d["auth"] else ": " + (d.get("auth_err") or "неизвестно")))
+    if d.get("auth_form"): L_.append("   формат ключа: " + str(d["auth_form"]))
     if d.get("auth"):
         ok_tts = d.get("tts_bytes", 0) > 0
         L_.append(("✅" if ok_tts else "❌") + " синтез речи" + (" (%s байт)" % d["tts_bytes"] if ok_tts else ": " + (d.get("tts_err") or "пусто")))
