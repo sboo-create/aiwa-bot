@@ -83,7 +83,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-22-v68"
+AIWA_VERSION = "2026-07-22-v69"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -214,7 +214,8 @@ def db():
     c.execute("CREATE TABLE IF NOT EXISTS proactive_state(chat_id INTEGER, signal TEXT, last_ts TEXT, PRIMARY KEY(chat_id, signal))")
     c.execute("CREATE TABLE IF NOT EXISTS memory(chat_id INTEGER, mkey TEXT, mval TEXT, updated TEXT, PRIMARY KEY(chat_id, mkey))")
     c.execute("CREATE TABLE IF NOT EXISTS referrals(chat_id INTEGER PRIMARY KEY, source TEXT, ts TEXT)")
-    for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0"):
+    for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
+                "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
         try: c.execute(f"ALTER TABLE events ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     for col in ("end_date TEXT",):
@@ -258,9 +259,16 @@ def add_sugg(cid, q):
     c = db(); sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?)", (cid, q)).lastrowid; c.commit(); c.close(); return sid
 def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
-def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0):
-    c = db(); c.execute("INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n,calls) VALUES(?,?,?,?,?,?,?,?)",
-        (cid, datetime.now(TZ).isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls))); c.commit(); c.close()
+def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, usage=None):
+    """usage — список из llm._call; из него достаём вход/выход токенов и имя модели."""
+    tin = tout = 0; model = None
+    if usage:
+        try: tin, tout, model = L.usage_split(usage)
+        except Exception: pass
+    c = db(); c.execute(
+        "INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n,calls,tok_in,tok_out,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, datetime.now(TZ).isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls),
+         int(tin), int(tout), model or None)); c.commit(); c.close()
 
 def _num(x, d=0):
     try:
@@ -982,7 +990,7 @@ async def send_menu(context, cid, with_image=False):
         await context.bot.send_chat_action(cid, "upload_photo")
     prof = profile_of(u); target = profile_kcal(prof) if prof else None
     usage = []; mdata = await asyncio.to_thread(menu_cached, cid, st, prof, target, None, usage)
-    if usage: ev(cid, "tokens", sum(usage), meta="menu", calls=len(usage))
+    if usage: ev(cid, "tokens", sum(usage), meta="menu", calls=len(usage), usage=usage)
     if target:
         mdata["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
     note = st["content"]["food"]
@@ -1144,7 +1152,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
         await context.bot.send_message(cid, body, reply_markup=kb, parse_mode="HTML")
     else:
         await context.bot.send_message(cid, clean, reply_markup=kb)
-    ev(cid, "tokens", sum(usage), meta="answer", calls=len(usage))
+    ev(cid, "tokens", sum(usage), meta="answer", calls=len(usage), usage=usage)
     if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
         await _send_voice_reply(context, cid, clean)
 
@@ -1161,7 +1169,7 @@ async def push_general(context, cid):
     kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u, app_label=APP_BUTTON_TEXT)
     await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
         reply_markup=kb, parse_mode="HTML")
-    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage))
+    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
     ev(cid, "goal", meta="summary")
 
 async def send_general(context, cid, key):
@@ -1270,7 +1278,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         return await msg.reply_text(await log_food_from_text(cid, u, txt))
     if intent == "diary":
         await context.bot.send_chat_action(cid, "typing"); usage = []
-        t = await answer_diary(cid, usage); ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage))
+        t = await answer_diary(cid, usage); ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage), usage=usage)
         return await msg.reply_text(t)
     if intent == "food":
         if general: return await send_general(context, cid, "food")
@@ -1303,7 +1311,7 @@ async def push_summary(context, cid, with_image=True):
     kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u, app_label=APP_BUTTON_TEXT)
     await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
         reply_markup=kb, parse_mode="HTML")
-    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage))
+    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
     ev(cid, "goal", meta="summary")
 
 async def push_checkin(context, cid):
@@ -1483,7 +1491,7 @@ async def _proactive_pick_and_send(cid, slot, shadow, context):
     _u = []
     text = await asyncio.to_thread(L.proactive_compose, best["topic"], best.get("data", ""), _u)
     if _u:
-        ev(cid, "tokens", sum(_u), meta="proactive_compose", calls=len(_u))
+        ev(cid, "tokens", sum(_u), meta="proactive_compose", calls=len(_u), usage=_u)
     text = (text or "").strip()
     if not text:
         return None
@@ -1552,7 +1560,7 @@ async def _proactive_preview(compose_limit=4, scan_limit=500):
                 except Exception:
                     text = ""
                 composed += 1
-                if _u: ev(cid, "tokens", sum(_u), meta="proactive_preview", calls=len(_u))
+                if _u: ev(cid, "tokens", sum(_u), meta="proactive_preview", calls=len(_u), usage=_u)
             rows.append((cid, best["key"], best["score"], (text or "").strip()))
         except Exception as e:
             log.warning("proactive_preview: %s", e)
@@ -2508,7 +2516,7 @@ async def on_photo(update, context):
         parsed = await asyncio.to_thread(L.analyze_food, bytes(ba), "food.jpg", prof, usage)
     except Exception as e:
         log.warning("on_photo analyze %s: %s", cid, e); parsed = None
-    ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
+    ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage), usage=usage)
     rec = normalize_food(parsed, "photo") if parsed else None
     if not rec:
         _e = ""
@@ -2564,7 +2572,7 @@ async def handle_text(update, context, txt):
             ans = await asyncio.to_thread(L.partner_answer, wst, txt, last_hint(wid), usage=usage)
         else:
             return await update.message.reply_text(PARTNER_INFO)
-        ev(cid, "answered", tokens=sum(usage), meta="partner_q", ms=int((time.monotonic()-t0)*1000), n=len(txt), calls=len(usage))
+        ev(cid, "answered", tokens=sum(usage), meta="partner_q", ms=int((time.monotonic()-t0)*1000), n=len(txt), calls=len(usage), usage=usage)
         return await context.bot.send_message(cid, ans)
 
     if state == "await_date":
@@ -2572,7 +2580,7 @@ async def handle_text(update, context, txt):
         if not d:
             if is_question_like(txt):
                 _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
-                ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq))
+                ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: напиши дату начала последних месячных, например 25.05.2026. Потом даты можно редактировать в приложении.")
             return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
         upsert(cid, pending_date=d.isoformat(), state="await_len")
@@ -2586,7 +2594,7 @@ async def handle_text(update, context, txt):
         except (ValueError, AssertionError):
             if is_question_like(txt):
                 _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
-                ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq))
+                ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? Обычно это 21-35 дней, но у многих бывает иначе.")
             return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь точно, напиши примерное значение, потом его можно поправить. Если цикл нерегулярный, можно начать заново через /start и выбрать «Нет регулярного цикла».")
         finish_onboarding(context, cid, u["pending_date"], n)
@@ -2620,7 +2628,7 @@ async def handle_text(update, context, txt):
         except Exception:
             if is_question_like(txt):
                 _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
-                ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq))
+                ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await update.message.reply_text(fit_tg(L.split_followups(a)[0]) + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
         upsert(cid, height=int(cm), weight=kg, age=age, state="await_activity")
@@ -2751,7 +2759,7 @@ async def handle_text(update, context, txt):
     if is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
         _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
-        ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq))
+        ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
         await update.message.reply_text(fit_tg(L.split_followups(a)[0]))
     await need_onboard(update.message)
 
@@ -3315,7 +3323,7 @@ async def _api_meal(request):
         st = {"phase": "follicular", "phase_ru": "фолликулярная", "subphase": "общая", "day": ""}
     prof = profile_of(u); target = profile_kcal(prof) if prof else None; usage = []
     meal = await asyncio.to_thread(L.replace_meal, st, body.get("slot", 0), body.get("dish"), prof, target, usage)
-    ev(cid, "button", meta="web_meal_replace"); ev(cid, "tokens", sum(usage), meta="meal", calls=len(usage))
+    ev(cid, "button", meta="web_meal_replace", usage=usage); ev(cid, "tokens", sum(usage), meta="meal", calls=len(usage))
     return _cors(web.json_response({"meal": meal}))
 async def _api_partner(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -3373,29 +3381,29 @@ async def _api_section(request):
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
         if kind == "food":
             _usage = []; menu = await asyncio.to_thread(menu_cached, cid, None, prof, target, u.get("mode"), _usage)
-            if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage))
+            if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage), usage=_usage)
             if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
             txt = {"meno": "В менопаузе на первый план выходят кости, сон и сердце. Делай упор на белок (рыба, яйца, творог, курица) и кальций с витамином D (молочное, сардины, зелень), добавляй магний и B6 (гречка, орехи, тёмный шоколад) для сна и приливов, и омега-3 из жирной рыбы. Меньше быстрых сахаров, кофеина и алкоголя — они усиливают приливы.",
                    "preg": "В беременности важно закрыть потребность в фолиевой кислоте, железе, кальции и белке. Ешь зелень и бобовые (фолаты), красное мясо и гречку (железо), молочное (кальций), рыбу с омега-3 и белок в каждый приём. Избегай сырого мяса и рыбы, непастеризованного, печени в избытке, алкоголя и лишнего кофеина.",
                    "irregular": "Без чёткого цикла опирайся на стабильный сахар и сытость. Белок в каждый приём (яйца, рыба, птица, творог), сложные углеводы (гречка, рис, овощи), магний и железо — это держит энергию и настроение ровными в течение дня.",
                    "none": "Сбалансированно и просто: белок в каждый приём, овощи и зелень, сложные углеводы, полезные жиры (рыба, орехи) и достаточно воды. Меньше резких скачков сахара — стабильнее энергия и меньше тяги к перекусам."}.get(u.get("mode"), "Сбалансированное питание на день: белок, овощи, сложные углеводы и вода.")
             _su = []; sugg = await asyncio.to_thread(L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, None), _su)
-            if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su))
+            if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
             return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt, "suggestions": sugg}))
         _su = []; plan = await asyncio.to_thread(L.training_today, None, prof, _recent_workouts_text(cid), u.get("mode"), _su)
-        if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su))
+        if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
         return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
     if kind == "food":
         prof = profile_of(u); target = profile_kcal(prof) if prof else None
         _usage = []; menu = await asyncio.to_thread(menu_cached, cid, st, prof, target, None, _usage)
-        if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage))
+        if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage), usage=_usage)
         if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
         text = st["content"]["food"]
         _su = []; sugg = await asyncio.to_thread(L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, st), _su)
-        if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su))
+        if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
         return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text, "suggestions": sugg}))
     _su = []; plan = await asyncio.to_thread(L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
-    if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su))
+    if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
     return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
 async def _api_today(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -3405,7 +3413,7 @@ async def _api_today(request):
     _, st = status_of(cid); ev(cid, "button", meta="web_today")
     _su = []
     note = await asyncio.to_thread(L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), _su)
-    if _su: ev(cid, "tokens", sum(_su), meta="today_note", calls=len(_su))
+    if _su: ev(cid, "tokens", sum(_su), meta="today_note", calls=len(_su), usage=_su)
     return _cors(web.json_response(note))
 
 async def _api_chat(request):
@@ -3532,7 +3540,7 @@ async def _memory_learn(cid, umsg, amsg):
         for f in (facts or []):
             mem_set(cid, f.get("key"), f.get("value"))
         if usage:
-            ev(cid, "memory_learn", tokens=sum(usage), meta="memory_learn", calls=len(usage))
+            ev(cid, "memory_learn", tokens=sum(usage), meta="memory_learn", calls=len(usage), usage=usage)
     except Exception as e:
         log.warning("memory_learn: %s", e)
 
@@ -3561,7 +3569,7 @@ async def _chat_reply(cid, u, msg):
         return {"answer": _t, "suggestions": ["Открыть питание", "Совет по дневнику"]}
     if intent == "diary":
         usage = []; txt = await answer_diary(cid, usage)
-        if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage))
+        if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage), usage=usage)
         return {"answer": txt, "suggestions": ["Открыть питание", "Что купить?"]}
     _, st = status_of(cid); usage = []; prof = profile_of(u)
     ans = None
@@ -3590,7 +3598,7 @@ async def _chat_reply(cid, u, msg):
             for e in L.followups(st, msg, clean):
                 if e not in sugg and len(sugg) < 2: sugg.append(e)
         except Exception: pass
-    ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage))
+    ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage), usage=usage)
     try:
         asyncio.create_task(_memory_learn(cid, msg, clean))
     except Exception:
@@ -3667,7 +3675,7 @@ async def log_food_from_text(cid, u, text):
         food = text
     usage = []
     parsed = await asyncio.to_thread(L.analyze_food_text, food, profile_of(u), usage)
-    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage))
+    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage)
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
         return "Не поняла, что добавить. Напиши, например «добавь на завтрак рисовую кашу»."
@@ -3704,7 +3712,7 @@ async def _api_food_photo(request):
         parsed = await asyncio.to_thread(L.analyze_food, raw, fn, prof, usage)
     except Exception as e:
         log.warning("food_photo analyze %s: %s", cid, e); parsed = None
-    ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage))
+    ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage), usage=usage)
     rec = normalize_food(parsed, "photo") if parsed else None
     if not rec:
         _e = ""
@@ -3734,7 +3742,7 @@ async def _api_food_text(request):
         parsed = await asyncio.to_thread(L.analyze_food_text, txt, prof, usage)
     except Exception as e:
         log.warning("food_text analyze %s: %s", cid, e); parsed = None
-    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage))
+    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage)
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
         return _cors(web.json_response({"ok": False, "message": "Не поняла блюдо. Уточни, например «200 г творога и банан»."}))
@@ -3816,7 +3824,7 @@ async def _api_workout(request):
         workout_add(cid, wk, d=d_iso)
     except Exception as e:
         return _cors(web.json_response({"error": "save", "text": "Сбой сохранения: " + str(e)}, status=500))
-    if usage: ev(cid, "tokens", sum(usage), meta="workout", calls=len(usage))
+    if usage: ev(cid, "tokens", sum(usage), meta="workout", calls=len(usage), usage=usage)
     ev(cid, "goal", meta="workout"); ev(cid, "manual", meta="workout")
     return _cors(web.json_response({"ok": True, "review": review, "calories": kcal, "muscles": muscles,
         "week": train_week(cid), "today": workouts_of(cid)}))
@@ -3908,7 +3916,7 @@ async def _api_diary_reco(request):
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
     usage = []; text = await answer_diary(cid, usage)
-    if usage: ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage))
+    if usage: ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage), usage=usage)
     return _cors(web.json_response({"ok": True, "text": text}))
 
 async def _api_mode(request):
@@ -4071,7 +4079,7 @@ def analytics_data(days=7, frm=None, to=None):
         except Exception: return today
     c = db()
     users = c.execute("SELECT chat_id, created, mode FROM users").fetchall()
-    evs = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, calls FROM events WHERE ts>=? AND ts<=?", (since_ts, until_ts)).fetchall()
+    evs = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, calls, tok_in, tok_out, model FROM events WHERE ts>=? AND ts<=?", (since_ts, until_ts)).fetchall()
     partners = c.execute("SELECT partner_id, woman_id FROM partners").fetchall()
     wmin = datetime.combine(until - timedelta(days=120), dtime.min).isoformat()
     wide = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=? AND ts<=?", (wmin, until_ts)).fetchall()
@@ -4097,12 +4105,20 @@ def analytics_data(days=7, frm=None, to=None):
     active_by_day = defaultdict(set); events_by_day = Counter(); tool_by_day = Counter()
     ev_src = Counter(); actions = Counter(); tool_meta = Counter()
     answered = fallback = errors = tokens = tool_total = ev_total = 0
+    tok_in = tok_out = 0; by_model = {}
     lat = []; sess = defaultdict(list); modeseg = defaultdict(set); mode_active_day = defaultdict(lambda: defaultdict(set))
     bcast = Counter(); ans_by_day = Counter(); err_by_day = Counter(); tool_src = Counter()
     push_days = defaultdict(set); act_days = defaultdict(set); new_by_day = Counter(); gper = defaultdict(set)
     feat_users = defaultdict(set); feat_events = Counter()
-    for cid, ts, action, tok, meta, ms, calls in evs:
+    for cid, ts, action, tok, meta, ms, calls, t_in, t_out, mdl in evs:
         d = dparse(ts); iso = d.isoformat(); tokens += (tok or 0)
+        tok_in += (t_in or 0); tok_out += (t_out or 0)
+        if (tok or 0) or (t_in or 0):
+            mk = mdl or "(не указана)"
+            mstat = by_model.setdefault(mk, {"model": mk, "tokens": 0, "tok_in": 0, "tok_out": 0, "calls": 0, "ms": 0, "n": 0})
+            mstat["tokens"] += (tok or 0); mstat["tok_in"] += (t_in or 0); mstat["tok_out"] += (t_out or 0)
+            mstat["calls"] += (calls or 0)
+            if ms: mstat["ms"] += ms; mstat["n"] += 1
         if calls:
             tool_total += calls; tool_by_day[iso] += calls; tool_meta[meta or action] += calls; tool_src[_tc_src(meta or action)] += calls
         if action == "broadcast":
@@ -4192,6 +4208,8 @@ def analytics_data(days=7, frm=None, to=None):
         seg.append({"mode": m, "users": sum(1 for c2, _, mo in users if (mo or "cycle") == m),
                     "active": len(modeseg[m]), "avg_dau": round(act / span, 1) if span else 0})
     PRICE = float(os.environ.get("AIWA_TOKEN_PRICE_USD", "0.5"))
+    PRICE_IN = float(os.environ.get("AIWA_PRICE_IN_USD", os.environ.get("AIWA_TOKEN_PRICE_USD", "0.5")))
+    PRICE_OUT = float(os.environ.get("AIWA_PRICE_OUT_USD", "1.5"))
     series = []; d = since
     while d <= until:
         iso = d.isoformat()
@@ -4240,7 +4258,11 @@ def analytics_data(days=7, frm=None, to=None):
             "fallback_rate": round(fallback / ans_tot * 100) if ans_tot else 0,
             "error_rate": round(errors / ans_tot * 100) if ans_tot else 0,
             "p50": pct(lat, 0.5), "p95": pct(lat, 0.95),
-            "tokens": tokens, "cost_usd": round(tokens / 1e6 * PRICE, 2)},
+            "tokens": tokens, "tokens_in": tok_in, "tokens_out": tok_out,
+            "cost_usd": round(tokens / 1e6 * PRICE, 2),
+            "cost_split_usd": round(tok_in / 1e6 * PRICE_IN + tok_out / 1e6 * PRICE_OUT, 2) if (tok_in or tok_out) else None},
+        "models": sorted([dict(v, avg_ms=(round(v["ms"] / v["n"]) if v["n"] else 0)) for v in by_model.values()],
+                         key=lambda x: -x["tokens"]),
         "toolcalls_by_source": {"app": tool_src.get("app", 0), "chat": tool_src.get("chat", 0), "auto": tool_src.get("auto", 0),
                                 "stt": tool_src.get("stt", 0), "other": tool_src.get("other", 0)},
         "growth": {
@@ -4328,7 +4350,10 @@ var DEF={
  lat:"Латентность ответа модели: p50 (медиана) и p95 (почти худшее) по времени ответа.",
  push:"Конверсия пуш→открытие = доля отправленных пушей, после которых пользователь сделал действие в тот же день.",
  tok:"Токены модели за период и оценка стоимости по цене за 1M токенов.",
- grow:"WoW = рост относительно предыдущего периода такой же длины."
+ tokin:"Токены на входе — системный промпт, контекст цикла, история диалога и память. Обычно дороже всего по объёму.",
+ tokout:"Токены на выходе — то, что модель написала в ответ. Тарифицируются дороже входных.",
+ costsplit:"Стоимость с раздельными ценами: AIWA_PRICE_IN_USD за миллион входных и AIWA_PRICE_OUT_USD за миллион выходных.",
+ grow:"WoW = рост относительно предыдущего периода такой же длины." 
 };
 function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function ic(d){return d?"<span class='ic' data-def=\""+esc(d)+"\">i</span>":"";}
@@ -4400,7 +4425,10 @@ function render(){
   v.innerHTML=h;
  } else {
   var qd=D.quality,h='';
-  h+="<div class='grid'>"+card('Успешность ответов',qd.success_rate+'%',qd.answered+' ответов',DEF.succ)+card('Фолбэки',qd.fallback,qd.fallback_rate+'% от попыток',null)+card('Ошибки',qd.errors,qd.error_rate+'% от попыток',null)+card('Латентность',qd.p50+' / '+qd.p95+' мс','p50 / p95',DEF.lat)+card('Токены',qd.tokens,'≈ $'+qd.cost_usd,DEF.tok)+"</div>";
+  h+="<div class='grid'>"+card('Успешность ответов',qd.success_rate+'%',qd.answered+' ответов',DEF.succ)+card('Фолбэки',qd.fallback,qd.fallback_rate+'% от попыток',null)+card('Ошибки',qd.errors,qd.error_rate+'% от попыток',null)+card('Латентность',qd.p50+' / '+qd.p95+' мс','p50 / p95',DEF.lat)+"</div>";
+  h+="<div class='grid'>"+card('Токены всего',qd.tokens,'≈ $'+qd.cost_usd,DEF.tok)+card('Вход (промпты)',qd.tokens_in||'—',(qd.tokens?Math.round((qd.tokens_in||0)/qd.tokens*100)+'% от всего':''),DEF.tokin)+card('Выход (ответы)',qd.tokens_out||'—',(qd.tokens?Math.round((qd.tokens_out||0)/qd.tokens*100)+'% от всего':''),DEF.tokout)+card('Стоимость по факту',(qd.cost_split_usd!=null?('$'+qd.cost_split_usd):'—'),'вход и выход по своим ценам',DEF.costsplit)+"</div>";
+  h+="<div class='sec-h'>По моделям"+ic('Расход и скорость в разрезе моделей. Появляется после перехода на провайдера, который сообщает имя модели — так видно, что реально изменил переезд.')+"</div>";
+  h+=tbl(['Модель','Токенов','Вход','Выход','Вызовов','Ср. время'],(D.models||[]).map(function(m){return [esc(m.model),m.tokens,m.tok_in,m.tok_out,m.calls,(m.avg_ms?m.avg_ms+' мс':'—')];}));
   h+=chartCard('cQ','Ответы и ошибки по дням',DEF.succ);
   v.innerHTML=h;mkLine('cQ',[{key:'answered',label:'Ответы',color:C.ans},{key:'errors',label:'Ошибки',color:C.err}]);
  }

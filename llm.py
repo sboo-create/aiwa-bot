@@ -10,6 +10,33 @@ try:
 except Exception:
     pass
 
+class Tok(int):
+    """Число токенов, которое дополнительно помнит вход/выход и модель.
+    Наследуемся от int, чтобы sum(usage) и len(usage) в старом коде работали как раньше."""
+    def __new__(cls, total, pin=0, pout=0, model=""):
+        o = int.__new__(cls, int(total or 0))
+        o.pin, o.pout, o.model = int(pin or 0), int(pout or 0), str(model or "")
+        return o
+
+def _mk_tok(data, model=""):
+    """Достаёт usage из ответа провайдера в OpenAI-формате."""
+    u = (data or {}).get("usage") or {}
+    pin = u.get("prompt_tokens") or u.get("input_tokens") or 0
+    pout = u.get("completion_tokens") or u.get("output_tokens") or 0
+    total = u.get("total_tokens") or (int(pin or 0) + int(pout or 0))
+    return Tok(total, pin, pout, (data or {}).get("model") or model)
+
+def usage_split(usage):
+    """(вход, выход, модель) по списку usage — для записи в аналитику."""
+    us = usage or []
+    pin = sum(getattr(x, "pin", 0) for x in us)
+    pout = sum(getattr(x, "pout", 0) for x in us)
+    model = ""
+    for x in us:
+        m = getattr(x, "model", "")
+        if m: model = m; break
+    return pin, pout, model
+
 PROVIDER = os.environ.get("AIWA_PROVIDER", "litellm").lower()
 GIGA_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat-2")
 GIGA_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
@@ -69,7 +96,7 @@ def _call_giga(messages, max_tokens, temperature, usage, attempts=4):
                 _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             r.raise_for_status(); data = r.json()
             if usage is not None:
-                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+                usage.append(_mk_tok(data))
             txt = (data["choices"][0]["message"]["content"] or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
             return txt or None
@@ -232,7 +259,7 @@ def _call_gigastand(messages, max_tokens, temperature, usage, attempts=3):
                 return None
             data = r.json()
             if usage is not None:
-                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+                usage.append(_mk_tok(data))
             txt = _response_text(data)
             txt = (txt or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
@@ -248,7 +275,7 @@ SYSTEM = (
     "Ты — AIWA, ИИ-ассистент женского здоровья по циклу. Пиши конкретно и тепло, на русском, без воды и без AI-флёра. "
     "Опирайся на физиологию цикла и рекомендации гинекологов и эндокринологов. "
     "Твоё имя - Айва. Если пользовательница начинает сообщение с «Айва», воспринимай это как обращение к тебе, а не как просьбу рассказать о продукте. "
-    "Если спрашивают, на чём ты работаешь, какая модель тебя питает, отвечай, что ты работаешь на GigaChat. "
+    "Если спрашивают, на чём ты работаешь и какая модель тебя питает, не называй конкретного вендора: скажи, что ты ИИ-ассистент Айва и работаешь на большой языковой модели. "
     "Ты сама ведёшь календарь цикла и отмечаешь месячные прямо в этом боте (кнопка Отметить месячные или команда /period). НИКОГДА не советуй пользователю сторонние приложения, календари или бумажные дневники для отслеживания цикла, всё это делается здесь, у тебя. "
     "ОЧЕНЬ ВАЖНО: ты НЕ можешь сама вносить, изменять или удалять данные (даты месячных, длину цикла, профиль, время рассылки, отметки) через чат, у тебя нет такой возможности. Никогда не пиши, что ты «добавила», «внесла», «изменила», «удалила» или «отметила» что-то. Если просят это сделать, честно объясни, ГДЕ это сделать: отметить месячные — кнопка «Отметить месячные» в меню или тап по дате в календаре приложения; изменить рост/вес/возраст — команда /profile; добавить историю циклов — «Изменить данные» → «История циклов». "
     "Команды бота, существуют только эти: /menu, /today, /checkin, /period, /calendar, /report, /partner, /unlink, /addcycles, /profile, /app, /time, /about, /id, /stop. Никогда не выдумывай других команд (например, нет команды /settings). Рост, вес и возраст меняются командой /profile. "
@@ -437,7 +464,7 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
                 return None
             data = r.json()
             if usage is not None:
-                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+                usage.append(_mk_tok(data))
             txt = _response_text(data)
             txt = (txt or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
@@ -484,7 +511,7 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
             return None
         data = r.json()
         if usage is not None:
-            usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+            usage.append(_mk_tok(data))
         msg = (data.get("choices") or [{}])[0].get("message") or {}
         content = msg.get("content")
         if isinstance(content, str):
@@ -1513,7 +1540,7 @@ def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=No
                 return None
             data = r.json()
             if usage is not None:
-                usage.append(int(data.get("usage", {}).get("total_tokens", 0)))
+                usage.append(_mk_tok(data))
             txt = (data["choices"][0]["message"]["content"] or "").strip()
             return re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip() or None
         except Exception as e:
@@ -1580,13 +1607,21 @@ def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
         "Если это готовое блюдо — определи, что это, и оцени вес порции на глаз. Посчитай калории и БЖУ. " + _FOOD_FORMAT)
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "jpg").lower()
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
-    # 1) через рабочий провайдер (тот же канал, что и текст)
+    # 1) через рабочий провайдер (тот же канал, что и текст).
+    # Текстовая модель может не уметь картинки (deepseek и т.п.) — тогда берём LITELLM_VISION_MODEL.
     try:
         b64 = base64.b64encode(image_bytes).decode()
         mm = [{"role": "user", "content": [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}]
-        out = _call(mm, max_tokens=500, temperature=0.2, usage=usage)
+        out = None
+        vmodel = os.environ.get("LITELLM_VISION_MODEL")
+        if vmodel:
+            for cfg in _proxy_configs():
+                out = _call_proxy_one(dict(cfg, model=vmodel), mm, 500, 0.2, usage, attempts=2)
+                if out: break
+        if not out:
+            out = _call(mm, max_tokens=500, temperature=0.2, usage=usage)
         try: print("FOOD provider vision raw:", repr(out)[:300])
         except Exception: pass
         rec = _parse_food(out)
