@@ -67,6 +67,13 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(data["ai"]["cost_usd"], .002)
         self.assertEqual(data["data_quality"]["mode"], "mixed")
         self.assertEqual(data["data_quality"]["reconstructed_events"], 1)
+        self.assertEqual([x["value"] for x in data["funnel"]], [1, 1, 1, 1])
+        self.assertIn("Proxy ценности", data["funnel"][3]["help"])
+        health = {x["label"]: x for x in data["product_health"]}
+        self.assertEqual(health["Activation proxy"]["value"], 100.0)
+        self.assertEqual(health["Time to value p50"]["value"], 110)
+        self.assertEqual(health["Fallback requests"]["value"], 100.0)
+        self.assertTrue(all(x.get("help") for x in data["primary"]))
 
         month = self.module.compute_dashboard(30)
         self.assertEqual(month["data_quality"]["available_days"], 1)

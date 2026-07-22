@@ -58,6 +58,9 @@ VALUE_NAMES = {
     "assistant_response_received", "checkin_completed", "meal_add_completed",
     "workout_add_completed", "summary_opened", "feature_value_completed",
 }
+ENGAGEMENT_NAMES = VALUE_NAMES | {
+    "assistant_message_sent", "app_opened", "screen_viewed", "checkin_updated",
+}
 
 app = FastAPI()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -308,17 +311,59 @@ def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
     starts: dict[str, float] = {}
     for row in selected:
         if row["name"] == "onboarding_started": starts.setdefault(row["device_id"], row["ts"])
-    completed = messaged = valued = 0
+    completed = engaged = valued = 0; time_to_value: list[float] = []
     for user, started in starts.items():
         after = [r for r in rows if r["device_id"] == user and r["ts"] >= started]
-        completed += any(r["name"] == "onboarding_completed" for r in after)
-        messaged += any(r["name"] in {"assistant_message_sent", "assistant_response_received"} for r in after)
-        valued += any(r["name"] in VALUE_NAMES for r in after)
+        completion_times = [r["ts"] for r in after if r["name"] == "onboarding_completed"]
+        if not completion_times:
+            continue
+        completed += 1; completion = min(completion_times)
+        engaged_rows = [r for r in after if r["ts"] >= completion and r["name"] in ENGAGEMENT_NAMES]
+        value_rows = [r for r in after if r["ts"] >= completion and r["name"] in VALUE_NAMES]
+        if engaged_rows: engaged += 1
+        if value_rows:
+            valued += 1; time_to_value.append(max(0, min(r["ts"] for r in value_rows) - started))
     funnel = [
-        {"label": "Начали онбординг", "value": len(starts), "rate": 100.0 if starts else 0.0},
-        {"label": "Завершили", "value": completed, "rate": _percent(completed, len(starts))},
-        {"label": "Поговорили с AIWA", "value": messaged, "rate": _percent(messaged, len(starts))},
-        {"label": "Получили ценность", "value": valued, "rate": _percent(valued, len(starts))},
+        {"label": "Начали онбординг", "value": len(starts), "rate": 100.0 if starts else 0.0,
+         "help": "Уникальные люди, у которых событие начала онбординга попало в выбранный период."},
+        {"label": "Завершили онбординг", "value": completed, "rate": _percent(completed, len(starts)),
+         "help": "Из начавших онбординг: дошли до финального шага настройки профиля."},
+        {"label": "Сделали первое действие", "value": engaged, "rate": _percent(engaged, len(starts)),
+         "help": "После завершения онбординга открыли mini app, написали AIWA или сделали запись в продукте."},
+        {"label": "Сделали ключевое действие", "value": valued, "rate": _percent(valued, len(starts)),
+         "help": "Proxy ценности, а не оценка ощущений пользователя: получен ответ AIWA, завершён чек-ин, добавлены еда/тренировка или открыта сводка."},
+    ]
+
+    active_days_by_user: dict[str, set[str]] = defaultdict(set)
+    feature_set_by_user: dict[str, set[str]] = defaultdict(set)
+    for row in active_selected:
+        active_days_by_user[row["device_id"]].add(
+            datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat())
+        feature = _feature(row)
+        if feature: feature_set_by_user[row["device_id"]].add(feature)
+    returning_users = sum(len(days_set) >= 2 for days_set in active_days_by_user.values())
+    multi_feature_users = sum(len(feature_set) >= 2 for feature_set in feature_set_by_user.values())
+    checkin_users = {r["device_id"] for r in checkins}
+    product_health = [
+        {"label": "Activation proxy", "value": _percent(valued, len(starts)) if starts else None,
+         "unit": "%", "note": f"{valued} из {len(starts)} начавших",
+         "help": "Доля начавших онбординг, которые затем сделали хотя бы одно ключевое действие. Это proxy, пока нет пользовательской оценки пользы."},
+        {"label": "Time to value p50", "value": _pct(time_to_value, .5) if time_to_value else None,
+         "unit": "duration", "note": "от старта онбординга",
+         "help": "Медианное время от начала онбординга до первого ключевого действия. Считается только для активированных пользователей."},
+        {"label": "Returning users", "value": (_percent(returning_users, len(selected_ids))
+                                                   if available_days >= 2 and selected_ids else None),
+         "unit": "%", "note": f"{returning_users} активны в 2+ дня",
+         "help": "Доля активных пользователей, которые были активны минимум в два разных календарных дня выбранного периода."},
+        {"label": "Multi-feature users", "value": _percent(multi_feature_users, len(selected_ids)) if selected_ids else None,
+         "unit": "%", "note": f"{multi_feature_users} используют 2+ функции",
+         "help": "Доля активных пользователей, использовавших минимум две продуктовые зоны: чат, чек-ин, питание, нагрузка, статистика или mini app."},
+        {"label": "Check-in adoption", "value": _percent(len(checkin_users), len(selected_ids)) if selected_ids else None,
+         "unit": "%", "note": f"{len(checkin_users)} пользователей",
+         "help": "Доля активных пользователей, завершивших хотя бы один ежедневный чек-ин в выбранном периоде."},
+        {"label": "Fallback requests", "value": _percent(fallback_requests, len(requests)) if requests else None,
+         "unit": "%", "note": f"{fallback_requests} из {len(requests)} запросов",
+         "help": "Доля AI-запросов, где понадобился retry или переключение провайдера. Чем ниже, тем стабильнее основной маршрут."},
     ]
 
     observed = [r for r in rows if r["provenance"] == "observed"]
@@ -349,13 +394,19 @@ def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
     }
     label = "24h" if abs(window_days - 1) < 0.01 else f"{window_days:g}d"
     primary = [
-        {"label": "Ever used", "value": len(ever_ids), "note": "уникальные пользователи · всё время"},
-        {"label": "MAU", "value": len(mau_ids), "note": "активные за последние 30 дней"},
+        {"label": "Ever used", "value": len(ever_ids), "note": "уникальные пользователи · всё время",
+         "help": "Уникальные псевдонимные пользователи, у которых было хотя бы одно продуктовое действие за всю доступную историю."},
+        {"label": "MAU", "value": len(mau_ids), "note": "активные за последние 30 дней",
+         "help": "Уникальные пользователи с продуктовой активностью за последние 30 суток. Системные AI-попытки и push-отправки не считаются активностью."},
         {"label": "Avg DAU", "value": round(avg_dau, 1),
-         "note": f"среднее за {available_days} дн. с данными · окно {label}"},
-        {"label": "Daily sessions / user", "value": per_active_day(sessions), "note": "сессии на активного пользователя в день"},
-        {"label": "Daily messages / user", "value": per_active_day(messages), "note": "сообщения пользователя в день"},
-        {"label": "Daily AI calls / user", "value": per_active_day(len(ai_rows)), "note": "все попытки модели, включая retry"},
+         "note": f"среднее за {available_days} дн. с данными · окно {label}",
+         "help": "Среднее число уникальных активных пользователей в день. Дни до начала сбора не входят в знаменатель."},
+        {"label": "Daily sessions / user", "value": per_active_day(sessions), "note": "сессии на активного пользователя в день",
+         "help": "Среднее число сессий на активного пользователя-день. Новая сессия начинается после 30 минут без продуктовых событий."},
+        {"label": "Daily messages / user", "value": per_active_day(messages), "note": "сообщения пользователя в день",
+         "help": "Среднее число сообщений пользователя AIWA на активного пользователя-день. Ответы AIWA сюда не входят."},
+        {"label": "Daily AI calls / user", "value": per_active_day(len(ai_rows)), "note": "все попытки модели, включая retry",
+         "help": "Среднее число технических обращений к AI-провайдерам на активного пользователя-день. Один запрос может создать несколько попыток из-за retry/fallback."},
     ]
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "window_days": window_days,
@@ -373,7 +424,7 @@ def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
                        "events_per_session": round(sum(session_events) / len(session_events), 1) if session_events else 0,
                        "features": features,
                        "pushes_sent": len(pushes), "checkins_completed": len(checkins)},
-        "funnel": funnel, "retention": _retention(rows),
+        "funnel": funnel, "product_health": product_health, "retention": _retention(rows),
         "series": _series(rows, window_days, now, available_start),
         "ai": {"attempts": len(ai_rows), "requests": len(requests), "untraced_attempts": len(ai_rows) - request_covered,
                "successful_requests": successful_requests,
