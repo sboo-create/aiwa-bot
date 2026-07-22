@@ -12,6 +12,28 @@ try:
 except Exception:
     pass
 
+class Tok(int):
+    """Token total with the legacy input/output/model attributes attached."""
+    def __new__(cls, total, pin=0, pout=0, model=""):
+        obj = int.__new__(cls, int(total or 0))
+        obj.pin, obj.pout, obj.model = int(pin or 0), int(pout or 0), str(model or "")
+        return obj
+
+def _mk_tok(data, model=""):
+    raw = (data or {}).get("usage") or {}
+    inp = raw.get("prompt_tokens") or raw.get("input_tokens") or 0
+    out = raw.get("completion_tokens") or raw.get("output_tokens") or 0
+    total = raw.get("total_tokens") or (int(inp or 0) + int(out or 0))
+    return Tok(total, inp, out, (data or {}).get("model") or model)
+
+def usage_split(usage):
+    """Return input, output and first reported model for the legacy dashboard."""
+    values = usage or []
+    inp = sum(getattr(item, "pin", 0) for item in values)
+    out = sum(getattr(item, "pout", 0) for item in values)
+    model = next((getattr(item, "model", "") for item in values if getattr(item, "model", "")), "")
+    return inp, out, model
+
 _USAGE_SINK = None
 _CALL_CONTEXT = contextvars.ContextVar("aiwa_llm_call_context", default={})
 
@@ -41,7 +63,7 @@ def _capture_usage(usage_list, data, provider, model, started, status="success",
     try: reported_cost = float(reported_cost) if reported_cost is not None else None
     except (TypeError, ValueError): reported_cost = None
     if usage_list is not None:
-        usage_list.append(total)
+        usage_list.append(Tok(total, inp, out, model))
     if _USAGE_SINK:
         ctx = _CALL_CONTEXT.get() or {}
         record = {
@@ -319,7 +341,7 @@ SYSTEM = (
     "Ты — AIWA, ИИ-ассистент женского здоровья по циклу. Пиши конкретно и тепло, на русском, без воды и без AI-флёра. "
     "Опирайся на физиологию цикла и рекомендации гинекологов и эндокринологов. "
     "Твоё имя - Айва. Если пользовательница начинает сообщение с «Айва», воспринимай это как обращение к тебе, а не как просьбу рассказать о продукте. "
-    "Если спрашивают, на чём ты работаешь, какая модель тебя питает, отвечай, что ты работаешь на GigaChat. "
+    "Если спрашивают, на чём ты работаешь и какая модель тебя питает, не называй конкретного вендора: скажи, что ты ИИ-ассистент Айва и работаешь на большой языковой модели. "
     "Ты сама ведёшь календарь цикла и отмечаешь месячные прямо в этом боте (кнопка Отметить месячные или команда /period). НИКОГДА не советуй пользователю сторонние приложения, календари или бумажные дневники для отслеживания цикла, всё это делается здесь, у тебя. "
     "ОЧЕНЬ ВАЖНО: ты НЕ можешь сама вносить, изменять или удалять данные (даты месячных, длину цикла, профиль, время рассылки, отметки) через чат, у тебя нет такой возможности. Никогда не пиши, что ты «добавила», «внесла», «изменила», «удалила» или «отметила» что-то. Если просят это сделать, честно объясни, ГДЕ это сделать: отметить месячные — кнопка «Отметить месячные» в меню или тап по дате в календаре приложения; изменить рост/вес/возраст — команда /profile; добавить историю циклов — «Изменить данные» → «История циклов». "
     "Команды бота, существуют только эти: /menu, /today, /checkin, /period, /calendar, /report, /partner, /unlink, /addcycles, /profile, /app, /time, /about, /id, /stop. Никогда не выдумывай других команд (например, нет команды /settings). Рост, вес и возраст меняются командой /profile. "
@@ -1712,7 +1734,7 @@ def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
         "Если это готовое блюдо — определи, что это, и оцени вес порции на глаз. Посчитай калории и БЖУ. " + _FOOD_FORMAT)
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "jpg").lower()
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
-    # 1) отдельная OpenRouter vision-модель либо тот же канал, что и текст
+    # 1) Separate OpenRouter vision model, generic LiteLLM vision model, or text channel.
     try:
         b64 = base64.b64encode(image_bytes).decode()
         mm = [{"role": "user", "content": [
@@ -1723,7 +1745,15 @@ def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
             out = _call_proxy_one(vision_cfg, mm, max_tokens=500, temperature=0.2,
                                   usage=usage, attempts=3)
         else:
-            out = _call(mm, max_tokens=500, temperature=0.2, usage=usage)
+            out = None
+            vmodel = os.environ.get("LITELLM_VISION_MODEL")
+            if vmodel:
+                for cfg in _proxy_configs():
+                    out = _call_proxy_one(dict(cfg, model=vmodel), mm, 500, 0.2, usage, attempts=2)
+                    if out:
+                        break
+            if not out:
+                out = _call(mm, max_tokens=500, temperature=0.2, usage=usage)
         try: print("FOOD provider vision raw:", repr(out)[:300])
         except Exception: pass
         rec = _parse_food(out)

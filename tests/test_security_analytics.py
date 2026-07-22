@@ -136,6 +136,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
         finally:
             llm.set_usage_sink(old_sink)
         self.assertEqual(sum(usage), 125)
+        self.assertEqual(llm.usage_split(usage), (100, 25, "model"))
         self.assertEqual(captured[0]["input_tokens"], 100)
         self.assertEqual(captured[0]["output_tokens"], 25)
         self.assertEqual(captured[0]["request_id"], "r_test")
