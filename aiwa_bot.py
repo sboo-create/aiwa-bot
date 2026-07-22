@@ -86,7 +86,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-22-v69-security-analytics"
+AIWA_VERSION = "2026-07-22-v70-traction-metrics"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2277,6 +2277,7 @@ def aggregate_stats():
     L.append("Аналитика AIWA · за 7 дней (" + A["since"] + " -> " + A["until"] + ")")
     L.append("")
     L.append("АУДИТОРИЯ")
+    L.append("Ever used " + str(a["ever_used"]))
     L.append("Средний DAU " + str(a["avg_dau"]) + wow(g.get("avg_dau")) + " · сегодня " + str(a["dau"]) + " (день идёт)")
     L.append("WAU " + str(a["wau"]) + " · MAU " + str(a["mau"]) + " · Stickiness " + str(a["stickiness"]) + "% (DAU/MAU)")
     ret = a["retention"]
@@ -2287,10 +2288,10 @@ def aggregate_stats():
     L.append("ВОВЛЕЧЁННОСТЬ")
     L.append("Событий на DAU: " + str(e["events_per_dau"]) + " = " + str(e["events_total"]) + " событий / " + str(e["active_user_days"]) + " активных·дней" + wow(g.get("events")))
     L.append("События по источнику: приложение " + str(e["by_source"]["app"]) + ", чат " + str(e["by_source"]["chat"]))
-    L.append("Тул-коллов " + str(e["toolcalls_total"]) + " (на DAU " + str(e["toolcalls_per_dau"]) + ") · прил " + str(ts.get("app", 0)) + ", чат " + str(ts.get("chat", 0)) + ", авто " + str(ts.get("auto", 0)) + wow(g.get("toolcalls")))
+    L.append("Tools / DAU " + str(e["tools_per_dau"]) + " (" + str(e["toolcalls_total"]) + " вызовов) · прил " + str(ts.get("app", 0)) + ", чат " + str(ts.get("chat", 0)) + ", авто " + str(ts.get("auto", 0)) + wow(g.get("toolcalls")))
     L.append("Топ действий: " + (", ".join(str(k) + " " + str(vv) for k, vv in e["actions_top"][:6]) or "нет"))
     ss = e["sessions"]
-    L.append("Сессии за период: всего " + str(ss["count"]) + ", на DAU " + str(ss["per_dau"]) + ", длина " + str(ss["avg_len_min"]) + " мин, действий/сессия " + str(ss["events_per"]))
+    L.append("Sessions / DAU " + str(e["sessions_per_dau"]) + " (" + str(ss["count"]) + " сессий), длина " + str(ss["avg_len_min"]) + " мин, действий/сессия " + str(ss["events_per"]))
     L.append("")
     L.append("ПРОДУКТ")
     po = pr["push_open"]
@@ -4268,6 +4269,8 @@ def analytics_data(days=7, frm=None, to=None):
                 sc += 1; slens.append((cur[-1] - cur[0]).total_seconds()); sevs.append(len(cur)); cur = []
             cur.append(t)
         if cur: sc += 1; slens.append((cur[-1] - cur[0]).total_seconds()); sevs.append(len(cur))
+    tools_per_dau = round(tool_total / active_user_days, 2) if active_user_days else 0
+    sessions_per_dau = round(sc / active_user_days, 2) if active_user_days else 0
     popen = ptot = 0
     for cid, pd in push_days.items():
         for d in pd:
@@ -4331,7 +4334,7 @@ def analytics_data(days=7, frm=None, to=None):
         "since": since.isoformat(), "until": until.isoformat(), "span": span,
         "updated": datetime.now(TZ).strftime("%d.%m %H:%M"),
         "audience": {
-            "dau": dau, "wau": wau, "mau": mau, "avg_dau": round(avg_dau, 1),
+            "ever_used": onboarded, "dau": dau, "wau": wau, "mau": mau, "avg_dau": round(avg_dau, 1),
             "avg_wau": round(sum(x["wau"] for x in series) / len(series), 1) if series else 0,
             "stickiness": round(dau / mau * 100) if mau else 0,
             "users_total": len(users), "onboarded": onboarded, "new_users": new_users, "active_period": active_period,
@@ -4342,12 +4345,13 @@ def analytics_data(days=7, frm=None, to=None):
         "engagement": {
             "events_total": ev_total, "toolcalls_total": tool_total, "active_user_days": active_user_days,
             "events_per_dau": round(ev_total / active_user_days, 2) if active_user_days else 0,
-            "toolcalls_per_dau": round(tool_total / active_user_days, 2) if active_user_days else 0,
+            "tools_per_dau": tools_per_dau, "sessions_per_dau": sessions_per_dau,
+            "toolcalls_per_dau": tools_per_dau,
             "by_source": {"chat": ev_src.get("chat", 0), "app": ev_src.get("app", 0)},
             "actions_top": actions.most_common(12), "toolcalls_by_meta": [[_tc_lbl(k), v] for k, v in tool_meta.most_common(10)],
             "features": sorted([{"name": k, "users": len(v), "events": feat_events[k]} for k, v in feat_users.items()],
                                key=lambda x: -x["users"]),
-            "sessions": {"count": sc, "per_dau": round(sc / active_user_days, 2) if active_user_days else 0,
+            "sessions": {"count": sc, "per_dau": sessions_per_dau,
                          "avg_len_min": round(sum(slens) / len(slens) / 60, 1) if slens else 0,
                          "events_per": round(sum(sevs) / len(sevs), 1) if sevs else 0}},
         "product": {
@@ -4452,6 +4456,7 @@ h1{font-size:20px;margin:0}
 var q=new URLSearchParams(location.search), DAYS=Number(q.get('days'))||7, FROM=q.get('from')||'', TO=q.get('to')||'', D=null, TAB='aud', CH=[];
 var C={dau:'#2F6BED',wau:'#1E9E54',mau:'#E8912A',stick:'#7C5CD0',ev:'#2F6BED',tc:'#7C5CD0',ans:'#1E9E54',err:'#DC5A5A'};
 var DEF={
+ ever:"Уникальные пользователи, совершившие хотя бы одно действие за всё время. Созданная запись без использования продукта не считается.",
  dau:"Уникальные активные за день. Активный = минимум одно действие пользователя (кнопки, команды, ответы, голос, ручной ввод) в чате или приложении. Получение пуша активностью НЕ считается.",
  avgdau:"Средний DAU = сумма дневных DAU за период / число дней. Показатель за весь период, не за сегодня.",
  wau:"Уникальные активные за последние 7 дней (скользящее окно).",
@@ -4459,7 +4464,8 @@ var DEF={
  stick:"Липкость = DAU / MAU × 100%. Доля месячной аудитории, заходящей в конкретный день.",
  ret:"Rolling retention D_N: доля новых пользователей, кто был активен на N-й день после первого ИЛИ позже. Считается по когортам возрастом от N до 90 дней.",
  evdau:"Событий на DAU = все действия пользователя (чат + приложение) за период / активные·дни.",
- tcdau:"Тул-коллов на DAU = все вызовы модели (сумма calls, учтены все хопы одного запроса; фото ≈ 1) / активные·дни.",
+ tcdau:"Tools / DAU = все вызовы моделей и AI-инструментов за период / активные пользовательские дни. Для одного дня это буквально вызовы / DAU.",
+ sessionsdau:"Sessions / DAU = все сессии за период / активные пользовательские дни. Новая сессия начинается после перерыва больше 30 минут. Для одного дня это буквально сессии / DAU.",
  aud:"Активные·дни = сумма по дням числа активных пользователей за период (человеко-дни). Это знаменатель метрик «на DAU».",
  evtot:"Все пользовательские действия за период (чат + приложение).",
  tctot:"Все вызовы модели за период = сумма поля calls по всем событиям.",
@@ -4491,14 +4497,19 @@ function render(){
  clearCharts();var v=document.getElementById('view');if(!D){v.textContent='нет данных';return;}v.className='';
  var g=D.growth||{};
  if(TAB==='aud'){
-  var a=D.audience,h='';
+  var a=D.audience,e=D.engagement,ss=e.sessions,h='';
+  h+="<div class='sec-h'>Traction</div>";
   h+="<div class='grid'>"+
-   card('Средний DAU',a.avg_dau,'за период',DEF.avgdau,g.avg_dau)+
-   card('DAU за день',a.dau,'на '+D.until,DEF.dau)+
+   card('Ever used',a.ever_used,'за всё время',DEF.ever)+
+   card('DAU',a.dau,'на '+D.until,DEF.dau)+
    card('WAU',a.wau,'7 дней',DEF.wau)+
    card('MAU',a.mau,'30 дней',DEF.mau)+
+   card('Sessions / DAU',e.sessions_per_dau,ss.count+' сессий / '+e.active_user_days+' акт·дн',DEF.sessionsdau)+
+   card('Tools / DAU',e.tools_per_dau,e.toolcalls_total+' вызовов / '+e.active_user_days+' акт·дн',DEF.tcdau,g.toolcalls)+"</div>";
+  h+="<div class='grid'>"+
+   card('Средний DAU',a.avg_dau,'за период',DEF.avgdau,g.avg_dau)+
    card('Stickiness',a.stickiness+'%','DAU/MAU',DEF.stick)+
-   card('Новых за период',a.new_users,'из '+a.users_total+' всего',null)+"</div>";
+   card('Новых за период',a.new_users,'из '+a.users_total+' записей',null)+"</div>";
   h+=chartCard('cAud','Аудитория по дням',DEF.dau);
   h+=chartCard('cStick','Липкость по дням, %',DEF.stick);
   var r=a.retention;
@@ -4520,7 +4531,7 @@ function render(){
   h+="<div class='sec-h'>События по источнику"+ic('Приложение vs чат — где пользователи совершают действия.')+"</div>";
   h+=tbl(['Источник','Событий'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
   h+="<div class='sec-h'>Тул-коллы (вызовы модели)"+ic('Все обращения к модели: шаги агента (инструменты) + финальный ответ. Растут с агентными ответами.')+"</div>";
-  h+="<div class='grid'>"+card('Тул-коллов на DAU',e.toolcalls_per_dau,e.toolcalls_total+' вызовов',DEF.tcdau,g.toolcalls)+card('Всего тул-коллов',e.toolcalls_total,'за период',null,g.toolcalls)+"</div>";
+  h+="<div class='grid'>"+card('Tools / DAU',e.tools_per_dau,e.toolcalls_total+' вызовов',DEF.tcdau,g.toolcalls)+card('Всего тул-коллов',e.toolcalls_total,'за период',null,g.toolcalls)+"</div>";
   h+=tbl(['Источник','Тул-коллов'],[['Приложение',ts.app||0],['Чат',ts.chat||0],['Авто/пуши',ts.auto||0],['Голос: расшифровка и озвучка',ts.stt||0],['Прочее',ts.other||0]]);
   h+="<div class='sec-h'>Тул-коллы по фиче</div>";
   h+=tbl(['Фича','Вызовов'],(e.toolcalls_by_meta||[]).map(function(x){return [x[0],x[1]];}));
@@ -4528,7 +4539,7 @@ function render(){
   h+=tbl(['Действие','Кол-во'],e.actions_top.map(function(x){return [x[0],x[1]];}));
   var ss=e.sessions;
   h+="<div class='sec-h'>Сессии <span style='font-weight:600;color:var(--mut);font-size:12px'>(за период "+D.since+" → "+D.until+")</span></div>";
-  h+="<div class='grid'>"+card('Сессий всего',ss.count,'',null)+card('Сессий/DAU',ss.per_dau,'',null)+card('Средняя длина',ss.avg_len_min+' мин','',null)+card('Действий/сессия',ss.events_per,'',null)+"</div>";
+  h+="<div class='grid'>"+card('Сессий всего',ss.count,'',null)+card('Sessions / DAU',e.sessions_per_dau,'',DEF.sessionsdau)+card('Средняя длина',ss.avg_len_min+' мин','',null)+card('Действий/сессия',ss.events_per,'',null)+"</div>";
   v.innerHTML=h;mkLine('cEng',[{key:'events',label:'События',color:C.ev}]);
  } else if(TAB==='prod'){
   var pr=D.product,po=pr.push_open,h='';

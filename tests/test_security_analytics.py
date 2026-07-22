@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import date
 from unittest import mock
 from urllib.parse import urlencode
 
@@ -188,6 +189,35 @@ class SecurityAnalyticsTests(unittest.TestCase):
                          "https://proxy.example/v1/chat/completions")
         self.assertEqual(llm._chat_completions_url("https://proxy.example/v1/chat/completions"),
                          "https://proxy.example/v1/chat/completions")
+
+    def test_traction_metrics_count_people_sessions_and_tools(self):
+        conn = bot.db()
+        for cid in range(1, 6):
+            conn.execute("INSERT INTO users(chat_id,created) VALUES(?,?)", (cid, "2026-01-01T00:00:00"))
+        events = [
+            (1, "2026-01-02T08:00:00", "command", 0),
+            (1, "2026-07-22T09:00:00", "command", 2),
+            (1, "2026-07-22T09:05:00", "button", 0),
+            (2, "2026-07-22T10:00:00", "command", 3),
+            (2, "2026-07-22T11:00:00", "button", 0),
+            (3, "2026-07-16T12:00:00", "command", 0),
+            (4, "2026-07-02T12:00:00", "command", 0),
+        ]
+        conn.executemany("INSERT INTO events(chat_id,ts,action,calls) VALUES(?,?,?,?)", events)
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(bot, "dtoday", return_value=date(2026, 7, 22)):
+            data = bot.analytics_data(days=1)
+
+        self.assertEqual(data["audience"]["ever_used"], 4)
+        self.assertEqual(data["audience"]["dau"], 2)
+        self.assertEqual(data["audience"]["wau"], 3)
+        self.assertEqual(data["audience"]["mau"], 4)
+        self.assertEqual(data["engagement"]["sessions_per_dau"], 1.5)
+        self.assertEqual(data["engagement"]["tools_per_dau"], 2.5)
+        self.assertEqual(data["engagement"]["sessions"]["count"], 3)
+        self.assertEqual(data["engagement"]["active_user_days"], 2)
 
 
 if __name__ == "__main__":
