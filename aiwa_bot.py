@@ -83,7 +83,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-22-v60"
+AIWA_VERSION = "2026-07-22-v61"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2240,6 +2240,31 @@ def aggregate_stats():
     L.append("Латентность p50 " + str(qd["p50"]) + " / p95 " + str(qd["p95"]) + " мс")
     L.append("Токены " + str(qd["tokens"]) + ", оценка $" + str(qd["cost_usd"]))
     return "\n".join(L)
+
+async def voicetest_cmd(update, context):
+    """Диагностика голоса: авторизация Сбера, синтез, отправка тестового голосового."""
+    cid = update.effective_chat.id
+    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
+        return await update.message.reply_text("Команда только для админа.")
+    await update.message.reply_text("Проверяю голосовой контур…")
+    d = await asyncio.to_thread(L.salute_diag)
+    L_ = ["Голосовой контур:", ""]
+    L_.append(("✅" if d["key"] else "❌") + " ключ SBER_SALUTE_AUTH_KEY " + ("задан" if d["key"] else "НЕ задан"))
+    L_.append(("✅" if d["auth"] else "❌") + " авторизация в Сбере" + ("" if d["auth"] else ": " + (d.get("auth_err") or "неизвестно")))
+    if d.get("auth"):
+        ok_tts = d.get("tts_bytes", 0) > 0
+        L_.append(("✅" if ok_tts else "❌") + " синтез речи" + (" (%s байт)" % d["tts_bytes"] if ok_tts else ": " + (d.get("tts_err") or "пусто")))
+    L_ += ["", "scope: " + str(d["scope"]), "модель распознавания: " + str(d["model"]),
+           "голос: " + str(d["voice"]), "режим STT: " + str(d["stt_mode"]),
+           "ответ голосом: " + ("включён" if _voice_reply_on() else "ВЫКЛЮЧЕН (AIWA_VOICE_REPLY=0)"),
+           "Groq (запасной): " + ("есть" if d["groq"] else "нет")]
+    await update.message.reply_text("\n".join(L_))
+    if d.get("tts_bytes"):
+        try:
+            audio = await asyncio.to_thread(L.synthesize, "Привет! Это Айва. Проверка голосового ответа.")
+            if audio: await context.bot.send_voice(cid, audio)
+        except Exception as e:
+            await update.message.reply_text("Синтез удался, но отправить голосовое не вышло: " + str(e)[:200])
 
 async def refs_cmd(update, context):
     cid = update.effective_chat.id
@@ -4409,7 +4434,7 @@ async def run_all():
     global BOT_APP; BOT_APP = app
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd), ("voicetest", voicetest_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))

@@ -1645,6 +1645,7 @@ SALUTE_SCOPE = os.environ.get("SALUTE_SPEECH_SCOPE") or os.environ.get("SBER_SAL
 # voice_messaging — модель SaluteSpeech под голосовые сообщения (короткая спонтанная речь), general — универсальная
 SALUTE_MODEL = os.environ.get("SBER_SALUTE_RECOGNITION_MODEL") or os.environ.get("SALUTE_SPEECH_MODEL") or "general"
 _salute_tok = {"token": None, "exp": 0.0}
+_SALUTE_ERR = {"auth": "", "stt": "", "tts": ""}   # последние ошибки — для команды /voicetest
 # Форматы, которые SaluteSpeech принимает напрямую. Голосовые Telegram — ogg/opus, попадают сюда.
 _SALUTE_MIME = {"ogg": "audio/ogg;codecs=opus", "oga": "audio/ogg;codecs=opus",
                 "opus": "audio/ogg;codecs=opus", "mp3": "audio/mpeg", "flac": "audio/flac"}
@@ -1662,18 +1663,23 @@ def _salute_auth(force=False):
             import base64
             creds = base64.b64encode(f"{cid}:{sec}".encode()).decode()
     if not creds:
+        _SALUTE_ERR["auth"] = "ключ не задан (SBER_SALUTE_AUTH_KEY)"
         return None
     try:
         r = _HTTP.post(SALUTE_OAUTH,
             headers={"Authorization": f"Basic {creds}", "RqUID": str(uuid.uuid4()),
                      "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
             data={"scope": SALUTE_SCOPE}, timeout=30, verify=_GIGA_VERIFY)
+        if r.status_code >= 400:
+            _SALUTE_ERR["auth"] = "HTTP %s: %s" % (r.status_code, (r.text or "")[:200])
         r.raise_for_status(); d = r.json()
+        _SALUTE_ERR["auth"] = ""
         _salute_tok["token"] = d["access_token"]
         exp = d.get("expires_at", 0)
         _salute_tok["exp"] = (exp / 1000) if exp > 1e12 else (exp or (_t.time() + 1500))
         return _salute_tok["token"]
     except Exception as e:
+        if not _SALUTE_ERR["auth"]: _SALUTE_ERR["auth"] = str(e)[:200]
         print("Salute auth error:", e); return None
 
 def _transcribe_salute(audio_bytes, ext):
@@ -1757,14 +1763,32 @@ def synthesize(text, info=None):
                 tok = _salute_auth(force=True)
                 if not tok: return None
                 continue
+            if r.status_code >= 400:
+                _SALUTE_ERR["tts"] = "HTTP %s: %s" % (r.status_code, (r.text or "")[:200])
             r.raise_for_status()
             audio = r.content
+            _SALUTE_ERR["tts"] = ""
             if isinstance(info, dict):
                 info["ms"] = int((_t.time() - t0) * 1000); info["chars"] = len(body)
             return audio or None
         except Exception as e:
+            if not _SALUTE_ERR["tts"]: _SALUTE_ERR["tts"] = str(e)[:200]
             print("Salute TTS error:", e); return None
     return None
+
+def salute_diag():
+    """Диагностика голосового контура для админ-команды /voicetest."""
+    out = {"key": bool(os.environ.get("SBER_SALUTE_AUTH_KEY") or os.environ.get("SALUTE_SPEECH_CREDENTIALS")),
+           "scope": SALUTE_SCOPE, "model": SALUTE_MODEL, "voice": SALUTE_VOICE,
+           "stt_mode": (os.environ.get("AIWA_STT", "auto") or "auto"),
+           "oauth_url": SALUTE_OAUTH, "tts_url": SALUTE_TTS, "stt_url": SALUTE_STT,
+           "groq": bool(os.environ.get("GROQ_API_KEY"))}
+    tok = _salute_auth(force=True)
+    out["auth"] = bool(tok); out["auth_err"] = _SALUTE_ERR["auth"]
+    if tok:
+        a = synthesize("Проверка связи. Айва слышит и говорит.")
+        out["tts_bytes"] = len(a or b""); out["tts_err"] = _SALUTE_ERR["tts"]
+    return out
 
 def transcribe(audio_bytes, filename="voice.ogg", info=None):
     """Распознавание голосового. Провайдер выбирается AIWA_STT: salute | groq | auto (по умолчанию).
