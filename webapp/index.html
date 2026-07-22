@@ -374,6 +374,7 @@ const tg=window.Telegram&&window.Telegram.WebApp; if(tg){tg.ready();tg.expand();
 function haptic(type,style){if(tg&&tg.HapticFeedback&&(!tg.isVersionAtLeast||tg.isVersionAtLeast("6.1"))){try{if(type==="selection")tg.HapticFeedback.selectionChanged();else tg.HapticFeedback.impactOccurred(style||"light");}catch(e){}}}
 const INIT=(tg&&tg.initData)||"";
 const NAME=(tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user&&tg.initDataUnsafe.user.first_name)||"";
+const CAMPAIGN=(new URLSearchParams(location.search)).get('campaign')||"";
 const MONTHS=["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"];
 const MNOM=["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
 const WD=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
@@ -414,7 +415,7 @@ var DEMO_FOODT="Питание сегодня. В фолликулярную ф�
 var DEMO_TRAINT="Нагрузка сегодня. Эстроген растёт, чувствительность к инсулину повышена, это хорошее окно для силовых и бодрого кардио.\n• Силовая, средняя-высокая, 45-60 мин\n• Интервальный бег, 25-30 мин\n• Пилатес, 30-40 мин";
 function blossom(el,size){el.style.width=size+'px';el.style.height=size+'px';el.innerHTML='';el.classList.add('bloomanim');for(var i=0;i<5;i++){var p=document.createElement('div');p.className='petal';p.style.width=(size*0.42)+'px';p.style.height=(size*0.58)+'px';p.style.marginLeft=(-size*0.21)+'px';p.style.marginTop=(-size*0.52)+'px';p.style.setProperty('--rot',(i*72)+'deg');p.style.transform='rotate('+(i*72)+'deg)';p.style.animationDelay=(i*55)+'ms';el.appendChild(p);}var c=document.createElement('div');c.className='core';c.style.width=(size*0.22)+'px';c.style.height=(size*0.22)+'px';c.style.marginLeft=(-size*0.11)+'px';c.style.marginTop=(-size*0.11)+'px';el.appendChild(c);}
 blossom(document.getElementById('logo'),26);
-async function api(path,body){try{var r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({initData:INIT},body))});return await r.json();}catch(e){return{error:'net'};}}
+async function api(path,body){try{var r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({initData:INIT,campaign:CAMPAIGN},body))});return await r.json();}catch(e){return{error:'net'};}}
 function track(t){try{api('/api/track',{screen:t});}catch(e){}}
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c];});}
 function phaseForDay(d,l){if(d<=5)return"men";var ov=Math.max(12,l-14);if(d<ov)return"fol";if(d<=ov+2)return"ovu";return"lut";}
@@ -1060,7 +1061,8 @@ var chatInited=false;
 function bubbleAI(text){var d=document.createElement('div');d.className='msg ai';d.textContent=text;document.getElementById('chatlog').appendChild(d);return d;}
 function bubbleMe(text){var d=document.createElement('div');d.className='msg me';d.textContent=text;document.getElementById('chatlog').appendChild(d);return d;}
 function scrollBottom(){var c=document.getElementById('chatlog');if(c){c.scrollTop=c.scrollHeight;}else{window.scrollTo(0,document.body.scrollHeight);}}
-async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML("Айва думает");scrollBottom();var r=await api('/api/chat',{message:text});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+"…":s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}scrollBottom();}
+function addFeedback(t,answerId){if(!answerId)return;var c=document.createElement('div');c.className='chips';var lab=document.createElement('span');lab.textContent='Ответ помог?';lab.style.cssText='font-size:12px;color:var(--inkSoft);align-self:center';c.appendChild(lab);[['👍 Да','helpful'],['👎 Нет','unhelpful']].forEach(function(x){var b=document.createElement('button');b.className='chip';b.textContent=x[0];b.onclick=async function(){c.querySelectorAll('button').forEach(function(y){y.disabled=true;});var r=await api('/api/feedback',{answer_id:answerId,rating:x[1]});c.textContent=(r&&r.ok)?'Спасибо, это помогает улучшать Айву 💛':'Не получилось сохранить оценку';};c.appendChild(b);});t.appendChild(c);}
+async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML("Айва думает");scrollBottom();var r=await api('/api/chat',{message:text});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+"…":s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}addFeedback(t,r.answer_id);scrollBottom();}
 function initChat(){
   if(chatInited)return;chatInited=true;var log=(D&&D.chatlog)||[];
   if(log.length){log.forEach(function(m){if(m.role==="user")bubbleMe(m.text);else bubbleAI(m.text);});scrollBottom();}
@@ -1095,6 +1097,7 @@ async function sendVoice(blob,type){
     me.textContent=(d&&d.transcript)?d.transcript:'🎤 (не расслышала)';
     t.textContent=(d&&d.answer)||'Не получилось ответить, попробуй ещё раз.';
     if(d&&d.suggestions&&d.suggestions.length){var c=document.createElement('div');c.className='chips';d.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+'…':s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}
+    addFeedback(t,d&&d.answer_id);
   }catch(e){t.textContent='Не получилось распознать голос, попробуй ещё раз.';}
   scrollBottom();
 }

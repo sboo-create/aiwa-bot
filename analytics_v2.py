@@ -9,6 +9,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -117,7 +118,7 @@ def user_key(chat_id):
 
 def _source_for(action, meta):
     text = str(meta or "")
-    if text.startswith("web_") or text.startswith("view_") or text == "app_open":
+    if text.startswith("web_") or text.startswith("view_") or text == "app_open" or text.endswith("|webapp"):
         return "webapp"
     if action in {"broadcast", "proactive", "reactivation"} or text.startswith("proactive"):
         return "push"
@@ -154,7 +155,24 @@ def _legacy_event_name(action, meta):
     if action == "tokens":
         return "ai_usage_recorded", None
     if action in {"broadcast", "proactive", "reactivation"}:
+        if action == "proactive" and text.startswith("shadow:"):
+            return "push_shadowed", None
+        status = text.split("|", 1)[0]
+        if status == "queued":
+            return "push_queued", None
+        if status in {"blocked", "error", "failed"} or status.endswith("_error"):
+            return "push_failed", None
         return "push_sent", None
+    if action == "push_open":
+        return "push_opened", None
+    if action == "feedback_prompt":
+        return "answer_feedback_prompted", None
+    if action == "feedback":
+        return "answer_feedback_submitted", None
+    if action == "safety":
+        return "safety_guidance_shown", None
+    if action == "flow_start" and text in {"food", "workout"}:
+        return text + "_flow_started", None
     if action == "goal" and text == "summary":
         return "summary_opened", None
     if action == "goal" and text == "food_log":
@@ -200,12 +218,40 @@ def _epoch(value):
 def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_version=None,
                         request_id=None, calls=0):
     event_name, screen = _legacy_event_name(action, meta)
+    text = str(meta or "")
     props = {}
     # Only coarse, explicitly safe dimensions are copied from legacy metadata.
     if meta in {"text", "voice", "webapp", "food_photo", "food_text", "diary_reco"}:
         props["channel"] = meta
     if calls:
         props["calls"] = max(0, int(calls))
+    parts = str(meta or "").split("|")
+    safe_id = lambda value, limit=80: re.sub(r"[^a-zA-Z0-9_.:-]", "", str(value or ""))[:limit]
+    if action in {"broadcast", "proactive", "reactivation"}:
+        status = safe_id(parts[0] if parts else "sent", 24) or "sent"
+        campaign = safe_id(parts[1] if len(parts) > 1 else text, 80)
+        if campaign:
+            props["campaign_id"] = campaign
+            props["campaign_type"] = campaign.split(":", 1)[0]
+        props["delivery_status"] = status
+    elif action == "push_open":
+        campaign = safe_id(parts[0] if parts else "", 80)
+        if campaign:
+            props["campaign_id"] = campaign
+            props["campaign_type"] = campaign.split(":", 1)[0]
+    elif action == "feedback_prompt":
+        answer_id = safe_id(parts[0] if parts else "", 40)
+        if answer_id: props["answer_id"] = answer_id
+    elif action == "feedback":
+        rating = safe_id(parts[0] if parts else "", 12)
+        answer_id = safe_id(parts[1] if len(parts) > 1 else "", 40)
+        if rating in {"helpful", "unhelpful"}: props["rating"] = rating
+        if answer_id: props["answer_id"] = answer_id
+    elif action == "safety":
+        level = safe_id(parts[0] if parts else "", 20)
+        answer_id = safe_id(parts[1] if len(parts) > 1 else "", 40)
+        if level in {"disclaimer", "escalation", "emergency"}: props["safety_level"] = level
+        if answer_id: props["answer_id"] = answer_id
     event_id = str(uuid.uuid4())
     occurred = datetime.now(timezone.utc)
     key = user_key(chat_id)

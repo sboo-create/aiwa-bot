@@ -50,7 +50,8 @@ def call_context(user_key=None, request_id=None, purpose=None):
     finally:
         _CALL_CONTEXT.reset(token)
 
-def _capture_usage(usage_list, data, provider, model, started, status="success", retry_index=0, fallback_from=None):
+def _capture_usage(usage_list, data, provider, model, started, status="success", retry_index=0,
+                   fallback_from=None, cost_unit=None):
     """Normalize OpenAI-, Anthropic- and GigaChat-style usage fields."""
     import time as _t
     raw = data.get("usage") or {} if isinstance(data, dict) else {}
@@ -73,7 +74,8 @@ def _capture_usage(usage_list, data, provider, model, started, status="success",
             "status": status, "latency_ms": int((_t.time() - started) * 1000),
             "input_tokens": inp, "output_tokens": out, "cached_tokens": cached,
             "total_tokens": total, "retry_index": retry_index, "fallback_from": fallback_from,
-            "reported_cost": reported_cost, "cost_unit": ("provider_credit" if reported_cost is not None else None),
+            "reported_cost": reported_cost,
+            "cost_unit": ((cost_unit or "provider_credit") if reported_cost is not None else None),
             "meta": {"reasoning_tokens": int((raw.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)},
         }
         try:
@@ -541,7 +543,8 @@ def _proxy_configs():
              "key": key, "xkey": xkey,
              "referer": os.environ.get("OPENROUTER_HTTP_REFERER"),
              "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA",
-             "provider": (_openrouter_provider_preferences() if is_openrouter else None)}]
+             "provider": (_openrouter_provider_preferences() if is_openrouter else None),
+             "cost_unit": ("usd" if is_openrouter else os.environ.get("LITELLM_COST_UNIT"))}]
     fb_key = os.environ.get("LITELLM_FALLBACK_KEY") or os.environ.get("AIWA_LLM_FALLBACK_KEY")
     fb_xkey = os.environ.get("LITELLM_FALLBACK_XKEY") or os.environ.get("AIWA_LLM_FALLBACK_XKEY")
     fb_url = os.environ.get("LITELLM_FALLBACK_URL") or os.environ.get("AIWA_LLM_FALLBACK_URL") or FALLBACK_PROXY_URL
@@ -567,6 +570,7 @@ def _openrouter_vision_config():
         "referer": os.environ.get("OPENROUTER_HTTP_REFERER"),
         "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA",
         "provider": _openrouter_provider_preferences(),
+        "cost_unit": "usd",
     }
 
 def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
@@ -595,7 +599,8 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
             data = r.json()
             actual_provider = data.get("provider") or cfg.get("name") or "litellm"
             actual_model = data.get("model") or cfg.get("model")
-            _capture_usage(usage, data, actual_provider, actual_model, started, retry_index=i)
+            _capture_usage(usage, data, actual_provider, actual_model, started, retry_index=i,
+                           cost_unit=cfg.get("cost_unit"))
             txt = _response_text(data)
             txt = (txt or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
@@ -648,7 +653,8 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
         data = r.json()
         actual_provider = data.get("provider") or cfg.get("name") or "litellm"
         actual_model = data.get("model") or cfg.get("model")
-        _capture_usage(usage, data, actual_provider, actual_model, t1)
+        _capture_usage(usage, data, actual_provider, actual_model, t1,
+                       cost_unit=cfg.get("cost_unit"))
         msg = (data.get("choices") or [{}])[0].get("message") or {}
         content = msg.get("content")
         if isinstance(content, str):
