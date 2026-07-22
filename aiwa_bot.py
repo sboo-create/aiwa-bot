@@ -83,7 +83,7 @@ DB = os.environ.get("AIWA_DB") or ("/data/aiwa.db" if os.path.isdir("/data") els
 if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-22-v66"
+AIWA_VERSION = "2026-07-22-v67"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2257,7 +2257,7 @@ async def voicetest_cmd(update, context):
         ok_tts = d.get("tts_bytes", 0) > 0
         L_.append(("✅" if ok_tts else "❌") + " синтез речи" + (" (%s байт)" % d["tts_bytes"] if ok_tts else ": " + (d.get("tts_err") or "пусто")))
     if d.get("key_parts"): L_.append("   в ключе: " + str(d["key_parts"]) + " (норма: 36 + 36)")
-    L_ += ["", "версия: " + AIWA_VERSION, "сервис: " + str(d.get("mode")),
+    L_ += ["", "версия: " + AIWA_VERSION, "сервис: " + str(d.get("mode")) + " · логин: " + str(d.get("client")),
            "OAuth URL: " + str(d.get("oauth_url")),
            "модель распознавания: " + str(d["model"]),
            "голос: " + str(d["voice"]), "режим STT: " + str(d["stt_mode"]),

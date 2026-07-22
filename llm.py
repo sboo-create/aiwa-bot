@@ -1655,21 +1655,22 @@ def _salute_is_giga():
 _SALUTE_MIME = {"ogg": "audio/ogg;codecs=opus", "oga": "audio/ogg;codecs=opus",
                 "opus": "audio/ogg;codecs=opus", "mp3": "audio/mpeg", "flac": "audio/flac"}
 
+SALUTE_CLIENT = (os.environ.get("SBER_SALUTE_CLIENT") or "gigacons").strip()
+
 def _norm_basic(raw):
-    """Готовит ключ к заголовку Authorization. Чистит кавычки, пробелы, переносы и префикс Basic.
-    Пару 'client_id:client_secret' (два UUID) кодирует в base64, всё остальное отдаёт как есть —
-    у speech.giga.chat ключ непрозрачный и перекодировать его нельзя."""
-    import base64, binascii
+    """Собирает заголовок Basic для SaluteSpeech.
+    SBER_SALUTE_AUTH_KEY — это ТОЛЬКО секрет, логин отдельно (по умолчанию 'gigacons'),
+    итоговый ключ = base64('логин:секрет'). Так это работает в основном проекте."""
+    import base64
     s = (raw or "").strip().strip('"').strip("'").strip()
     if s.lower().startswith("basic "):              # снимаем префикс до чистки пробелов
         s = s[6:]
     s = re.sub(r"\s+", "", s)                       # переносы строк при копировании в панель
     if not s:
         return None, "пусто"
-    # В алфавите base64 нет двоеточия: если оно есть — это открытая пара id:secret, её нужно закодировать.
-    if ":" in s:
-        return base64.b64encode(s.encode()).decode(), None
-    return s, None                                  # уже base64 или непрозрачный токен
+    if SALUTE_CLIENT:
+        return base64.b64encode(("%s:%s" % (SALUTE_CLIENT, s)).encode()).decode(), None
+    return s, None
 
 def _salute_auth(force=False):
     """OAuth SaluteSpeech — та же схема, что у GigaChat, но свой scope и свой кэш токена."""
@@ -1694,22 +1695,17 @@ def _salute_auth(force=False):
                               os.environ.get("SALUTE_SPEECH_CREDENTIALS") or "").strip().strip('"').strip("'"))
     # Разные контуры Сбера ждут ключ по-разному. Перебираем варианты, пока один не сработает,
     # и запоминаем удачный — чтобы не гадать по документации.
-    variants = [("Basic " + creds, "Basic base64(id:secret)")]
+    variants = [("Basic " + creds, "Basic base64(%s:секрет)" % SALUTE_CLIENT)]
     if raw and raw != creds:
         variants.append(("Basic " + raw, "Basic ключ как есть"))
-    if raw:
-        variants.append(("Bearer " + raw, "Bearer ключ как есть"))
     last = ""
     for hdr, label in variants:
         try:
-            headers = {"Authorization": hdr, "RqUID": str(uuid.uuid4()), "Accept": "application/json"}
-            if _salute_is_giga():
-                # speech.giga.chat: POST /v1/token без scope, токен приходит в поле tok
-                r = _HTTP.post(SALUTE_OAUTH, headers=headers, timeout=30, verify=_GIGA_VERIFY)
-            else:
-                headers["Content-Type"] = "application/x-www-form-urlencoded"
-                r = _HTTP.post(SALUTE_OAUTH, headers=headers, data={"scope": SALUTE_SCOPE},
-                               timeout=30, verify=_GIGA_VERIFY)
+            # scope передаётся всегда, в теле формы — так делает рабочий проект и для speech.giga.chat
+            headers = {"Authorization": hdr, "RqUID": str(uuid.uuid4()), "Accept": "application/json",
+                       "Content-Type": "application/x-www-form-urlencoded"}
+            r = _HTTP.post(SALUTE_OAUTH, headers=headers, data={"scope": SALUTE_SCOPE},
+                           timeout=30, verify=_GIGA_VERIFY)
             if r.status_code >= 400:
                 last = "%s -> HTTP %s: %s" % (label, r.status_code, (r.text or "")[:120])
                 continue
@@ -1741,7 +1737,7 @@ def _transcribe_salute(audio_bytes, ext):
     if not tok:
         return None
     import uuid
-    params = {"model": SALUTE_MODEL, "language": "ru-RU"}
+    params = {"model": SALUTE_MODEL} if SALUTE_MODEL else {}
     for attempt in (1, 2):
         try:
             r = _HTTP.post(SALUTE_STT, params=params,
@@ -1777,7 +1773,8 @@ def _transcribe_groq(audio_bytes, filename, ext):
 
 SALUTE_TTS = (os.environ.get("SBER_SALUTE_SYNTH_URL") or os.environ.get("SALUTE_SPEECH_SYNTH_URL")
               or "https://speech.giga.chat/rest/v1/text:synthesize")
-SALUTE_VOICE = os.environ.get("AIWA_TTS_VOICE") or "Nec_24000"   # женский голос «Наталья»
+SALUTE_VOICE = os.environ.get("AIWA_TTS_VOICE") or "Nec"   # женский голос «Наталья»
+TTS_FORMAT = os.environ.get("AIWA_TTS_FORMAT") or "opus"   # opus — родной для голосовых Telegram
 TTS_MAXCHARS = int(os.environ.get("AIWA_TTS_MAXCHARS", "700"))
 
 def _tts_trim(text, limit=None):
@@ -1804,9 +1801,11 @@ def synthesize(text, info=None):
     tok = _salute_auth()
     if not tok:
         return None
+    # голос задают коротким именем (Nec), сервису нужен суффикс частоты
+    voice = SALUTE_VOICE if re.search(r"_\d+$", SALUTE_VOICE) else SALUTE_VOICE + "_24000"
     for attempt in (1, 2):
         try:
-            r = _HTTP.post(SALUTE_TTS, params={"format": "opus", "voice": SALUTE_VOICE},
+            r = _HTTP.post(SALUTE_TTS, params={"format": TTS_FORMAT, "voice": voice},
                 headers={"Authorization": "Bearer " + tok, "Content-Type": "application/text",
                          "RqUID": str(uuid.uuid4())},
                 data=body.encode("utf-8"), timeout=(6, 60), verify=_GIGA_VERIFY)
@@ -1830,7 +1829,7 @@ def synthesize(text, info=None):
 def salute_diag():
     """Диагностика голосового контура для админ-команды /voicetest."""
     out = {"key": bool(os.environ.get("SBER_SALUTE_AUTH_KEY") or os.environ.get("SALUTE_SPEECH_CREDENTIALS")),
-           "mode": ("speech.giga.chat (без scope)" if _salute_is_giga() else "smartspeech.sber.ru (со scope)"),
+           "mode": ("speech.giga.chat" if _salute_is_giga() else "smartspeech.sber.ru"), "client": SALUTE_CLIENT,
            "scope": SALUTE_SCOPE, "model": SALUTE_MODEL, "voice": SALUTE_VOICE,
            "stt_mode": (os.environ.get("AIWA_STT", "auto") or "auto"),
            "oauth_url": SALUTE_OAUTH, "tts_url": SALUTE_TTS, "stt_url": SALUTE_STT,
