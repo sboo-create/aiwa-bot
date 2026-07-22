@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Disrupt Analytics module for AIWA.
+"""Privacy-safe product analytics module for AIWA.
 
-Receives pseudonymous, allow-listed events from the Railway worker and exposes
-the canonical Overview contract used by stats.multitool.works.
+The collector stores only a stable HMAC pseudonym, canonical event names and
+an explicit allow-list of operational properties. Medical data, Telegram IDs,
+messages, images and audio never cross this boundary.
 """
 from __future__ import annotations
 
@@ -13,8 +14,10 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -29,8 +32,32 @@ INGEST_TOKEN = os.environ.get("STATS_INGEST_TOKEN", "")
 ALLOW_OPEN = os.environ.get("STATS_ALLOW_UNAUTHENTICATED_INGEST", "0") == "1"
 VERSION_FILE = HERE / "VERSION"
 VERSION = VERSION_FILE.read_text().strip() if VERSION_FILE.exists() else "dev"
-SAFE_PROPERTIES = {"screen", "channel", "calls", "provider", "model", "purpose", "status"}
-INACTIVE_NAMES = {"ai_call", "ai_usage_recorded", "user_deleted", "error", "legacy_error"}
+
+SAFE_PROPERTIES = {
+    "screen", "channel", "calls", "provider", "model", "purpose", "status",
+    "request_id", "retry_index", "fallback_from", "latency_ms", "input_tokens",
+    "output_tokens", "cached_tokens", "total_tokens", "reported_cost", "cost_unit",
+    "estimated_cost_usd", "feature", "provenance", "confidence", "source_schema",
+    "payload_version", "app_version", "migration_batch", "token_precision",
+}
+NUMERIC_PROPERTIES = {
+    "calls", "retry_index", "latency_ms", "input_tokens", "output_tokens",
+    "cached_tokens", "total_tokens", "reported_cost", "estimated_cost_usd",
+    "payload_version",
+}
+ALIASES = {
+    "legacy_signup": "onboarding_started",
+    "legacy_activated": "onboarding_completed",
+}
+SYSTEM_NAMES = {
+    "ai_call", "ai_usage_recorded", "legacy_ai_usage", "user_deleted", "error",
+    "legacy_error", "legacy_tokens", "legacy_broadcast", "push_sent",
+}
+SUCCESS = {"success", "ok", "completed"}
+VALUE_NAMES = {
+    "assistant_response_received", "checkin_completed", "meal_add_completed",
+    "workout_add_completed", "summary_opened", "feature_value_completed",
+}
 
 app = FastAPI()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -39,8 +66,20 @@ _db.execute("PRAGMA journal_mode=WAL")
 _db.execute(
     "CREATE TABLE IF NOT EXISTS events("
     "event_id TEXT PRIMARY KEY, ts REAL NOT NULL, device_id TEXT NOT NULL, "
-    "name TEXT NOT NULL, properties TEXT NOT NULL DEFAULT '{}')"
+    "name TEXT NOT NULL, properties TEXT NOT NULL DEFAULT '{}', "
+    "ingested_at REAL NOT NULL DEFAULT 0, provenance TEXT NOT NULL DEFAULT 'observed', "
+    "confidence TEXT NOT NULL DEFAULT 'high', payload_version INTEGER NOT NULL DEFAULT 1)"
 )
+for _column in (
+    "ingested_at REAL NOT NULL DEFAULT 0",
+    "provenance TEXT NOT NULL DEFAULT 'observed'",
+    "confidence TEXT NOT NULL DEFAULT 'high'",
+    "payload_version INTEGER NOT NULL DEFAULT 1",
+):
+    try:
+        _db.execute("ALTER TABLE events ADD COLUMN " + _column)
+    except sqlite3.OperationalError:
+        pass
 _db.execute("CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts)")
 _db.execute("CREATE INDEX IF NOT EXISTS ix_events_device_ts ON events(device_id,ts)")
 _db.execute("CREATE INDEX IF NOT EXISTS ix_events_name_ts ON events(name,ts)")
@@ -52,34 +91,306 @@ def _no_store(value: object, status: int = 200) -> JSONResponse:
     return JSONResponse(value, status_code=status, headers={"Cache-Control": "no-store"})
 
 
-def _is_active_name(name: str) -> bool:
-    return name not in INACTIVE_NAMES and name not in {"legacy_tokens", "legacy_broadcast", "legacy_error"}
+def _canonical(name: str) -> str:
+    return ALIASES.get(name, name)
 
 
-def active_ids(period_days: float) -> set[str]:
-    cutoff = time.time() - period_days * 86400.0
+def _is_active(name: str) -> bool:
+    return _canonical(name) not in SYSTEM_NAMES
+
+
+def _percent(n: float, d: float, digits: int = 1) -> float:
+    return round(n * 100.0 / d, digits) if d else 0.0
+
+
+def _pct(values: list[float], q: float) -> int:
+    if not values:
+        return 0
+    values = sorted(values)
+    return round(values[min(len(values) - 1, max(0, math.ceil(len(values) * q) - 1))])
+
+
+def _safe_properties(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in SAFE_PROPERTIES:
+        if key not in raw or raw[key] is None:
+            continue
+        value = raw[key]
+        if key in NUMERIC_PROPERTIES:
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                out[key] = value
+        elif isinstance(value, (str, bool)):
+            out[key] = value[:180] if isinstance(value, str) else value
+    return out
+
+
+def _event_rows() -> list[dict[str, Any]]:
     with DB_LOCK:
-        return {
-            device_id for device_id, name in _db.execute(
-                "SELECT device_id,name FROM events WHERE ts>? AND device_id!=''", (cutoff,)
-            ) if _is_active_name(name)
-        }
+        rows = _db.execute(
+            "SELECT event_id,ts,device_id,name,properties,ingested_at,provenance,confidence,payload_version "
+            "FROM events ORDER BY ts,event_id"
+        ).fetchall()
+    result = []
+    for event_id, ts, device_id, name, props_json, ingested_at, provenance, confidence, version in rows:
+        try:
+            props = json.loads(props_json or "{}")
+        except (TypeError, ValueError):
+            props = {}
+        result.append({
+            "event_id": event_id, "ts": float(ts), "device_id": device_id,
+            "name": _canonical(name), "raw_name": name, "properties": props,
+            "ingested_at": float(ingested_at or 0),
+            "provenance": props.get("provenance") or provenance or "observed",
+            "confidence": props.get("confidence") or confidence or "high",
+            "payload_version": int(props.get("payload_version") or version or 1),
+        })
+    return result
 
 
-def session_count(period_days: float = 1.0) -> int:
-    cutoff = time.time() - period_days * 86400.0
-    last: dict[str, float] = {}
-    sessions = 0
-    with DB_LOCK:
-        for device_id, ts, name in _db.execute(
-                "SELECT device_id,ts,name FROM events WHERE ts>? AND device_id!='' ORDER BY device_id,ts",
-                (cutoff,)):
-            if not _is_active_name(name):
+def _active_ids(rows: list[dict[str, Any]], cutoff: float) -> set[str]:
+    return {r["device_id"] for r in rows if r["ts"] >= cutoff and _is_active(r["name"])}
+
+
+def _sessions(rows: list[dict[str, Any]], cutoff: float) -> tuple[int, list[float], list[int]]:
+    by_user: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        if row["ts"] >= cutoff and _is_active(row["name"]):
+            by_user[row["device_id"]].append(row["ts"])
+    count = 0; lengths: list[float] = []; events: list[int] = []
+    for timestamps in by_user.values():
+        timestamps.sort(); start = prev = timestamps[0]; n = 1
+        for ts in timestamps[1:]:
+            if ts - prev > 1800:
+                count += 1; lengths.append(prev - start); events.append(n)
+                start = ts; n = 0
+            prev = ts; n += 1
+        count += 1; lengths.append(prev - start); events.append(n)
+    return count, lengths, events
+
+
+def _feature(row: dict[str, Any]) -> str | None:
+    name = row["name"]; props = row["properties"]; screen = props.get("screen")
+    if name in {"assistant_message_sent", "assistant_response_received"} or screen == "chat": return "Чат с AIWA"
+    if name.startswith("checkin_") or screen == "today": return "Сегодня / чек-ин"
+    if name == "meal_add_completed" or screen == "food": return "Питание"
+    if name == "workout_add_completed" or screen == "train": return "Нагрузка"
+    if screen == "stats": return "Статистика цикла"
+    if name == "app_opened" or name == "screen_viewed": return "Mini App"
+    if props.get("channel") == "voice" or name == "legacy_voice": return "Голос"
+    return props.get("feature")
+
+
+def _retention(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    active_days: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        if _is_active(row["name"]):
+            active_days[row["device_id"]].add(datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat())
+    today = datetime.now(timezone.utc).date()
+    out: dict[str, Any] = {}
+    for horizon in (1, 7, 30):
+        eligible = 0; returned = 0
+        for days in active_days.values():
+            dates = sorted(datetime.fromisoformat(d).date() for d in days)
+            first = dates[0]
+            if (today - first).days < horizon:
                 continue
-            if device_id not in last or ts - last[device_id] > 1800:
-                sessions += 1
-            last[device_id] = ts
-    return sessions
+            eligible += 1
+            if any((d - first).days >= horizon for d in dates[1:]):
+                returned += 1
+        out[f"d{horizon}"] = {"rate": _percent(returned, eligible), "eligible": eligible, "returned": returned}
+    return out
+
+
+def _series(rows: list[dict[str, Any]], days: float, now: float, available_start: float | None) -> list[dict[str, Any]]:
+    result = []
+    if available_start is None:
+        return result
+    if days <= 1.1:
+        start = max(now - 24 * 3600, available_start)
+        start = math.floor(start / 3600) * 3600
+        buckets = max(1, math.ceil((now - start) / 3600))
+        for i in range(buckets):
+            lo = start + i * 3600; hi = min(now + 1, lo + 3600)
+            chunk = [r for r in rows if lo <= r["ts"] < hi]
+            result.append({
+                "label": datetime.fromtimestamp(lo, timezone.utc).strftime("%H:00"),
+                "active": len({r["device_id"] for r in chunk if _is_active(r["name"])}),
+                "messages": sum(r["name"] == "assistant_message_sent" for r in chunk),
+                "ai_calls": sum(r["name"] == "ai_call" for r in chunk),
+            })
+        return result
+    span = max(1, int(math.ceil(days)))
+    today = datetime.fromtimestamp(now, timezone.utc).date()
+    first = max(today - timedelta(days=span - 1), datetime.fromtimestamp(available_start, timezone.utc).date())
+    day = first
+    while day <= today:
+        lo = datetime.combine(day, datetime.min.time(), timezone.utc).timestamp(); hi = lo + 86400
+        chunk = [r for r in rows if lo <= r["ts"] < hi]
+        result.append({
+            "label": day.strftime("%d.%m"),
+            "active": len({r["device_id"] for r in chunk if _is_active(r["name"])}),
+            "messages": sum(r["name"] == "assistant_message_sent" for r in chunk),
+            "ai_calls": sum(r["name"] == "ai_call" for r in chunk),
+        })
+        day += timedelta(days=1)
+    return result
+
+
+def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
+    window_days = max(0.04, min(float(days), 365.0)); now = time.time(); since = now - window_days * 86400
+    rows = _event_rows(); selected = [r for r in rows if r["ts"] >= since]
+    data_start = min((r["ts"] for r in rows), default=None)
+    available_start = max(since, data_start) if data_start is not None else None
+    requested_days = max(1, int(math.ceil(window_days)))
+    available_days = (min(requested_days,
+                          (datetime.fromtimestamp(now, timezone.utc).date() -
+                           datetime.fromtimestamp(available_start, timezone.utc).date()).days + 1)
+                      if available_start is not None else 0)
+    active_selected = [r for r in selected if _is_active(r["name"])]
+    ever_ids = {r["device_id"] for r in rows if _is_active(r["name"])}
+    selected_ids = {r["device_id"] for r in active_selected}
+    dau_ids = _active_ids(rows, now - 86400); wau_ids = _active_ids(rows, now - 7 * 86400); mau_ids = _active_ids(rows, now - 30 * 86400)
+
+    daily_users: dict[str, set[str]] = defaultdict(set)
+    for row in active_selected:
+        daily_users[datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()].add(row["device_id"])
+    active_user_days = sum(len(v) for v in daily_users.values())
+    sessions, session_lengths, session_events = _sessions(rows, since)
+    messages = sum(r["name"] == "assistant_message_sent" for r in selected)
+    responses = sum(r["name"] == "assistant_response_received" for r in selected)
+
+    ai_rows = [r for r in selected if r["name"] == "ai_call"]
+    requests: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    providers: dict[str, Counter] = defaultdict(Counter); models: dict[str, Counter] = defaultdict(Counter)
+    latencies: list[float] = []; input_tokens = output_tokens = cached_tokens = total_tokens = 0
+    token_covered = request_covered = model_covered = 0; cost_usd = 0.0; cost_covered = 0
+    for row in ai_rows:
+        p = row["properties"]; request_id = p.get("request_id")
+        if request_id:
+            requests[str(request_id)].append(row)
+        status = str(p.get("status") or "unknown"); provider = str(p.get("provider") or "unknown"); model = str(p.get("model") or "unknown")
+        providers[provider]["calls"] += 1; models[model]["calls"] += 1
+        if status in SUCCESS:
+            providers[provider]["success"] += 1; models[model]["success"] += 1
+            latency = float(p.get("latency_ms") or 0)
+            if latency > 0: latencies.append(latency)
+        if request_id: request_covered += 1
+        if p.get("model"): model_covered += 1
+        if "input_tokens" in p and "output_tokens" in p:
+            token_covered += 1
+            input_tokens += int(p.get("input_tokens") or 0); output_tokens += int(p.get("output_tokens") or 0)
+            cached_tokens += int(p.get("cached_tokens") or 0); total_tokens += int(p.get("total_tokens") or 0)
+        raw_cost = p.get("estimated_cost_usd")
+        if raw_cost is None and str(p.get("cost_unit") or "").strip().lower() in {"usd", "$"}:
+            raw_cost = p.get("reported_cost")
+        if isinstance(raw_cost, (int, float)):
+            cost_covered += 1; cost_usd += float(raw_cost)
+    successful_requests = sum(any(str(r["properties"].get("status") or "") in SUCCESS for r in rr) for rr in requests.values())
+    failed_requests = len(requests) - successful_requests
+    fallback_requests = sum(len({str(r["properties"].get("provider") or "") for r in rr}) > 1 or
+                            any(int(r["properties"].get("retry_index") or 0) > 0 for r in rr) for rr in requests.values())
+    failed_attempts = sum(str(r["properties"].get("status") or "") not in SUCCESS for r in ai_rows)
+    explicit_errors = sum(r["name"] in {"error", "legacy_error"} for r in selected)
+    pushes = [r for r in selected if r["name"] in {"push_sent", "legacy_broadcast"}]
+    checkins = [r for r in selected if r["name"] == "checkin_completed"]
+
+    feature_users: dict[str, set[str]] = defaultdict(set); feature_events = Counter()
+    for row in active_selected:
+        feature = _feature(row)
+        if feature:
+            feature_users[feature].add(row["device_id"]); feature_events[feature] += 1
+    features = sorted(({"name": name, "users": len(users), "events": feature_events[name],
+                        "adoption": _percent(len(users), len(selected_ids))}
+                       for name, users in feature_users.items()), key=lambda x: (-x["users"], x["name"]))
+
+    starts: dict[str, float] = {}
+    for row in selected:
+        if row["name"] == "onboarding_started": starts.setdefault(row["device_id"], row["ts"])
+    completed = messaged = valued = 0
+    for user, started in starts.items():
+        after = [r for r in rows if r["device_id"] == user and r["ts"] >= started]
+        completed += any(r["name"] == "onboarding_completed" for r in after)
+        messaged += any(r["name"] in {"assistant_message_sent", "assistant_response_received"} for r in after)
+        valued += any(r["name"] in VALUE_NAMES for r in after)
+    funnel = [
+        {"label": "Начали онбординг", "value": len(starts), "rate": 100.0 if starts else 0.0},
+        {"label": "Завершили", "value": completed, "rate": _percent(completed, len(starts))},
+        {"label": "Поговорили с AIWA", "value": messaged, "rate": _percent(messaged, len(starts))},
+        {"label": "Получили ценность", "value": valued, "rate": _percent(valued, len(starts))},
+    ]
+
+    observed = [r for r in rows if r["provenance"] == "observed"]
+    reconstructed = [r for r in rows if r["provenance"] != "observed"]
+    observed_start = min((r["ts"] for r in observed), default=None)
+    coverage_days = (now - observed_start) / 86400 if observed_start else 0
+    quality = {
+        "mode": "mixed" if reconstructed else "observed",
+        "observed_start": datetime.fromtimestamp(observed_start, timezone.utc).isoformat(timespec="seconds") if observed_start else None,
+        "coverage_days": round(coverage_days, 1),
+        "requested_days": requested_days, "available_days": available_days,
+        "observed_events": len(observed), "reconstructed_events": len(reconstructed),
+        "request_id_coverage": _percent(request_covered, len(ai_rows)),
+        "token_split_coverage": _percent(token_covered, len(ai_rows)),
+        "model_coverage": _percent(model_covered, len(ai_rows)),
+        "cost_coverage": _percent(cost_covered, len(ai_rows)),
+        "warnings": (["Точный слой пока короче 7 дней; retention и тренды предварительные."] if coverage_days < 7 else []) +
+                    (["Request ID покрывает меньше 80% AI-попыток; успех пользовательских запросов пока не показывается."] if ai_rows and _percent(request_covered, len(ai_rows)) < 80 else []) +
+                    ([f"Выбрано {requested_days} дн., но источник содержит только {available_days} дн.; средние и график не включают дни до начала сбора."] if 0 < available_days < requested_days else []) +
+                    (["Есть реконструированные события: они показаны отдельно и не входят в точную стоимость."] if reconstructed else []),
+    }
+
+    avg_dau = active_user_days / max(1, available_days)
+    per_active_day = lambda n: round(n / active_user_days, 2) if active_user_days else 0
+    overview = {
+        "ever_used": len(ever_ids), "dau": len(dau_ids), "wau": len(wau_ids), "mau": len(mau_ids),
+        "sessions_per_dau": per_active_day(sessions), "tools_per_dau": per_active_day(len(ai_rows)),
+    }
+    label = "24h" if abs(window_days - 1) < 0.01 else f"{window_days:g}d"
+    primary = [
+        {"label": "Ever used", "value": len(ever_ids), "note": "уникальные пользователи · всё время"},
+        {"label": "MAU", "value": len(mau_ids), "note": "активные за последние 30 дней"},
+        {"label": "Avg DAU", "value": round(avg_dau, 1),
+         "note": f"среднее за {available_days} дн. с данными · окно {label}"},
+        {"label": "Daily sessions / user", "value": per_active_day(sessions), "note": "сессии на активного пользователя в день"},
+        {"label": "Daily messages / user", "value": per_active_day(messages), "note": "сообщения пользователя в день"},
+        {"label": "Daily AI calls / user", "value": per_active_day(len(ai_rows)), "note": "все попытки модели, включая retry"},
+    ]
+    return {
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "window_days": window_days,
+        "installs": len(ever_ids), "dau": len(selected_ids), "events": len(selected),
+        "errors": (failed_requests if requests else 0) + explicit_errors, "overview": overview,
+        "metrics": [{"label": x["label"], "value": str(x["value"]), "good": True} for x in primary],
+        "primary": primary,
+        "audience": {"ever_used": len(ever_ids), "active": len(selected_ids), "dau": len(dau_ids),
+                     "wau": len(wau_ids), "mau": len(mau_ids), "avg_dau": round(avg_dau, 1),
+                     "active_user_days": active_user_days},
+        "engagement": {"sessions": sessions, "messages": messages, "responses": responses,
+                       "sessions_per_active_day": per_active_day(sessions),
+                       "messages_per_active_day": per_active_day(messages),
+                       "avg_session_min": round(sum(session_lengths) / len(session_lengths) / 60, 1) if session_lengths else 0,
+                       "events_per_session": round(sum(session_events) / len(session_events), 1) if session_events else 0,
+                       "features": features,
+                       "pushes_sent": len(pushes), "checkins_completed": len(checkins)},
+        "funnel": funnel, "retention": _retention(rows),
+        "series": _series(rows, window_days, now, available_start),
+        "ai": {"attempts": len(ai_rows), "requests": len(requests), "untraced_attempts": len(ai_rows) - request_covered,
+               "successful_requests": successful_requests,
+               "failed_requests": failed_requests,
+               "request_success_rate": (_percent(successful_requests, len(requests))
+                                        if requests and _percent(request_covered, len(ai_rows)) >= 80 else None),
+               "failed_attempts": failed_attempts, "attempt_error_rate": _percent(failed_attempts, len(ai_rows)),
+               "fallback_requests": fallback_requests, "attempts_per_request": round(len(ai_rows) / len(requests), 2) if requests else 0,
+               "p50_ms": _pct(latencies, .5), "p95_ms": _pct(latencies, .95),
+               "input_tokens": input_tokens, "output_tokens": output_tokens, "cached_tokens": cached_tokens,
+               "total_tokens": total_tokens, "cost_usd": round(cost_usd, 6),
+               "providers": [{"name": k, "calls": int(v["calls"]), "success": int(v["success"])}
+                             for k, v in sorted(providers.items(), key=lambda kv: -kv[1]["calls"])],
+               "models": [{"name": k, "calls": int(v["calls"]), "success": int(v["success"])}
+                          for k, v in sorted(models.items(), key=lambda kv: -kv[1]["calls"])]},
+        "data_quality": quality,
+    }
 
 
 @app.get("/health")
@@ -111,66 +422,68 @@ async def ingest(request: Request) -> JSONResponse:
         name = str(item["name"])[:120]
         if name == "user_deleted":
             deletions.append(device_id); continue
-        raw_props = item.get("properties") if isinstance(item.get("properties"), dict) else {}
-        props = {key: raw_props[key] for key in SAFE_PROPERTIES if key in raw_props}
+        props = _safe_properties(item.get("properties"))
+        version = max(1, int(item.get("payload_version") or props.get("payload_version") or 1))
+        provenance = str(props.get("provenance") or "observed")[:32]
+        confidence = str(props.get("confidence") or ("high" if provenance == "observed" else "medium"))[:16]
         rows.append((
-            str(item.get("event_id") or uuid.uuid4())[:160],
-            float(item.get("ts") or time.time()), device_id, name,
-            json.dumps(props, ensure_ascii=False, separators=(",", ":")),
+            str(item.get("event_id") or uuid.uuid4())[:160], float(item.get("ts") or time.time()),
+            device_id, name, json.dumps(props, ensure_ascii=False, separators=(",", ":")),
+            time.time(), provenance, confidence, version,
         ))
 
     def _write() -> None:
         with DB_LOCK:
             for device_id in deletions:
                 _db.execute("DELETE FROM events WHERE device_id=?", (device_id,))
-            _db.executemany("INSERT OR IGNORE INTO events VALUES(?,?,?,?,?)", rows)
+            _db.executemany(
+                """INSERT INTO events(event_id,ts,device_id,name,properties,ingested_at,provenance,confidence,payload_version)
+                   VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(event_id) DO UPDATE SET ts=excluded.ts,device_id=excluded.device_id,
+                     name=excluded.name,properties=excluded.properties,ingested_at=excluded.ingested_at,
+                     provenance=excluded.provenance,confidence=excluded.confidence,
+                     payload_version=excluded.payload_version
+                   WHERE excluded.payload_version >= events.payload_version""", rows)
             _db.commit()
 
     await run_in_threadpool(_write)
     return _no_store({"ok": True, "ingested": len(rows), "deleted": len(deletions)})
 
 
+@app.delete("/migration-batches/{batch_id}")
+async def delete_migration_batch(batch_id: str, request: Request) -> JSONResponse:
+    """Rollback reconstructed history without touching observed production events."""
+    if not INGEST_TOKEN or request.headers.get("x-ingest-token") != INGEST_TOKEN:
+        return _no_store({"error": "bad token"}, 401)
+    batch_id = batch_id[:80]
+
+    def _delete() -> int:
+        with DB_LOCK:
+            rows = _db.execute(
+                "SELECT event_id,properties,provenance FROM events WHERE provenance!='observed'"
+            ).fetchall()
+            ids = []
+            for event_id, props_json, provenance in rows:
+                try: props = json.loads(props_json or "{}")
+                except (TypeError, ValueError): props = {}
+                if provenance != "observed" and props.get("migration_batch") == batch_id:
+                    ids.append(event_id)
+            _db.executemany("DELETE FROM events WHERE event_id=?", [(x,) for x in ids])
+            _db.commit()
+            return len(ids)
+
+    removed = await run_in_threadpool(_delete)
+    return _no_store({"ok": True, "batch": batch_id, "removed": removed})
+
+
 @app.get("/summary")
 def summary(days: float = 1.0) -> JSONResponse:
-    window_days = max(0.04, min(float(days), 365.0))
-    since = time.time() - window_days * 86400.0
-    with DB_LOCK:
-        all_active = {
-            device_id for device_id, name in _db.execute(
-                "SELECT device_id,name FROM events WHERE device_id!=''"
-            ) if _is_active_name(name)
-        }
-        dau_ids = active_ids(1); wau_ids = active_ids(7); mau_ids = active_ids(30)
-        selected_ids = active_ids(window_days)
-        selected_events = _db.execute("SELECT COUNT(*) FROM events WHERE ts>?", (since,)).fetchone()[0]
-        errors = _db.execute(
-            "SELECT COUNT(*) FROM events WHERE ts>? AND (name IN ('error','legacy_error') OR "
-            "(name='ai_call' AND json_extract(properties,'$.status') NOT IN ('success','ok')))",
-            (since,),
-        ).fetchone()[0]
-        sessions = session_count(1)
-        tools = _db.execute("SELECT COUNT(*) FROM events WHERE ts>? AND name='ai_call'",
-                            (time.time() - 86400.0,)).fetchone()[0]
-    overview = {
-        "ever_used": len(all_active), "dau": len(dau_ids), "wau": len(wau_ids), "mau": len(mau_ids),
-        "sessions_per_dau": round(sessions / len(dau_ids), 2) if dau_ids else 0,
-        "tools_per_dau": round(tools / len(dau_ids), 2) if dau_ids else 0,
-    }
-    label = "24h" if abs(window_days - 1) < 1e-9 else f"{window_days:g}d"
-    return _no_store({
-        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "window_days": window_days,
-        "installs": len(all_active), "dau": len(selected_ids), "events": selected_events, "errors": errors,
-        "overview": overview,
-        "metrics": [
-            {"label": "Ever used", "value": str(len(all_active))},
-            {"label": "Active, " + label, "value": str(len(selected_ids))},
-            {"label": "Events, " + label, "value": str(selected_events)},
-            {"label": "AI calls, 24h", "value": str(tools)},
-            {"label": "Sessions, 24h", "value": str(sessions)},
-            {"label": "Errors, " + label, "value": str(errors), "good": errors == 0},
-        ],
-    })
+    return _no_store(compute_dashboard(days))
+
+
+@app.get("/dashboard")
+def dashboard_data(days: float = 1.0) -> JSONResponse:
+    return _no_store(compute_dashboard(days))
 
 
 @app.get("/")

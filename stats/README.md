@@ -12,6 +12,23 @@ Only the HMAC-pseudonymous `user_key`, canonical event name and an allow-list
 of coarse properties are accepted. Telegram IDs, message text, symptoms,
 cycle dates, photos and audio are never sent.
 
+## Historical migration
+
+Legacy history is intentionally not blended into the exact layer. Run the
+migration in dry-run mode first:
+
+```bash
+python scripts/migrate_legacy_analytics.py --db /data/aiwa.db
+```
+
+After reviewing the cutover, counts and invalid timestamps, repeat with
+`--apply`. The command creates `/data/backups/aiwa-before-analytics-<batch>.db`
+before writing anything. Imported events are marked `reconstructed` with a
+migration batch and can be removed locally with `--rollback <batch>`. Pass
+`--remote-url` on rollback to remove the same batch from this module. Exact
+input/output tokens, cost, latency and model attribution are never inferred
+from legacy totals.
+
 Local run:
 
 ```bash
