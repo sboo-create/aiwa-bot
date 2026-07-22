@@ -442,11 +442,12 @@ def _proxy_verify():
 def _proxy_is_messages(url=None):
     return "/messages" in ((url or PROXY_URL) or "")
 
-def _proxy_payload(messages, max_tokens, temperature, url=None, model=None):
+def _proxy_payload(messages, max_tokens, temperature, url=None, model=None, provider_preferences=None):
     model = model or PROXY_MODEL
     if not _proxy_is_messages(url):
         payload = {"messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
         if model: payload["model"] = model
+        if provider_preferences: payload["provider"] = provider_preferences
         return payload
     system = "\n\n".join((m.get("content") or "") for m in messages if m.get("role") == "system").strip()
     mm = []
@@ -459,9 +460,20 @@ def _proxy_payload(messages, max_tokens, temperature, url=None, model=None):
         mm.append({"role": role, "content": m.get("content") or ""})
     payload = {"messages": mm, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
     if model: payload["model"] = model
+    if provider_preferences: payload["provider"] = provider_preferences
     if system:
         payload["system"] = system
     return payload
+
+def _openrouter_provider_preferences():
+    """Fail closed for sensitive health data unless explicitly overridden."""
+    collection = (os.environ.get("OPENROUTER_DATA_COLLECTION") or "deny").strip().lower()
+    if collection not in {"allow", "deny"}:
+        collection = "deny"
+    prefs = {"data_collection": collection}
+    if _env_bool("OPENROUTER_ZDR", True):
+        prefs["zdr"] = True
+    return prefs
 
 def _response_text(data):
     try:
@@ -490,7 +502,8 @@ def _proxy_configs():
     cfgs = [{"name": ("openrouter" if is_openrouter else "litellm"), "url": PROXY_URL, "model": PROXY_MODEL,
              "key": key, "xkey": xkey,
              "referer": os.environ.get("OPENROUTER_HTTP_REFERER"),
-             "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA"}]
+             "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA",
+             "provider": (_openrouter_provider_preferences() if is_openrouter else None)}]
     fb_key = os.environ.get("LITELLM_FALLBACK_KEY") or os.environ.get("AIWA_LLM_FALLBACK_KEY")
     fb_xkey = os.environ.get("LITELLM_FALLBACK_XKEY") or os.environ.get("AIWA_LLM_FALLBACK_XKEY")
     fb_url = os.environ.get("LITELLM_FALLBACK_URL") or os.environ.get("AIWA_LLM_FALLBACK_URL") or FALLBACK_PROXY_URL
@@ -515,6 +528,7 @@ def _openrouter_vision_config():
         "key": _OPENROUTER_KEY,
         "referer": os.environ.get("OPENROUTER_HTTP_REFERER"),
         "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA",
+        "provider": _openrouter_provider_preferences(),
     }
 
 def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
@@ -529,7 +543,8 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
         started = _t.time()
         try:
             r = _HTTP.post(cfg["url"], headers=headers,
-                json=_proxy_payload(messages, max_tokens, temperature, cfg["url"], cfg.get("model")),
+                json=_proxy_payload(messages, max_tokens, temperature, cfg["url"], cfg.get("model"),
+                                    cfg.get("provider")),
                 timeout=(6, 30), verify=_proxy_verify())
             if r.status_code == 429:
                 _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, "http_429", i)
@@ -586,6 +601,7 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
         payload = {"messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens,
                    "tools": tools, "tool_choice": "auto"}
         if cfg.get("model") or PROXY_MODEL: payload["model"] = cfg.get("model") or PROXY_MODEL
+        if cfg.get("provider"): payload["provider"] = cfg["provider"]
         r = _HTTP.post(cfg["url"], headers=headers, json=payload, timeout=(6, 45), verify=_proxy_verify())
         if r.status_code >= 400:
             _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), t1, "http_%s" % r.status_code)

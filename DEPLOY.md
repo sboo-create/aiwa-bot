@@ -38,7 +38,8 @@
    - `AIWA_DB` = `/data/aiwa.db`
    - для OpenRouter вместо GigaChat: `AIWA_PROVIDER=openrouter`, `OPENROUTER_API_KEY`,
      `OPENROUTER_TEXT_MODEL=deepseek/deepseek-v3.2` и
-     `OPENROUTER_VISION_MODEL=google/gemini-2.5-flash`
+     `OPENROUTER_VISION_MODEL=google/gemini-2.5-flash`; `OPENROUTER_ZDR=1` и
+     `OPENROUTER_DATA_COLLECTION=deny` включены кодом по умолчанию
 3. Railway перезапустит сервис. Во вкладке **Deploy logs** должно появиться
    `AIWA bot starting...` и `Application started`.
 
@@ -64,6 +65,8 @@
 - Для OpenRouter текст и фото намеренно маршрутизируются в разные модели. Не используй
   `gemini-2.5-flash-image`: это модель генерации/редактирования изображений, а для разбора
   фотографии еды нужна обычная мультимодальная `gemini-2.5-flash`.
+- OpenRouter-запросы по умолчанию требуют Zero Data Retention и запрещают endpoints,
+  собирающие данные. Не ослабляй эти настройки для медицинских и дневниковых данных.
 
 ## Альтернативы
 - **Render** → New → **Background Worker** из того же GitHub-репо, start command

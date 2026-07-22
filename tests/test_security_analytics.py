@@ -158,6 +158,21 @@ class SecurityAnalyticsTests(unittest.TestCase):
             llm._OPENROUTER_KEY = old_key
             llm.OPENROUTER_VISION_MODEL = old_model
 
+    def test_openrouter_payload_is_private_by_default(self):
+        old_zdr = os.environ.get("OPENROUTER_ZDR")
+        old_collection = os.environ.get("OPENROUTER_DATA_COLLECTION")
+        os.environ.pop("OPENROUTER_ZDR", None)
+        os.environ.pop("OPENROUTER_DATA_COLLECTION", None)
+        try:
+            prefs = llm._openrouter_provider_preferences()
+            payload = llm._proxy_payload([{"role": "user", "content": "private"}], 10, 0.2,
+                                         "https://openrouter.ai/api/v1/chat/completions",
+                                         "test/model", prefs)
+            self.assertEqual(payload["provider"], {"data_collection": "deny", "zdr": True})
+        finally:
+            if old_zdr is not None: os.environ["OPENROUTER_ZDR"] = old_zdr
+            if old_collection is not None: os.environ["OPENROUTER_DATA_COLLECTION"] = old_collection
+
 
 if __name__ == "__main__":
     unittest.main()
