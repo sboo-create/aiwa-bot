@@ -451,7 +451,23 @@ def _focus(st):
 
 
 _OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
-PROXY_URL = os.environ.get("LITELLM_URL") or ("https://openrouter.ai/api/v1/chat/completions" if _OPENROUTER_KEY else "")
+def _chat_completions_url(base_url):
+    """Accept either an OpenAI base URL (/v1) or a full chat-completions URL."""
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if url.endswith("/chat/completions") or url.endswith("/messages"):
+        return url
+    if url.endswith("/v1"):
+        return url + "/chat/completions"
+    return url + "/v1/chat/completions"
+
+_PROXY_BASE = (os.environ.get("LITELLM_URL") or os.environ.get("OPENROUTER_BASE_URL")
+               or ("https://openrouter.ai/api/v1" if _OPENROUTER_KEY else ""))
+PROXY_URL = _chat_completions_url(_PROXY_BASE)
+if PROXY_URL.startswith("http://") and not _env_bool("AIWA_ALLOW_INSECURE_LLM_HTTP", False):
+    print("LLM proxy disabled: plain HTTP would expose API keys and health data; configure HTTPS")
+    PROXY_URL = ""
 PROXY_MODEL = (os.environ.get("LITELLM_MODEL") or os.environ.get("OPENROUTER_TEXT_MODEL")
                or os.environ.get("OPENROUTER_MODEL") or (None if _OPENROUTER_KEY else "gigachat-3-ultra"))
 OPENROUTER_VISION_MODEL = os.environ.get("OPENROUTER_VISION_MODEL")
@@ -541,11 +557,11 @@ def _proxy_configs():
 
 def _openrouter_vision_config():
     """Separate image model so a text-only model never receives food photos."""
-    if not (_OPENROUTER_KEY and OPENROUTER_VISION_MODEL):
+    if not (_OPENROUTER_KEY and OPENROUTER_VISION_MODEL and PROXY_URL):
         return None
     return {
         "name": "openrouter",
-        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "url": PROXY_URL,
         "model": OPENROUTER_VISION_MODEL,
         "key": _OPENROUTER_KEY,
         "referer": os.environ.get("OPENROUTER_HTTP_REFERER"),

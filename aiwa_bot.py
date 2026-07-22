@@ -4048,6 +4048,7 @@ async def _api_report(request):
 async def _api_opts(request): return _cors(web.Response())
 
 _ADMIN_COOKIE = "aiwa_admin_session"
+_ADMIN_SESSION_SECONDS = int(os.environ.get("AIWA_ADMIN_SESSION_SECONDS", str(7 * 24 * 3600)))
 _ADMIN_KEY_WARNING_SHOWN = False
 def _admin_http_secret():
     """Compatibility bridge: prefer a separate HTTP key, keep the current admin id working."""
@@ -4064,8 +4065,27 @@ def _admin_key_ok(request):
     expected = _admin_http_secret()
     if not expected:
         return False
-    got = request.headers.get("X-Admin-Key") or request.cookies.get(_ADMIN_COOKIE) or ""
-    return _hmac.compare_digest(str(got), str(expected))
+    header_key = request.headers.get("X-Admin-Key") or ""
+    cookie = request.cookies.get(_ADMIN_COOKIE) or ""
+    session = _admin_session_value(expected)
+    return (_hmac.compare_digest(str(header_key), str(expected)) or
+            _hmac.compare_digest(str(cookie), str(session)))
+
+def _admin_session_value(expected=None):
+    """One-way session token: the admin key itself is never stored in the cookie."""
+    secret = str(expected if expected is not None else _admin_http_secret())
+    return _hmac.new(secret.encode(), b"aiwa-admin-session-v1", _hashlib.sha256).hexdigest() if secret else ""
+
+def _set_admin_session(response):
+    response.set_cookie(_ADMIN_COOKIE, _admin_session_value(), max_age=_ADMIN_SESSION_SECONDS,
+                        httponly=True, secure=True, samesite="Strict", path="/")
+    return response
+
+def _refresh_admin_session(request, response):
+    """Sliding expiration: every authenticated dashboard request renews the week."""
+    if request.cookies.get(_ADMIN_COOKIE) and _admin_key_ok(request):
+        _set_admin_session(response)
+    return response
 
 _EV_LBL = {
     "app_open": "Открыла приложение", "web_food": "Открыла меню", "web_diary": "Открыла дневник",
@@ -4560,13 +4580,13 @@ async def _admin_login(request):
         await asyncio.sleep(0.25)
         return web.Response(text="forbidden", status=403)
     resp = web.HTTPFound("/admin")
-    resp.set_cookie(_ADMIN_COOKIE, expected, max_age=8 * 3600, httponly=True,
-                    secure=True, samesite="Strict", path="/")
-    return resp
+    return _set_admin_session(resp)
 
 @web.middleware
 async def _security_headers(request, handler):
     response = await handler(request)
+    if request.path == "/admin" or request.path.startswith("/api/admin_"):
+        _refresh_admin_session(request, response)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")

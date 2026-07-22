@@ -37,8 +37,9 @@
    - `AIWA_ANALYTICS_SALT` = ещё одна отдельная случайная строка длиной не меньше 32 символов
    - `AIWA_DB` = `/data/aiwa.db`
    - для OpenRouter вместо GigaChat: `AIWA_PROVIDER=openrouter`, `OPENROUTER_API_KEY`,
-     `OPENROUTER_TEXT_MODEL=deepseek/deepseek-v3.2` и
-     `OPENROUTER_VISION_MODEL=google/gemini-2.5-flash`; `OPENROUTER_ZDR=1` и
+     `OPENROUTER_BASE_URL=https://proxy.example/v1`,
+     `OPENROUTER_TEXT_MODEL=deepseek/deepseek-v4-flash` и
+     `OPENROUTER_VISION_MODEL=google/gemini-3.1-flash-lite`; `OPENROUTER_ZDR=1` и
      `OPENROUTER_DATA_COLLECTION=deny` включены кодом по умолчанию
 3. Railway перезапустит сервис. Во вкладке **Deploy logs** должно появиться
    `AIWA bot starting...` и `Application started`.
@@ -59,12 +60,16 @@
 - Если mini app и API находятся на разных доменах, перечисли точные origins в
   `AIWA_ALLOWED_ORIGINS`. Значение `*` не используется.
 - Дашборд открывается по `/admin`: ключ вводится в форме и сохраняется в защищённой HttpOnly
-  cookie на 8 часов. Ключи в URL запрещены, потому что URL попадают в access logs. Пока
+  cookie на 7 дней; каждый успешный заход продлевает её ещё на 7 дней. Ключи в URL
+  запрещены, потому что URL попадают в access logs. Пока
   `AIWA_ADMIN_KEY` не задан, для совместимости принимается текущее значение `AIWA_ADMIN`;
   приложение пишет предупреждение в лог. Позже лучше вынести отдельный длинный ключ.
-- Для OpenRouter текст и фото намеренно маршрутизируются в разные модели. Не используй
-  `gemini-2.5-flash-image`: это модель генерации/редактирования изображений, а для разбора
-  фотографии еды нужна обычная мультимодальная `gemini-2.5-flash`.
+- Для OpenRouter текст и фото намеренно маршрутизируются в разные модели. Для разбора
+  фотографии еды используется обычная мультимодальная `gemini-3.1-flash-lite`, а не
+  отдельная модель генерации/редактирования изображений.
+- `OPENROUTER_BASE_URL` принимает base URL вида `https://host/v1`; путь
+  `/chat/completions` добавляется автоматически. Публичный `http://` по умолчанию
+  блокируется, чтобы ключ, сообщения и фотографии не уходили без TLS.
 - OpenRouter-запросы по умолчанию требуют Zero Data Retention и запрещают endpoints,
   собирающие данные. Не ослабляй эти настройки для медицинских и дневниковых данных.
 

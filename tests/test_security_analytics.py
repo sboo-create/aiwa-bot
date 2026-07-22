@@ -112,13 +112,19 @@ class SecurityAnalyticsTests(unittest.TestCase):
         bot.AIWA_ADMIN = "123"
         os.environ.pop("AIWA_ADMIN_KEY", None)
         try:
-            self.assertTrue(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: "123"})))
+            legacy_session = bot._admin_session_value("123")
+            self.assertTrue(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: legacy_session})))
+            self.assertFalse(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: "123"})))
             self.assertFalse(bot._admin_key_ok(FakeRequest(query={"key": "123"})))
             os.environ["AIWA_ADMIN_KEY"] = "a" * 48
-            self.assertFalse(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: "123"})))
-            self.assertTrue(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: "a" * 48})))
+            session = bot._admin_session_value("a" * 48)
+            self.assertFalse(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: legacy_session})))
+            self.assertTrue(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: session})))
             self.assertFalse(bot._admin_key_ok(FakeRequest(query={"key": "a" * 48})))
             self.assertTrue(bot._admin_key_ok(FakeRequest(headers={"X-Admin-Key": "a" * 48})))
+            response = bot.web.Response()
+            bot._refresh_admin_session(FakeRequest(cookies={bot._ADMIN_COOKIE: session}), response)
+            self.assertEqual(response.cookies[bot._ADMIN_COOKIE]["max-age"], str(7 * 24 * 3600))
         finally:
             bot.AIWA_ADMIN = old_admin
             if old_key is None: os.environ.pop("AIWA_ADMIN_KEY", None)
@@ -144,8 +150,10 @@ class SecurityAnalyticsTests(unittest.TestCase):
     def test_food_photo_uses_separate_openrouter_vision_model(self):
         old_key = llm._OPENROUTER_KEY
         old_model = llm.OPENROUTER_VISION_MODEL
+        old_url = llm.PROXY_URL
         llm._OPENROUTER_KEY = "test-openrouter-key"
-        llm.OPENROUTER_VISION_MODEL = "google/gemini-2.5-flash"
+        llm.OPENROUTER_VISION_MODEL = "google/gemini-3.1-flash-lite"
+        llm.PROXY_URL = "https://proxy.example/v1/chat/completions"
         answer = json.dumps({"title": "Салат", "kcal": 250, "protein": 8,
                              "fat": 12, "carbs": 20})
         try:
@@ -153,11 +161,12 @@ class SecurityAnalyticsTests(unittest.TestCase):
                     mock.patch.object(llm, "_call") as text_call:
                 result = llm.analyze_food(b"fake-image", "food.jpg")
             self.assertEqual(result["title"], "Салат")
-            self.assertEqual(vision_call.call_args.args[0]["model"], "google/gemini-2.5-flash")
+            self.assertEqual(vision_call.call_args.args[0]["model"], "google/gemini-3.1-flash-lite")
             text_call.assert_not_called()
         finally:
             llm._OPENROUTER_KEY = old_key
             llm.OPENROUTER_VISION_MODEL = old_model
+            llm.PROXY_URL = old_url
 
     def test_openrouter_payload_is_private_by_default(self):
         old_zdr = os.environ.get("OPENROUTER_ZDR")
@@ -173,6 +182,12 @@ class SecurityAnalyticsTests(unittest.TestCase):
         finally:
             if old_zdr is not None: os.environ["OPENROUTER_ZDR"] = old_zdr
             if old_collection is not None: os.environ["OPENROUTER_DATA_COLLECTION"] = old_collection
+
+    def test_openai_base_url_is_normalized(self):
+        self.assertEqual(llm._chat_completions_url("https://proxy.example/v1"),
+                         "https://proxy.example/v1/chat/completions")
+        self.assertEqual(llm._chat_completions_url("https://proxy.example/v1/chat/completions"),
+                         "https://proxy.example/v1/chat/completions")
 
 
 if __name__ == "__main__":
