@@ -245,9 +245,13 @@ def _series(rows: list[dict[str, Any]], days: float, now: float, available_start
     return result
 
 
-def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
+def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any]:
     window_days = max(0.04, min(float(days), 365.0)); now = time.time(); since = now - window_days * 86400
-    rows = _event_rows(); selected = [r for r in rows if r["ts"] >= since]
+    source_mode = "observed" if str(source).lower() == "observed" else "mixed"
+    all_rows = _event_rows()
+    rows = ([r for r in all_rows if r["provenance"] == "observed"]
+            if source_mode == "observed" else all_rows)
+    selected = [r for r in rows if r["ts"] >= since]
     data_start = min((r["ts"] for r in rows), default=None)
     available_start = max(since, data_start) if data_start is not None else None
     requested_days = max(1, int(math.ceil(window_days)))
@@ -290,7 +294,10 @@ def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
             input_tokens += int(p.get("input_tokens") or 0); output_tokens += int(p.get("output_tokens") or 0)
             cached_tokens += int(p.get("cached_tokens") or 0); total_tokens += int(p.get("total_tokens") or 0)
         raw_cost = p.get("estimated_cost_usd")
-        if raw_cost is None and str(p.get("cost_unit") or "").strip().lower() in {"usd", "$"}:
+        cost_unit = str(p.get("cost_unit") or "").strip().lower()
+        openrouter_credit = (cost_unit == "provider_credit" and
+                             str(p.get("model") or "").strip().lower().startswith("openrouter/"))
+        if raw_cost is None and (cost_unit in {"usd", "$"} or openrouter_credit):
             raw_cost = p.get("reported_cost")
         if isinstance(raw_cost, (int, float)):
             cost_covered += 1; cost_usd += float(raw_cost)
@@ -458,12 +465,13 @@ def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
          "help": "Доля AI-запросов, где понадобился retry или переключение провайдера. Чем ниже, тем стабильнее основной маршрут."},
     ]
 
-    observed = [r for r in rows if r["provenance"] == "observed"]
-    reconstructed = [r for r in rows if r["provenance"] != "observed"]
+    observed = [r for r in all_rows if r["provenance"] == "observed"]
+    reconstructed = [r for r in all_rows if r["provenance"] != "observed"]
     observed_start = min((r["ts"] for r in observed), default=None)
     coverage_days = (now - observed_start) / 86400 if observed_start else 0
     quality = {
-        "mode": "mixed" if reconstructed else "observed",
+        "mode": ("observed" if source_mode == "observed" or not reconstructed else "mixed"),
+        "source_mode": source_mode,
         "observed_start": datetime.fromtimestamp(observed_start, timezone.utc).isoformat(timespec="seconds") if observed_start else None,
         "coverage_days": round(coverage_days, 1),
         "requested_days": requested_days, "available_days": available_days,
@@ -475,7 +483,10 @@ def compute_dashboard(days: float = 1.0) -> dict[str, Any]:
         "warnings": (["Точный слой пока короче 7 дней; retention и тренды предварительные."] if coverage_days < 7 else []) +
                     (["Request ID покрывает меньше 80% AI-попыток; успех пользовательских запросов пока не показывается."] if ai_rows and _percent(request_covered, len(ai_rows)) < 80 else []) +
                     ([f"Выбрано {requested_days} дн., но источник содержит только {available_days} дн.; средние и график не включают дни до начала сбора."] if 0 < available_days < requested_days else []) +
-                    (["Есть реконструированные события: они показаны отдельно и не входят в точную стоимость."] if reconstructed else []),
+                    (["Показан только точный слой v2; восстановленная история исключена из всех расчётов."]
+                     if source_mode == "observed" and reconstructed else []) +
+                    (["Есть реконструированные события: они расширяют историю, но не входят в точную стоимость."]
+                     if source_mode == "mixed" and reconstructed else []),
     }
 
     avg_dau = active_user_days / max(1, available_days)
@@ -622,13 +633,13 @@ async def delete_migration_batch(batch_id: str, request: Request) -> JSONRespons
 
 
 @app.get("/summary")
-def summary(days: float = 1.0) -> JSONResponse:
-    return _no_store(compute_dashboard(days))
+def summary(days: float = 1.0, source: str = "mixed") -> JSONResponse:
+    return _no_store(compute_dashboard(days, source))
 
 
 @app.get("/dashboard")
-def dashboard_data(days: float = 1.0) -> JSONResponse:
-    return _no_store(compute_dashboard(days))
+def dashboard_data(days: float = 1.0, source: str = "mixed") -> JSONResponse:
+    return _no_store(compute_dashboard(days, source))
 
 
 @app.get("/")
