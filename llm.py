@@ -539,22 +539,29 @@ def _response_text(data):
 def _proxy_configs():
     key = os.environ.get("LITELLM_KEY") or _OPENROUTER_KEY; xkey = os.environ.get("LITELLM_XKEY")
     is_openrouter = bool(_OPENROUTER_KEY and not os.environ.get("LITELLM_URL"))
+    # A LiteLLM gateway can still route an explicitly prefixed OpenRouter
+    # model. OpenRouter credits are denominated in USD, so preserve that unit
+    # even though the immediate HTTP endpoint is LiteLLM.
+    uses_openrouter_billing = is_openrouter or str(PROXY_MODEL or "").lower().startswith("openrouter/")
     cfgs = [{"name": ("openrouter" if is_openrouter else "litellm"), "url": PROXY_URL, "model": PROXY_MODEL,
              "key": key, "xkey": xkey,
              "referer": os.environ.get("OPENROUTER_HTTP_REFERER"),
              "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA",
              "provider": (_openrouter_provider_preferences() if is_openrouter else None),
-             "cost_unit": ("usd" if is_openrouter else os.environ.get("LITELLM_COST_UNIT"))}]
+             "cost_unit": ("usd" if uses_openrouter_billing else os.environ.get("LITELLM_COST_UNIT"))}]
     fb_key = os.environ.get("LITELLM_FALLBACK_KEY") or os.environ.get("AIWA_LLM_FALLBACK_KEY")
     fb_xkey = os.environ.get("LITELLM_FALLBACK_XKEY") or os.environ.get("AIWA_LLM_FALLBACK_XKEY")
     fb_url = os.environ.get("LITELLM_FALLBACK_URL") or os.environ.get("AIWA_LLM_FALLBACK_URL") or FALLBACK_PROXY_URL
     if fb_key or fb_xkey:
+        fb_model = os.environ.get("LITELLM_FALLBACK_MODEL") or os.environ.get("AIWA_LLM_FALLBACK_MODEL") or PROXY_MODEL
         cfgs.append({
             "name": "litellm_fallback",
             "url": fb_url,
-            "model": os.environ.get("LITELLM_FALLBACK_MODEL") or os.environ.get("AIWA_LLM_FALLBACK_MODEL") or PROXY_MODEL,
+            "model": fb_model,
             "key": fb_key,
             "xkey": fb_xkey,
+            "cost_unit": ("usd" if str(fb_model or "").lower().startswith("openrouter/")
+                          else os.environ.get("LITELLM_FALLBACK_COST_UNIT") or os.environ.get("LITELLM_COST_UNIT")),
         })
     return [c for c in cfgs if c.get("url") and (c.get("key") or c.get("xkey"))]
 

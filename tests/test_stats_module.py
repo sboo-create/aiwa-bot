@@ -116,3 +116,25 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIsNone(data["ai"]["request_success_rate"])
         self.assertEqual(data["errors"], 0)
         self.assertEqual(data["ai"]["providers"][0]["success"], 0)
+
+    def test_observed_filter_recalculates_metrics_and_openrouter_credits_are_usd(self):
+        now = time.time()
+        self.add("fresh-user", "u1", "app_opened", ts=now - 30)
+        self.add("legacy-user", "u2", "legacy_button", ts=now - 20, provenance="reconstructed")
+        self.add("priced-call", "u1", "ai_call", {
+            "request_id": "r-cost", "provider": "DeepInfra",
+            "model": "openrouter/deepseek/deepseek-v4-flash", "status": "success",
+            "reported_cost": 0.003, "cost_unit": "provider_credit",
+            "input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
+        }, ts=now - 10)
+
+        mixed = self.module.compute_dashboard(1, "mixed")
+        exact = self.module.compute_dashboard(1, "observed")
+
+        self.assertEqual(mixed["audience"]["ever_used"], 2)
+        self.assertEqual(exact["audience"]["ever_used"], 1)
+        self.assertEqual(exact["events"], 2)
+        self.assertEqual(exact["data_quality"]["source_mode"], "observed")
+        self.assertEqual(exact["data_quality"]["reconstructed_events"], 1)
+        self.assertEqual(exact["ai"]["cost_usd"], 0.003)
+        self.assertEqual(exact["data_quality"]["cost_coverage"], 100.0)

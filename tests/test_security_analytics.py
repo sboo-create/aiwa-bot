@@ -265,6 +265,15 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(llm._chat_completions_url("https://proxy.example/v1/chat/completions"),
                          "https://proxy.example/v1/chat/completions")
 
+    def test_litellm_openrouter_model_marks_reported_cost_as_usd(self):
+        with mock.patch.dict(os.environ, {"LITELLM_KEY": "test-key"}, clear=False), \
+                mock.patch.object(llm, "_OPENROUTER_KEY", None), \
+                mock.patch.object(llm, "PROXY_URL", "http://proxy.test/v1"), \
+                mock.patch.object(llm, "PROXY_MODEL", "openrouter/deepseek/deepseek-v4-flash"):
+            config = llm._proxy_configs()[0]
+        self.assertEqual(config["name"], "litellm")
+        self.assertEqual(config["cost_unit"], "usd")
+
     def test_long_telegram_text_is_split_without_losing_content(self):
         text = (("🌿 Длинный ответ с полезными пояснениями. " * 140) + "\n\n") * 3
 
