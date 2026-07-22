@@ -1,0 +1,17 @@
+[Unit]
+Description=AIWA Disrupt Analytics module
+After=network.target
+
+[Service]
+Type=simple
+User=gigatool
+Group=gigatool
+WorkingDirectory=/srv/stats/aiwa/app
+Environment=STATS_PORT=9904
+Environment=STATS_DB=/srv/stats/aiwa/data/events.db
+ExecStart=/srv/stats/aiwa/app/.venv/bin/python server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

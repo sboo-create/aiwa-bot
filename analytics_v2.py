@@ -61,6 +61,18 @@ SCHEMA = (
     "CREATE INDEX IF NOT EXISTS ix_llm_calls_time ON llm_calls(occurred_at)",
     "CREATE INDEX IF NOT EXISTS ix_llm_calls_request ON llm_calls(request_id)",
     "CREATE INDEX IF NOT EXISTS ix_llm_calls_user_time ON llm_calls(user_key, occurred_at)",
+    """CREATE TABLE IF NOT EXISTS traction_outbox(
+        event_id TEXT PRIMARY KEY,
+        occurred_at REAL NOT NULL,
+        device_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        properties_json TEXT NOT NULL DEFAULT '{}'
+    )""",
+    """CREATE TABLE IF NOT EXISTS traction_sent(
+        event_id TEXT PRIMARY KEY,
+        sent_at REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_traction_outbox_time ON traction_outbox(occurred_at)",
 )
 
 
@@ -123,6 +135,10 @@ def _legacy_event_name(action, meta):
         return "checkin_symptom_selected", None
     if text.startswith("ci:"):
         return "checkin_updated", None
+    if action == "signup":
+        return "onboarding_started", None
+    if action in {"activated", "onboarding_completed"}:
+        return "onboarding_completed", None
     if action == "answered":
         return "assistant_response_received", None
     if action in {"manual", "voice", "suggest"}:
@@ -132,41 +148,81 @@ def _legacy_event_name(action, meta):
     return "legacy_" + str(action or "unknown")[:48], None
 
 
-def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_version=None, request_id=None):
+def _queue_traction(conn, event_id, occurred_at, device_id, name, properties=None):
+    if not device_id:
+        return
+    conn.execute(
+        """INSERT OR IGNORE INTO traction_outbox(event_id,occurred_at,device_id,name,properties_json)
+           SELECT ?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM traction_sent WHERE event_id=?)""",
+        (event_id, float(occurred_at), device_id, name,
+         json.dumps(properties or {}, ensure_ascii=False, separators=(",", ":")), event_id),
+    )
+
+
+def _epoch(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc).timestamp()
+
+
+def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_version=None,
+                        request_id=None, calls=0):
     event_name, screen = _legacy_event_name(action, meta)
     props = {}
     # Only coarse, explicitly safe dimensions are copied from legacy metadata.
     if meta in {"text", "voice", "webapp", "food_photo", "food_text", "diary_reco"}:
         props["channel"] = meta
+    if calls:
+        props["calls"] = max(0, int(calls))
+    event_id = str(uuid.uuid4())
+    occurred = datetime.now(timezone.utc)
+    key = user_key(chat_id)
     conn.execute(
         """INSERT INTO events_v2(event_id,occurred_at,user_key,event_name,source,screen,request_id,status,
                                   latency_ms,properties_json,app_version)
            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-        (str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(), user_key(chat_id), event_name,
+        (event_id, occurred.isoformat(), key, event_name,
          _source_for(action, meta), screen, request_id, "success", int(latency_ms or 0),
          json.dumps(props, ensure_ascii=False, separators=(",", ":")), app_version),
     )
+    external_props = dict(props)
+    if screen: external_props["screen"] = screen
+    _queue_traction(conn, event_id, occurred.timestamp(), key, event_name, external_props)
+    return event_id
 
 
 def delete_user(conn, chat_id):
     key = user_key(chat_id)
     conn.execute("DELETE FROM events_v2 WHERE user_key=?", (key,))
     conn.execute("DELETE FROM llm_calls WHERE user_key=?", (key,))
+    conn.execute("DELETE FROM traction_outbox WHERE device_id=?", (key,))
+    deletion_id = "delete_" + str(uuid.uuid4())
+    _queue_traction(conn, deletion_id, datetime.now(timezone.utc).timestamp(), key, "user_deleted")
 
 
 def persist_llm_call(db_path, record):
     """Usage sink registered by llm.py; failures never break a user response."""
+    conn = None
     try:
         conn = sqlite3.connect(db_path, timeout=30)
         init_schema(conn)
+        call_id = record.get("call_id") or str(uuid.uuid4())
+        occurred_at = record.get("occurred_at") or datetime.now(timezone.utc).isoformat()
+        provider = record.get("provider") or "unknown"
+        model = record.get("model")
+        purpose = record.get("purpose")
+        status = record.get("status") or "unknown"
         conn.execute(
             """INSERT INTO llm_calls(call_id,occurred_at,user_key,request_id,provider,model,purpose,status,
                                       latency_ms,input_tokens,output_tokens,cached_tokens,total_tokens,retry_index,
                                       fallback_from,reported_cost,cost_unit,estimated_cost_usd,meta_json)
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (record.get("call_id") or str(uuid.uuid4()), record.get("occurred_at") or datetime.now(timezone.utc).isoformat(),
-             record.get("user_key"), record.get("request_id"), record.get("provider") or "unknown",
-             record.get("model"), record.get("purpose"), record.get("status") or "unknown",
+            (call_id, occurred_at,
+             record.get("user_key"), record.get("request_id"), provider,
+             model, purpose, status,
              int(record.get("latency_ms") or 0), int(record.get("input_tokens") or 0),
              int(record.get("output_tokens") or 0), int(record.get("cached_tokens") or 0),
              int(record.get("total_tokens") or 0), int(record.get("retry_index") or 0),
@@ -174,7 +230,66 @@ def persist_llm_call(db_path, record):
              record.get("estimated_cost_usd"),
              json.dumps(record.get("meta") or {}, ensure_ascii=False, separators=(",", ":"))),
         )
+        _queue_traction(conn, "llm_" + call_id, _epoch(occurred_at), record.get("user_key"), "ai_call", {
+            "provider": provider, "model": model, "purpose": purpose, "status": status,
+        })
         conn.commit()
-        conn.close()
     except Exception as exc:
         log.warning("llm call analytics write failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def seed_traction_outbox(db_path):
+    """Queue existing v2 history once; acknowledged ids are never re-queued."""
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        init_schema(conn)
+        for event_id, occurred_at, key, name, screen, props_json in conn.execute(
+                "SELECT event_id,occurred_at,user_key,event_name,screen,properties_json FROM events_v2"):
+            try: props = json.loads(props_json or "{}")
+            except (TypeError, ValueError): props = {}
+            if screen: props.setdefault("screen", screen)
+            _queue_traction(conn, event_id, _epoch(occurred_at), key, name, props)
+        for call_id, occurred_at, key, provider, model, purpose, status in conn.execute(
+                "SELECT call_id,occurred_at,user_key,provider,model,purpose,status FROM llm_calls"):
+            _queue_traction(conn, "llm_" + call_id, _epoch(occurred_at), key, "ai_call", {
+                "provider": provider, "model": model, "purpose": purpose, "status": status,
+            })
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def traction_batch(db_path, limit=200):
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        init_schema(conn)
+        rows = conn.execute(
+            "SELECT event_id,occurred_at,device_id,name,properties_json FROM traction_outbox "
+            "ORDER BY occurred_at,event_id LIMIT ?", (max(1, min(int(limit), 500)),)
+        ).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for event_id, occurred_at, device_id, name, properties_json in rows:
+        try: properties = json.loads(properties_json or "{}")
+        except (TypeError, ValueError): properties = {}
+        out.append({"event_id": event_id, "ts": occurred_at, "device_id": device_id,
+                    "name": name, "properties": properties})
+    return out
+
+
+def traction_ack(db_path, event_ids):
+    ids = [str(x) for x in event_ids if x]
+    if not ids: return
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        init_schema(conn); now = datetime.now(timezone.utc).timestamp()
+        conn.executemany("INSERT OR IGNORE INTO traction_sent(event_id,sent_at) VALUES(?,?)",
+                         [(event_id, now) for event_id in ids])
+        conn.executemany("DELETE FROM traction_outbox WHERE event_id=?", [(event_id,) for event_id in ids])
+        conn.commit()
+    finally:
+        conn.close()
