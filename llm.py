@@ -1746,14 +1746,40 @@ def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=No
             return None
     return None
 
+FOOD_CLASSES = ("белковое", "углеводное", "овощи и фрукты", "молочное", "жиры и орехи", "сладкое", "напиток", "смешанное")
+
 _FOOD_FORMAT = ("Ответь СТРОГО этими строками, каждая с новой строки, без вступления и без пояснений, только эти поля:\n"
     "НАЗВАНИЕ: короткое название\n"
+    "КЛАСС: одно значение из списка: белковое / углеводное / овощи и фрукты / молочное / жиры и орехи / сладкое / напиток / смешанное\n"
     "ГРАММЫ: число (примерный вес порции)\n"
     "ККАЛ: число\n"
     "БЕЛКИ: число\n"
     "ЖИРЫ: число\n"
     "УГЛЕВОДЫ: число\n"
     "Числа целые, без единиц измерения. Если точно не знаешь — поставь реалистичную оценку.")
+
+def food_class_norm(v, protein=0, fat=0, carbs=0):
+    """Приводит класс продукта к канону; если модель класс не дала — оцениваем по БЖУ."""
+    t = str(v or "").strip().lower()
+    for c in FOOD_CLASSES:
+        if c in t: return c
+    alias = {"белок": "белковое", "мясо": "белковое", "рыба": "белковое", "птица": "белковое",
+             "углевод": "углеводное", "крупа": "углеводное", "гарнир": "углеводное", "выпечка": "углеводное",
+             "овощ": "овощи и фрукты", "фрукт": "овощи и фрукты", "салат": "овощи и фрукты", "ягод": "овощи и фрукты",
+             "молоч": "молочное", "сыр": "молочное", "творо": "молочное", "йогурт": "молочное", "кефир": "молочное",
+             "орех": "жиры и орехи", "жир": "жиры и орехи", "масло": "жиры и орехи",
+             "десерт": "сладкое", "сладост": "сладкое", "снек": "сладкое", "перекус": "сладкое",
+             "напит": "напиток", "смузи": "напиток", "кофе": "напиток", "чай": "напиток"}
+    for k, c in alias.items():
+        if k in t: return c
+    # фолбэк: по доле калорий из макросов
+    pk, fk, ck = protein * 4, fat * 9, carbs * 4
+    tot = pk + fk + ck
+    if tot <= 0: return "смешанное"
+    if pk / tot >= 0.45: return "белковое"
+    if ck / tot >= 0.6: return "углеводное"
+    if fk / tot >= 0.55: return "жиры и орехи"
+    return "смешанное"
 
 def _food_num(v):
     if v is None:
@@ -1786,12 +1812,14 @@ def _parse_food(out):
         kcal_s = m.group(1) if m else None
     if not title and not kcal_s:
         return None
+    _p = round(_food_num(grab(["БЕЛК", "PROTEIN"])), 1)
+    _f = round(_food_num(grab(["ЖИР", "FAT"])), 1)
+    _c = round(_food_num(grab(["УГЛЕВОД", "CARB"])), 1)
     return {"title": title or "Приём пищи", "kind": "dish", "items": [],
+            "fclass": food_class_norm(grab(["КЛАСС", "КАТЕГОР", "CLASS"]), _p, _f, _c),
             "grams": int(_food_num(grab(["ГРАММ", "ВЕС", "ПОРЦИ"]))) or None,
             "kcal": int(_food_num(kcal_s)),
-            "protein": round(_food_num(grab(["БЕЛК", "PROTEIN"])), 1),
-            "fat": round(_food_num(grab(["ЖИР", "FAT"])), 1),
-            "carbs": round(_food_num(grab(["УГЛЕВОД", "CARB"])), 1),
+            "protein": _p, "fat": _f, "carbs": _c,
             "confidence": "medium", "note": ""}
 
 def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):

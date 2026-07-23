@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v84-diet-none-option"
+AIWA_VERSION = "2026-07-23-v85-food-classes"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -248,6 +248,8 @@ def db():
         except sqlite3.OperationalError: pass
     try: c.execute("ALTER TABLE meals ADD COLUMN slot TEXT")
     except sqlite3.OperationalError: pass
+    try: c.execute("ALTER TABLE meals ADD COLUMN fclass TEXT")
+    except sqlite3.OperationalError: pass
     for _wcol in ("kcal INTEGER DEFAULT 0", "muscles TEXT"):
         try: c.execute(f"ALTER TABLE workouts ADD COLUMN {_wcol}")
         except sqlite3.OperationalError: pass
@@ -385,7 +387,8 @@ def normalize_food(data, source="photo"):
     title = str(data.get("title") or (items[0]["name"] if items else "Приём пищи")).strip()[:80]
     if not (kcal or items or has_title):
         return None
-    return {"title": title, "kind": data.get("kind") or "dish", "items": items,
+    fclass = L.food_class_norm(data.get("fclass") or data.get("class") or data.get("category"), protein, fat, carbs)
+    return {"title": title, "kind": data.get("kind") or "dish", "items": items, "fclass": fclass,
             "kcal": kcal, "protein": protein, "fat": fat, "carbs": carbs, "grams": grams,
             "confidence": data.get("confidence") or "medium", "note": str(data.get("note") or "")[:160], "source": source}
 
@@ -405,10 +408,11 @@ def meal_add(cid, rec, d=None):
     if not _user_write_allowed(cid, conn=c):
         c.close(); return None
     mid = c.execute(
-        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (cid, d, datetime.now().isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
+        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, d, datetime.now(TZ).isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
          float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
-         json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo", slot)).lastrowid
+         json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo", slot,
+         rec.get("fclass") or None)).lastrowid
     c.commit(); c.close(); return mid
 
 def meal_set_slot(cid, mid, slot):
@@ -436,9 +440,10 @@ def meal_edit(cid, mid, **kw):
 
 def meals_of(cid, d=None):
     d = d or dtoday().isoformat()
-    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,slot FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
+    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
     return [{"id": x[0], "ts": x[1], "title": x[2], "kcal": x[3], "protein": x[4], "fat": x[5], "carbs": x[6],
-             "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9], "slot": (x[10] or "snack")} for x in r]
+             "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9], "slot": (x[10] or "snack"),
+             "fclass": x[11] or None} for x in r]
 
 def meal_del(cid, mid):
     c = db(); c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, int(mid))); c.commit(); c.close()
@@ -2820,7 +2825,8 @@ def food_card(rec, added=True):
     conf = {"low": "низкая", "medium": "средняя", "high": "высокая"}.get(rec.get("confidence"), "средняя")
     head = f"🍽 <b>{html.escape(rec['title'])}</b>"
     if rec.get("grams"): head += f" · ~{rec['grams']} г"
-    lines = [head, f"~{rec['kcal']} ккал · Б {round(rec['protein'])} · Ж {round(rec['fat'])} · У {round(rec['carbs'])} г"]
+    lines = [head, f"~{rec['kcal']} ккал · Б {round(rec['protein'])} · Ж {round(rec['fat'])} · У {round(rec['carbs'])} г"
+             + (f" · {rec['fclass']}" if rec.get("fclass") else "")]
     for it in (rec.get("items") or [])[:6]:
         g = f" {it['grams']} г" if it.get("grams") else ""
         lines.append(f"• {html.escape(it['name'])}{g} — {it['kcal']} ккал")
