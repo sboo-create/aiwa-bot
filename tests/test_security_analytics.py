@@ -637,8 +637,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
              mock.patch.object(bot, "ev"):
             asyncio.run(bot.on_voice(update, context))
 
-        self.assertEqual([request["text"] for request in spoken], ["Сводка готова Всё хорошо."])
-        self.assertEqual(spoken[0]["languages"], ("ru",))
+        self.assertEqual(spoken, ["Сводка готова Всё хорошо."])
         telegram_bot.send_voice.assert_awaited_once_with(cid, b"summary-audio")
 
     def test_telegram_text_never_enables_voice_reply(self):

@@ -2239,10 +2239,6 @@ SALUTE_TTS = (os.environ.get("SBER_SALUTE_SYNTH_URL") or os.environ.get("SALUTE_
 SALUTE_VOICE = os.environ.get("AIWA_TTS_VOICE") or "erm"   # голос Joy
 TTS_FORMAT = os.environ.get("AIWA_TTS_FORMAT") or "opus"   # opus — родной для голосовых Telegram
 TTS_MAXCHARS = int(os.environ.get("AIWA_TTS_MAXCHARS", "3500"))
-SALUTE_TTS_LANGUAGES = frozenset({"ru", "uz", "pt", "pl", "nl", "kz", "en", "de", "es", "fr", "it", "ky"})
-_LANGID_TO_SALUTE = {"kk": "kz"}
-_TTS_LANG_IDENTIFIER = None
-_TTS_LANG_LOCK = threading.Lock()
 
 def _tts_account_limit():
     legal = str(os.environ.get("AIWA_SALUTE_ACCOUNT_TYPE") or "personal").lower() in {
@@ -2259,210 +2255,11 @@ def _tts_provider_concurrency():
 
 _TTS_PROVIDER_GATE = threading.BoundedSemaphore(_tts_provider_concurrency())
 
-def _tts_lang_identifier():
-    global _TTS_LANG_IDENTIFIER
-    if _TTS_LANG_IDENTIFIER is None:
-        with _TTS_LANG_LOCK:
-            if _TTS_LANG_IDENTIFIER is None:
-                from langid.langid import LanguageIdentifier, model
-                _TTS_LANG_IDENTIFIER = LanguageIdentifier.from_modelstring(model, norm_probs=True)
-    return _TTS_LANG_IDENTIFIER
-
-_TTS_MARKERS = {
-    "fr": {"bonjour", "merci", "monsieur", "madame", "mon", "ami", "je", "vous", "avec", "dans", "très", "pour"},
-    "it": {"ciao", "grazie", "buongiorno", "come", "stai", "sono", "non", "mio", "mia", "per"},
-    "es": {"hola", "gracias", "buenos", "días", "señor", "señora", "cómo", "estás", "para", "pero"},
-    "pt": {"olá", "obrigado", "obrigada", "você", "como", "está", "não", "senhor", "senhora"},
-    "de": {"guten", "morgen", "danke", "herr", "frau", "der", "die", "das", "nicht", "und"},
-    "nl": {"goed", "dank", "meneer", "mevrouw", "het", "een", "niet", "voor", "van"},
-    "pl": {"dzień", "dobry", "dziękuję", "pan", "pani", "jest", "nie", "jak", "się"},
-    "en": {"hello", "thanks", "thank", "good", "morning", "the", "and", "with", "you", "not"},
-    "uz": {"o‘zbek", "o'zbek", "salom", "rahmat", "tilidagi", "uchun", "bilan", "emas"},
-    "kz": {"қазақ", "тіліндегі", "сөйлем", "бұл", "үшін", "және", "қарапайым"},
-    "ky": {"кыргыз", "тилиндеги", "сүйлөм", "бул", "үчүн", "менен", "жөнөкөй"},
-}
-_TTS_STRONG_MARKERS = {
-    "bonjour": "fr", "merci": "fr", "monsieur": "fr", "madame": "fr",
-    "ciao": "it", "grazie": "it", "buongiorno": "it",
-    "hola": "es", "gracias": "es",
-    "olá": "pt", "obrigado": "pt", "obrigada": "pt",
-    "dziękuję": "pl", "dzień": "pl",
-    "hello": "en", "thanks": "en",
-    "salom": "uz", "rahmat": "uz", "o‘zbek": "uz", "o'zbek": "uz",
-    "қазақ": "kz", "кыргыз": "ky",
-}
-_UNSUPPORTED_SCRIPT_CODES = (
-    ("HIRAGANA", "ja"), ("KATAKANA", "ja"), ("CJK", "zh"), ("HANGUL", "ko"),
-    ("GREEK", "el"), ("ARABIC", "ar"), ("HEBREW", "he"), ("THAI", "th"),
-    ("DEVANAGARI", "hi"), ("GEORGIAN", "ka"), ("ARMENIAN", "hy"),
-)
-
-class UnsupportedTTSLanguage(ValueError):
-    def __init__(self, languages):
-        self.languages = tuple(sorted(set(languages)))
-        super().__init__("unsupported SaluteSpeech language(s): " + ", ".join(self.languages))
-
-def _marker_language(text):
-    words = re.findall(r"[^\W\d_]+(?:[’'][^\W\d_]+)?", text.lower(), flags=re.U)
-    if not words:
-        return None
-    for word in words:
-        if word in _TTS_STRONG_MARKERS:
-            return _TTS_STRONG_MARKERS[word]
-    scores = {lang: sum(word in markers for word in words) for lang, markers in _TTS_MARKERS.items()}
-    lang, score = max(scores.items(), key=lambda item: item[1])
-    return lang if score >= 2 else None
-
-def detect_tts_language(text, default="ru"):
-    """Return (Salute language or None, confidence) without forcing unsupported scripts into Russian."""
-    value = str(text or "").strip()
-    letters = [ch for ch in value if ch.isalpha()]
-    if len(letters) < 4:
-        return default, 1.0
-    script_hits = {}
-    for ch in letters:
-        name = unicodedata.name(ch, "")
-        for script, code in _UNSUPPORTED_SCRIPT_CODES:
-            if script in name:
-                script_hits[code] = script_hits.get(code, 0) + 1
-    if script_hits:
-        code, hits = max(script_hits.items(), key=lambda item: item[1])
-        if hits >= max(3, len(letters) // 3):
-            return None, 1.0
-    lower = value.lower()
-    if re.search(r"[ўҳ]", lower) or re.search(r"\b(?:o[‘’']zbek|tilidagi|uchun|bilan|emas)\b", lower):
-        return "uz", 0.99
-    marked = _marker_language(value)
-    if marked:
-        return marked, 0.95
-    try:
-        raw_code, confidence = _tts_lang_identifier().classify(value)
-    except Exception:
-        return default, 0.0
-    code = _LANGID_TO_SALUTE.get(raw_code, raw_code)
-    if code in SALUTE_TTS_LANGUAGES:
-        if confidence >= 0.58 or len(letters) >= 24:
-            return code, float(confidence)
-        return default, float(confidence)
-    word_count = len(re.findall(r"[^\W\d_]+", value, flags=re.U))
-    if confidence >= 0.75 and len(letters) >= 24 and word_count >= 4:
-        return None, float(confidence)
-    return default, float(confidence)
-
-def _tts_fragments(text):
-    """Split sentences and quoted spans so language switches keep their own tag."""
-    value = _tts_spoken_text(text)
-    if not value:
-        return []
-    quoted = re.compile(r"(«[^»]+»|“[^”]+”|「[^」]+」|『[^』]+』|\"[^\"]+\")")
-    pieces = []
-    for outer in quoted.split(value):
-        if not outer or not outer.strip():
-            continue
-        if quoted.fullmatch(outer):
-            pieces.append(outer.strip())
-            continue
-        pieces.extend(
-            part.strip()
-            for part in re.findall(r"[^.!?…]+(?:[.!?…]+|$)", outer)
-            if part.strip()
-        )
-    return pieces
-
-def tts_language_segments(text, default="ru"):
-    """Return coalesced [{language,text,confidence}] and preserve reading order."""
-    segments = []
-    unsupported = []
-    for fragment in _tts_fragments(text):
-        language, confidence = detect_tts_language(fragment, default=default)
-        if language is None:
-            unsupported.append(_tts_lang_identifier().classify(fragment)[0])
-            continue
-        if segments and segments[-1]["language"] == language:
-            segments[-1]["text"] += " " + fragment
-            segments[-1]["confidence"] = min(segments[-1]["confidence"], confidence)
-        else:
-            segments.append({"language": language, "text": fragment, "confidence": confidence})
-    if unsupported:
-        raise UnsupportedTTSLanguage(unsupported)
-    return segments
-
 def _salute_voice_id(voice=None):
     voice_name = (voice or SALUTE_VOICE or "erm").strip()
     voice_name = re.sub(r"[^A-Za-z0-9_]", "", voice_name)
     voice_name = voice_name[:1].upper() + voice_name[1:]
     return voice_name if re.search(r"_\d+$", voice_name) else voice_name + "_24000"
-
-def _tts_ssml(segments, voice):
-    tags = []
-    for segment in segments:
-        body = html.escape(segment["text"], quote=False)
-        tags.append(f'<voice name="{voice}" lang="{segment["language"]}">{body}</voice>')
-    return "<speak>" + "".join(tags) + "</speak>"
-
-def _split_tts_segment(segment, max_text):
-    text = segment["text"].strip()
-    if len(html.escape(text, quote=False)) <= max_text:
-        return [segment]
-    parts = []
-    while text:
-        escaped_size = 0
-        safe_end = 0
-        for index, char in enumerate(text, start=1):
-            escaped_size += len(html.escape(char, quote=False))
-            if escaped_size > max_text:
-                break
-            safe_end = index
-        if safe_end >= len(text):
-            cut = len(text)
-        else:
-            window = text[:max(1, safe_end)]
-            boundaries = [m.end() for m in re.finditer(r"(?<=[.!?;,:])\s+|\s+", window)]
-            cut = max((p for p in boundaries if p >= max(1, safe_end // 2)), default=max(1, safe_end))
-        part = dict(segment)
-        part["text"] = text[:cut].strip()
-        if part["text"]:
-            parts.append(part)
-        text = text[cut:].strip()
-    return parts
-
-def tts_ssml_requests(text, voice=None, limit=4000, default_language="ru"):
-    """Build bounded synchronous SSML requests for all supported language switches."""
-    max_body = max(500, min(4000, int(limit)))
-    voice_id = _salute_voice_id(voice)
-    overhead = len(_tts_ssml([{"language": "ru", "text": "", "confidence": 1.0}], voice_id))
-    segments = []
-    for segment in tts_language_segments(text, default=default_language):
-        segments.extend(_split_tts_segment(segment, max(200, max_body - overhead - 24)))
-    requests_ = []
-    current = []
-    for segment in segments:
-        candidate = current + [segment]
-        body = _tts_ssml(candidate, voice_id)
-        if current and len(body) > max_body:
-            request_body = _tts_ssml(current, voice_id)
-            requests_.append({
-                "body": request_body,
-                "content_type": "application/ssml",
-                "characters": sum(len(item["text"]) for item in current),
-                "languages": tuple(dict.fromkeys(item["language"] for item in current)),
-                "text": " ".join(item["text"] for item in current),
-            })
-            current = [segment]
-        else:
-            current = candidate
-    if current:
-        request_body = _tts_ssml(current, voice_id)
-        requests_.append({
-            "body": request_body,
-            "content_type": "application/ssml",
-            "characters": sum(len(item["text"]) for item in current),
-            "languages": tuple(dict.fromkeys(item["language"] for item in current)),
-            "text": " ".join(item["text"] for item in current),
-        })
-    if any(len(item["body"]) > max_body for item in requests_):
-        raise ValueError("SSML request exceeds SaluteSpeech 4000-character limit")
-    return requests_
 
 def _tts_spoken_text(text):
     """Convert messenger markup, tables and formulas into pronounceable prose."""
@@ -2489,7 +2286,7 @@ def _tts_spoken_text(text):
     t = re.sub(r"\bккал\b", "килокалорий", t, flags=re.I)
     t = re.sub(r"\bг\s*/\s*день\b", "граммов в день", t, flags=re.I)
     t = re.sub(r"\s*[•·]\s*", ". ", t)
-    t = re.sub(r"[^\w\s.,!?;:。！？，、()«»“”„\"'’‘「」『』&\-–—/%°]", " ", t, flags=re.U)
+    t = re.sub(r"[^\w\s.,!?;:()«»\"'\-–—/%°]", " ", t, flags=re.U)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
@@ -2520,16 +2317,15 @@ def _tts_trim(text, limit=None):
     m = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
     return (cut[:m + 1] if m > lim * 0.4 else cut).strip()
 
-def synthesize_request(request_, info=None):
-    """Execute one already-bounded SaluteSpeech request."""
+def synthesize(text, info=None):
+    """Текст -> голосовое (ogg/opus для Telegram) через SaluteSpeech. None, если синтез недоступен."""
     import time as _t, uuid
-    if not isinstance(request_, dict) or not request_.get("body"):
+    if not text or not str(text).strip():
         return None
     t0 = _t.time()
-    body = str(request_["body"])
-    content_type = str(request_.get("content_type") or "application/ssml")
-    characters = int(request_.get("characters") or len(request_.get("text") or ""))
-    languages = tuple(request_.get("languages") or ())
+    body = _tts_trim(text)
+    if not body:
+        return None
     tok = _salute_auth()
     if not tok:
         return None
@@ -2537,18 +2333,10 @@ def synthesize_request(request_, info=None):
     for attempt in (1, 2):
         try:
             with _TTS_PROVIDER_GATE:
-                r = _HTTP.post(
-                    SALUTE_TTS,
-                    params={"format": TTS_FORMAT, "voice": voice},
-                    headers={
-                        "Authorization": "Bearer " + tok,
-                        "Content-Type": content_type,
-                        "RqUID": str(uuid.uuid4()),
-                    },
-                    data=body.encode("utf-8"),
-                    timeout=(6, 60),
-                    verify=_GIGA_VERIFY,
-                )
+                r = _HTTP.post(SALUTE_TTS, params={"format": TTS_FORMAT, "voice": voice},
+                    headers={"Authorization": "Bearer " + tok, "Content-Type": "application/text",
+                             "RqUID": str(uuid.uuid4())},
+                    data=body.encode("utf-8"), timeout=(6, 60), verify=_GIGA_VERIFY)
             if r.status_code == 401 and attempt == 1:
                 tok = _salute_auth(force=True)
                 if not tok: return None
@@ -2559,46 +2347,20 @@ def synthesize_request(request_, info=None):
             audio = r.content
             _SALUTE_ERR["tts"] = ""
             if isinstance(info, dict):
-                info.update(
-                    ms=int((_t.time() - t0) * 1000),
-                    chars=characters,
-                    languages=list(languages),
-                    ssml=content_type == "application/ssml",
-                )
-            _capture_media(
-                "salute", SALUTE_VOICE, t0, "success", "tts",
-                {"characters": characters, "languages": list(languages), "ssml": True},
-            )
+                info["ms"] = int((_t.time() - t0) * 1000); info["chars"] = len(body)
+            _capture_media("salute", SALUTE_VOICE, t0, "success", "tts", {"characters": len(body)})
             return audio or None
         except Exception as e:
             if not _SALUTE_ERR["tts"]: _SALUTE_ERR["tts"] = str(e)[:200]
-            _capture_media(
-                "salute", SALUTE_VOICE, t0, "error", "tts",
-                {"characters": characters, "languages": list(languages), "ssml": True},
-            )
+            _capture_media("salute", SALUTE_VOICE, t0, "error", "tts", {"characters": len(body)})
             print("Salute TTS error:", e); return None
     return None
-
-def synthesize(text, info=None):
-    """Synthesize one short mono- or multilingual text through SSML."""
-    if not text or not str(text).strip():
-        return None
-    try:
-        requests_ = tts_ssml_requests(text)
-    except (UnsupportedTTSLanguage, ValueError) as exc:
-        _SALUTE_ERR["tts"] = str(exc)[:200]
-        return None
-    if len(requests_) != 1:
-        _SALUTE_ERR["tts"] = "текст требует нескольких TTS-запросов; используй tts_ssml_requests"
-        return None
-    return synthesize_request(requests_[0], info=info)
 
 def salute_diag():
     """Диагностика голосового контура для админ-команды /voicetest."""
     out = {"key": bool(os.environ.get("SBER_SALUTE_AUTH_KEY") or os.environ.get("SALUTE_SPEECH_CREDENTIALS")),
            "mode": ("speech.giga.chat" if _salute_is_giga() else "smartspeech.sber.ru"), "client": SALUTE_CLIENT,
            "scope": SALUTE_SCOPE, "model": SALUTE_MODEL, "voice": SALUTE_VOICE,
-           "tts_languages": sorted(SALUTE_TTS_LANGUAGES),
            "tts_concurrency": _tts_provider_concurrency(),
            "tts_account_limit": _tts_account_limit(),
            "stt_mode": (os.environ.get("AIWA_STT", "auto") or "auto"),
