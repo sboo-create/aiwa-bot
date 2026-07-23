@@ -114,6 +114,14 @@ class StatsModuleTests(unittest.TestCase):
         safe = self.module._safe_properties({"screen": "food", "symptoms": "secret", "cycle_date": "secret"})
         self.assertEqual(safe, {"screen": "food"})
 
+    def test_dashboard_explains_data_sources_without_requiring_technical_terms(self):
+        html = (ROOT / "stats" / "index.html").read_text()
+        self.assertIn("Вся история", html)
+        self.assertIn("Только точные v2", html)
+        self.assertIn("могут быть неполными", html)
+        self.assertIn("Точно записанные (observed)", html)
+        self.assertIn("Восстановленные (reconstructed)", html)
+
     def test_request_success_is_hidden_when_request_ids_are_missing(self):
         self.add("call", "u1", "ai_call", {"provider": "p", "model": "m", "status": "error"})
 
