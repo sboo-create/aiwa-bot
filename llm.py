@@ -1088,7 +1088,7 @@ def training_review(workout, recent=None, phase_ru=None, mode=None, profile=None
     ]
     user = "\n".join(x for x in parts if x)
     sys = "Ты AIWA - тёплый и точный ассистент по женскому здоровью и тренировкам. Пиши по-русски, обычным текстом, без markdown, без звёздочек и списков, без приветствий."
-    out = _call([{"role": "system", "content": sys}, {"role": "user", "content": user}], max_tokens=420, temperature=0.6, usage=usage)
+    out = _call([{"role": "system", "content": sys}, {"role": "user", "content": user}], max_tokens=600, temperature=0.6, usage=usage)
     return (out or "").strip()
 
 def _parse_str_list(out, n=3):
@@ -1146,7 +1146,7 @@ def training_today(st, profile=None, recent=None, mode=None, usage=None):
         "В options 2-3 конкретных варианта. Только обычная доступная активность. По-русски, без markdown."
     )
     out = _call([{"role": "system", "content": "Ты тренер femtech-приложения. Отвечай строго JSON, по-русски, без markdown."},
-                 {"role": "user", "content": prompt}], max_tokens=750, temperature=0.6, usage=usage)
+                 {"role": "user", "content": prompt}], max_tokens=1100, temperature=0.6, usage=usage)
     data = None
     if out:
         try:
@@ -1184,7 +1184,7 @@ def food_suggestions(dishes, ctx="", usage=None):
               "Живо, не шаблонно, без слова «рецепт». Пример стиля: «польза миндаля при ПМС», «чем заменить рис вечером», «почему тянет на сладкое». "
               "Ответь строго JSON-массивом из 3 строк, по-русски.")
     out = _call([{"role": "system", "content": "Ты ассистент femtech-приложения. Отвечай строго JSON-массивом строк, по-русски."},
-                 {"role": "user", "content": prompt}], max_tokens=220, temperature=0.85, usage=usage)
+                 {"role": "user", "content": prompt}], max_tokens=350, temperature=0.85, usage=usage)
     return _parse_str_list(out, 3)
 
 
@@ -1198,7 +1198,7 @@ def today_note(st, profile=None, recent_syms=None, mode=None, usage=None):
               "И 3 разных саджеста — только про тело, цикл, фазу, питание, нагрузку, сон или самочувствие (не продуктивность и не быт). " + SUGG_RULES + " Строго JSON без обрамления: "
               '{"summary":"...","suggestions":["...","...","..."]}. По-русски, без markdown.')
     out = _call([{"role": "system", "content": "Ты ассистент femtech-приложения. Отвечай строго JSON, по-русски, без markdown."},
-                 {"role": "user", "content": prompt}], max_tokens=430, temperature=0.55, usage=usage)
+                 {"role": "user", "content": prompt}], max_tokens=600, temperature=0.55, usage=usage)
     data = None
     if out:
         try:
@@ -1311,8 +1311,8 @@ def partner_brief(st, hint=None, usage=None):
               "### 📌 На что обратить внимание\n"
               "- 1 короткий пункт про тревожные симптомы или мягкое наблюдение, без диагнозов.\n"
               "Объём 900-1300 знаков. Только русский, без длинных тире. " + TOV)
-    out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=850, temperature=0.45, usage=usage)
-    return _clean(out, None)
+    out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=1200, temperature=0.45, usage=usage)
+    return _ensure_complete(_clean(out, None)) if out else None
 
 def partner_answer(st, question, hint=None, usage=None):
     h = f" Сегодня она отмечала: {hint}." if hint else ""
@@ -1323,7 +1323,7 @@ def partner_answer(st, question, hint=None, usage=None):
              "Дай короткое объяснение через гормоны или физиологию, чтобы ему было интересно и понятно, но не перегружай. "
              "Если уместно, добавь строку «🧠 Факт: ...» с одним полезным фактом о цикле, ПМС, овуляции, прогестероне, эстрогене или самочувствии. "
              "Без воды, только русский, без markdown, без длинных тире. Вопрос: " + question)}]
-    out = _call(msgs, max_tokens=650, temperature=0.38, usage=usage)
+    out = _call(msgs, max_tokens=950, temperature=0.38, usage=usage)
     return _clean(out, "Поддержи её вниманием и заботой, спроси, чего ей сейчас хочется.")
 
 def partner_preg_brief(preg, hint=None, usage=None):
@@ -1338,8 +1338,8 @@ def partner_preg_brief(preg, hint=None, usage=None):
               "### 🍽 Что предложить\n- 2-3 идеи еды/напитков, безопасные при беременности.\n"
               "### 📌 На что обратить внимание\n- 1 пункт: когда стоит связаться с врачом, без запугивания.\n"
               "Объём 900-1300 знаков. Только русский, без длинных тире. " + TOV)
-    out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=850, temperature=0.45, usage=usage)
-    return _clean(out, None)
+    out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=1200, temperature=0.45, usage=usage)
+    return _ensure_complete(_clean(out, None)) if out else None
 
 def partner_preg_answer(preg, question, hint=None, usage=None):
     h = f" Сегодня она отмечала: {hint}." if hint else ""
@@ -1494,7 +1494,7 @@ def menu_today(st, profile=None, target=None, usage=None):
               '{"macros":{"protein":"NN г","fat":"NN г","carbs":"NNN г"},'
               '"meals":[{"time":"08:00","dish":"...","note":"нутриент","kcal":"NNN ккал"}]}')
     out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
-                 {"role": "user", "content": prompt}], max_tokens=600, usage=usage)
+                 {"role": "user", "content": prompt}], max_tokens=900, usage=usage)
     if out:
         try:
             data = json.loads(out[out.find("{"):out.rfind("}") + 1])
@@ -1529,7 +1529,7 @@ def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
                   " Блюдо должно быть обычным для России, простым, белковым, без тофу, батата, киноа, протеиновых порошков и странных сочетаний. "
                   'Ответь строго JSON: {"time":"08:00","dish":"...","note":"нутриент","kcal":"NNN ккал"}')
         out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
-                     {"role": "user", "content": prompt}], max_tokens=220, temperature=0.2, usage=usage)
+                     {"role": "user", "content": prompt}], max_tokens=320, temperature=0.2, usage=usage)
         if out:
             try:
                 data = json.loads(out[out.find("{"):out.rfind("}") + 1])
@@ -1649,7 +1649,7 @@ def general_menu(profile, mode, target=None, usage=None):
               '{"macros":{"protein":"NN г","fat":"NN г","carbs":"NNN г"},'
               '"meals":[{"time":"08:00","dish":"...","note":"нутриент","kcal":"NNN ккал"}]}')
     out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
-                 {"role": "user", "content": prompt}], max_tokens=600, usage=usage)
+                 {"role": "user", "content": prompt}], max_tokens=900, usage=usage)
     if out:
         try:
             data = json.loads(out[out.find("{"):out.rfind("}") + 1])
