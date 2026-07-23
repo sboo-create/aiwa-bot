@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-24-v102-reviewed-summary"
+AIWA_VERSION = "2026-07-24-v103-delivery-leases"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -978,7 +978,10 @@ def summary_prepare_hhmm(cid, hhmm):
 
 def schedule_text(cid, hhmm):
     actual, _, _ = scheduled_hhmm(cid, hhmm)
-    return f"Время сводки: {actual} по Москве — соберу заранее и пришлю к этому времени."
+    return (
+        f"Время сводки: {actual} по Москве — подготовлю заранее и начну отправку в это время. "
+        "При высокой нагрузке доставка может занять несколько минут."
+    )
 
 def today_start_iso():
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
@@ -994,9 +997,16 @@ def summary_sent_today(cid):
     return bool(r)
 
 def _claim_push_delivery(cid, campaign):
-    """Atomically reserve one daily push across workers, replicas and restarts."""
+    """Atomically reserve a push using a recoverable lease, not a permanent lock."""
     if not campaign:
         return True
+    try:
+        lease_seconds = max(60, int(os.environ.get("AIWA_PUSH_CLAIM_TTL_SEC", "900")))
+    except (TypeError, ValueError):
+        lease_seconds = 900
+    now = datetime.now(TZ)
+    now_iso = now.isoformat()
+    stale_before = (now - timedelta(seconds=lease_seconds)).isoformat()
     c = db()
     try:
         c.execute("BEGIN IMMEDIATE")
@@ -1011,7 +1021,7 @@ def _claim_push_delivery(cid, campaign):
                 """INSERT OR IGNORE INTO push_deliveries
                    (chat_id,campaign_id,status,claimed_at,sent_at)
                    VALUES(?,?,'sent',?,?)""",
-                (cid, campaign, datetime.now(TZ).isoformat(), datetime.now(TZ).isoformat()),
+                (cid, campaign, now_iso, now_iso),
             )
             c.commit()
             return False
@@ -1019,8 +1029,18 @@ def _claim_push_delivery(cid, campaign):
             """INSERT OR IGNORE INTO push_deliveries
                (chat_id,campaign_id,status,claimed_at)
                VALUES(?,?,'claimed',?)""",
-            (cid, campaign, datetime.now(TZ).isoformat()),
+            (cid, campaign, now_iso),
         ).rowcount == 1
+        if not claimed:
+            # A process may die after claiming and before completing. Reclaim only
+            # an expired in-flight lease; a sent row is never reopened.
+            claimed = c.execute(
+                """UPDATE push_deliveries
+                   SET claimed_at=?, sent_at=NULL
+                   WHERE chat_id=? AND campaign_id=? AND status='claimed'
+                     AND claimed_at<=?""",
+                (now_iso, cid, campaign, stale_before),
+            ).rowcount == 1
         c.commit()
         return claimed
     finally:
@@ -1470,10 +1490,12 @@ async def send_section(context, cid, st, key):
     await send_answer(context, cid, text, st, text, usage=usage)
 
 async def send_delay(context, cid, st, campaign=None):
-    if IMG:
-        try:
-            bio = io.BytesIO(await asyncio.to_thread(IMG.render_delay, st)); bio.name = "delay.png"; await context.bot.send_photo(cid, photo=bio)
-        except Exception as e: log.warning("delay img: %s", e)
+    claimed = False; sent_any = False
+    if campaign:
+        claimed = _claim_push_delivery(cid, campaign)
+        if not claimed:
+            log.info("delay summary skipped as duplicate: %s %s", cid, campaign)
+            return False
     msgs = {
         "due": (
             "🟡 Сводка на сегодня: месячные ожидаются примерно сейчас.\n\n"
@@ -1508,13 +1530,32 @@ async def send_delay(context, cid, st, campaign=None):
             "• Если месячных действительно нет так долго, это повод обсудить ситуацию с гинекологом.\n"
             "• Возможные причины: беременность, СПКЯ, щитовидная железа, резкая потеря веса, стресс, перименопауза."
         )}
-    u = row(cid)
-    body = msgs.get(st["status"], "")
-    await context.bot.send_message(cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
-        reply_markup=summary_sugg_kb(cid, u, st, app_label="Открыть календарь"), parse_mode="HTML")
-    if campaign:
-        ev(cid, "goal", meta="summary")
-        ev(cid, "broadcast", meta="sent|" + campaign)
+    try:
+        if IMG:
+            try:
+                bio = io.BytesIO(await asyncio.to_thread(IMG.render_delay, st))
+                bio.name = "delay.png"
+                await context.bot.send_photo(cid, photo=bio)
+                sent_any = True
+            except Exception as e:
+                log.warning("delay img: %s", e)
+        u = row(cid)
+        body = msgs.get(st["status"], "")
+        await context.bot.send_message(
+            cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
+            reply_markup=summary_sugg_kb(cid, u, st, app_label="Открыть календарь"),
+            parse_mode="HTML",
+        )
+        sent_any = True
+        if campaign:
+            _complete_push_delivery(cid, campaign)
+            ev(cid, "goal", meta="summary")
+            ev(cid, "broadcast", meta="sent|" + campaign)
+        return True
+    except Exception:
+        if claimed and not sent_any:
+            _release_push_delivery(cid, campaign)
+        raise
 
 async def send_guide(context, cid, g):
     path = os.path.join(GUIDE_DIR, g["file"])
@@ -1951,6 +1992,38 @@ async def _send_summary_text(context, cid, clean, kb):
     except BadRequest:
         await context.bot.send_message(cid, md_plain(clean), reply_markup=kb)
 
+def _delivery_summary_fallback(u, st=None, pregnancy=None):
+    """Fast deterministic fallback used only when scheduled pre-generation missed."""
+    if st is not None:
+        return L.fallback_summary(st, u.get("modules") or ["phase", "general", "food", "training"])
+    mode = (u or {}).get("mode") or "none"
+    if mode == "preg":
+        term = ""
+        if pregnancy:
+            term = f"Сейчас ориентировочно {pregnancy['week']}-я неделя, {pregnancy['trimester']}-й триместр. "
+        return (
+            "### 💛 Сегодня\n"
+            f"- {term}Ориентируйся на самочувствие и назначения врача.\n"
+            "- При боли, кровянистых выделениях, выраженной слабости или резком ухудшении самочувствия свяжись с врачом.\n\n"
+            "### 🍽 Основа дня\n"
+            "- Регулярно ешь, пей достаточно воды и избегай продуктов, которые врач рекомендовал исключить.\n\n"
+            "### 🏋️ Нагрузка\n"
+            "- Выбирай только привычную комфортную активность без боли и перегрева."
+        )
+    if mode == "meno":
+        context_line = "при менопаузе"
+    elif mode == "irregular":
+        context_line = "при нерегулярном цикле"
+    else:
+        context_line = "без привязки к циклу"
+    return (
+        "### 💛 Сегодня\n"
+        f"- Это резервная сводка {context_line}: персональный текст не успел подготовиться заранее.\n"
+        "- Отметь энергию и симптомы, чтобы следующая сводка учитывала актуальное самочувствие.\n\n"
+        "### 🍽 Питание и нагрузка\n"
+        "- Выбирай обычный сбалансированный рацион и комфортную активность по самочувствию."
+    )
+
 async def push_general(context, cid, with_image=True, campaign=None):
     u = row(cid)
     if not u or not is_onboarded(u):
@@ -1970,7 +2043,7 @@ async def push_general(context, cid, with_image=True, campaign=None):
         if value is None:
             value = prepared_summary_get(cid, day, key)
         body, facts = _summary_unpack(value)
-        if not body:
+        if not body and not campaign:
             hint = _summary_hint(cid, u, pregnancy)
             body = await llm_to_thread(
                 cid, "daily_summary", L.general_summary,
@@ -1988,7 +2061,8 @@ async def push_general(context, cid, with_image=True, campaign=None):
                 _prune_day(_SUM_CACHE); _SUM_CACHE[key] = value
                 prepared_summary_put(cid, day, key, value, generation=generation)
         if not body:
-            body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
+            body = _delivery_summary_fallback(u, pregnancy=pregnancy)
+            ev(cid, "fallback", meta="static:summary_delivery_cache_miss")
         if with_image:
             sent_any = await send_daily_infographic(context.bot, cid, u, facts)
         clean, extra = L.split_followups(body)
@@ -2141,7 +2215,8 @@ async def push_summary(context, cid, with_image=True, campaign=None):
         return await push_general(context, cid, with_image=with_image, campaign=campaign)
     u, st = status_of(cid)
     if not st: return
-    if st["status"] != "normal": return await send_delay(context, cid, st, campaign=campaign)
+    if st["status"] != "normal":
+        return await send_delay(context, cid, st, campaign=campaign)
     claimed = False; sent_any = False
     if campaign:
         claimed = _claim_push_delivery(cid, campaign)
@@ -2156,7 +2231,7 @@ async def push_summary(context, cid, with_image=True, campaign=None):
         if value is None:
             value = prepared_summary_get(cid, day, key)
         body, facts = _summary_unpack(value)
-        if not body:
+        if not body and not campaign:
             hint = _summary_hint(cid, u)
             body = await llm_to_thread(
                 cid, "daily_summary", L.generate_summary,
@@ -2174,7 +2249,8 @@ async def push_summary(context, cid, with_image=True, campaign=None):
                 _prune_day(_SUM_CACHE); _SUM_CACHE[key] = value
                 prepared_summary_put(cid, day, key, value, generation=generation)
         if not body:
-            body = "💛 Сводка на сегодня готова. Открой приложение, чтобы посмотреть календарь, симптомы, питание и нагрузку."
+            body = _delivery_summary_fallback(u, st=st)
+            ev(cid, "fallback", meta="static:summary_delivery_cache_miss")
         if with_image:
             sent_any = await send_daily_infographic(context.bot, cid, u, facts, st)
         clean, extra = L.split_followups(body)
