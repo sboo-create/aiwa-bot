@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v77-shorter-answers"
+AIWA_VERSION = "2026-07-23-v78-short-answers-and-telegram-voice"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1266,6 +1266,60 @@ def chat_hint(cid):
 _VOICE_TURN = {}   # cid -> True, если текущий вопрос пришёл голосом: тогда ответ дублируем голосом
 def _voice_reply_on():
     return os.environ.get("AIWA_VOICE_REPLY", "1") in ("1", "true", "True", "yes", "on")
+
+def _voice_plain_text(value):
+    """Prepare already-sent Telegram text for TTS without speaking HTML markup."""
+    text = html.unescape(re.sub(r"<[^>]+>", "", str(value or "")))
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text[:3000].rstrip()
+
+class _VoiceBotProxy:
+    """Delegate Telegram calls while remembering text sent during a voice turn."""
+    def __init__(self, bot, cid, sent_texts):
+        self._bot = bot; self._cid = cid; self._sent_texts = sent_texts
+
+    def __getattr__(self, name):
+        return getattr(self._bot, name)
+
+    async def send_message(self, chat_id, text, *args, **kwargs):
+        result = await self._bot.send_message(chat_id, text, *args, **kwargs)
+        if str(chat_id) == str(self._cid) and str(text or "").strip():
+            self._sent_texts.append(str(text))
+        return result
+
+    async def send_photo(self, chat_id, *args, **kwargs):
+        result = await self._bot.send_photo(chat_id, *args, **kwargs)
+        caption = kwargs.get("caption")
+        if str(chat_id) == str(self._cid) and str(caption or "").strip():
+            self._sent_texts.append(str(caption))
+        return result
+
+class _VoiceContextProxy:
+    def __init__(self, context, bot):
+        self._context = context; self.bot = bot
+
+    def __getattr__(self, name):
+        return getattr(self._context, name)
+
+class _VoiceMessageProxy:
+    def __init__(self, message, sent_texts):
+        self._message = message; self._sent_texts = sent_texts
+
+    def __getattr__(self, name):
+        return getattr(self._message, name)
+
+    async def reply_text(self, text, *args, **kwargs):
+        result = await self._message.reply_text(text, *args, **kwargs)
+        if str(text or "").strip():
+            self._sent_texts.append(str(text))
+        return result
+
+class _VoiceUpdateProxy:
+    def __init__(self, update, message):
+        self._update = update; self.message = message
+
+    def __getattr__(self, name):
+        return getattr(self._update, name)
 
 async def _send_audio_fallback(context, cid, audio):
     """Если Telegram не даёт слать голосовые (настройка приватности у получателя),
@@ -2720,8 +2774,22 @@ async def on_voice(update, context):
     ev(cid, "voice", n=len(txt))
     await update.message.reply_text(f"🎙 Расслышала: «{txt}»")
     _VOICE_TURN[cid] = True          # спросили голосом — ответим текстом и голосом
+    sent_texts = []
+    voice_context = _VoiceContextProxy(
+        context, _VoiceBotProxy(context.bot, cid, sent_texts)
+    )
+    voice_update = _VoiceUpdateProxy(
+        update, _VoiceMessageProxy(update.message, sent_texts)
+    )
     try:
-        await handle_text(update, context, txt)
+        await handle_text(voice_update, voice_context, txt)
+        # Free-form AI answers speak inside send_answer(). Intent/state branches
+        # often reply directly, so duplicate their final visible text here too.
+        if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
+            spoken = _voice_plain_text(sent_texts[-1] if sent_texts else
+                                       "Готово. Результат отправила в чат.")
+            if spoken:
+                await _send_voice_reply(context, cid, spoken)
     finally:
         _VOICE_TURN.pop(cid, None)   # чтобы флаг не протёк на следующий текстовый вопрос
 

@@ -361,6 +361,97 @@ class SecurityAnalyticsTests(unittest.TestCase):
 
         context.bot.send_message.assert_not_awaited()
 
+    def _voice_fixture(self, cid):
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        voice_file = types.SimpleNamespace(
+            download_as_bytearray=mock.AsyncMock(return_value=bytearray(b"ogg"))
+        )
+        telegram_bot = types.SimpleNamespace(
+            send_chat_action=mock.AsyncMock(),
+            get_file=mock.AsyncMock(return_value=voice_file),
+            send_message=mock.AsyncMock(),
+            send_voice=mock.AsyncMock(),
+            send_audio=mock.AsyncMock(),
+        )
+        message = types.SimpleNamespace(
+            voice=types.SimpleNamespace(file_id="voice-file"),
+            reply_text=mock.AsyncMock(),
+        )
+        update = types.SimpleNamespace(
+            effective_chat=types.SimpleNamespace(id=cid),
+            message=message,
+        )
+        return update, types.SimpleNamespace(bot=telegram_bot), telegram_bot, message
+
+    def test_telegram_voice_freeform_returns_text_and_one_voice_copy(self):
+        cid = 85
+        update, context, telegram_bot, message = self._voice_fixture(cid)
+
+        async def fake_llm(_cid, purpose, _fn, *args, **kwargs):
+            info = args[-1] if args and isinstance(args[-1], dict) else {}
+            if purpose == "stt":
+                info.update(provider="salute", ms=120)
+                return "Почему я устала?"
+            if purpose == "tts":
+                info.update(ms=90, chars=len(str(args[0])))
+                return b"voice-answer"
+            raise AssertionError(purpose)
+
+        async def fake_handle(_update, proxied_context, text):
+            self.assertEqual(text, "Почему я устала?")
+            await bot.send_answer(proxied_context, cid, "Короткий текстовый ответ.", None, text)
+
+        with mock.patch.dict(os.environ, {"AIWA_VOICE_REPLY": "1"}), \
+             mock.patch.object(bot, "llm_to_thread", side_effect=fake_llm), \
+             mock.patch.object(bot, "handle_text", side_effect=fake_handle), \
+             mock.patch.object(bot, "sugg_kb", return_value=None), \
+             mock.patch.object(bot.L, "split_followups", return_value=("Короткий текстовый ответ.", [])), \
+             mock.patch.object(bot.L, "followups", return_value=[]), \
+             mock.patch.object(bot, "ev"):
+            asyncio.run(bot.on_voice(update, context))
+
+        message.reply_text.assert_awaited_once_with("🎙 Расслышала: «Почему я устала?»")
+        telegram_bot.send_message.assert_awaited_once()
+        telegram_bot.send_voice.assert_awaited_once_with(cid, b"voice-answer")
+        self.assertNotIn(cid, bot._VOICE_TURN)
+
+    def test_telegram_voice_intent_also_gets_spoken_copy_of_direct_reply(self):
+        cid = 86
+        update, context, telegram_bot, _message = self._voice_fixture(cid)
+        spoken = []
+
+        async def fake_llm(_cid, purpose, _fn, *args, **kwargs):
+            if purpose == "stt":
+                return "Покажи сводку"
+            if purpose == "tts":
+                spoken.append(args[0])
+                return b"summary-audio"
+            raise AssertionError(purpose)
+
+        async def fake_handle(_update, proxied_context, _text):
+            await proxied_context.bot.send_message(cid, "<b>Сводка готова</b>\nВсё хорошо.")
+
+        with mock.patch.dict(os.environ, {"AIWA_VOICE_REPLY": "1"}), \
+             mock.patch.object(bot, "llm_to_thread", side_effect=fake_llm), \
+             mock.patch.object(bot, "handle_text", side_effect=fake_handle), \
+             mock.patch.object(bot, "ev"):
+            asyncio.run(bot.on_voice(update, context))
+
+        self.assertEqual(spoken, ["Сводка готова\nВсё хорошо."])
+        telegram_bot.send_voice.assert_awaited_once_with(cid, b"summary-audio")
+
+    def test_telegram_text_never_enables_voice_reply(self):
+        update = types.SimpleNamespace(
+            effective_chat=types.SimpleNamespace(id=87),
+            message=types.SimpleNamespace(text="Обычный текст", reply_text=mock.AsyncMock()),
+        )
+        context = types.SimpleNamespace()
+        with mock.patch.object(bot, "handle_text", new=mock.AsyncMock()), \
+             mock.patch.object(bot, "_send_voice_reply", new=mock.AsyncMock()) as voice_reply:
+            asyncio.run(bot.on_text(update, context))
+        voice_reply.assert_not_awaited()
+
     def test_http_admin_keeps_legacy_key_but_prefers_separate_secret(self):
         old_admin = bot.AIWA_ADMIN
         old_key = os.environ.get("AIWA_ADMIN_KEY")
@@ -506,11 +597,11 @@ class SecurityAnalyticsTests(unittest.TestCase):
             self.assertIs(call.kwargs.get("reply_markup"), keyboard if i == len(calls) - 1 else None)
         self.assertEqual("".join(delivered), answer)
 
-    def test_chat_answers_target_about_three_thousand_characters(self):
+    def test_chat_answers_follow_current_short_response_contract(self):
         with mock.patch.object(llm, "_call", return_value="Готовый ответ") as call:
             llm.answer_question(None, "Почему?", {})
-        self.assertEqual(call.call_args.kwargs["max_tokens"], 900)
-        self.assertIn("НЕ превышай 3000 знаков", call.call_args.args[0][-1]["content"])
+        self.assertEqual(call.call_args.kwargs["max_tokens"], 1200)
+        self.assertIn("ЖЁСТКИЙ предел 1900 знаков", call.call_args.args[0][-1]["content"])
 
     def test_onboarding_completion_counts_as_traction_activity(self):
         cid = 700
