@@ -5,7 +5,9 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +47,9 @@ class StatsModuleTests(unittest.TestCase):
         self.module._db.commit()
 
     def test_dashboard_separates_requests_attempts_and_legacy_quality(self):
-        now = time.time()
+        # Keep the fixture away from UTC midnight: events intentionally span a few
+        # minutes and otherwise make the expected number of calendar days flaky.
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
         self.add("start", "u1", "onboarding_started", ts=now - 300)
         self.add("done", "u1", "onboarding_completed", ts=now - 250)
         self.add("msg", "u1", "user_message_sent", ts=now - 200)
@@ -70,7 +74,8 @@ class StatsModuleTests(unittest.TestCase):
                  "total_tokens": 120, "estimated_cost_usd": .002, "latency_ms": 500}, now - 198)
         self.add("old", "u2", "legacy_button", {"migration_batch": "b1"}, now - 1000, "reconstructed")
 
-        data = self.module.compute_dashboard(1)
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            data = self.module.compute_dashboard(1)
 
         self.assertEqual(len(data["primary"]), 6)
         self.assertEqual(data["ai"]["requests"], 1)
@@ -98,7 +103,8 @@ class StatsModuleTests(unittest.TestCase):
         chat = next(x for x in data["feature_funnels"] if x["label"] == "Чат с AIWA")
         self.assertEqual((chat["started"], chat["completed"], chat["rate"]), (1, 1, 100.0))
 
-        month = self.module.compute_dashboard(30)
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            month = self.module.compute_dashboard(30)
         self.assertEqual(month["data_quality"]["available_days"], 1)
         self.assertEqual(month["audience"]["avg_dau"], 2.0)
         self.assertEqual(len(month["series"]), 1)
