@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-24-v101-on-time-summaries"
+AIWA_VERSION = "2026-07-24-v102-reviewed-summary"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -260,6 +260,21 @@ def db():
         claimed_at TEXT NOT NULL,
         sent_at TEXT,
         PRIMARY KEY(chat_id, campaign_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS prepared_summaries(
+        chat_id INTEGER NOT NULL,
+        summary_date TEXT NOT NULL,
+        context_key TEXT NOT NULL,
+        body TEXT NOT NULL,
+        prepared_at TEXT NOT NULL,
+        PRIMARY KEY(chat_id, summary_date))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS feedback_requests(
+        chat_id INTEGER NOT NULL,
+        answer_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        rating TEXT,
+        submitted_at TEXT,
+        PRIMARY KEY(chat_id, answer_id))""")
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
                 "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
@@ -278,7 +293,8 @@ def db():
     for _ix in ("CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts)",
                 "CREATE INDEX IF NOT EXISTS ix_events_cid_ts ON events(chat_id, ts)",
                 "CREATE INDEX IF NOT EXISTS ix_meals_cid_d ON meals(chat_id, d)",
-                "CREATE INDEX IF NOT EXISTS ix_workouts_cid_d ON workouts(chat_id, d)"):
+                "CREATE INDEX IF NOT EXISTS ix_workouts_cid_d ON workouts(chat_id, d)",
+                "CREATE INDEX IF NOT EXISTS ix_prepared_summary_date ON prepared_summaries(summary_date)"):
         try: c.execute(_ix)
         except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
@@ -601,12 +617,17 @@ def meno_users():
 def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
-              "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries"):
+              "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries",
+              "prepared_summaries", "feedback_requests"):
         c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))  # nosec B608
     c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid))
     A2.delete_user(c, cid)
     c.commit(); c.close()
     CHAT_HIST.pop(cid, None)
+    menu_cache_clear(cid)
+    for key in [key for key in list(_SUM_CACHE) if key and key[0] == cid]:
+        _SUM_CACHE.pop(key, None)
+    BCAST_PENDING.discard(cid)
 def chatlog_add(cid, role, text):
     if not text: return
     c = db()
@@ -936,32 +957,28 @@ def time_kb():
     times = ["07:00", "08:00", "09:00", "10:00", "21:00", "22:00"]
     return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=f"tm:{t}") for t in times[i:i + 3]] for i in (0, 3)])
 
-def schedule_jitter_min():
-    try:
-        return max(0, int(os.environ.get("AIWA_SCHEDULE_JITTER_MIN", "15")))
-    except (TypeError, ValueError):
-        return 15
-
-def summary_spread_min():
-    try:
-        return max(1, int(os.environ.get("AIWA_SUMMARY_SPREAD_MIN", "180")))
-    except (TypeError, ValueError):
-        return 180
-
 def scheduled_hhmm(cid, hhmm):
+    """The selected time is the delivery time, never a load-spreading hint."""
     h, m = map(int, hhmm.split(":"))
-    # дефолтную утреннюю сводку (08:00) размазываем по окну 08:00-11:00; кастомное время — маленький анти-коллизионный джиттер
-    window = summary_spread_min() if hhmm == "08:00" else 0   # кастомное время шлём ровно, сводка прегревается заранее
-    offset = abs(int(cid)) % window if window else 0
-    m += offset
-    h = (h + m // 60) % 24
-    return f"{h:02d}:{m % 60:02d}", offset, window
+    return f"{h % 24:02d}:{m % 60:02d}", 0, 0
+
+def summary_prepare_hhmm(cid, hhmm):
+    """Spread expensive generation before, rather than after, delivery time."""
+    try:
+        lead = max(1, int(os.environ.get("AIWA_SUMMARY_PREPARE_MIN", "10")))
+    except (TypeError, ValueError):
+        lead = 10
+    try:
+        spread = max(1, int(os.environ.get("AIWA_SUMMARY_PREPARE_SPREAD_MIN", "20")))
+    except (TypeError, ValueError):
+        spread = 20
+    h, m = map(int, hhmm.split(":"))
+    total = (h * 60 + m - lead - (abs(int(cid)) % spread)) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 def schedule_text(cid, hhmm):
-    actual, offset, window = scheduled_hhmm(cid, hhmm)
-    if hhmm == "08:00":
-        return (f"Утренняя сводка будет приходить около {actual} по Москве. Точное время можно поменять в Меню.")
-    return f"Время сводки: {hhmm} по Москве — соберу заранее и пришлю ровно в срок."
+    actual, _, _ = scheduled_hhmm(cid, hhmm)
+    return f"Время сводки: {actual} по Москве — соберу заранее и пришлю к этому времени."
 
 def today_start_iso():
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
@@ -1179,6 +1196,33 @@ async def send_general_infographic(bot, cid, u=None):
         log.warning("general infographic (%s): %s", mode, e)
         return False
 
+async def send_daily_infographic(bot, cid, u, facts=None, st=None):
+    """Render trusted metrics plus model-selected reviewed facts."""
+    if not IMG or not u:
+        return False
+    mode = "cycle" if st is not None else (u.get("mode") or "none")
+    pregnancy = None
+    if mode == "preg" and u.get("last_period"):
+        try:
+            pregnancy = C.preg_status(u["last_period"])
+        except Exception:
+            pregnancy = None
+    try:
+        png = await asyncio.to_thread(
+            IMG.render_summary_card,
+            mode,
+            dtoday(),
+            facts or [],
+            st,
+            pregnancy,
+        )
+        bio = io.BytesIO(png); bio.name = "aiwa-today.png"
+        await bot.send_photo(cid, photo=bio)
+        return True
+    except Exception as e:
+        log.warning("daily infographic (%s): %s", mode, e)
+        return False
+
 async def send_training_card(context, cid, st):
     if not IMG: return
     await context.bot.send_chat_action(cid, "upload_photo")
@@ -1216,8 +1260,160 @@ _SUM_CACHE = {}
 def _prune_day(cache):
     today = dtoday().isoformat()
     if len(cache) > 1500:
-        for k in [k for k in list(cache) if k[1] != today]:
+        tomorrow = (dtoday() + timedelta(days=1)).isoformat()
+        for k in [k for k in list(cache) if k[1] not in (today, tomorrow)]:
             cache.pop(k, None)
+
+def _prepared_context_key(cache_key):
+    raw = json.dumps(list(cache_key[2:]), ensure_ascii=False, sort_keys=True, default=str)
+    return _hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def _summary_state_for_day(u, day):
+    target = date.fromisoformat(day)
+    if is_cycle(u) and u.get("last_period") and u.get("cycle_len"):
+        return C.cycle_status(date.fromisoformat(u["last_period"]), int(u["cycle_len"]), target), None
+    if u.get("mode") == "preg" and u.get("last_period"):
+        try:
+            return None, C.preg_status(u["last_period"], target)
+        except Exception:
+            pass
+    return None, None
+
+def _summary_hint(cid, u, pregnancy=None):
+    hint = last_hint(cid) or ""
+    if u.get("mode") == "preg" and pregnancy:
+        hint = ((hint + " ") if hint else "") + (
+            f"Беременность, срок примерно {pregnancy['week']} недель, "
+            f"{pregnancy['trimester']} триместр."
+        )
+    return hint or None
+
+def _summary_key(cid, u, day, st=None, pregnancy=None):
+    profile = profile_of(u) or {}
+    snapshot = {
+        "mode": "cycle" if st is not None else (u.get("mode") or "none"),
+        "last_period": u.get("last_period"),
+        "cycle_len": u.get("cycle_len"),
+        "period_len": u.get("period_len"),
+        "modules": list(u.get("modules") or []),
+        "profile": {k: profile.get(k) for k in (
+            "height", "weight", "age", "activity", "diet", "diet_note", "kcal_goal"
+        )},
+        "checkin": log_get(cid, day) or {},
+        "hint": _summary_hint(cid, u, pregnancy),
+        "cycle": ({k: st.get(k) for k in (
+            "day", "cycle_len", "phase", "subphase", "days_to_next", "status"
+        )} if st else None),
+        "pregnancy": ({k: pregnancy.get(k) for k in (
+            "week", "day", "trimester", "due", "days_left"
+        )} if pregnancy else None),
+    }
+    return (cid, day, json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str))
+
+def _summary_pack(body, facts=None):
+    return {"v": 2, "body": str(body or ""), "facts": list(facts or [])[:3]}
+
+def _summary_unpack(value):
+    if isinstance(value, dict):
+        return str(value.get("body") or ""), list(value.get("facts") or [])[:3]
+    return str(value or ""), []
+
+def prepared_summary_get(cid, day, cache_key):
+    c = db()
+    try:
+        row_ = c.execute(
+            """SELECT body FROM prepared_summaries
+               WHERE chat_id=? AND summary_date=? AND context_key=?""",
+            (cid, day, _prepared_context_key(cache_key)),
+        ).fetchone()
+        if not row_:
+            return None
+        raw = row_[0]
+        try:
+            value = json.loads(raw)
+            if isinstance(value, dict) and value.get("v") == 2:
+                return value
+        except Exception:
+            pass
+        return raw
+    finally:
+        c.close()
+
+_PREP_CLEANUP_DAY = None
+def prepared_summary_put(cid, day, cache_key, value, generation=None):
+    global _PREP_CLEANUP_DAY
+    body, _ = _summary_unpack(value)
+    if not body:
+        return False
+    stored = (json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+              if isinstance(value, dict) else str(value))
+    c = db()
+    try:
+        if not _user_write_allowed(cid, generation=generation, conn=c):
+            return False
+        c.execute(
+            """INSERT OR REPLACE INTO prepared_summaries
+               (chat_id,summary_date,context_key,body,prepared_at)
+               VALUES(?,?,?,?,?)""",
+            (cid, day, _prepared_context_key(cache_key), stored, datetime.now(TZ).isoformat()),
+        )
+        cleanup_day = dtoday().isoformat()
+        if _PREP_CLEANUP_DAY != cleanup_day:
+            c.execute("DELETE FROM prepared_summaries WHERE summary_date<?",
+                      ((dtoday() - timedelta(days=2)).isoformat(),))
+            _PREP_CLEANUP_DAY = cleanup_day
+        c.commit()
+        return True
+    finally:
+        c.close()
+
+async def prepare_daily_summary(cid, target_day=None):
+    """Warm the daily LLM result before the user's exact delivery time."""
+    generation = _user_generation(cid)
+    u = row(cid)
+    if not u or not is_onboarded(u):
+        return False
+    usage = []; day = target_day or dtoday().isoformat()
+    st, pregnancy = _summary_state_for_day(u, day)
+    if st is not None and st.get("status") != "normal":
+        return False
+    key = _summary_key(cid, u, day, st, pregnancy)
+    if _SUM_CACHE.get(key) is not None or prepared_summary_get(cid, day, key) is not None:
+        return True
+    hint = _summary_hint(cid, u, pregnancy)
+    if st is None:
+        body = await llm_to_thread(
+            cid, "daily_summary_prepare", L.general_summary,
+            profile_of(u), u.get("mode"), hint=hint, usage=usage,
+            user_generation=generation,
+        )
+    else:
+        body = await llm_to_thread(
+            cid, "daily_summary_prepare", L.generate_summary,
+            st, u["modules"], hint=hint, usage=usage,
+            user_generation=generation,
+        )
+    if not body or not _user_write_allowed(cid, generation=generation):
+        return False
+    mode = "cycle" if st is not None else (u.get("mode") or "none")
+    facts = []
+    if mode in ("cycle", "preg"):
+        facts = await llm_to_thread(
+            cid, "summary_card_facts", L.summary_card_facts,
+            mode, st, pregnancy, hint, usage,
+            user_generation=generation,
+        )
+    if not _user_write_allowed(cid, generation=generation):
+        return False
+    value = _summary_pack(body, facts)
+    _prune_day(_SUM_CACHE)
+    _SUM_CACHE[key] = value
+    if not prepared_summary_put(cid, day, key, value, generation=generation):
+        _SUM_CACHE.pop(key, None)
+        return False
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="summary_prepare", calls=len(usage), usage=usage)
+    return True
 
 async def send_menu(context, cid, with_image=False):
     u, st = status_of(cid)
@@ -1352,13 +1548,27 @@ async def send_rich(bot, cid, md_text, reply_markup=None):
 def tg_rich(text):
     """Лёгкие маркеры от модели -> Telegram HTML: **жирный**, __курсив__, ```моноширинный блок```."""
     if not text: return ""
-    t = html.escape(str(text), quote=False)
-    t = re.sub(r"```[a-z]*\n?(.*?)```", lambda m: "<pre>" + m.group(1).strip("\n") + "</pre>", t, flags=re.S)
-    t = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", t)                     # ### заголовок -> жирный
-    t = _gfm_tables_to_pre(t)
-    t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t, flags=re.S)
-    t = re.sub(r"__(.+?)__", r"<i>\1</i>", t, flags=re.S)
-    return t.replace("**", "").replace("__", "")     # непарные хвосты после нарезки
+    # Protect fenced blocks before applying inline entities: Telegram rejects
+    # nested <b>/<i> inside <pre>.
+    chunks = re.split(r"(```[a-z]*\n?.*?```)", str(text), flags=re.S)
+    out = []
+    for chunk in chunks:
+        if chunk.startswith("```") and chunk.endswith("```"):
+            body = re.sub(r"^```[a-z]*\n?", "", chunk)
+            body = body[:-3].strip("\n")
+            out.append("<pre>" + html.escape(body, quote=False) + "</pre>")
+            continue
+        safe = html.escape(chunk, quote=False)
+        safe = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", safe)
+        safe = _gfm_tables_to_pre(safe)
+        for part in re.split(r"(<pre>.*?</pre>)", safe, flags=re.S):
+            if part.startswith("<pre>") and part.endswith("</pre>"):
+                out.append(part)
+                continue
+            part = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", part, flags=re.S)
+            part = re.sub(r"__(.+?)__", r"<i>\1</i>", part, flags=re.S)
+            out.append(part.replace("**", "").replace("__", ""))
+    return "".join(out)
 
 def _gfm_tables_to_pre(t):
     """Фолбэк для клиентов без rich: GFM-таблицу выравниваем пробелами в <pre>."""
@@ -1444,7 +1654,11 @@ async def reply_long(message, text, reply_markup=None):
             log.info("rich fallback: %s", str(_e)[:120])
     parts = split_tg(text) or [str(text or "")]
     for i, part in enumerate(parts):
-        await message.reply_text(tg_rich(part), reply_markup=(reply_markup if i == len(parts) - 1 else None), parse_mode="HTML")
+        markup = reply_markup if i == len(parts) - 1 else None
+        try:
+            await message.reply_text(tg_rich(part), reply_markup=markup, parse_mode="HTML")
+        except BadRequest:
+            await message.reply_text(md_plain(part), reply_markup=markup)
 def chat_hint(cid):
     base = last_hint(cid) or ""
     u = row(cid)
@@ -1521,21 +1735,27 @@ async def _send_audio_fallback(context, cid, audio):
     await context.bot.send_audio(cid, buf, title="Ответ Айвы", performer="Айва")
 
 async def _send_voice_reply(context, cid, text):
-    """Озвучка ответа. Молча пропускаем, если синтез недоступен — текст уже отправлен."""
+    """Speak the complete answer in bounded requests instead of truncating it."""
     try:
-        _ti = {}
-        audio = await llm_to_thread(cid, "tts", L.synthesize, text, _ti)
-        if not audio:
-            return
-        how = "tts:salute"
-        try:
-            await context.bot.send_voice(cid, audio)
-        except Exception as e:
-            if "voice_messages_forbidden" not in str(e).lower():
-                raise
-            await _send_audio_fallback(context, cid, audio)   # у получателя закрыты голосовые
-            how = "tts:audio"
-        ev(cid, "tts", meta=how, ms=int(_ti.get("ms") or 0), n=int(_ti.get("chars") or 0), calls=1)
+        chunks = L.tts_chunks(text)
+        total_ms = 0; total_chars = 0; calls = 0; how = "tts:salute"
+        for chunk in chunks:
+            info = {}
+            audio = await llm_to_thread(cid, "tts", L.synthesize, chunk, info)
+            if not audio:
+                continue
+            calls += 1
+            total_ms += int(info.get("ms") or 0)
+            total_chars += int(info.get("chars") or len(chunk))
+            try:
+                await context.bot.send_voice(cid, audio)
+            except Exception as exc:
+                if "voice_messages_forbidden" not in str(exc).lower():
+                    raise
+                await _send_audio_fallback(context, cid, audio)
+                how = "tts:audio"
+        if calls:
+            ev(cid, "tts", meta=how, ms=total_ms, n=total_chars, calls=calls)
     except Exception as e:
         log.warning("voice reply: %s", e)
 
@@ -1569,16 +1789,44 @@ def _instrument_feedback_prompt(cid, answer, channel="bot"):
     answer_id = secrets.token_hex(8)
     sampled = _feedback_sampled(answer_id)
     if sampled:
-        ev(cid, "feedback_prompt", meta=f"{answer_id}|{channel}")
+        _register_feedback_prompt(cid, answer_id, channel)
     level = _safety_level(answer)
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|{channel}")
     return answer_id if sampled else None
 
+def _register_feedback_prompt(cid, answer_id, channel="bot"):
+    """Persist the button entitlement independently from analytics events."""
+    answer_id = re.sub(r"[^a-f0-9]", "", str(answer_id or ""))[:32]
+    if not answer_id:
+        return False
+    c = db()
+    try:
+        if not _user_write_allowed(cid, conn=c):
+            return False
+        cur = c.execute(
+            """INSERT OR IGNORE INTO feedback_requests
+               (chat_id,answer_id,channel,created_at) VALUES(?,?,?,?)""",
+            (cid, answer_id, str(channel or "bot")[:24], datetime.now(TZ).isoformat()),
+        )
+        c.commit()
+        created = cur.rowcount > 0
+    finally:
+        c.close()
+    if created:
+        ev(cid, "feedback_prompt", meta=f"{answer_id}|{channel}")
+    return True
+
 def _feedback_prompt_exists(cid, answer_id):
     """Accept feedback only for an answer actually shown to this user."""
     c = db()
     try:
+        if c.execute(
+            "SELECT 1 FROM feedback_requests WHERE chat_id=? AND answer_id=? LIMIT 1",
+            (cid, answer_id),
+        ).fetchone() is not None:
+            return True
+        # Compatibility with buttons sent before feedback_requests was introduced.
         return c.execute(
             "SELECT 1 FROM events WHERE chat_id=? AND action='feedback_prompt' AND meta LIKE ? LIMIT 1",
             (cid, answer_id + "|%"),
@@ -1586,39 +1834,100 @@ def _feedback_prompt_exists(cid, answer_id):
     finally:
         c.close()
 
+def _submit_feedback(cid, answer_id, rating, channel="bot"):
+    """Atomically save one rating; repeated taps are successful but do not duplicate analytics."""
+    answer_id = re.sub(r"[^a-f0-9]", "", str(answer_id or ""))[:32]
+    rating = str(rating or "")
+    if not answer_id or rating not in {"helpful", "unhelpful"}:
+        return "missing"
+    c = db()
+    saved_channel = str(channel or "bot")[:24]
+    try:
+        if not _user_write_allowed(cid, conn=c):
+            return "missing"
+        c.execute("BEGIN IMMEDIATE")
+        row_ = c.execute(
+            "SELECT channel,rating FROM feedback_requests WHERE chat_id=? AND answer_id=?",
+            (cid, answer_id),
+        ).fetchone()
+        if row_ is None:
+            # Migrate a still-visible legacy button on first click.
+            legacy = c.execute(
+                """SELECT meta FROM events
+                   WHERE chat_id=? AND action='feedback_prompt' AND meta LIKE ?
+                   ORDER BY id DESC LIMIT 1""",
+                (cid, answer_id + "|%"),
+            ).fetchone()
+            if legacy is None:
+                c.rollback()
+                return "missing"
+            if "|" in (legacy[0] or ""):
+                saved_channel = legacy[0].split("|", 1)[1][:24] or saved_channel
+            c.execute(
+                """INSERT INTO feedback_requests
+                   (chat_id,answer_id,channel,created_at) VALUES(?,?,?,?)""",
+                (cid, answer_id, saved_channel, datetime.now(TZ).isoformat()),
+            )
+            row_ = (saved_channel, None)
+        saved_channel = row_[0] or saved_channel
+        if row_[1] in {"helpful", "unhelpful"}:
+            c.commit()
+            return "duplicate"
+        c.execute(
+            """UPDATE feedback_requests SET rating=?,submitted_at=?
+               WHERE chat_id=? AND answer_id=? AND rating IS NULL""",
+            (rating, datetime.now(TZ).isoformat(), cid, answer_id),
+        )
+        c.commit()
+    finally:
+        c.close()
+    ev(cid, "feedback", meta=f"{rating}|{answer_id}|{saved_channel}")
+    return "saved"
+
 async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None):
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
     clean, sugg = sf(text) if sf else (text, [])
-    if len(sugg) < 2:
-        try:
-            for e in L.followups(st, basis_q, clean):
-                if e not in sugg and len(sugg) < 2: sugg.append(e)
-        except Exception: pass
+    try:
+        topical = L.followups(st, basis_q, clean)
+        # For known product topics deterministic relevance wins over a model
+        # suggestion that may be well-formed but unrelated to the answer.
+        if topical:
+            sugg = topical
+    except Exception:
+        pass
     answer_id = secrets.token_hex(8)
     feedback_id = answer_id if _feedback_sampled(answer_id) else None
     kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label, feedback_id=feedback_id)
     quote_text = _clip_tg(quote) if quote else None
+    rich_sent = False
     if RICH_OK:
         try:
             md = (("> " + quote_text.replace("\n", " ") + "\n\n") if quote_text else "") + clean
             await send_rich(context.bot, cid, md, reply_markup=kb)
-            ev(cid, "assistant_message", meta="bot_rich")
-            return
+            rich_sent = True
         except Exception as _re_:
             log.info("rich fallback: %s", str(_re_)[:120])
-    first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
-    parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
-    for i, part in enumerate(parts):
-        last = i == len(parts) - 1
-        if i == 0 and quote_text:
-            body = f"<blockquote>{html.escape(quote_text)}</blockquote>\n{tg_rich(part)}"
-            await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
-        else:
-            await context.bot.send_message(cid, tg_rich(part), reply_markup=(kb if last else None), parse_mode="HTML")
-    ev(cid, "assistant_message", meta="bot")
+    if not rich_sent:
+        first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
+        parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
+        for i, part in enumerate(parts):
+            last = i == len(parts) - 1
+            if i == 0 and quote_text:
+                body = f"<blockquote>{html.escape(quote_text)}</blockquote>\n{tg_rich(part)}"
+                try:
+                    await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
+                except BadRequest:
+                    await context.bot.send_message(cid, quote_text + "\n\n" + md_plain(part),
+                                                   reply_markup=(kb if last else None))
+            else:
+                try:
+                    await context.bot.send_message(cid, tg_rich(part), reply_markup=(kb if last else None), parse_mode="HTML")
+                except BadRequest:
+                    await context.bot.send_message(cid, md_plain(part), reply_markup=(kb if last else None))
+    ev(cid, "assistant_message", meta="bot_rich" if rich_sent else "bot")
     if feedback_id:
-        ev(cid, "feedback_prompt", meta=f"{answer_id}|bot")
+        _register_feedback_prompt(cid, answer_id, "bot")
     level = _safety_level(clean)
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|bot")
@@ -1626,33 +1935,77 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
         await _send_voice_reply(context, cid, clean)
 
-async def push_general(context, cid, with_image=True, campaign=None):
-    u = row(cid); usage = []; _ds = dtoday().isoformat()
-    if with_image:
-        await send_general_infographic(context.bot, cid, u)
-    _key = (cid, _ds, AIWA_VERSION, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
-    body = _SUM_CACHE.get(_key)
-    if body is None:
-        body = await llm_to_thread(cid, "daily_summary", L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
-        if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
-    if not body:
-        body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
-    clean, extra = L.split_followups(body)
-    kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u,
-                 app_label=APP_BUTTON_TEXT, campaign=campaign)
+async def _send_summary_text(context, cid, clean, kb):
+    """Use Telegram rich messages when available, with a safe HTML fallback."""
     if RICH_OK:
         try:
             await send_rich(context.bot, cid, clean, reply_markup=kb)
-        except Exception as _re_:
-            log.info("rich fallback: %s", str(_re_)[:120])
-            await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
-                reply_markup=kb, parse_mode="HTML")
-    else:
-        await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
-            reply_markup=kb, parse_mode="HTML")
-    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
-    ev(cid, "goal", meta="summary")
-    if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
+            return
+        except Exception as exc:
+            log.info("rich summary fallback: %s", str(exc)[:120])
+    try:
+        await context.bot.send_message(
+            cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
+            reply_markup=kb, parse_mode="HTML",
+        )
+    except BadRequest:
+        await context.bot.send_message(cid, md_plain(clean), reply_markup=kb)
+
+async def push_general(context, cid, with_image=True, campaign=None):
+    u = row(cid)
+    if not u or not is_onboarded(u):
+        return False
+    claimed = False; sent_any = False
+    if campaign:
+        claimed = _claim_push_delivery(cid, campaign)
+        if not claimed:
+            log.info("summary push skipped as duplicate: %s %s", cid, campaign)
+            return False
+    try:
+        generation = _user_generation(cid)
+        usage = []; day = dtoday().isoformat()
+        _, pregnancy = _summary_state_for_day(u, day)
+        key = _summary_key(cid, u, day, None, pregnancy)
+        value = _SUM_CACHE.get(key)
+        if value is None:
+            value = prepared_summary_get(cid, day, key)
+        body, facts = _summary_unpack(value)
+        if not body:
+            hint = _summary_hint(cid, u, pregnancy)
+            body = await llm_to_thread(
+                cid, "daily_summary", L.general_summary,
+                profile_of(u), u.get("mode"), hint=hint, usage=usage,
+                user_generation=generation,
+            )
+            if u.get("mode") == "preg" and _user_write_allowed(cid, generation=generation):
+                facts = await llm_to_thread(
+                    cid, "summary_card_facts", L.summary_card_facts,
+                    "preg", None, pregnancy, hint, usage,
+                    user_generation=generation,
+                )
+            if body and _user_write_allowed(cid, generation=generation):
+                value = _summary_pack(body, facts)
+                _prune_day(_SUM_CACHE); _SUM_CACHE[key] = value
+                prepared_summary_put(cid, day, key, value, generation=generation)
+        if not body:
+            body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
+        if with_image:
+            sent_any = await send_daily_infographic(context.bot, cid, u, facts)
+        clean, extra = L.split_followups(body)
+        kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u,
+                     app_label=APP_BUTTON_TEXT, campaign=campaign)
+        await _send_summary_text(context, cid, clean, kb)
+        sent_any = True
+        if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
+        ev(cid, "goal", meta="summary")
+        if campaign:
+            _complete_push_delivery(cid, campaign)
+            ev(cid, "broadcast", meta="sent|" + campaign)
+        return True
+    except Exception:
+        if claimed and not sent_any:
+            _release_push_delivery(cid, campaign)
+        raise
 
 async def send_general(context, cid, key):
     u = row(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
@@ -1789,31 +2142,56 @@ async def push_summary(context, cid, with_image=True, campaign=None):
     u, st = status_of(cid)
     if not st: return
     if st["status"] != "normal": return await send_delay(context, cid, st, campaign=campaign)
-    if with_image: await send_infographic(context.bot, cid)
-    usage = []; _ds = dtoday().isoformat()
-    _key = (cid, _ds, AIWA_VERSION, st.get("phase"), str(log_get(cid, _ds) or ""))
-    body = _SUM_CACHE.get(_key)
-    if body is None:
-        body = await llm_to_thread(cid, "daily_summary", L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
-        if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
-    if not body:
-        body = "💛 Сводка на сегодня готова. Открой приложение, чтобы посмотреть календарь, симптомы, питание и нагрузку."
-    clean, extra = L.split_followups(body)
-    kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u,
-                 app_label=APP_BUTTON_TEXT, campaign=campaign)
-    if RICH_OK:
-        try:
-            await send_rich(context.bot, cid, clean, reply_markup=kb)
-        except Exception as _re_:
-            log.info("rich fallback: %s", str(_re_)[:120])
-            await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
-                reply_markup=kb, parse_mode="HTML")
-    else:
-        await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
-            reply_markup=kb, parse_mode="HTML")
-    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
-    ev(cid, "goal", meta="summary")
-    if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
+    claimed = False; sent_any = False
+    if campaign:
+        claimed = _claim_push_delivery(cid, campaign)
+        if not claimed:
+            log.info("summary push skipped as duplicate: %s %s", cid, campaign)
+            return False
+    try:
+        generation = _user_generation(cid)
+        usage = []; day = dtoday().isoformat()
+        key = _summary_key(cid, u, day, st, None)
+        value = _SUM_CACHE.get(key)
+        if value is None:
+            value = prepared_summary_get(cid, day, key)
+        body, facts = _summary_unpack(value)
+        if not body:
+            hint = _summary_hint(cid, u)
+            body = await llm_to_thread(
+                cid, "daily_summary", L.generate_summary,
+                st, u["modules"], hint=hint, usage=usage,
+                user_generation=generation,
+            )
+            if _user_write_allowed(cid, generation=generation):
+                facts = await llm_to_thread(
+                    cid, "summary_card_facts", L.summary_card_facts,
+                    "cycle", st, None, hint, usage,
+                    user_generation=generation,
+                )
+            if body and _user_write_allowed(cid, generation=generation):
+                value = _summary_pack(body, facts)
+                _prune_day(_SUM_CACHE); _SUM_CACHE[key] = value
+                prepared_summary_put(cid, day, key, value, generation=generation)
+        if not body:
+            body = "💛 Сводка на сегодня готова. Открой приложение, чтобы посмотреть календарь, симптомы, питание и нагрузку."
+        if with_image:
+            sent_any = await send_daily_infographic(context.bot, cid, u, facts, st)
+        clean, extra = L.split_followups(body)
+        kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u,
+                     app_label=APP_BUTTON_TEXT, campaign=campaign)
+        await _send_summary_text(context, cid, clean, kb)
+        sent_any = True
+        if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
+        ev(cid, "goal", meta="summary")
+        if campaign:
+            _complete_push_delivery(cid, campaign)
+            ev(cid, "broadcast", meta="sent|" + campaign)
+        return True
+    except Exception:
+        if claimed and not sent_any:
+            _release_push_delivery(cid, campaign)
+        raise
 
 async def push_checkin(context, cid, campaign=None):
     """После утренней сводки — быстрый чек-ин. Переиспользует существующий поток ci:* (энергия→настроение→симптомы)."""
@@ -2129,40 +2507,25 @@ async def proactive_cmd(update, context):
         except Exception:
             pass
 
-async def prepare_summary_body(cid):
-    """Прегрев: собираем сводку в дневной кэш заранее, отправка в срок берёт её мгновенно.
-    Если между прегревом и отправкой появится новый чек-ин — ключ изменится и пуш перегенерит по свежим данным."""
-    u = row(cid)
-    if not is_onboarded(u): return
-    _ds = dtoday().isoformat()
-    if not is_cycle(u):
-        _key = (cid, _ds, AIWA_VERSION, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
-        if _SUM_CACHE.get(_key) is None:
-            body = await llm_to_thread(cid, "daily_summary", L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=[])
-            if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
-        return
-    u2, st = status_of(cid)
-    if not st or st["status"] != "normal": return
-    _key = (cid, _ds, AIWA_VERSION, st.get("phase"), str(log_get(cid, _ds) or ""))
-    if _SUM_CACHE.get(_key) is None:
-        body = await llm_to_thread(cid, "daily_summary", L.generate_summary, st, u2["modules"], hint=chat_hint(cid), usage=[])
-        if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
-
-async def prewarm_job(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await prepare_summary_body(context.job.chat_id)
-    except Exception as e:
-        log.warning("prewarm %s: %s", context.job.chat_id, e)
+def _remove_daily_jobs(app, cid):
+    for name in (str(cid), f"prepare:{cid}"):
+        for job in app.job_queue.get_jobs_by_name(name):
+            job.schedule_removal()
 
 def schedule_daily(app, cid, hhmm):
-    for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
-    for j in app.job_queue.get_jobs_by_name("pw_" + str(cid)): j.schedule_removal()
+    _remove_daily_jobs(app, cid)
     actual, _, _ = scheduled_hhmm(cid, hhmm)
+    prepare_at = summary_prepare_hhmm(cid, actual)
+    ph, pm = map(int, prepare_at.split(":"))
     h, m = map(int, actual.split(":"))
+    app.job_queue.run_daily(
+        summary_prepare_job,
+        time=dtime(ph, pm, tzinfo=TZ),
+        chat_id=cid,
+        name=f"prepare:{cid}",
+        data={"delivery_hhmm": actual},
+    )
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
-    pm = m - 12; ph = h
-    if pm < 0: pm += 60; ph = (ph - 1) % 24
-    app.job_queue.run_daily(prewarm_job, time=dtime(ph, pm, tzinfo=TZ), chat_id=cid, name="pw_" + str(cid))
 
 def db_mark_period(cid, iso):
     """Записывает старт месячных в БД и включает трекинг цикла. Без планировщика, безопасно из веб-обработчика."""
@@ -2190,17 +2553,37 @@ async def think_llm(context, cid, fn, *args, **kwargs):
 class _BCtx:
     def __init__(self, app): self.bot = app.bot; self.application = app
 
+async def summary_prepare_job(context: ContextTypes.DEFAULT_TYPE):
+    cid = context.job.chat_id
+    try:
+        actual = ((context.job.data or {}).get("delivery_hhmm")
+                  if getattr(context.job, "data", None) is not None else None)
+        target = dtoday()
+        if actual:
+            ah, am = map(int, actual.split(":"))
+            prepare_at = summary_prepare_hhmm(cid, actual)
+            ph, pm = map(int, prepare_at.split(":"))
+            if ph * 60 + pm > ah * 60 + am:
+                target += timedelta(days=1)
+        await prepare_daily_summary(cid, target.isoformat())
+    except Exception as exc:
+        # Delivery still runs at the selected time and can generate on demand or
+        # fall back, so preparation failure must never cancel the send job.
+        log.warning("summary prepare %s: %s", cid, exc)
+
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     cid = context.job.chat_id
     if BCAST_Q is not None:
         return await enqueue_broadcast(cid)    # в очередь, обработает воркер с паузами
     try:
-        await push_summary(context, cid, campaign=campaign_id("daily_summary")); await push_partner(context, cid)
+        sent = await push_summary(context, cid, campaign=campaign_id("daily_summary"))
+        if sent:
+            await push_partner(context, cid)
         await push_checkin(context, cid, campaign=campaign_id("daily_checkin"))
     except Forbidden:
         ev(cid, "broadcast", meta=f"blocked|{campaign_id('daily_summary')}")
         try:
-            for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+            _remove_daily_jobs(context.application, cid)
         except Exception: pass
     except Exception as e:
         ev(cid, "broadcast", meta=f"error|{campaign_id('daily_summary')}")
@@ -2208,18 +2591,19 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def broadcast_worker(app):
     """Один из нескольких параллельных воркеров рассылки. Реальный лимит GigaChat держит семафор в llm._call, поэтому большая пауза не нужна."""
-    delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "0.3"))
+    delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "0.05"))
     while True:
         cid = await BCAST_Q.get()
         try:
             ctx = _BCtx(app)
-            await push_summary(ctx, cid, campaign=campaign_id("daily_summary"))
-            await push_partner(ctx, cid)
+            sent = await push_summary(ctx, cid, campaign=campaign_id("daily_summary"))
+            if sent:
+                await push_partner(ctx, cid)
             await push_checkin(ctx, cid, campaign=campaign_id("daily_checkin"))
         except Forbidden:
             try:
                 ev(cid, "broadcast", meta=f"blocked|{campaign_id('daily_summary')}")
-                for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+                _remove_daily_jobs(app, cid)
             except Exception: pass
             log.info("broadcast %s: заблокирован пользователем, снял с рассылки", cid)
         except Exception as e:
@@ -2794,7 +3178,7 @@ async def app_cmd(update, context):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=url))]]))
 async def stop(update, context):
     cid = update.effective_chat.id
-    for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+    _remove_daily_jobs(context.application, cid)
     del_user(cid); await update.message.reply_text("Отключила сводки и удалила данные. Вернуться: /start")
 async def help_cmd(update, context):
     await update.message.reply_text(
@@ -3391,10 +3775,13 @@ async def on_cb(update, context):
         parts = data.split(":", 2)
         rating = parts[1] if len(parts) > 1 else ""
         answer_id = re.sub(r"[^a-f0-9]", "", parts[2] if len(parts) > 2 else "")[:32]
-        if rating not in {"helpful", "unhelpful"} or not answer_id or not _feedback_prompt_exists(cid, answer_id):
+        feedback_result = _submit_feedback(cid, answer_id, rating, "bot")
+        if feedback_result == "missing":
             return await q.answer("Не получилось сохранить оценку")
-        ev(cid, "feedback", meta=f"{rating}|{answer_id}|bot")
-        await q.answer("Спасибо, это помогает улучшать Айву 💛")
+        if feedback_result == "duplicate":
+            await q.answer("Оценка уже сохранена 💛")
+        else:
+            await q.answer("Спасибо, это помогает улучшать Айву 💛")
         rows = []
         for row_buttons in (getattr(q.message.reply_markup, "inline_keyboard", None) or []):
             if any(str(getattr(button, "callback_data", "") or "").startswith("fb:") for button in row_buttons):
@@ -3704,7 +4091,7 @@ async def on_startup(app):
     except Exception:
         BOT_USERNAME = None
     BCAST_Q = asyncio.Queue()
-    _bw = max(1, min(20, int(os.environ.get("AIWA_BROADCAST_WORKERS", "6"))))
+    _bw = max(1, min(20, int(os.environ.get("AIWA_BROADCAST_WORKERS", "10"))))
     for _ in range(_bw):
         asyncio.create_task(broadcast_worker(app))
     log.info("broadcast workers started: %d", _bw)
@@ -4103,8 +4490,17 @@ async def _api_section(request):
             _su = []; sugg = await llm_to_thread(cid, "food_suggestions", L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, None), _su)
             if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
             return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt, "suggestions": sugg}))
-        _su = []; plan = await llm_to_thread(cid, "training_recommendation", L.training_today, None, prof, _recent_workouts_text(cid), u.get("mode"), _su)
-        if isinstance(plan, dict) and plan.pop("_fallback", None): ev(cid, "fallback", meta="static:training_plan")
+        pregnancy = None
+        if u.get("mode") == "preg" and u.get("last_period"):
+            try: pregnancy = C.preg_status(u["last_period"])
+            except Exception: pregnancy = None
+        _su = []; plan = await llm_to_thread(
+            cid, "training_recommendation", L.training_today,
+            None, prof, _recent_workouts_text(cid), u.get("mode"), _su,
+            pregnancy=pregnancy, checkin=log_get(cid, dtoday().isoformat()),
+        )
+        if isinstance(plan, dict) and plan.pop("_fallback", None):
+            ev(cid, "fallback", meta="static:training_plan")
         if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
         return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
     if kind == "food":
@@ -4158,10 +4554,10 @@ async def _api_feedback(request):
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     rating = str(body.get("rating") or "")
     answer_id = re.sub(r"[^a-f0-9]", "", str(body.get("answer_id") or ""))[:32]
-    if rating not in {"helpful", "unhelpful"} or not answer_id or not _feedback_prompt_exists(cid, answer_id):
+    feedback_result = _submit_feedback(cid, answer_id, rating, "webapp")
+    if feedback_result == "missing":
         return _cors(web.json_response({"error": "bad_feedback"}, status=400))
-    ev(cid, "feedback", meta=f"{rating}|{answer_id}|webapp")
-    return _cors(web.json_response({"ok": True}))
+    return _cors(web.json_response({"ok": True, "duplicate": feedback_result == "duplicate"}))
 
 def _agent_tools_spec():
     return [
@@ -4350,11 +4746,12 @@ async def _chat_reply(cid, u, msg, user_generation=None):
     if current:
         hist_push(cid, msg, ans)
     clean, sugg = L.split_followups(ans)
-    if st is not None and len(sugg) < 2:
-        try:
-            for e in L.followups(st, msg, clean):
-                if e not in sugg and len(sugg) < 2: sugg.append(e)
-        except Exception: pass
+    try:
+        topical = L.followups(st, msg, clean)
+        if topical:
+            sugg = topical
+    except Exception:
+        pass
     if current:
         ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage),
            request_id=request_id, usage=usage)
@@ -4784,46 +5181,6 @@ async def _api_report(request):
 
 async def _api_opts(request): return _cors(web.Response())
 
-_ADMIN_COOKIE = "aiwa_admin_session"
-_ADMIN_SESSION_SECONDS = int(os.environ.get("AIWA_ADMIN_SESSION_SECONDS", str(7 * 24 * 3600)))
-_ADMIN_KEY_WARNING_SHOWN = False
-def _admin_http_secret():
-    """Compatibility bridge: prefer a separate HTTP key, keep the current admin id working."""
-    global _ADMIN_KEY_WARNING_SHOWN
-    expected = os.environ.get("AIWA_ADMIN_KEY") or AIWA_ADMIN or ""
-    if expected and len(expected) < 32 and not _ADMIN_KEY_WARNING_SHOWN:
-        log.warning("AIWA admin dashboard uses a short legacy key; rotate AIWA_ADMIN_KEY when possible")
-        _ADMIN_KEY_WARNING_SHOWN = True
-    return str(expected)
-
-def _admin_key_ok(request):
-    # Prefer a separate HTTP secret; the Telegram admin id remains a temporary
-    # compatibility fallback until AIWA_ADMIN_KEY is configured.
-    expected = _admin_http_secret()
-    if not expected:
-        return False
-    header_key = request.headers.get("X-Admin-Key") or ""
-    cookie = request.cookies.get(_ADMIN_COOKIE) or ""
-    session = _admin_session_value(expected)
-    return (_hmac.compare_digest(str(header_key), str(expected)) or
-            _hmac.compare_digest(str(cookie), str(session)))
-
-def _admin_session_value(expected=None):
-    """One-way session token: the admin key itself is never stored in the cookie."""
-    secret = str(expected if expected is not None else _admin_http_secret())
-    return _hmac.new(secret.encode(), b"aiwa-admin-session-v1", _hashlib.sha256).hexdigest() if secret else ""
-
-def _set_admin_session(response):
-    response.set_cookie(_ADMIN_COOKIE, _admin_session_value(), max_age=_ADMIN_SESSION_SECONDS,
-                        httponly=True, secure=True, samesite="Strict", path="/")
-    return response
-
-def _refresh_admin_session(request, response):
-    """Sliding expiration: every authenticated dashboard request renews the week."""
-    if request.cookies.get(_ADMIN_COOKIE) and _admin_key_ok(request):
-        _set_admin_session(response)
-    return response
-
 _EV_LBL = {
     "start": "Начала настройку", "onboarding_completed": "Завершила настройку",
     "app_open": "Открыла приложение", "web_food": "Открыла меню", "web_diary": "Открыла дневник",
@@ -5131,215 +5488,16 @@ def analytics_data(days=7, frm=None, to=None):
         "series": series,
     }
 
-async def _admin_stats(request):
-    if not _admin_key_ok(request):
-        return web.json_response({"error": "forbidden"}, status=403)
-    qp = request.query
-    d = await asyncio.to_thread(analytics_data, qp.get("days", 7), qp.get("from"), qp.get("to"))
-    return web.json_response(d)
-
-async def _admin_page(request):
-    if not _admin_key_ok(request):
-        login = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AIWA · Вход</title><style>body{font:16px system-ui;background:#f6f8fa;margin:0;display:grid;place-items:center;min-height:100vh}.c{background:#fff;padding:28px;border-radius:18px;box-shadow:0 12px 40px #0001;width:min(420px,calc(100% - 40px))}h1{font-size:20px}.old{background:#fff7ed;border:1px solid #f1d2ad;border-radius:12px;padding:13px 14px;color:#7a4518;font-size:13px;line-height:1.45}.old p{margin:5px 0}.old a{color:#9a4d0b;font-weight:750}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:10px;margin-top:10px}input{border:1px solid #ddd}button{border:0;background:#14181f;color:#fff;font-weight:700}</style>
-<div class="c"><div class="old"><strong>Эта админка устарела</strong><p>Новая продуктовая аналитика уже доступна отдельно. Здесь оставлен временный доступ для сверки старых данных.</p><a href="https://stats.multitool.works/#/p/aiwa" target="_blank" rel="noopener noreferrer">Открыть новую аналитику →</a></div><form method="post" action="/admin/login"><h1>AIWA · старая аналитика</h1><input type="password" name="key" autocomplete="current-password" placeholder="Admin key" required><button type="submit">Войти</button></form></div>"""
-        return web.Response(text=login, content_type="text/html", headers={"Cache-Control": "no-store"})
-    html_text = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AIWA · Аналитика</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<style>
-:root{--bg:#F6F8FA;--card:#fff;--ink:#14181F;--mut:#6B7280;--faint:#9AA3AF;--line:#E9ECF1;--blue:#2F6BED;--green:#1E9E54;--amber:#E8912A;--red:#DC5A5A;--violet:#7C5CD0}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,Inter,"Segoe UI",Arial,sans-serif}
-.wrap{max-width:1180px;margin:0 auto;padding:20px 20px 70px}
-.head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
-h1{font-size:20px;margin:0}
-.per{color:var(--mut);font-size:12.5px}
-.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:14px 0 4px}
-.bar button,.bar input{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 11px;font-size:13px;cursor:pointer;color:var(--ink)}
-.bar input{cursor:text;width:140px}
-.bar button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
-.bar .sp{flex:1}
-.tabs{display:flex;gap:6px;margin:16px 0 18px;flex-wrap:wrap}
-.tabs button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 16px;font-size:13.5px;font-weight:600;cursor:pointer;color:var(--mut)}
-.tabs button.on{background:var(--blue);color:#fff;border-color:var(--blue)}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin-bottom:16px}
-.mc{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 15px}
-.ml{font-size:12px;color:var(--mut);font-weight:600;display:flex;align-items:center;gap:5px}
-.mv{font-size:26px;font-weight:800;margin-top:5px;letter-spacing:-.02em;display:flex;align-items:baseline;gap:8px}
-.ms{font-size:11.5px;color:var(--faint);margin-top:3px}
-.chip{font-size:11px;font-weight:800;padding:2px 7px;border-radius:999px}
-.chip.up{color:#0E7A3A;background:#E4F5EC}.chip.dn{color:#B33636;background:#FBE7E7}.chip.zero{color:var(--mut);background:var(--line)}
-.ic{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:var(--line);color:var(--mut);font-size:10px;font-style:italic;cursor:pointer;font-weight:800;user-select:none}
-.chartcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:16px}
-.ct{font-size:13px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px}
-.tb{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:16px}
-.tb th{background:#FAFBFC;text-align:left;font-size:11px;color:var(--mut);font-weight:700;padding:9px 12px;text-transform:uppercase;letter-spacing:.03em}
-.tb td{padding:9px 12px;font-size:13px;border-top:1px solid var(--line)}
-.tb td:last-child,.tb th:last-child{text-align:right;font-variant-numeric:tabular-nums}
-.sec-h{font-size:14px;font-weight:800;margin:22px 0 10px;display:flex;align-items:center;gap:6px}
-.loading{color:var(--mut);padding:50px;text-align:center}
-#defpop{position:absolute;display:none;max-width:300px;background:#111827;color:#fff;font-size:12px;line-height:1.5;padding:10px 12px;border-radius:10px;z-index:99;box-shadow:0 8px 24px rgba(0,0,0,.2)}
-.deprecated{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:14px 0;padding:12px 14px;background:#FFF7ED;border:1px solid #F1D2AD;border-radius:11px;color:#7A4518;font-size:12px;line-height:1.45}.deprecated strong{display:block;font-size:13px}.deprecated a{flex:0 0 auto;color:#9A4D0B;font-weight:800;text-decoration:none;background:#fff;border:1px solid #E8BE91;border-radius:8px;padding:8px 10px}@media(max-width:640px){.deprecated{align-items:flex-start;flex-direction:column}.deprecated a{width:100%;text-align:center}}
-</style>
-<div class="wrap">
- <div class="head"><h1>AIWA · Аналитика</h1><span class="per" id="per"></span></div>
- <div class="deprecated"><div><strong>Старая аналитика — только для сверки</strong>Новые метрики, точный слой v2 и восстановленная история находятся в Disrupt Analytics. Эту страницу планируем удалить после переходного периода.</div><a href="https://stats.multitool.works/#/p/aiwa" target="_blank" rel="noopener noreferrer">Открыть новую аналитику →</a></div>
- <div class="bar" id="bar">
-   <button data-d="7">7 дней</button><button data-d="30">30 дней</button><button data-d="90">90 дней</button>
-   <button id="yday">Вчера</button>
-   <span style="color:var(--mut);font-size:12px">c</span><input type="date" id="from"><span style="color:var(--mut);font-size:12px">по</span><input type="date" id="to"><button id="apply">Применить</button>
-   <span class="sp"></span><button id="csv">Excel (CSV)</button><button id="rl">Обновить</button>
- </div>
- <div class="tabs" id="tabs"></div>
- <div id="view" class="loading">Загрузка…</div>
-</div>
-<div id="defpop"></div>
-<script>
-var q=new URLSearchParams(location.search), DAYS=Number(q.get('days'))||7, FROM=q.get('from')||'', TO=q.get('to')||'', D=null, TAB='aud', CH=[];
-var C={dau:'#2F6BED',wau:'#1E9E54',mau:'#E8912A',stick:'#7C5CD0',ev:'#2F6BED',tc:'#7C5CD0',ans:'#1E9E54',err:'#DC5A5A'};
-var DEF={
- ever:"Уникальные пользователи, совершившие хотя бы одно действие за всё время. Созданная запись без использования продукта не считается.",
- dau:"Уникальные активные за день. Активный = минимум одно действие пользователя (кнопки, команды, ответы, голос, ручной ввод) в чате или приложении. Получение пуша активностью НЕ считается.",
- avgdau:"Средний DAU = сумма дневных DAU за период / число дней. Показатель за весь период, не за сегодня.",
- wau:"Уникальные активные за последние 7 дней (скользящее окно).",
- mau:"Уникальные активные за последние 30 дней (скользящее окно).",
- stick:"Липкость = DAU / MAU × 100%. Доля месячной аудитории, заходящей в конкретный день.",
- ret:"Rolling retention D_N: доля новых пользователей, кто был активен на N-й день после первого ИЛИ позже. Считается по когортам возрастом от N до 90 дней.",
- evdau:"Событий на DAU = все действия пользователя (чат + приложение) за период / активные·дни.",
- tcdau:"Tools / DAU = все вызовы моделей и AI-инструментов за период / активные пользовательские дни. Для одного дня это буквально вызовы / DAU.",
- sessionsdau:"Sessions / DAU = все сессии за период / активные пользовательские дни. Новая сессия начинается после перерыва больше 30 минут. Для одного дня это буквально сессии / DAU.",
- aud:"Активные·дни = сумма по дням числа активных пользователей за период (человеко-дни). Это знаменатель метрик «на DAU».",
- evtot:"Все пользовательские действия за период (чат + приложение).",
- tctot:"Все вызовы модели за период = сумма поля calls по всем событиям.",
- tcsrc:"Откуда пришли вызовы модели: приложение (меню, фото/текст еды, тренировки), чат (ответы), авто (утренние сводки).",
- succ:"Успешность = answered / (answered + fallback + errors) × 100%.",
- lat:"Латентность ответа модели: p50 (медиана) и p95 (почти худшее) по времени ответа.",
- push:"Конверсия пуш→открытие = доля отправленных пушей, после которых пользователь сделал действие в тот же день.",
- tok:"Токены модели за период и оценка стоимости по цене за 1M токенов.",
- tokin:"Токены на входе — системный промпт, контекст цикла, история диалога и память. Обычно дороже всего по объёму.",
- tokout:"Токены на выходе — то, что модель написала в ответ. Тарифицируются дороже входных.",
- costsplit:"Стоимость с раздельными ценами: AIWA_PRICE_IN_USD за миллион входных и AIWA_PRICE_OUT_USD за миллион выходных.",
- grow:"WoW = рост относительно предыдущего периода такой же длины."
-};
-function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
-function ic(d){return d?"<span class='ic' data-def=\""+esc(d)+"\">i</span>":"";}
-function chip(g){if(g==null)return '';var c=g>0?'up':(g<0?'dn':'zero');var ar=g>0?'▲':(g<0?'▼':'■');return "<span class='chip "+c+"' title='WoW'>"+ar+" "+Math.abs(g)+"%</span>";}
-function card(label,val,sub,def,growth){return "<div class='mc'><div class='ml'>"+label+ic(def)+"</div><div class='mv'>"+(val==null?'—':val)+(growth!==undefined?chip(growth):'')+"</div>"+(sub?"<div class='ms'>"+sub+"</div>":"")+"</div>";}
-function tbl(head,rows){if(!rows||!rows.length)return "<div class='ms' style='margin-bottom:16px'>нет данных за период</div>";return "<table class='tb'><tr>"+head.map(function(h){return "<th>"+h+"</th>";}).join('')+"</tr>"+rows.map(function(r){return "<tr>"+r.map(function(c){return "<td>"+c+"</td>";}).join('')+"</tr>";}).join('')+"</table>";}
-function chartCard(id,title,def){return "<div class='chartcard'><div class='ct'>"+title+ic(def)+"</div><div style='height:230px'><canvas id='"+id+"'></canvas></div></div>";}
-function mkLine(id,keys){var el=document.getElementById(id);if(!el)return;if(!window.Chart){el.parentNode.innerHTML="<div class='ms'>График не отрисовался: не загрузился Chart.js с CDN. Все цифры выше корректны.</div>";return;}var labels=D.series.map(function(p){return p.date;});
- var ds=keys.map(function(k){return {label:k.label,data:D.series.map(function(p){return p[k.key]||0;}),borderColor:k.color,backgroundColor:k.color,tension:.3,pointRadius:3,pointHoverRadius:6,borderWidth:2,fill:false};});
- CH.push(new Chart(el,{type:'line',data:{labels:labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}},tooltip:{enabled:true}},scales:{y:{beginAtZero:true,grid:{color:'#EEF1F5'},ticks:{font:{size:11}}},x:{grid:{display:false},ticks:{font:{size:11},maxRotation:0,autoSkip:true,maxTicksLimit:9}}}}}));}
-function clearCharts(){CH.forEach(function(c){try{c.destroy();}catch(e){}});CH=[];}
-function pctv(x){return x==null?'—':x+'%';}
-function bLbl(k){var M={'sent':'Утренняя сводка','queued':'Поставлено в очередь','blocked':'Бот заблокирован','checkin_push':'Пуш чек-ина','food_reminder_sent':'Пуш про питание','train_reminder_sent':'Пуш про тренировку','phase_push':'Смена фазы','reactivation_sent':'Реактивация','announce_sent':'Анонс','meno_update_sent':'Мено-дайджест'};if(M[k])return M[k];
- if(k&&k.indexOf('proactive:')===0){var S={'pms_soon':'скоро ПМС','no_move':'нет движения','low_energy':'мало энергии','felt_bad':'плохое самочувствие','low_protein':'мало белка','practice_eve':'вечерняя практика'};var s=k.slice(10);if(S[s])return 'Проактив: '+S[s];if(s.indexOf('streak_')===0)return 'Проактив: стрик '+s.slice(7)+' дн.';return 'Проактив: '+s;}
- return k;}
-function render(){
- clearCharts();var v=document.getElementById('view');if(!D){v.textContent='нет данных';return;}v.className='';
- var g=D.growth||{};
- if(TAB==='aud'){
-  var a=D.audience,e=D.engagement,ss=e.sessions,h='';
-  h+="<div class='sec-h'>Traction</div>";
-  h+="<div class='grid'>"+
-   card('Ever used',a.ever_used,'за всё время',DEF.ever)+
-   card('DAU',a.dau,'на '+D.until,DEF.dau)+
-   card('WAU',a.wau,'7 дней',DEF.wau)+
-   card('MAU',a.mau,'30 дней',DEF.mau)+
-   card('Sessions / DAU',e.sessions_per_dau,ss.count+' сессий / '+e.active_user_days+' акт·дн',DEF.sessionsdau)+
-   card('Tools / DAU',e.tools_per_dau,e.toolcalls_total+' вызовов / '+e.active_user_days+' акт·дн',DEF.tcdau,g.toolcalls)+"</div>";
-  h+="<div class='grid'>"+
-   card('Средний DAU',a.avg_dau,'за период',DEF.avgdau,g.avg_dau)+
-   card('Stickiness',a.stickiness+'%','DAU/MAU',DEF.stick)+
-   card('Новых за период',a.new_users,'из '+a.users_total+' записей',null)+"</div>";
-  h+=chartCard('cAud','Аудитория по дням',DEF.dau);
-  h+=chartCard('cStick','Липкость по дням, %',DEF.stick);
-  var r=a.retention;
-  h+="<div class='sec-h'>Rolling retention"+ic(DEF.ret)+"</div>";
-  h+="<div class='grid'>"+card('D1',pctv(r.roll_d1),'вернулись на 1-й день+',DEF.ret)+card('D7',pctv(r.roll_d7),'на 7-й день+',DEF.ret)+card('D30',pctv(r.roll_d30),'на 30-й день+',DEF.ret)+"</div>";
-  h+="<div class='sec-h'>Сегменты по режиму</div>";
-  h+=tbl(['Режим','Всего','Активных','Ср. DAU'],a.segments.map(function(s){return [s.mode,s.users,s.active,s.avg_dau];}));
-  h+="<div class='grid'>"+card('Партнёров',a.partners.connected,'у '+a.partners.women+' женщин',null)+card('Активных за период',a.active_period,'уникальных',null)+"</div>";
-  v.innerHTML=h;mkLine('cAud',[{key:'dau',label:'DAU',color:C.dau},{key:'wau',label:'WAU',color:C.wau},{key:'mau',label:'MAU',color:C.mau}]);mkLine('cStick',[{key:'stick',label:'Stickiness %',color:C.stick}]);
- } else if(TAB==='eng'){
-  var e=D.engagement,ts=D.toolcalls_by_source||{},h='';
-  h+="<div class='grid'>"+
-   card('Событий на DAU',e.events_per_dau,e.events_total+' соб / '+e.active_user_days+' акт·дн',DEF.evdau,g.events)+
-   card('Всего событий',e.events_total,'за период',DEF.evtot,g.events)+
-   card('Активные·дни',e.active_user_days,'знаменатель «на DAU»',DEF.aud)+"</div>";
-  h+=chartCard('cEng','События по дням',DEF.evtot);
-  h+="<div class='sec-h'>Разделы: сколько людей пользуются"+ic('Уникальные пользователи за выбранный период, которые совершали действия в каждом разделе. Один человек может быть в нескольких разделах.')+"</div>";
-  h+=tbl(['Раздел','Людей','Из активных','Событий'],(e.features||[]).map(function(x){var ap=D.audience&&D.audience.active_period;return [x.name,x.users,(ap?Math.round(x.users/ap*100)+'%':'—'),x.events];}));
-  h+="<div class='sec-h'>События по источнику"+ic('Приложение vs чат — где пользователи совершают действия.')+"</div>";
-  h+=tbl(['Источник','Событий'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
-  h+="<div class='sec-h'>Тул-коллы (вызовы модели)"+ic('Все обращения к модели: шаги агента (инструменты) + финальный ответ. Растут с агентными ответами.')+"</div>";
-  h+="<div class='grid'>"+card('Tools / DAU',e.tools_per_dau,e.toolcalls_total+' вызовов',DEF.tcdau,g.toolcalls)+card('Всего тул-коллов',e.toolcalls_total,'за период',null,g.toolcalls)+"</div>";
-  h+=tbl(['Источник','Тул-коллов'],[['Приложение',ts.app||0],['Чат',ts.chat||0],['Авто/пуши',ts.auto||0],['Голос: расшифровка и озвучка',ts.stt||0],['Прочее',ts.other||0]]);
-  h+="<div class='sec-h'>Тул-коллы по фиче</div>";
-  h+=tbl(['Фича','Вызовов'],(e.toolcalls_by_meta||[]).map(function(x){return [x[0],x[1]];}));
-  h+="<div class='sec-h'>Топ действий</div>";
-  h+=tbl(['Действие','Кол-во'],e.actions_top.map(function(x){return [x[0],x[1]];}));
-  var ss=e.sessions;
-  h+="<div class='sec-h'>Сессии <span style='font-weight:600;color:var(--mut);font-size:12px'>(за период "+D.since+" → "+D.until+")</span></div>";
-  h+="<div class='grid'>"+card('Сессий всего',ss.count,'',null)+card('Sessions / DAU',e.sessions_per_dau,'',DEF.sessionsdau)+card('Средняя длина',ss.avg_len_min+' мин','',null)+card('Действий/сессия',ss.events_per,'',null)+"</div>";
-  v.innerHTML=h;mkLine('cEng',[{key:'events',label:'События',color:C.ev}]);
- } else if(TAB==='prod'){
-  var pr=D.product,po=pr.push_open,h='';
-  h+="<div class='grid'>"+card('Конверсия пуш→открытие',po.rate+'%',po.opened+' из '+po.sent+' пушей',DEF.push)+card('Отправлено пушей',po.sent,'за период',null)+"</div>";
-  h+="<div class='sec-h'>Источники переходов"+ic('Реферальные метки из ссылок вида t.me/бот?start=МЕТКА. Первое касание: пользовательница закрепляется за той меткой, по которой пришла впервые. «Перешли» и «Настроили» — за всё время, «Новых» — за выбранный период.')+"</div>";
-  h+=tbl(['Метка','Перешли','Настроили','Конверсия','Новых за период'],(pr.referrals||[]).map(function(r){return [esc(r.src),r.total,r.onboarded,r.conv+'%',r.new_period];}));
-  h+="<div class='sec-h'>Рассылки по типам</div>";
-  h+=tbl(['Тип','Кол-во'],Object.keys(pr.broadcasts).sort(function(a,b){return pr.broadcasts[b]-pr.broadcasts[a];}).map(function(k){return [bLbl(k),pr.broadcasts[k]];}));
-  var f=pr.funnel;
-  h+="<div class='sec-h'>Воронка за период"+ic('Все этапы считаются в выбранном периоде: новые пользователи → кто совершал действия → кто открывал сводку → кто записал еду → кто отметил тренировку.')+"</div>";
-  h+=tbl(['Этап','Пользователей'],[['Новые за период',f.new_users],['Активные за период',f.onboarded],['Открывали сводку',f.got_summary],['Записали еду',f.logged_food],['Отметили тренировку',f.logged_workout]]);
-  v.innerHTML=h;
- } else {
-  var qd=D.quality,q2=D.quality_v2||{},h='';
-  if(q2.available){h+="<div class='sec-h'>AI-вызовы · точный учёт v2</div><div class='grid'>"+card('Provider calls',q2.calls,q2.requests+' пользовательских запросов',null)+card('Успешность вызовов',q2.success_rate+'%',q2.successful+' успешных',DEF.succ)+card('Input tokens',q2.input_tokens,'cached '+q2.cached_tokens,DEF.tok)+card('Output tokens',q2.output_tokens,'всего '+q2.total_tokens,DEF.tok)+card('Reported cost',q2.reported_cost,(q2.cost_units||[]).join(', ')||'провайдер не вернул стоимость',DEF.tok)+card('Латентность',q2.p50+' / '+q2.p95+' мс','p50 / p95',DEF.lat)+"</div>";h+=tbl(['Провайдер / модель','Вызовов','Успешных','Input','Output'],(q2.providers||[]).map(function(x){return [esc(x.name),x.calls,x.success,x.input_tokens,x.output_tokens];}));}
-  h+="<div class='sec-h'>Legacy-метрики</div>";
-  h+="<div class='grid'>"+card('Успешность ответов',qd.success_rate+'%',qd.answered+' ответов',DEF.succ)+card('Фолбэки',qd.fallback,qd.fallback_rate+'% от попыток',null)+card('Ошибки',qd.errors,qd.error_rate+'% от попыток',null)+card('Латентность',qd.p50+' / '+qd.p95+' мс','p50 / p95',DEF.lat)+"</div>";
-  h+="<div class='grid'>"+card('Токены всего',qd.tokens,'≈ $'+qd.cost_usd,DEF.tok)+card('Вход (промпты)',qd.tokens_in||'—',(qd.tokens?Math.round((qd.tokens_in||0)/qd.tokens*100)+'% от всего':''),DEF.tokin)+card('Выход (ответы)',qd.tokens_out||'—',(qd.tokens?Math.round((qd.tokens_out||0)/qd.tokens*100)+'% от всего':''),DEF.tokout)+card('Стоимость по факту',(qd.cost_split_usd!=null?('$'+qd.cost_split_usd):'—'),'вход и выход по своим ценам',DEF.costsplit)+"</div>";
-  h+="<div class='sec-h'>По моделям"+ic('Расход и скорость в разрезе моделей. Появляется после перехода на провайдера, который сообщает имя модели — так видно, что реально изменил переезд.')+"</div>";
-  h+=tbl(['Модель','Токенов','Вход','Выход','Вызовов','Ср. время'],(D.models||[]).map(function(m){return [esc(m.model),m.tokens,m.tok_in,m.tok_out,m.calls,(m.avg_ms?m.avg_ms+' мс':'—')];}));
-  h+=chartCard('cQ','Ответы и ошибки по дням',DEF.succ);
-  v.innerHTML=h;mkLine('cQ',[{key:'answered',label:'Ответы',color:C.ans},{key:'errors',label:'Ошибки',color:C.err}]);
- }
-}
-function tabsBar(){var t=[['aud','Аудитория'],['eng','Вовлечённость'],['prod','Продукт'],['qual','Качество']];document.getElementById('tabs').innerHTML=t.map(function(x){return "<button data-t='"+x[0]+"' class='"+(TAB===x[0]?'on':'')+"'>"+x[1]+"</button>";}).join('');document.querySelectorAll('#tabs button').forEach(function(b){b.onclick=function(){TAB=b.dataset.t;tabsBar();render();};});}
-function bar(){
- document.querySelectorAll('#bar button[data-d]').forEach(function(b){b.classList.toggle('on',!FROM&&Number(b.dataset.d)===DAYS);b.onclick=function(){DAYS=Number(b.dataset.d);FROM='';TO='';q.set('days',DAYS);q.delete('from');q.delete('to');upURL();load();};});
- var fy=document.getElementById('from'),ty=document.getElementById('to');fy.value=FROM;ty.value=TO;
- document.getElementById('apply').onclick=function(){var a=fy.value,z=ty.value;if(a&&z){FROM=a;TO=z;q.set('from',a);q.set('to',z);q.delete('days');upURL();load();}else alert('Выбери обе даты');};
- document.getElementById('yday').onclick=function(){var y=new Date(Date.now()-864e5).toISOString().slice(0,10);FROM=y;TO=y;q.set('from',y);q.set('to',y);q.delete('days');upURL();load();};
- document.getElementById('rl').onclick=load;document.getElementById('csv').onclick=toCSV;
-}
-function upURL(){history.replaceState(null,'','?'+q.toString());}
-function toCSV(){if(!D)return;var head=['date','dau','wau','mau','events','toolcalls','answered','errors','new','stickiness_pct'];var lines=[head.join(',')];D.series.forEach(function(p){lines.push([p.full,p.dau,p.wau,p.mau,p.events,p.toolcalls,p.answered,p.errors,p.new,p.stick].join(','));});var blob=new Blob(['﻿'+lines.join('\n')],{type:'text/csv;charset=utf-8'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='aiwa_analytics_'+D.since+'_'+D.until+'.csv';document.body.appendChild(a);a.click();a.remove();}
-document.addEventListener('click',function(e){var pp=document.getElementById('defpop');if(e.target&&e.target.classList&&e.target.classList.contains('ic')){var r=e.target.getBoundingClientRect();pp.textContent=e.target.getAttribute('data-def')||'';pp.style.display='block';pp.style.left=Math.max(8,Math.min(window.innerWidth-312,r.left-140))+'px';pp.style.top=(r.bottom+window.scrollY+7)+'px';e.stopPropagation();}else{pp.style.display='none';}});
-async function load(){var v=document.getElementById('view');v.className='loading';v.textContent='Собираю аналитику…';bar();tabsBar();try{var u='/api/admin_stats?'+(FROM&&TO?('from='+FROM+'&to='+TO):('days='+DAYS));var r=await fetch(u,{credentials:'same-origin'});var d=await r.json();if(d.error){v.textContent='Нет доступа';return;}D=d;var span=d.span;document.getElementById('per').textContent='Период: '+d.since+' → '+d.until+' ('+span+' дн.) · обновлено '+d.updated;render();}catch(e){v.className='loading';v.textContent='Ошибка загрузки: '+e.message;}}
-load();
-</script>"""
-    return web.Response(text=html_text, content_type="text/html")
-
-async def _admin_login(request):
-    expected = _admin_http_secret()
-    try:
-        data = await request.post()
-        got = str(data.get("key") or "")
-    except Exception:
-        got = ""
-    if not expected or not _hmac.compare_digest(got, expected):
-        await asyncio.sleep(0.25)
-        return web.Response(text="forbidden", status=403)
-    resp = web.HTTPFound("/admin")
-    return _set_admin_session(resp)
+async def _legacy_admin_removed(request):
+    return web.Response(
+        status=410,
+        text="Legacy AIWA analytics has been removed.",
+        headers={"Cache-Control": "no-store"},
+    )
 
 @web.middleware
 async def _security_headers(request, handler):
     response = await handler(request)
-    if request.path == "/admin" or request.path.startswith("/api/admin_"):
-        _refresh_admin_session(request, response)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
@@ -5362,9 +5520,9 @@ def build_web():
     aio = web.Application(client_max_size=20 * 1024 * 1024, middlewares=[_security_headers])  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
     aio.router.add_get("/health", _health)
-    aio.router.add_get("/admin", _admin_page)
-    aio.router.add_post("/admin/login", _admin_login)
-    aio.router.add_get("/api/admin_stats", _admin_stats)
+    aio.router.add_route("*", "/admin", _legacy_admin_removed)
+    aio.router.add_route("*", "/admin/login", _legacy_admin_removed)
+    aio.router.add_route("*", "/api/admin_stats", _legacy_admin_removed)
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/today", _api_today)

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Сводка, ответы и динамические саджесты через GigaChat/LiteLLM."""
-import os, re, json, requests, unicodedata, threading, contextvars, uuid
+import os, re, json, html, requests, unicodedata, threading, contextvars, uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -351,8 +351,11 @@ SYSTEM = (
     "Ты сама ведёшь календарь цикла и отмечаешь месячные прямо в этом боте (кнопка Отметить месячные или команда /period). НИКОГДА не советуй пользователю сторонние приложения, календари или бумажные дневники для отслеживания цикла, всё это делается здесь, у тебя. "
     "ОЧЕНЬ ВАЖНО: ты НЕ можешь сама вносить, изменять или удалять данные (даты месячных, длину цикла, профиль, время рассылки, отметки) через чат, у тебя нет такой возможности. Никогда не пиши, что ты «добавила», «внесла», «изменила», «удалила» или «отметила» что-то. Если просят это сделать, честно объясни, ГДЕ это сделать: отметить месячные — кнопка «Отметить месячные» в меню или тап по дате в календаре приложения; изменить рост/вес/возраст — команда /profile; добавить историю циклов — «Изменить данные» → «История циклов». "
     "Команды бота, существуют только эти: /menu, /today, /checkin, /period, /calendar, /report, /partner, /unlink, /addcycles, /profile, /app, /time, /about, /id, /stop. Никогда не выдумывай других команд (например, нет команды /settings). Рост, вес и возраст меняются командой /profile. "
-    "Формат строго для мессенджера: обычный текст без markdown. НИКОГДА не используй символы #, *, _, обратные кавычки, "
-    "markdown-таблицы и вертикальную черту |. Не используй длинные тире, ставь обычный дефис, запятую или скобки. "
+    "Формат строго для мессенджера: GitHub Markdown, который Telegram рендерит нативно. "
+    "Используй ### для коротких подзаголовков, **жирный** для ключевых слов, строки с - для списков "
+    "и GFM-таблицы с вертикальными чертами и обязательной строкой-разделителем. "
+    "Если пользователь прямо просит таблицу, обязательно ответь настоящей таблицей и включи все запрошенные периоды. "
+    "Не используй HTML-теги, одиночные обратные кавычки и ссылки в скобках. Не используй длинные тире. "
     "Отвечай точно на заданный вопрос и ровно в том объёме, который он требует. НЕ добавляй разделы про питание, нагрузку, фазу или прогноз, если о них прямо не спрашивали. Если в ответе несколько смысловых частей, можешь предварять их уместным эмодзи, но не навязывай фиксированную структуру ответ-питание-нагрузка-рекомендации. "
     "Перечисления оформляй списком: каждая строка с новой строки, начинается с «- » (дефис и пробел). "
     "Пиши строго и только на грамотном русском языке кириллицей. Никогда не вставляй латинские буквы и слова из других языков внутрь русских слов: пиши «сперматозоиды», а не «Сpermatozoиды»; «помогает», а не «giúpает»; «силовая тренировка», а не «силачья»; «кости», а не «bones». "
@@ -1109,7 +1112,7 @@ def _parse_str_list(out, n=3):
     return res[:n]
 
 
-def _train_ctx(st, mode, profile):
+def _train_ctx(st, mode, profile, pregnancy=None, checkin=None):
     if st:
         base = (f"Сегодня день {st['day']} из {st['cycle_len']}, {st.get('subphase','')} "
                 f"{st['phase_ru'].lower()} фаза, до месячных ~{st['days_to_next']} дн.")
@@ -1124,12 +1127,40 @@ def _train_ctx(st, mode, profile):
         if a: bits.append(f"обычная активность {a}")
     if bits:
         base += " Пользовательница: " + ", ".join(bits) + "."
+    if mode == "preg" and pregnancy:
+        base += (f" Акушерский срок: примерно {pregnancy.get('week')} недель, "
+                 f"{pregnancy.get('trimester')} триместр.")
+    if checkin:
+        energy = checkin.get("energy")
+        symptoms = ", ".join(checkin.get("symptoms") or [])
+        if energy:
+            base += f" Энергия по чек-ину: {energy} из 3."
+        if symptoms:
+            base += " Отмеченные симптомы: " + symptoms + "."
     return base
 
 
-def training_today(st, profile=None, recent=None, mode=None, usage=None):
+def training_today(st, profile=None, recent=None, mode=None, usage=None, pregnancy=None, checkin=None):
     """Динамическая рекомендация по нагрузке от модели: меняется день ото дня и учитывает недавние тренировки."""
-    ctx = _train_ctx(st, mode, profile)
+    if mode == "preg" and checkin:
+        symptoms = set(checkin.get("symptoms") or [])
+        if checkin.get("energy") == 1 or symptoms.intersection({"preg_cramp", "preg_swelling"}):
+            return {
+                "title": "Пауза и самочувствие",
+                "level": "Без интенсивной нагрузки",
+                "duration": "по самочувствию",
+                "summary": "Сегодня не планируй интенсивную тренировку. Отдохни или выбери только спокойную прогулку, если она комфортна.",
+                "why": "При низкой энергии, тянущей боли или отёках сначала важно оценить самочувствие. Если симптом новый, сильный или нарастает, свяжись со своим врачом.",
+                "phase": "", "day": "", "cycle_len": "",
+                "options": [
+                    {"name": "Отдых", "benefit": "не добавляет нагрузку при плохом самочувствии",
+                     "how": "вернись к активности после улучшения и с учётом рекомендаций врача"},
+                    {"name": "Спокойная прогулка", "benefit": "поддерживает мягкое движение",
+                     "how": "только если комфортно, без одышки, боли и перегрева"},
+                ],
+                "suggestions": ["Когда связаться с врачом?", "Как вернуться к нагрузке?"],
+            }
+    ctx = _train_ctx(st, mode, profile, pregnancy=pregnancy, checkin=checkin)
     rec = ""
     if recent:
         rec = (" Недавние тренировки (свежие сверху): " + recent +
@@ -1146,6 +1177,12 @@ def training_today(st, profile=None, recent=None, mode=None, usage=None):
         '"suggestions":["три РАЗНЫХ саджеста про нагрузку, восстановление или технику"]}\n' + SUGG_RULES + '\n'
         "В options 2-3 конкретных варианта. Только обычная доступная активность. По-русски, без markdown."
     )
+    if mode == "preg":
+        prompt += (
+            " Для беременности учитывай указанный триместр и чек-ин. Не предлагай контактный спорт, "
+            "риск падения, перегрев, задержку дыхания, тренировку через боль или новые упражнения высокой интенсивности. "
+            "Не обещай медицинский эффект и напомни остановиться при боли, кровотечении, головокружении или ухудшении самочувствия."
+        )
     out = _call([{"role": "system", "content": "Ты тренер femtech-приложения. Отвечай строго JSON, по-русски, без markdown."},
                  {"role": "user", "content": prompt}], max_tokens=1100, temperature=0.6, usage=usage)
     data = None
@@ -1254,7 +1291,23 @@ def memory_extract(user_msg, ai_msg, existing="", usage=None):
 
 def explain_section(st, key, usage=None):
     if key == "training":
-        return training_text(st)
+        plan = training_plan(st)
+        prompt = (
+            f"Данные: {_ctx(st)}\n"
+            f"Проверенный базовый план нагрузки: {json.dumps(plan, ensure_ascii=False)}\n\n"
+            "Собери персональный ответ про нагрузку на сегодня. Не меняй точный день цикла и не противоречь "
+            "базовому уровню нагрузки. Объясни связь с гормонами и самочувствием, дай 2-3 конкретных варианта "
+            "с длительностью, отдельно коротко укажи, чего сегодня избегать и как восстановиться. "
+            "Не добавляй питание, если оно не нужно для восстановления. " + FMT_TG + " " + TOV +
+            "\nВ самом конце добавь строку: СЛЕДУЮЩИЕ: вопрос ;; вопрос — два коротких продолжения строго про эту нагрузку."
+        )
+        out = _call(
+            [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+            max_tokens=750,
+            temperature=0.35,
+            usage=usage,
+        )
+        return _clean(out, training_text(st))
     base = (f"Её фаза: {st['subphase']} {st['phase_ru'].lower()}, день {st['day']} из {st['cycle_len']}, "
             f"до месячных ~{st['days_to_next']} дн.")
     if key == "food":
@@ -1277,10 +1330,36 @@ def _section_fallback(st, key):
 
 
 def followups(st, basis_q, basis_a, usage=None):
-    # случайные саджесты по фазе: разные каждый раз, без обращения к модели
-    import random
-    pool = [t for _, t in _static(st)]; random.shuffle(pool)
-    return pool[:2]
+    """Relevant fallback suggestions when the model omitted its own.
+
+    Topic relevance is more important than always filling two buttons.  The old
+    implementation ignored ``basis_q``/``basis_a`` and sampled by cycle phase,
+    so an answer about dietary fats could end with buttons about energy and
+    training.
+    """
+    question = str(basis_q or "").lower()
+    answer = str(basis_a or "").lower()
+    topics = (
+        (r"жир|масл|омега|авокад|орех", ["Какие жиры выбрать?", "Сколько орехов в день?"]),
+        (r"белок|протеин|творог|мяс|рыб|яйц", ["Сколько нужно белка?", "Какие источники лучше?"]),
+        (r"углевод|сахар|сладк|круп|хлеб", ["Какие углеводы выбрать?", "Как снизить тягу?"]),
+        (r"калори|ккал|дефицит|вес", ["Какая моя норма?", "Как собрать меню?"]),
+        (r"питани|ед[ауы]|продукт|меню|завтрак|обед|ужин", ["Что съесть сегодня?", "Как собрать меню?"]),
+        (r"тренир|нагруз|спорт|кардио|силов|упражнен", ["Какая нагрузка подойдёт?", "Как восстановиться?"]),
+        (r"сон|спать|бессон", ["Как улучшить сон?", "Что мешает засыпать?"]),
+        (r"овуляц|фертиль", ["Когда фертильное окно?", "Как понять овуляцию?"]),
+        (r"пмс|месячн|цикл|фаз|задерж", ["Что сейчас с циклом?", "Когда ждать месячные?"]),
+        (r"беремен|триместр|недел", ["Что важно на сроке?", "Какие симптомы допустимы?"]),
+        (r"менопауз|прилив|мгт", ["Как уменьшить приливы?", "Какие чекапы нужны?"]),
+    )
+    ranked = []
+    for order, (pattern, suggestions) in enumerate(topics):
+        q_hits = len(re.findall(pattern, question))
+        a_hits = len(re.findall(pattern, answer))
+        score = q_hits * 5 + min(a_hits, 3)
+        if score:
+            ranked.append((score, -order, suggestions))
+    return max(ranked)[2] if ranked else []
 
 
 def _static(st):
@@ -1385,6 +1464,95 @@ def general_summary(profile, mode, hint=None, usage=None):
         "Конкретно, без воды, только русский. " + FMT_TG + " " + SUMMARY_LEN + " " + TOV)
     out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], max_tokens=1000, temperature=0.3, usage=usage)
     return _ensure_complete(_clean(out, None)) if out else None
+
+
+# The model personalizes a card by choosing identifiers, never by placing
+# arbitrary medical copy or numbers onto the image. Every rendered sentence
+# therefore comes from this small reviewed catalogue.
+SUMMARY_CARD_FACTS = {
+    "cycle_common": {
+        "check_in": "Сверяй нагрузку с самочувствием, а не только с прогнозом",
+        "sleep": "Оставь достаточно времени на сон и восстановление",
+        "food": "Собери регулярные приёмы пищи с белком и клетчаткой",
+        "water": "Держи воду рядом и пей по ощущениям в течение дня",
+        "pain": "Не тренируйся через боль или заметное ухудшение самочувствия",
+    },
+    "menstrual": {
+        "gentle": "При боли выбирай отдых или спокойное движение",
+        "iron_food": "Добавь привычные продукты с железом и белком",
+    },
+    "follicular": {
+        "gradual": "Если энергии больше, повышай нагрузку постепенно",
+        "routine": "Используй хороший ресурс для привычной активности",
+    },
+    "ovulation": {
+        "contraception": "Не используй прогноз овуляции как метод контрацепции",
+        "steady": "Сохраняй привычную технику даже при хорошем самочувствии",
+    },
+    "luteal": {
+        "recovery": "Если энергии меньше, оставь больше времени на восстановление",
+        "regular_food": "Регулярная еда часто помогает избежать резкого голода",
+    },
+    "preg": {
+        "doctor": "Ориентируйся на самочувствие и рекомендации своего врача",
+        "movement": "Выбирай привычное спокойное движение без перегрузки",
+        "rest": "Чередуй повседневную активность с коротким отдыхом",
+        "food": "Собирай регулярные приёмы пищи с белком и клетчаткой",
+        "symptoms": "При новых или сильных симптомах свяжись с врачом",
+        "water": "Держи воду рядом и пей по ощущениям в течение дня",
+    },
+}
+
+def summary_card_facts(mode, st=None, pregnancy=None, hint=None, usage=None):
+    """Choose three safe catalogue facts through a constrained model call."""
+    if mode == "cycle":
+        phase = (st or {}).get("phase") or "cycle_common"
+        allowed = dict(SUMMARY_CARD_FACTS["cycle_common"])
+        allowed.update(SUMMARY_CARD_FACTS.get(phase, {}))
+        preferred = {
+            "menstrual": ["gentle", "iron_food", "sleep"],
+            "follicular": ["gradual", "routine", "check_in"],
+            "ovulation": ["steady", "contraception", "check_in"],
+            "luteal": ["recovery", "regular_food", "sleep"],
+        }.get(phase, ["check_in", "sleep", "food"])
+        context = f"Режим: цикл; прогнозируемая фаза: {phase}."
+    elif mode == "preg":
+        allowed = dict(SUMMARY_CARD_FACTS["preg"])
+        preferred = ["doctor", "movement", "symptoms"]
+        tri = (pregnancy or {}).get("trimester")
+        context = f"Режим: беременность; триместр: {tri or 'не указан'}."
+    else:
+        return []
+    if hint:
+        context += " Чек-ин: " + str(hint)[:240]
+    prompt = (
+        context + "\n"
+        "Выбери ровно три наиболее уместных идентификатора для короткой карточки. "
+        "Нельзя писать свой текст, числа, диагнозы или назначения. Верни только JSON "
+        'вида {\"ids\":[\"id1\",\"id2\",\"id3\"]}. Доступные идентификаторы: ' +
+        ", ".join(sorted(allowed))
+    )
+    out = _call(
+        [{"role": "system", "content": "Ты выбираешь только идентификаторы из заданного списка и отвечаешь строгим JSON."},
+         {"role": "user", "content": prompt}],
+        max_tokens=80, temperature=0.15, usage=usage,
+    )
+    chosen = []
+    try:
+        raw = out or ""
+        data = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+        for key in data.get("ids") or []:
+            if key in allowed and key not in chosen:
+                chosen.append(key)
+    except Exception:
+        pass
+    for key in preferred:
+        if key in allowed and key not in chosen:
+            chosen.append(key)
+        if len(chosen) >= 3:
+            break
+    return [allowed[key] for key in chosen[:3]]
+
 
 def general_answer(profile, mode, question, hint=None, history=None, usage=None):
     h = f" {hint}." if hint else ""
@@ -2064,14 +2232,58 @@ SALUTE_TTS = (os.environ.get("SBER_SALUTE_SYNTH_URL") or os.environ.get("SALUTE_
               or "https://speech.giga.chat/rest/v1/text:synthesize")
 SALUTE_VOICE = os.environ.get("AIWA_TTS_VOICE") or "erm"   # голос Joy
 TTS_FORMAT = os.environ.get("AIWA_TTS_FORMAT") or "opus"   # opus — родной для голосовых Telegram
-TTS_MAXCHARS = int(os.environ.get("AIWA_TTS_MAXCHARS", "700"))
+TTS_MAXCHARS = int(os.environ.get("AIWA_TTS_MAXCHARS", "3500"))
+
+def _tts_spoken_text(text):
+    """Convert messenger markup, tables and formulas into pronounceable prose."""
+    t = html.unescape(re.sub(r"<[^>]+>", " ", str(text or "")))
+    t = re.sub(r"```[a-z]*\n?", "\n", t, flags=re.I)
+    t = t.replace("```", "\n").replace("**", "").replace("__", "")
+    t = re.sub(r"(?m)^\s*#{1,6}\s*", "", t)
+    rows = []
+    for line in t.splitlines():
+        if re.match(r"^\s*\|?[\s:|-]+\|?\s*$", line) and "|" in line:
+            continue
+        cells = [c.strip() for c in re.split(r"\t+|\s*\|\s*", line.strip().strip("|")) if c.strip()]
+        rows.append(". ".join(cells) if len(cells) > 1 else line)
+    t = "\n".join(rows)
+    t = re.sub(r"\bBMR\b", "базовый обмен", t, flags=re.I)
+    t = re.sub(r"\bTDEE\b", "суточный расход энергии", t, flags=re.I)
+    t = re.sub(r"(?<=\d)\.(?=\d)", ",", t)
+    t = re.sub(r"(?<=\d)\s*[-–—]\s*(?=\d)", " до ", t)
+    t = t.replace("×", " умножить на ").replace("*", " умножить на ")
+    t = t.replace("≈", " примерно ").replace("=", " равно ").replace("+", " плюс ")
+    t = re.sub(r"(?<!\w)-(?=\s*\d)", " минус ", t)
+    t = re.sub(r"(?<=\d)\s*%", " процентов", t)
+    t = re.sub(r"\bккал\s*/\s*день\b", "килокалорий в день", t, flags=re.I)
+    t = re.sub(r"\bккал\b", "килокалорий", t, flags=re.I)
+    t = re.sub(r"\bг\s*/\s*день\b", "граммов в день", t, flags=re.I)
+    t = re.sub(r"\s*[•·]\s*", ". ", t)
+    t = re.sub(r"[^\w\s.,!?;:()«»\"'\-–—/%°]", " ", t, flags=re.U)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def tts_chunks(text, limit=None):
+    """Return complete spoken chunks; never silently discard the tail."""
+    lim = max(200, min(3800, int(TTS_MAXCHARS if limit is None else limit)))
+    rest = _tts_spoken_text(text)
+    chunks = []
+    while rest:
+        if len(rest) <= lim:
+            chunks.append(rest)
+            break
+        window = rest[:lim + 1]
+        floor = int(lim * 0.55)
+        boundaries = [m.end() for m in re.finditer(r"(?<=[.!?])\s+|;\s+|,\s+|\s+", window)]
+        cut = max((p for p in boundaries if floor <= p <= lim), default=lim)
+        chunks.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    return [chunk for chunk in chunks if chunk]
 
 def _tts_trim(text, limit=None):
-    """Готовит текст к озвучке: убирает эмодзи и маркеры списка, режет по границе предложения."""
+    """Prepare one bounded TTS request; multi-part callers should use tts_chunks."""
     lim = TTS_MAXCHARS if limit is None else limit
-    t = re.sub(r"[^\w\s.,!?;:()«»\"'\-–—/%°]", " ", text or "", flags=re.U)
-    t = re.sub(r"\s*[•·]\s*", ". ", t)
-    t = re.sub(r"\s+", " ", t).strip()
+    t = _tts_spoken_text(text)
     if len(t) <= lim:
         return t
     cut = t[:lim]
