@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v94-rich-everywhere"
+AIWA_VERSION = "2026-07-23-v95-voice-and-training-ctx"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1249,7 +1249,14 @@ async def send_section(context, cid, st, key):
     await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
     usage = []
     if key == "training":
-        text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
+        _recent = _recent_workouts_text(cid)
+        _fq = ("Составь рекомендацию по нагрузке на сегодня под мою фазу. Мои последние тренировки: "
+               + (_recent or "данных нет") + ". ОБЯЗАТЕЛЬНО учти их: если вчера была тяжёлая тренировка "
+               "(например на ноги) — сегодня предложи другие группы мышц или восстановление, и скажи об этом прямо. "
+               "Формат: короткий заголовок, почему именно так (гормоны и восстановление), 2-3 конкретных варианта с «как».")
+        text = await think_llm(context, cid, L.answer_question, st, _fq, profile_of(row(cid)), None, usage=usage)
+        if not text or "не вернула ответ" in text:
+            text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
         text += "\n\n📱 В приложении Айвы можно посмотреть нагрузку рядом с календарём, симптомами и фазой цикла. Открой приложение кнопкой ниже."
         return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage,
             app_user=row(cid), app_label="Открыть нагрузку")
@@ -1336,6 +1343,7 @@ async def send_rich(bot, cid, md_text, reply_markup=None):
     """Отправка через sendRichMessage (Bot API 10.1+): Telegram сам рендерит GFM —
     таблицы, ### заголовки, списки, цитаты. Бросает исключение, если метод недоступен."""
     md_text = re.sub(r"(?m)^(\s*)•\s+", r"\1- ", str(md_text))   # любые «• » -> GFM-список, иначе рендер склеит/задвоит
+    _LAST_SPOKEN[cid] = md_plain(md_text)                            # rich не проходит через текстовый прокси озвучки
     data = {"chat_id": cid, "rich_message": json.dumps({"markdown": md_text})}
     if reply_markup is not None:
         data["reply_markup"] = reply_markup.to_json()
@@ -1447,6 +1455,7 @@ def chat_hint(cid):
         except Exception: pass
     return base or None
 _VOICE_TURN = {}   # cid -> True, если текущий вопрос пришёл голосом: тогда ответ дублируем голосом
+_LAST_SPOKEN = {}  # cid -> содержательный текст для озвучки (rich-отправки не видны текстовому прокси)
 def _voice_reply_on():
     return os.environ.get("AIWA_VOICE_REPLY", "1") in ("1", "true", "True", "yes", "on")
 
@@ -3027,8 +3036,8 @@ async def on_voice(update, context):
         # Free-form AI answers speak inside send_answer(). Intent/state branches
         # often reply directly, so duplicate their final visible text here too.
         if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
-            spoken = _voice_plain_text(sent_texts[-1] if sent_texts else
-                                       "Готово. Результат отправила в чат.")
+            spoken = _voice_plain_text(_LAST_SPOKEN.pop(cid, None) or (sent_texts[-1] if sent_texts else
+                                       "Готово. Результат отправила в чат."))
             if spoken:
                 await _send_voice_reply(context, cid, spoken)
     finally:

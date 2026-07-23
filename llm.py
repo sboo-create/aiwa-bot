@@ -1032,20 +1032,20 @@ def training_text(st, profile=None):
         f"День {p['day']} из {p['cycle_len']}, {st['subphase']} {st['phase_ru'].lower()} фаза.",
         p["summary"],
         "",
-        "🧬 Гормоны и физиология",
+        "**Гормоны и физиология**",
     ]
     for h in p.get("hormones", []):
         lines.append(f"• {h}")
     lines += [
         "",
-        "📌 Почему такая нагрузка",
+        "**Почему так**",
         p["why"],
         "",
-        "✅ Что выбрать",
+        "**Что выбрать**",
     ]
     for o in p["options"]:
         lines.append(f"• {o['name']}: {o['benefit']}. Как: {o['how']}.")
-    lines += ["", "⚠️ Сегодня лучше избегать", f"• {p['avoid']}", "", "💧 Восстановление", f"• {p['recovery']}"]
+    lines += ["", "**Чего избегать**", f"• {p['avoid']}", "", "**Восстановление**", f"• {p['recovery']}"]
     lines.append("")
     lines.append("СЛЕДУЮЩИЕ: А если мало сил? ;; Что после тренировки?")
     return "\n".join(lines)
