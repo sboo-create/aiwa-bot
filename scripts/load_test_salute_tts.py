@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controlled live load test for SaluteSpeech multilingual synchronous TTS.
+"""Controlled live load test for SaluteSpeech synchronous TTS.
 
 The script never prints credentials or stores returned audio. It ramps concurrency
 only to the documented account limit and exits non-zero on any failed request.
@@ -16,18 +16,12 @@ import time
 
 
 SAMPLES = [
-    ("ru", "Сегодня хорошая погода, и мы идём гулять."),
-    ("uz", "Salom, bu o‘zbek tilidagi oddiy gap."),
-    ("pt", "Olá, como você está hoje? Muito obrigado."),
-    ("pl", "Dzień dobry, jak się masz? Dziękuję bardzo."),
-    ("nl", "Goedemorgen, dit is een Nederlandse zin."),
-    ("kz", "Бұл қазақ тіліндегі қарапайым сөйлем."),
-    ("en", "Hello, this is a simple English sentence."),
-    ("de", "Guten Morgen, das ist ein deutscher Satz."),
-    ("es", "Hola, buenos días. Esta es una frase española."),
-    ("fr", "Bonjour, ceci est une phrase française."),
-    ("it", "Ciao, questa è una semplice frase italiana."),
-    ("ky", "Бул кыргыз тилиндеги жөнөкөй сүйлөм."),
+    "Сегодня хорошая погода, и мы идём гулять по набережной.",
+    "Сводка готова: самочувствие в норме, вода и прогулка по плану.",
+    "Не забудь про приём у врача в четверг в одиннадцать утра.",
+    "На ужин предлагаю запечённую рыбу с овощами и стакан кефира.",
+    "Лёгкая разминка на десять минут поможет снять напряжение в спине.",
+    "Завтра утром пришлю напоминание о витаминах и завтраке.",
 ]
 
 
@@ -80,16 +74,14 @@ def main():
 
     payloads = []
     while len(payloads) < args.requests_per_level:
-        for language, text in SAMPLES:
-            payloads.append(
-                llm.tts_ssml_requests(text, default_language=language)[0]
-            )
+        for text in SAMPLES:
+            payloads.append(text)
             if len(payloads) >= args.requests_per_level:
                 break
 
     report = {
         "provider": "salute",
-        "mode": "sync_multilingual_ssml",
+        "mode": "sync_plain_text",
         "account_type": args.account_type,
         "documented_concurrency_limit": account_limit,
         "requests_per_level": args.requests_per_level,
@@ -99,13 +91,12 @@ def main():
     def one(index):
         info = {}
         started = time.perf_counter()
-        audio = llm.synthesize_request(payloads[index % len(payloads)], info)
+        audio = llm.synthesize(payloads[index % len(payloads)], info)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return {
             "ok": bool(audio),
             "latency_ms": elapsed_ms,
             "characters": int(info.get("chars") or 0),
-            "languages": info.get("languages") or [],
         }
 
     baseline_wall = None
