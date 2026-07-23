@@ -295,6 +295,18 @@ class SecurityAnalyticsTests(unittest.TestCase):
             if old_key is None: os.environ.pop("AIWA_ADMIN_KEY", None)
             else: os.environ["AIWA_ADMIN_KEY"] = old_key
 
+    def test_legacy_admin_is_marked_deprecated_and_links_to_new_dashboard(self):
+        with mock.patch.object(bot, "_admin_key_ok", return_value=False):
+            login = asyncio.run(bot._admin_page(FakeRequest()))
+        self.assertIn("Эта админка устарела", login.text)
+        self.assertIn("https://stats.multitool.works/#/p/aiwa", login.text)
+
+        with mock.patch.object(bot, "_admin_key_ok", return_value=True):
+            dashboard = asyncio.run(bot._admin_page(FakeRequest()))
+        self.assertIn("Старая аналитика — только для сверки", dashboard.text)
+        self.assertIn("планируем удалить после переходного периода", dashboard.text)
+        self.assertIn("rel=\"noopener noreferrer\"", dashboard.text)
+
     def test_llm_usage_keeps_legacy_total_and_captures_split(self):
         captured = []
         old_sink = llm._USAGE_SINK

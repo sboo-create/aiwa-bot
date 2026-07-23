@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v74-deletion-and-canonical-events"
+AIWA_VERSION = "2026-07-23-v75-deprecate-legacy-admin"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -4722,8 +4722,8 @@ async def _admin_stats(request):
 async def _admin_page(request):
     if not _admin_key_ok(request):
         login = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AIWA · Вход</title><style>body{font:16px system-ui;background:#f6f8fa;margin:0;display:grid;place-items:center;min-height:100vh}.c{background:#fff;padding:28px;border-radius:18px;box-shadow:0 12px 40px #0001;width:min(360px,calc(100% - 40px))}h1{font-size:20px}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:10px;margin-top:10px}input{border:1px solid #ddd}button{border:0;background:#14181f;color:#fff;font-weight:700}</style>
-<form class="c" method="post" action="/admin/login"><h1>AIWA · Аналитика</h1><input type="password" name="key" autocomplete="current-password" placeholder="Admin key" required><button type="submit">Войти</button></form>"""
+<title>AIWA · Вход</title><style>body{font:16px system-ui;background:#f6f8fa;margin:0;display:grid;place-items:center;min-height:100vh}.c{background:#fff;padding:28px;border-radius:18px;box-shadow:0 12px 40px #0001;width:min(420px,calc(100% - 40px))}h1{font-size:20px}.old{background:#fff7ed;border:1px solid #f1d2ad;border-radius:12px;padding:13px 14px;color:#7a4518;font-size:13px;line-height:1.45}.old p{margin:5px 0}.old a{color:#9a4d0b;font-weight:750}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:10px;margin-top:10px}input{border:1px solid #ddd}button{border:0;background:#14181f;color:#fff;font-weight:700}</style>
+<div class="c"><div class="old"><strong>Эта админка устарела</strong><p>Новая продуктовая аналитика уже доступна отдельно. Здесь оставлен временный доступ для сверки старых данных.</p><a href="https://stats.multitool.works/#/p/aiwa" target="_blank" rel="noopener noreferrer">Открыть новую аналитику →</a></div><form method="post" action="/admin/login"><h1>AIWA · старая аналитика</h1><input type="password" name="key" autocomplete="current-password" placeholder="Admin key" required><button type="submit">Войти</button></form></div>"""
         return web.Response(text=login, content_type="text/html", headers={"Cache-Control": "no-store"})
     html_text = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AIWA · Аналитика</title>
@@ -4760,9 +4760,11 @@ h1{font-size:20px;margin:0}
 .sec-h{font-size:14px;font-weight:800;margin:22px 0 10px;display:flex;align-items:center;gap:6px}
 .loading{color:var(--mut);padding:50px;text-align:center}
 #defpop{position:absolute;display:none;max-width:300px;background:#111827;color:#fff;font-size:12px;line-height:1.5;padding:10px 12px;border-radius:10px;z-index:99;box-shadow:0 8px 24px rgba(0,0,0,.2)}
+.deprecated{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:14px 0;padding:12px 14px;background:#FFF7ED;border:1px solid #F1D2AD;border-radius:11px;color:#7A4518;font-size:12px;line-height:1.45}.deprecated strong{display:block;font-size:13px}.deprecated a{flex:0 0 auto;color:#9A4D0B;font-weight:800;text-decoration:none;background:#fff;border:1px solid #E8BE91;border-radius:8px;padding:8px 10px}@media(max-width:640px){.deprecated{align-items:flex-start;flex-direction:column}.deprecated a{width:100%;text-align:center}}
 </style>
 <div class="wrap">
  <div class="head"><h1>AIWA · Аналитика</h1><span class="per" id="per"></span></div>
+ <div class="deprecated"><div><strong>Старая аналитика — только для сверки</strong>Новые метрики, точный слой v2 и восстановленная история находятся в Disrupt Analytics. Эту страницу планируем удалить после переходного периода.</div><a href="https://stats.multitool.works/#/p/aiwa" target="_blank" rel="noopener noreferrer">Открыть новую аналитику →</a></div>
  <div class="bar" id="bar">
    <button data-d="7">7 дней</button><button data-d="30">30 дней</button><button data-d="90">90 дней</button>
    <button id="yday">Вчера</button>
