@@ -159,6 +159,150 @@ def render_general_summary(mode, today, pregnancy=None):
     buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
 
 
+def render_summary_card(mode, today, facts=None, cycle=None, pregnancy=None, variant=None):
+    """Render one of three stable daily-card templates.
+
+    The date deterministically rotates the template, so repeated renders on the
+    same day are identical.  All numbers come from application state; ``facts``
+    are selected from the reviewed catalogue in ``llm.py``.
+    """
+    import textwrap
+    W,H=720,1040
+    mode=mode or "none"
+    variant=(today.toordinal()+(1 if mode=="preg" else 0))%3 if variant is None else int(variant)%3
+    accent=(105,126,91) if mode=="preg" else ROSE
+    wash=(236,239,229) if mode=="preg" else ROSEWASH
+    apricot=(232,139,72)
+    palettes=[
+        (accent,wash,(242,239,231)),
+        ((177,103,119) if mode!="preg" else (119,139,102),(249,235,229),(235,239,228)),
+        ((202,116,83) if mode!="preg" else (103,133,113),(246,231,226),(239,235,218)),
+    ]
+    accent,wash,soft2=palettes[variant]
+    img=Image.new("RGB",(W*S,H*S),PAPER); d=ImageDraw.Draw(img)
+    def X(v): return int(v*S)
+    f_brand=_f("DejaVuSerif.ttf",34); f_date=_f("DejaVuSans.ttf",18)
+    f_title=_f("DejaVuSans.ttf",28); f_metric=_f("DejaVuSerif.ttf",54)
+    f_label=_f("DejaVuSans-Bold.ttf",14); f_fact=_f("DejaVuSans.ttf",17)
+    f_num=_f("DejaVuSans-Bold.ttf",17); f_small=_f("DejaVuSans.ttf",15)
+
+    title="Сегодня"
+    metric="Персональная сводка"
+    metric_label="САМОЧУВСТВИЕ"
+    status=""
+    if mode=="cycle" and cycle:
+        day=max(1,int(cycle.get("day") or 1))
+        phase=str(cycle.get("phase_ru") or "Фаза цикла")
+        left=max(0,int(cycle.get("days_to_next") or 0))
+        title=f"Сегодня — {day} день цикла"
+        metric=phase+" фаза"
+        metric_label="ПРОГНОЗИРУЕМАЯ ФАЗА"
+        status=f"До месячных ориентировочно ~{left} дн."
+    elif mode=="preg" and pregnancy:
+        week=max(1,int(pregnancy.get("week") or 1))
+        tri=max(1,int(pregnancy.get("trimester") or 1))
+        left=max(0,int(pregnancy.get("days_left") or 0))
+        title=f"Сегодня — {week} неделя"
+        metric=("I" if tri==1 else "II" if tri==2 else "III")+" триместр"
+        metric_label="СРОК БЕРЕМЕННОСТИ"
+        status=f"До ПДР ориентировочно ~{left} дн."
+    elif mode=="meno":
+        title="Самочувствие сегодня"; metric="Менопауза"; metric_label="БЕЗ ПРОГНОЗА ФАЗЫ"
+    elif mode=="irregular":
+        title="Самочувствие сегодня"; metric="Нерегулярный цикл"; metric_label="БЕЗ ПРОГНОЗА ФАЗЫ"
+
+    clean=[]
+    for value in facts or []:
+        value=" ".join(str(value or "").split()).strip(" •-")
+        if value and value not in clean and len(value)<=110:
+            clean.append(value)
+        if len(clean)>=3: break
+    fallbacks={
+        "cycle":["Ориентируйся на сегодняшнее самочувствие","Выбирай привычную нагрузку без работы через боль","Оставь время на сон, еду и восстановление"],
+        "preg":["Ориентируйся на самочувствие и рекомендации врача","Выбирай привычное спокойное движение без перегрузки","При новых или сильных симптомах свяжись с врачом"],
+    }
+    for fact in fallbacks.get(mode,["Ориентируйся на сегодняшнее самочувствие"]):
+        if len(clean)>=3: break
+        if fact not in clean: clean.append(fact)
+
+    # Shared paper texture and calm organic shapes from the approved references.
+    d.ellipse([X(-140),X(-110),X(260),X(250)],fill=(247,232,225))
+    d.ellipse([X(520),X(-120),X(850),X(235)],fill=soft2)
+    d.ellipse([X(-150),X(845),X(250),X(1160)],fill=soft2)
+    d.ellipse([X(525),X(850),X(850),X(1160)],fill=(248,229,221))
+    d.text((X(42),X(42)),"AIWA",font=f_brand,fill=INK)
+    d.text((X(W-42),X(54)),f"{today.day} {MONTHS[today.month-1]}",font=f_date,fill=INKMID,anchor="ra")
+
+    if variant==0:
+        # Reference A: generous hero plus three editorial columns.
+        d.rounded_rectangle([X(42),X(135),X(W-42),X(475)],radius=X(34),fill=(255,250,247),outline=wash,width=X(2))
+        d.text((X(W//2),X(188)),title,font=f_title,fill=INK,anchor="mm")
+        d.text((X(W//2),X(260)),metric,font=f_metric,fill=accent,anchor="mm")
+        d.text((X(W//2),X(320)),metric_label,font=f_label,fill=accent,anchor="mm")
+        if status:
+            d.rounded_rectangle([X(120),X(366),X(W-120),X(438)],radius=X(35),fill=accent)
+            d.text((X(W//2),X(402)),status,font=f_num,fill=(255,255,255),anchor="mm")
+        d.text((X(42),X(515)),"СЕГОДНЯ ВАЖНО",font=f_label,fill=INKMID)
+        gap=12; cw=(W-84-gap*2)//3
+        for i,fact in enumerate(clean[:3]):
+            x=42+i*(cw+gap)
+            fill=(255,246,243) if i==0 else ((246,248,240) if i==1 else (255,247,237))
+            d.rounded_rectangle([X(x),X(552),X(x+cw),X(850)],radius=X(24),fill=fill,outline=wash,width=X(1))
+            d.ellipse([X(x+cw//2-24),X(584),X(x+cw//2+24),X(632)],fill=wash)
+            d.text((X(x+cw//2),X(608)),str(i+1),font=f_num,fill=accent,anchor="mm")
+            lines=textwrap.wrap(fact,width=20,break_long_words=False,break_on_hyphens=False)[:6]
+            y=674-(len(lines)-3)*10
+            for line in lines:
+                d.text((X(x+cw//2),X(y)),line,font=f_fact,fill=INK,anchor="mm"); y+=27
+    elif variant==1:
+        # Reference B: asymmetrical editorial stripe and stacked insights.
+        d.rounded_rectangle([X(42),X(140),X(W-42),X(380)],radius=X(34),fill=wash)
+        d.rounded_rectangle([X(42),X(140),X(62),X(380)],radius=X(10),fill=accent)
+        d.text((X(88),X(190)),metric_label,font=f_label,fill=accent)
+        d.text((X(88),X(238)),title,font=f_title,fill=INK)
+        d.text((X(88),X(302)),metric,font=f_metric,fill=INK)
+        if status: d.text((X(88),X(354)),status,font=f_num,fill=accent)
+        d.text((X(42),X(430)),"ТРИ ОРИЕНТИРА НА ДЕНЬ",font=f_label,fill=INKMID)
+        y=470
+        for i,fact in enumerate(clean[:3]):
+            fill=(255,249,246) if i%2==0 else (245,248,240)
+            d.rounded_rectangle([X(42),X(y),X(W-42),X(y+126)],radius=X(24),fill=fill)
+            d.ellipse([X(62),X(y+36),X(112),X(y+86)],fill=wash)
+            d.text((X(87),X(y+61)),str(i+1),font=f_num,fill=accent,anchor="mm")
+            lines=textwrap.wrap(fact,width=48,break_long_words=False,break_on_hyphens=False)[:3]
+            ty=y+36
+            for line in lines:
+                d.text((X(138),X(ty)),line,font=f_fact,fill=INK); ty+=28
+            y+=142
+    else:
+        # Reference C: circular status seal and compact numbered cards.
+        d.text((X(42),X(150)),title,font=f_title,fill=INK)
+        cx,cy=X(W//2),X(330); rr=X(154)
+        d.ellipse([cx-rr,cy-rr,cx+rr,cy+rr],fill=wash)
+        d.text((cx,X(285)),metric_label,font=f_label,fill=accent,anchor="mm")
+        metric_lines=textwrap.wrap(metric,width=18,break_long_words=False)
+        my=330-(len(metric_lines)-1)*28
+        for line in metric_lines:
+            d.text((cx,X(my)),line,font=f_metric,fill=INK,anchor="mm"); my+=58
+        if status: d.text((cx,X(414)),status,font=f_small,fill=accent,anchor="mm")
+        d.text((X(42),X(530)),"СЕГОДНЯ ВАЖНО",font=f_label,fill=INKMID)
+        y=570
+        for i,fact in enumerate(clean[:3]):
+            d.rounded_rectangle([X(42),X(y),X(W-42),X(y+105)],radius=X(52),fill=(255,250,247))
+            d.ellipse([X(58),X(y+18),X(127),X(y+87)],fill=(wash if i<2 else (249,230,216)))
+            d.text((X(92),X(y+52)),str(i+1),font=f_num,fill=(accent if i<2 else apricot),anchor="mm")
+            lines=textwrap.wrap(fact,width=48,break_long_words=False,break_on_hyphens=False)[:3]
+            ty=y+26
+            for line in lines:
+                d.text((X(150),X(ty)),line,font=f_fact,fill=INK); ty+=27
+            y+=120
+
+    footer="Прогноз цикла ориентировочный · не метод контрацепции" if mode=="cycle" else "Срок рассчитан по данным профиля · рекомендации обновляются"
+    d.text((X(W//2),X(H-48)),footer,font=f_small,fill=SOFT,anchor="mm")
+    img=img.resize((W,H),Image.LANCZOS)
+    buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
+
+
 def render_menu(data, phase_ru="Лютеиновая", target_kcal=None):
     """Карточка питания на день. Единый рендер (3x супер-сэмплинг), длинный текст обрезается, а не вылезает."""
     W=720
