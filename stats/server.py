@@ -511,8 +511,11 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     }
 
     series_data = _series(rows, window_days, now, available_start)
-    avg_dau = (sum(point["active"] for point in series_data) / len(series_data)
-               if series_data else 0)
+    avg_dau = (len(dau_ids) if window_days <= 1.1 else
+               (sum(point["active"] for point in series_data) / len(series_data)
+                if series_data else 0))
+    avg_dau_note = ("rolling 24 часа" if window_days <= 1.1 else
+                    f"по {len(series_data)} календарным дням с данными")
     per_active_day = lambda n: round(n / active_user_days, 2) if active_user_days else 0
     per_active_day_or_none = lambda n: round(n / active_user_days, 2) if active_user_days else None
     untraced_ai_attempts = len(ai_rows) - request_covered
@@ -591,8 +594,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     latest_observed_ts = max((r["ts"] for r in observed_rows), default=None)
     diagnostics = [
         {"label": "Avg DAU", "value": round(avg_dau, 1), "unit": "number",
-         "note": f"по {len(series_data)} календарным точкам с данными",
-         "help": "Среднее число активных пользователей по календарным точкам графика, доступным после начала сбора. Дни до начала сбора не входят в знаменатель."},
+         "note": avg_dau_note,
+         "help": "Для окна 1 день это rolling DAU за последние 24 часа. Для 7/30 дней — среднее число активных пользователей по доступным календарным дням; дни до начала сбора не входят в знаменатель."},
         {"label": "Сессии / user-day", "value": per_active_day_or_none(sessions), "unit": "number",
          "note": f"{sessions} сессий / {active_user_days} user-days",
          "help": "Периодная глубина использования. В отличие от верхнего Sessions / DAU, учитывает каждый активный user-day выбранного окна."},

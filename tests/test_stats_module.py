@@ -134,6 +134,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(day["overview"]["dau"], 1)
         self.assertEqual(day["overview"]["sessions_per_dau"], 1.0)
         self.assertEqual(day["overview"]["tools_per_dau"], 2.0)
+        self.assertEqual(day["audience"]["avg_dau"], 1.0)
         self.assertEqual(day["overview"], week["overview"])
 
     def test_ingest_allow_list_drops_sensitive_properties_and_upgrades_payload(self):
