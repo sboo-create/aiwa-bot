@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v83-sampled-feedback"
+AIWA_VERSION = "2026-07-23-v84-diet-none-option"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -901,7 +901,8 @@ ACT_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Очень высокая", callback_data="act:5")],
 ])
 def diet_kb(selected):
-    rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"diet:s:{code}")] for code, ru in DIET]
+    rows = [[InlineKeyboardButton("Ограничений нет 👌", callback_data="diet:none")]]
+    rows += [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"diet:s:{code}")] for code, ru in DIET]
     rows.append([InlineKeyboardButton("Готово", callback_data="diet:done")]); return InlineKeyboardMarkup(rows)
 
 def time_kb():
@@ -2988,7 +2989,7 @@ async def handle_text(update, context, txt):
         if _act is None:
             return await update.message.reply_text("Выбери уровень активности кнопкой ниже — так точнее.", reply_markup=ACT_KB)
         upsert(cid, activity=_act, state="await_diet")
-        return await update.message.reply_text("Есть ограничения в еде? Отметь кнопками или напиши своё текстом (например «без свинины, без сахара»), потом Готово.", reply_markup=diet_kb(set()))
+        return await update.message.reply_text("Есть ограничения в еде? Если нет — жми «Ограничений нет». Или отметь кнопками / напиши своё текстом (например «без свинины, без сахара»), потом «Готово».", reply_markup=diet_kb(set()))
 
     if state == "await_symptom_custom":
         code = symptom_code(txt)
@@ -3167,11 +3168,14 @@ async def on_cb(update, context):
     if data.startswith("act:"):
         upsert(cid, activity=int(data.split(":")[1]), state="await_diet")
         upsert(cid, state="await_diet")
-        return await q.message.reply_text("Есть ограничения в еде? Отметь кнопками или напиши своё текстом (например «без свинины, без сахара»), потом Готово.", reply_markup=diet_kb(set()))
+        return await q.message.reply_text("Есть ограничения в еде? Если нет — жми «Ограничений нет». Или отметь кнопками / напиши своё текстом (например «без свинины, без сахара»), потом «Готово».", reply_markup=diet_kb(set()))
     if data.startswith("diet:s:"):
         code = data.split(":")[2]; cur = set((row(cid).get("diet") or "").split(",")) - {""}
         cur.symmetric_difference_update({code}); upsert(cid, diet=",".join(sorted(cur)))
         return await q.edit_message_reply_markup(reply_markup=diet_kb(cur))
+    if data == "diet:none":
+        # явный выбор «без ограничений»: чистим отмеченное и сразу завершаем шаг
+        upsert(cid, diet="", state=None); return await welcome_finish(context, cid, q.message)
     if data == "diet:done":
         upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
     if data == "no_cycle":
