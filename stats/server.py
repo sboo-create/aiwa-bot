@@ -593,10 +593,16 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     trailing_ai_attempts = sum(r["name"] == "ai_call" and r["ts"] >= trailing_cutoff and
                                r["provenance"] == "observed" for r in rows)
     per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
+    exact_dau_ids = {r["device_id"] for r in rows if r["ts"] >= trailing_cutoff and
+                     r["provenance"] == "observed" and _is_active(r["name"])}
+    overview_tools_per_dau = (round(trailing_ai_attempts / len(exact_dau_ids), 2)
+                              if exact_dau_ids else (0 if not trailing_ai_attempts else None))
     overview = {
         "ever_used": len(ever_ids), "dau": len(dau_ids), "wau": len(wau_ids), "mau": len(mau_ids),
-        "sessions_per_dau": per_dau(trailing_sessions), "tools_per_dau": per_dau(trailing_ai_attempts),
+        "sessions_per_dau": per_dau(trailing_sessions),
     }
+    if overview_tools_per_dau is not None:
+        overview["tools_per_dau"] = overview_tools_per_dau
     primary = [
         {"label": "Ever used", "value": len(ever_ids), "note": "уникальные пользователи · всё время",
          "help": "Уникальные псевдонимные пользователи, у которых было хотя бы одно продуктовое действие за всю доступную историю."},
@@ -609,9 +615,9 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         {"label": "Sessions / DAU", "value": overview["sessions_per_dau"],
          "note": "сессии за 24 ч / rolling DAU",
          "help": "Та же формула, что в общей сводке: сессии за последние 24 часа, делённые на уникальных активных пользователей за эти же 24 часа. Новая сессия начинается после 30 минут без продуктовых событий."},
-        {"label": "Tools / DAU", "value": overview["tools_per_dau"],
-         "note": "сейчас: AI-попытки за 24 ч / DAU",
-         "help": "Та же текущая формула, что в общей сводке: все AI-попытки за последние 24 часа, включая retry и fallback, делённые на rolling DAU. Варианты более продуктового определения показаны ниже."},
+        {"label": "Tools / DAU", "value": overview_tools_per_dau,
+         "note": "сейчас: точные AI-попытки за 24 ч / точный DAU",
+         "help": "Та же текущая формула, что в общей сводке: точно записанные AI-попытки за последние 24 часа, включая retry и fallback, делённые на rolling DAU точного v2-слоя. Восстановленные пользователи не входят в знаменатель, потому что старые AI-вызовы неполны. Варианты более продуктового определения показаны ниже."},
     ]
 
     classified_active = sum(_feature(r) is not None for r in active_selected)

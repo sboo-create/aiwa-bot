@@ -119,6 +119,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(tools["ai_provider_attempts"]["denominator"], 1)
         self.assertEqual(tools["logical_ai_requests"]["value"], 1.0)
         self.assertEqual(tools["value_actions"]["value"], 1.5)
+        self.assertEqual(data["overview"]["tools_per_dau"], 2.0)
         self.assertEqual(len(data["diagnostics"]), 10)
 
     def test_overview_ratios_use_rolling_dau_not_calendar_user_days(self):
@@ -166,7 +167,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIsNone(tools["ai_provider_attempts"]["value"])
         self.assertIsNone(tools["logical_ai_requests"]["value"])
         self.assertEqual(tools["ai_provider_attempts"]["status"], "no_active_users")
-        self.assertIsNone(data["overview"]["tools_per_dau"])
+        self.assertNotIn("tools_per_dau", data["overview"])
         self.assertEqual(data["errors"], 0)
         self.assertEqual(data["ai"]["providers"][0]["success"], 0)
 
