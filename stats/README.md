@@ -20,8 +20,10 @@ contract: `ever_used`, `dau`, `wau`, `mau`, `sessions_per_dau` and
 by distinct rolling DAU, regardless of the period selected on the detailed
 dashboard.
 
-For backward compatibility, `tools_per_dau` currently means AI provider
-attempts, including retry and fallback. The detailed dashboard exposes the
+For backward compatibility, `tools_per_dau` currently means observed v2 AI
+provider attempts, including retry and fallback. If attempts exist without a
+rolling DAU denominator, the ratio is `null` rather than a misleading zero.
+The detailed dashboard exposes the
 top-level `tool_definitions` candidates with stable IDs, numerators,
 denominators and `selected_for_overview`. This makes the current choice
 explicit while product can compare logical AI requests, product actions,

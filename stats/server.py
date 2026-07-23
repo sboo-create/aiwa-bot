@@ -518,8 +518,26 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                     f"по {len(series_data)} календарным дням с данными")
     per_active_day = lambda n: round(n / active_user_days, 2) if active_user_days else 0
     per_active_day_or_none = lambda n: round(n / active_user_days, 2) if active_user_days else None
-    untraced_ai_attempts = len(ai_rows) - request_covered
-    logical_ai_requests = len(requests) + untraced_ai_attempts
+    exact_ai_rows = [r for r in ai_rows if r["provenance"] == "observed"]
+    exact_requests: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    exact_request_covered = 0
+    for row in exact_ai_rows:
+        request_id = row["properties"].get("request_id")
+        if request_id:
+            exact_request_covered += 1
+            exact_requests[str(request_id)].append(row)
+    exact_untraced_attempts = len(exact_ai_rows) - exact_request_covered
+    logical_ai_requests = len(exact_requests) + exact_untraced_attempts
+    exact_active_days: dict[str, set[str]] = defaultdict(set)
+    for row in active_selected:
+        if row["provenance"] == "observed":
+            day = datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()
+            exact_active_days[day].add(row["device_id"])
+    exact_active_user_days = sum(len(users) for users in exact_active_days.values())
+    per_exact_active_day = lambda n: (round(n / exact_active_user_days, 2)
+                                      if exact_active_user_days else None)
+    exact_request_coverage = _percent(exact_request_covered, len(exact_ai_rows))
+    exact_request_ready = bool(exact_ai_rows) and exact_request_coverage >= 80
     product_actions = sum(r["name"] in PRODUCT_ACTION_NAMES for r in selected)
     value_actions = sum(r["name"] in KEY_RESULT_NAMES for r in selected)
     feature_days: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -532,40 +550,49 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
 
     tool_definitions = [
         {"id": "ai_provider_attempts", "label": "AI-попытки / user-day",
-         "value": per_active_day_or_none(len(ai_rows)), "numerator": len(ai_rows),
+         "value": per_exact_active_day(len(exact_ai_rows)), "numerator": len(exact_ai_rows),
          "numerator_label": "AI-попыток",
-         "denominator": active_user_days, "selected_for_overview": True,
-         "help": "Текущий тип события для Tools / DAU в общей сводке: все обращения к AI-провайдерам, включая retry и fallback. Overview делит их за последние 24 часа на rolling DAU; здесь период нормализован на active user-days. Это техническая нагрузка, а не число использованных функций."},
+         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
+         "status": ("no_data" if not exact_ai_rows else
+                    "no_active_users" if not exact_active_user_days else "ok"),
+         "selected_for_overview": True,
+         "help": "Текущий тип события для Tools / DAU в общей сводке: все точно записанные обращения к AI-провайдерам, включая retry и fallback. Overview делит их за последние 24 часа на rolling DAU; здесь период нормализован только на user-days точного v2-слоя, потому что старые AI-вызовы восстановлены неполно. Это техническая нагрузка, а не число использованных функций."},
         {"id": "logical_ai_requests", "label": "AI-запросы / user-day",
-         "value": (per_active_day_or_none(logical_ai_requests)
-                   if ai_rows and _percent(request_covered, len(ai_rows)) >= 80 else None),
-         "numerator": (logical_ai_requests
-                       if ai_rows and _percent(request_covered, len(ai_rows)) >= 80 else None),
+         "value": (per_exact_active_day(logical_ai_requests) if exact_request_ready else None),
+         "numerator": (logical_ai_requests if exact_request_ready else None),
          "numerator_label": "AI-запросов",
-         "denominator": active_user_days, "coverage": _percent(request_covered, len(ai_rows)),
+         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
+         "coverage": exact_request_coverage,
+         "status": ("no_data" if not exact_ai_rows else
+                    "insufficient_coverage" if not exact_request_ready else
+                    "no_active_users" if not exact_active_user_days else "ok"),
          "selected_for_overview": False,
          "help": "Логические AI-запросы после объединения retry и fallback по request_id. Попытки без request_id считаются отдельными запросами, поэтому метрика зависит от полноты трассировки."},
         {"id": "product_actions", "label": "Действия в функциях / user-day",
          "value": per_active_day_or_none(product_actions), "numerator": product_actions,
          "numerator_label": "действий",
-         "denominator": active_user_days, "selected_for_overview": False,
+         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
+         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
          "help": "Явные действия пользователя в чате, чек-ине, питании и нагрузке. Простые открытия экранов и технические AI-попытки не считаются."},
         {"id": "feature_breadth", "label": "Разные функции / user-day",
          "value": per_active_day_or_none(distinct_feature_uses), "numerator": distinct_feature_uses,
          "numerator_label": "использований разных функций",
-         "denominator": active_user_days, "selected_for_overview": False,
+         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
+         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
          "help": "Среднее число разных продуктовых зон, которыми человек воспользовался за активный день. Повторное использование одной зоны в тот же день не увеличивает показатель."},
         {"id": "value_actions", "label": "Ключевые результаты / user-day",
          "value": per_active_day_or_none(value_actions), "numerator": value_actions,
          "numerator_label": "ключевых результатов",
-         "denominator": active_user_days, "selected_for_overview": False,
+         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
+         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
          "help": "Ответ AIWA, завершённый чек-ин, сохранённые еда или тренировка либо открытая сводка. Это proxy полученной ценности, а не прямая оценка пользователя."},
     ]
 
     trailing_cutoff = now - 86400
     trailing_sessions, _, _ = _sessions(rows, trailing_cutoff)
-    trailing_ai_attempts = sum(r["name"] == "ai_call" and r["ts"] >= trailing_cutoff for r in rows)
-    per_dau = lambda n: round(n / len(dau_ids), 2) if dau_ids else 0
+    trailing_ai_attempts = sum(r["name"] == "ai_call" and r["ts"] >= trailing_cutoff and
+                               r["provenance"] == "observed" for r in rows)
+    per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
     overview = {
         "ever_used": len(ever_ids), "dau": len(dau_ids), "wau": len(wau_ids), "mau": len(mau_ids),
         "sessions_per_dau": per_dau(trailing_sessions), "tools_per_dau": per_dau(trailing_ai_attempts),
@@ -632,7 +659,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "window_days": window_days,
         "installs": len(ever_ids), "dau": len(selected_ids), "events": len(selected),
         "errors": (failed_requests if requests else 0) + explicit_errors, "overview": overview,
-        "metrics": [{"label": x["label"], "value": str(x["value"]), "good": True} for x in primary],
+        "metrics": [{"label": x["label"], "value": ("—" if x["value"] is None else str(x["value"])),
+                     "good": True} for x in primary],
         "primary": primary,
         "audience": {"ever_used": len(ever_ids), "active": len(selected_ids), "dau": len(dau_ids),
                      "wau": len(wau_ids), "mau": len(mau_ids), "avg_dau": round(avg_dau, 1),

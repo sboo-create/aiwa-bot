@@ -116,7 +116,8 @@ class StatsModuleTests(unittest.TestCase):
         })
         tools = {x["id"]: x for x in data["tool_definitions"]}
         self.assertTrue(tools["ai_provider_attempts"]["selected_for_overview"])
-        self.assertEqual(tools["logical_ai_requests"]["value"], 0.5)
+        self.assertEqual(tools["ai_provider_attempts"]["denominator"], 1)
+        self.assertEqual(tools["logical_ai_requests"]["value"], 1.0)
         self.assertEqual(tools["value_actions"]["value"], 1.5)
         self.assertEqual(len(data["diagnostics"]), 10)
 
@@ -164,8 +165,17 @@ class StatsModuleTests(unittest.TestCase):
         tools = {x["id"]: x for x in data["tool_definitions"]}
         self.assertIsNone(tools["ai_provider_attempts"]["value"])
         self.assertIsNone(tools["logical_ai_requests"]["value"])
+        self.assertEqual(tools["ai_provider_attempts"]["status"], "no_active_users")
+        self.assertIsNone(data["overview"]["tools_per_dau"])
         self.assertEqual(data["errors"], 0)
         self.assertEqual(data["ai"]["providers"][0]["success"], 0)
+
+    def test_tool_request_card_distinguishes_no_calls_from_missing_request_ids(self):
+        data = self.module.compute_dashboard(1)
+        tools = {x["id"]: x for x in data["tool_definitions"]}
+
+        self.assertEqual(tools["logical_ai_requests"]["status"], "no_data")
+        self.assertIsNone(tools["logical_ai_requests"]["value"])
 
     def test_push_action_requires_campaign_specific_target(self):
         now = time.time()
