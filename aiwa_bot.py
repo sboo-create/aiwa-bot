@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v90-summary-images"
+AIWA_VERSION = "2026-07-23-v90-native-rich"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1330,19 +1330,60 @@ async def send_guide(context, cid, g):
         log.warning("guide: %s", e)
         with open(path, "rb") as fh: await context.bot.send_photo(cid, photo=fh, caption=g["title"])
 
+RICH_OK = os.environ.get("AIWA_RICH", "1") in ("1", "true", "True", "on")
+
+async def send_rich(bot, cid, md_text, reply_markup=None):
+    """Отправка через sendRichMessage (Bot API 10.1+): Telegram сам рендерит GFM —
+    таблицы, ### заголовки, списки, цитаты. Бросает исключение, если метод недоступен."""
+    data = {"chat_id": cid, "rich_message": json.dumps({"markdown": md_text})}
+    if reply_markup is not None:
+        data["reply_markup"] = reply_markup.to_json()
+    return await bot._post("sendRichMessage", data)
+
 def tg_rich(text):
     """Лёгкие маркеры от модели -> Telegram HTML: **жирный**, __курсив__, ```моноширинный блок```."""
     if not text: return ""
     t = html.escape(str(text), quote=False)
     t = re.sub(r"```[a-z]*\n?(.*?)```", lambda m: "<pre>" + m.group(1).strip("\n") + "</pre>", t, flags=re.S)
+    t = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", t)                     # ### заголовок -> жирный
+    t = _gfm_tables_to_pre(t)
     t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t, flags=re.S)
     t = re.sub(r"__(.+?)__", r"<i>\1</i>", t, flags=re.S)
     return t.replace("**", "").replace("__", "")     # непарные хвосты после нарезки
 
+def _gfm_tables_to_pre(t):
+    """Фолбэк для клиентов без rich: GFM-таблицу выравниваем пробелами в <pre>."""
+    out, buf = [], []
+    def flush():
+        if len(buf) >= 2 and re.match(r"^\s*\|?[\s:|-]+\|?\s*$", buf[1]):
+            rows = [[c.strip() for c in r.strip().strip("|").split("|")] for r in (buf[:1] + buf[2:])]
+            w = [max(len(r[i]) if i < len(r) else 0 for r in rows) for i in range(max(len(r) for r in rows))]
+            out.append("<pre>" + "\n".join("  ".join((r[i] if i < len(r) else "").ljust(w[i]) for i in range(len(w))).rstrip() for r in rows) + "</pre>")
+        else:
+            out.extend(buf)
+        buf.clear()
+    for ln in t.split("\n"):
+        if "|" in ln and ln.strip():
+            buf.append(ln)
+        else:
+            flush(); out.append(ln)
+    flush()
+    return "\n".join(out)
+
 def md_plain(text):
-    """Для мини-аппа: те же маркеры просто убираем, он рендерит плейн."""
+    """Для мини-аппа: маркеры убираем, таблицы сводим к строкам — он рендерит плейн."""
     if not text: return text
     t = re.sub(r"```[a-z]*\n?(.*?)```", r"\1", str(text), flags=re.S)
+    t = re.sub(r"(?m)^#{1,6}\s*", "", t)
+    lines = []
+    for ln in t.split("\n"):
+        if re.match(r"^\s*\|?[\s:|-]+\|?\s*$", ln) and "|" in ln:
+            continue                                   # разделитель таблицы
+        if "|" in ln and ln.strip().startswith("|"):
+            cells = [c.strip() for c in ln.strip().strip("|").split("|") if c.strip()]
+            ln = "• " + ", ".join(cells)
+        lines.append(ln)
+    t = "\n".join(lines)
     return t.replace("**", "").replace("__", "")
 
 TG_MESSAGE_LIMIT = 4096
@@ -1541,6 +1582,14 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     feedback_id = answer_id if _feedback_sampled(answer_id) else None
     kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label, feedback_id=feedback_id)
     quote_text = _clip_tg(quote) if quote else None
+    if RICH_OK:
+        try:
+            md = (("> " + quote_text.replace("\n", " ") + "\n\n") if quote_text else "") + clean
+            await send_rich(context.bot, cid, md, reply_markup=kb)
+            ev(cid, "assistant_message", meta="bot_rich")
+            return
+        except Exception as _re_:
+            log.info("rich fallback: %s", str(_re_)[:120])
     first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
     parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
     for i, part in enumerate(parts):
@@ -1574,8 +1623,16 @@ async def push_general(context, cid, with_image=True, campaign=None):
     clean, extra = L.split_followups(body)
     kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u,
                  app_label=APP_BUTTON_TEXT, campaign=campaign)
-    await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
-        reply_markup=kb, parse_mode="HTML")
+    if RICH_OK:
+        try:
+            await send_rich(context.bot, cid, clean, reply_markup=kb)
+        except Exception as _re_:
+            log.info("rich fallback: %s", str(_re_)[:120])
+            await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
+                reply_markup=kb, parse_mode="HTML")
+    else:
+        await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
+            reply_markup=kb, parse_mode="HTML")
     if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
     ev(cid, "goal", meta="summary")
     if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
@@ -1719,8 +1776,16 @@ async def push_summary(context, cid, with_image=True, campaign=None):
     clean, extra = L.split_followups(body)
     kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u,
                  app_label=APP_BUTTON_TEXT, campaign=campaign)
-    await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
-        reply_markup=kb, parse_mode="HTML")
+    if RICH_OK:
+        try:
+            await send_rich(context.bot, cid, clean, reply_markup=kb)
+        except Exception as _re_:
+            log.info("rich fallback: %s", str(_re_)[:120])
+            await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
+                reply_markup=kb, parse_mode="HTML")
+    else:
+        await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
+            reply_markup=kb, parse_mode="HTML")
     if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
     ev(cid, "goal", meta="summary")
     if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
