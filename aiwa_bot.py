@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v75-deprecate-legacy-admin"
+AIWA_VERSION = "2026-07-23-v76-product-metrics-and-proactive-controls"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -258,9 +258,12 @@ def db():
         except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
-                "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER", "last_phase_notified TEXT", "last_reactivation TEXT"):
+                "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER",
+                "last_phase_notified TEXT", "last_reactivation TEXT",
+                "proactive_enabled INTEGER DEFAULT 1"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
+    c.commit()
     return c
 
 def _user_generation(cid):
@@ -289,17 +292,18 @@ def _activate_user(cid):
         c.close()
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
             "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
             "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12],
             "mode": r[13] or "cycle", "diet_note": r[14] or "", "period_end": r[15], "period_len": r[16],
-            "train_profile": r[17], "kcal_goal": r[18], "last_phase_notified": r[19], "last_reactivation": r[20]}
+            "train_profile": r[17], "kcal_goal": r[18], "last_phase_notified": r[19],
+            "last_reactivation": r[20], "proactive_enabled": r[21] is None or bool(r[21])}
 
 _USER_UPDATE_COLUMNS = frozenset({"activity", "age", "cycle_len", "diet", "diet_note", "height", "kcal_goal",
     "last_period", "last_phase_notified", "last_reactivation", "mode", "partner_code", "pending_date",
-    "period_end", "period_len", "send_time", "state", "train_profile", "weight"})
+    "period_end", "period_len", "proactive_enabled", "send_time", "state", "train_profile", "weight"})
 def upsert(cid, **kw):
     unknown = set(kw) - _USER_UPDATE_COLUMNS
     if unknown:
@@ -1529,8 +1533,14 @@ async def push_checkin(context, cid, campaign=None):
 PROACTIVE_MIN = int(os.environ.get("AIWA_PROACTIVE_MIN", "40"))
 def _proactive_enabled():
     return os.environ.get("AIWA_PROACTIVE", "0") in ("1", "true", "True", "yes", "on")
+def _proactive_preference_on(cid):
+    """User-level opt-in shared by the new engine and legacy optional jobs."""
+    user = row(cid)
+    return bool(user and user.get("proactive_enabled", True))
 def _proactive_on(cid):
     if not _proactive_enabled():
+        return False
+    if not _proactive_preference_on(cid):
         return False
     raw = (os.environ.get("AIWA_PROACTIVE_IDS", "") or "").strip()
     if not raw or raw.lower() == "all":
@@ -1902,7 +1912,7 @@ def train_reminder_text(cid):
 
 async def push_food_reminder(context, cid):
     u = row(cid)
-    if not is_onboarded(u): return
+    if not is_onboarded(u) or not _proactive_preference_on(cid): return
     if meals_of(cid, dtoday().isoformat()): return   # уже отметила еду сегодня — не дёргаем
     campaign = campaign_id("food_reminder")
     wu = campaign_webapp_url(u, campaign, "food")
@@ -1912,7 +1922,7 @@ async def push_food_reminder(context, cid):
 
 async def push_train_reminder(context, cid):
     u = row(cid)
-    if not is_onboarded(u): return
+    if not is_onboarded(u) or not _proactive_preference_on(cid): return
     if workouts_of(cid, dtoday().isoformat()): return   # уже отметила тренировку — не дёргаем
     campaign = campaign_id("train_reminder")
     wu = campaign_webapp_url(u, campaign, "train")
@@ -1939,7 +1949,7 @@ async def train_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     if TRAIN_Q is None: return
     n = 0
     for cid in all_users():
-        if cid in TRAIN_PENDING: continue
+        if cid in TRAIN_PENDING or not _proactive_preference_on(cid): continue
         TRAIN_PENDING.add(cid); await TRAIN_Q.put(cid); n += 1
     log.info("train reminder queued: %d", n)
 
@@ -1978,7 +1988,8 @@ async def phase_transition_job(context: ContextTypes.DEFAULT_TYPE):
     for cid in all_users():
         try:
             u = row(cid)
-            if not is_onboarded(u) or (u.get("mode") or "cycle") != "cycle":
+            if (not is_onboarded(u) or not _proactive_preference_on(cid)
+                    or (u.get("mode") or "cycle") != "cycle"):
                 continue
             _, st = status_of(cid); phase = (st or {}).get("phase")
             if not phase or u.get("last_phase_notified") == phase:
@@ -2010,7 +2021,7 @@ async def reactivation_job(context: ContextTypes.DEFAULT_TYPE):
     for cid in all_users():
         try:
             u = row(cid)
-            if not is_onboarded(u):
+            if not is_onboarded(u) or not _proactive_preference_on(cid):
                 continue
             c = db(); r = c.execute("SELECT MAX(ts) FROM events WHERE chat_id=? AND action IN ('manual','button','suggest','command','answered','voice','goal')", (cid,)).fetchone(); c.close()
             if not r or not r[0]:
@@ -2064,7 +2075,7 @@ async def food_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     if FOOD_Q is None: return
     n = 0
     for cid in all_users():
-        if cid in FOOD_PENDING: continue
+        if cid in FOOD_PENDING or not _proactive_preference_on(cid): continue
         FOOD_PENDING.add(cid); await FOOD_Q.put(cid); n += 1
     log.info("food reminder queued: %d", n)
 
@@ -3049,8 +3060,9 @@ async def on_cb(update, context):
             _ans = "Не получилось собрать прямо сейчас, попробуй ещё раз чуть позже."
         _wu = webapp_url(_u) or AIWA_WEBAPP_URL
         _kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=_wu))]]) if _wu else None
+        sent = await context.bot.send_message(cid, _ans, reply_markup=_kb)
         ev(cid, "assistant_message", meta="bot")
-        return await context.bot.send_message(cid, _ans, reply_markup=_kb)
+        return sent
     if data == "go_start": return await begin_onboard(cid, q.message, force=True)
     if data == "keep":
         u_keep = row(cid)
@@ -3366,7 +3378,7 @@ async def on_startup(app):
         log.info("phase/reactivation pushes suppressed (proactive engine on)")
     if _proactive_enabled():
         try:
-            app.job_queue.run_daily(proactive_job_mid, time=dtime(13, 0, tzinfo=TZ), name="proactive_mid")
+            app.job_queue.run_daily(proactive_job_mid, time=dtime(14, 0, tzinfo=TZ), name="proactive_mid")
             app.job_queue.run_daily(proactive_job_eve, time=dtime(19, 30, tzinfo=TZ), name="proactive_eve")
             log.info("proactive engine ON (shadow=%s)", os.environ.get("AIWA_PROACTIVE_SHADOW", "1"))
         except Exception as _pe:
@@ -3436,6 +3448,7 @@ async def _api_data(request):
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
            "partner_linked": bool(partner_of(cid)),
+           "proactive_enabled": bool(u.get("proactive_enabled", True)),
            "today_log": log_get(cid, dtoday().isoformat()) or {"symptoms": []},
            "send_time": u.get("send_time") or "08:00",
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
@@ -3562,22 +3575,44 @@ async def _api_checkin(request):
     try: date.fromisoformat(ds)
     except Exception: ds = dtoday().isoformat()
     log_ensure(cid, ds)
+    changed = False
     if body.get("energy"):
-        try: log_set(cid, ds, energy=max(1, min(3, int(body["energy"]))))
+        try:
+            log_set(cid, ds, energy=max(1, min(3, int(body["energy"]))))
+            changed = True
         except Exception: pass
     if body.get("mood"):
-        try: log_set(cid, ds, mood=max(1, min(3, int(body["mood"]))))
+        try:
+            log_set(cid, ds, mood=max(1, min(3, int(body["mood"]))))
+            changed = True
         except Exception: pass
     if body.get("symptom"):
         code = str(body.get("symptom"))
         if code in SYM or code.startswith("custom:"):
             log_toggle(cid, ds, code)
+            changed = True
     if body.get("custom_symptom"):
         code = symptom_code(str(body.get("custom_symptom")))
         if code:
             log_add_symptom(cid, ds, code)
-    ev(cid, "manual", meta="web_checkin")
+            changed = True
+    if changed:
+        ev(cid, "manual", meta="web_checkin")
+        # In the mini app every successful field save is a completed check-in:
+        # unlike the bot flow there is intentionally no separate “Готово” button.
+        ev(cid, "goal", meta="web_checkin_complete")
     return _cors(web.json_response({"ok": True, "log": log_get(cid, ds) or {"symptoms": []}}))
+
+async def _api_proactive(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return _cors(web.json_response({"error": "bad_enabled"}, status=400))
+    upsert(cid, proactive_enabled=int(enabled))
+    ev(cid, "manual", meta=("web_proactive_on" if enabled else "web_proactive_off"))
+    return _cors(web.json_response({"ok": True, "proactive_enabled": enabled}))
 async def _api_profile(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -4968,6 +5003,7 @@ def build_web():
     aio.router.add_post("/api/period", _api_period)
     aio.router.add_post("/api/pa", _api_pa)
     aio.router.add_post("/api/checkin", _api_checkin)
+    aio.router.add_post("/api/proactive", _api_proactive)
     aio.router.add_post("/api/profile", _api_profile)
     aio.router.add_post("/api/meal", _api_meal)
     aio.router.add_post("/api/partner", _api_partner)

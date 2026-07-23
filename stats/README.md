@@ -33,6 +33,27 @@ denominators and `selected_for_overview`. This makes the current choice
 explicit while product can compare logical AI requests, product actions,
 feature breadth and completed value proxies before changing the canonical KPI.
 
+## Product decisions recorded on 2026-07-23
+
+- Immediate value means a successfully sent AIWA answer. Provider attempts,
+  retries, check-ins, meal/workout saves and summary opens do not redefine this
+  activation metric.
+- Bot check-in completion is the `Готово` action. In the mini app each
+  successfully saved field completes the check-in because there is no final
+  submit button.
+- Delayed check-in value is reported separately: the next scheduled morning
+  summary must be delivered within 36 hours and opened within the following
+  24 hours. One summary can satisfy only one check-in user-day, and user-days
+  follow the Moscow product timezone. Manual `/today` requests do not qualify.
+  This metric uses observed v2 events only; reconstructed check-ins have no
+  trustworthy campaign attribution and are shown as excluded rather than failures.
+  Recent check-ins that have not yet had a chance to receive a summary stay
+  pending rather than being counted as failures.
+- Daily summaries target a summary open. Proactive messages always report opens;
+  an action conversion is shown only for signals with an explicit target.
+  Fresh open/action windows remain pending for 24 hours instead of immediately
+  lowering conversion.
+
 ## Historical migration
 
 Legacy history is intentionally not blended into the exact layer. Run the

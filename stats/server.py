@@ -14,10 +14,11 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -32,6 +33,7 @@ INGEST_TOKEN = os.environ.get("STATS_INGEST_TOKEN", "")
 ALLOW_OPEN = os.environ.get("STATS_ALLOW_UNAUTHENTICATED_INGEST", "0") == "1"
 VERSION_FILE = HERE / "VERSION"
 VERSION = VERSION_FILE.read_text().strip() if VERSION_FILE.exists() else "dev"
+PRODUCT_TZ = ZoneInfo(os.environ.get("AIWA_TZ", "Europe/Moscow"))
 
 SAFE_PROPERTIES = {
     "screen", "channel", "calls", "provider", "model", "purpose", "status",
@@ -58,16 +60,16 @@ SYSTEM_NAMES = {
     "answer_feedback_submitted", "safety_guidance_shown", "summary_delivered",
 }
 SUCCESS = {"success", "ok", "completed"}
-VALUE_NAMES = {
-    "assistant_response_received", "checkin_completed", "meal_add_completed",
-    "workout_add_completed", "summary_opened", "feature_value_completed",
-}
+RESPONSE_NAMES = {"assistant_message_sent", "assistant_response_received"}
+# Product decision 2026-07-23: value means that AIWA delivered an answer.
+# Check-ins, meals, workouts and summary opens remain important product results,
+# but do not silently redefine the activation/value KPI.
+VALUE_NAMES = RESPONSE_NAMES
 PRODUCT_ACTION_NAMES = {
     "user_message_sent", "checkin_updated", "checkin_symptom_selected", "checkin_completed",
     "food_flow_started", "meal_add_completed", "workout_flow_started", "workout_add_completed",
     "summary_opened", "feature_value_completed",
 }
-KEY_RESULT_NAMES = VALUE_NAMES - {"feature_value_completed"}
 ENGAGEMENT_NAMES = VALUE_NAMES | {
     "user_message_sent", "assistant_message_sent", "app_opened", "screen_viewed", "checkin_updated",
 }
@@ -85,6 +87,31 @@ PUSH_ACTION_TARGETS = {
 def _push_action_targets(campaign_type: str) -> set[str]:
     """Return only an explicitly defined target; unknown campaigns never claim conversion."""
     return PUSH_ACTION_TARGETS.get(campaign_type, set())
+
+def _push_family(campaign_type: str) -> tuple[str, str]:
+    if campaign_type == "daily_summary":
+        return "daily_summary", "Утренняя сводка"
+    if campaign_type.startswith("proactive_"):
+        return "proactive", "Проактивное сообщение"
+    return "other", "Прочие / старая логика"
+
+def _push_target_label(targets: set[str]) -> str:
+    labels = {
+        "summary_opened": "открытие сводки",
+        "checkin_completed": "сохранение чек-ина",
+        "meal_add_completed": "запись еды",
+        "workout_add_completed": "запись тренировки",
+    }
+    return ", ".join(labels.get(name, name) for name in sorted(targets))
+
+def _is_delivered_answer(row: dict[str, Any]) -> bool:
+    """Prefer the post-send event; reconstructed history may only have the legacy response event."""
+    return (row["name"] == "assistant_message_sent" or
+            (row["name"] == "assistant_response_received" and row["provenance"] != "observed"))
+
+
+def _product_day(ts: float) -> str:
+    return datetime.fromtimestamp(ts, PRODUCT_TZ).date().isoformat()
 
 app = FastAPI()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -290,7 +317,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     active_user_days = sum(len(v) for v in daily_users.values())
     sessions, session_lengths, session_events = _sessions(rows, since)
     messages = sum(r["name"] == "user_message_sent" for r in selected)
-    responses = sum(r["name"] == "assistant_response_received" for r in selected)
+    responses = sum(_is_delivered_answer(r) for r in selected)
 
     ai_rows = [r for r in selected if r["name"] == "ai_call"]
     requests: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -328,7 +355,11 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     failed_attempts = sum(str(r["properties"].get("status") or "") not in SUCCESS for r in ai_rows)
     explicit_errors = sum(r["name"] in {"error", "legacy_error"} for r in selected)
     pushes = [r for r in selected if r["name"] in {"push_sent", "legacy_broadcast"}]
-    checkins = [r for r in selected if r["name"] == "checkin_completed"]
+    all_checkins = [r for r in selected if r["name"] == "checkin_completed"]
+    exact_checkins = [r for r in all_checkins if r["provenance"] == "observed"]
+    reconstructed_checkins = [
+        r for r in all_checkins if r["provenance"] != "observed"
+    ]
 
     feature_users: dict[str, set[str]] = defaultdict(set); feature_events = Counter()
     for row in active_selected:
@@ -339,26 +370,40 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                         "adoption": _percent(len(users), len(selected_ids))}
                        for name, users in feature_users.items()), key=lambda x: (-x["users"], x["name"]))
 
-    def _feature_funnel(label: str, start_names: set[str], done_names: set[str], help_text: str) -> dict[str, Any]:
+    def _feature_funnel(label: str, start_names: set[str], done_names: set[str], help_text: str,
+                        done_predicate=None) -> dict[str, Any]:
         started_at: dict[str, float] = {}
         for item in selected:
             if item["name"] in start_names:
                 started_at.setdefault(item["device_id"], item["ts"])
         completed = 0
         for user, start_ts in started_at.items():
-            if any(item["device_id"] == user and item["ts"] >= start_ts and item["name"] in done_names
+            if any(item["device_id"] == user and item["ts"] >= start_ts
+                   and ((done_predicate(item) if done_predicate else item["name"] in done_names))
                    for item in selected):
                 completed += 1
         return {"label": label, "started": len(started_at), "completed": completed,
                 "rate": _percent(completed, len(started_at)) if started_at else None, "help": help_text}
 
+    has_reconstructed_answers = any(
+        _is_delivered_answer(item) and item["provenance"] != "observed" for item in selected
+    )
+    answer_delivery_help = (
+        "Из написавших AIWA: получили ответ. В восстановленной истории это приблизительный "
+        "legacy-сигнал до отправки; в точном v2-слое — подтверждённая отправка в Telegram."
+        if has_reconstructed_answers else
+        "Из написавших AIWA: получили подтверждённо отправленный ответ. "
+        "Считаются уникальные люди, а не сообщения."
+    )
     feature_funnels = [
         _feature_funnel("Чат с AIWA", {"user_message_sent"},
                         {"assistant_message_sent", "assistant_response_received", "answer_feedback_prompted"},
-                        "Из написавших AIWA: получили ответ. Считаются уникальные люди, а не сообщения."),
+                        answer_delivery_help,
+                        lambda item: (_is_delivered_answer(item)
+                                      or item["name"] == "answer_feedback_prompted")),
         _feature_funnel("Ежедневный чек-ин", {"checkin_updated", "checkin_symptom_selected"},
                         {"checkin_completed"},
-                        "Из начавших отмечать состояние: дошли до кнопки «Готово»."),
+                        "В боте завершение — кнопка «Готово»; в mini app — успешное сохранение любого выбранного поля."),
         _feature_funnel("Питание", {"food_flow_started"}, {"meal_add_completed"},
                         "Из начавших добавление еды: сохранили приём пищи. Событие старта собирается с новой версии."),
         _feature_funnel("Нагрузка", {"workout_flow_started"}, {"workout_add_completed"},
@@ -403,28 +448,70 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         elif item["name"] == "push_opened":
             opened_by_key[key].append(item)
     push_campaigns: dict[str, Counter] = defaultdict(Counter)
-    push_opened = push_acted = 0
+    push_campaign_labels: dict[str, str] = {}
+    push_campaign_targets: dict[str, set[str]] = defaultdict(set)
+    push_opened = push_open_eligible = push_open_pending = 0
+    push_acted = push_action_eligible = push_action_pending = 0
     for key, sent_item in sent_by_key.items():
         user, campaign = key; campaign_type = str(sent_item["properties"].get("campaign_type") or campaign.split(":", 1)[0])
-        push_campaigns[campaign_type]["sent"] += 1
+        family, family_label = _push_family(campaign_type)
+        targets = _push_action_targets(campaign_type)
+        push_campaign_labels[family] = family_label
+        push_campaign_targets[family].update(targets)
+        push_campaigns[family]["sent"] += 1
         opens = [item for item in opened_by_key.get(key, []) if sent_item["ts"] <= item["ts"] <= sent_item["ts"] + 86400]
         if not opens:
+            if sent_item["ts"] + 86400 <= now:
+                push_open_eligible += 1
+                push_campaigns[family]["open_eligible"] += 1
+            else:
+                push_open_pending += 1
+                push_campaigns[family]["open_pending"] += 1
+            if targets:
+                if sent_item["ts"] + 86400 <= now:
+                    push_action_eligible += 1
+                    push_campaigns[family]["action_eligible"] += 1
+                else:
+                    push_action_pending += 1
+                    push_campaigns[family]["action_pending"] += 1
             continue
-        push_opened += 1; push_campaigns[campaign_type]["opened"] += 1
+        push_opened += 1; push_open_eligible += 1
+        push_campaigns[family]["opened"] += 1
+        push_campaigns[family]["open_eligible"] += 1
         opened_at = min(item["ts"] for item in opens)
-        targets = _push_action_targets(campaign_type)
         acted = bool(targets) and any(item["name"] in targets and opened_at <= item["ts"] <= opened_at + 86400
                                       for item in events_by_user[user])
         if acted:
-            push_acted += 1; push_campaigns[campaign_type]["acted"] += 1
+            push_acted += 1; push_action_eligible += 1
+            push_campaigns[family]["acted"] += 1
+            push_campaigns[family]["action_eligible"] += 1
+        elif targets and opened_at + 86400 <= now:
+            push_action_eligible += 1
+            push_campaigns[family]["action_eligible"] += 1
+        elif targets:
+            push_action_pending += 1
+            push_campaigns[family]["action_pending"] += 1
     push_failed = sum(item["name"] == "push_failed" for item in selected)
     push_funnel = {
         "sent": len(sent_by_key), "opened": push_opened, "acted": push_acted, "failed": push_failed,
-        "open_rate": _percent(push_opened, len(sent_by_key)) if sent_by_key else None,
-        "action_rate": _percent(push_acted, len(sent_by_key)) if sent_by_key else None,
-        "campaigns": [{"name": name, "sent": values["sent"], "opened": values["opened"],
-                       "acted": values["acted"], "open_rate": _percent(values["opened"], values["sent"]),
-                       "action_rate": _percent(values["acted"], values["sent"])}
+        "open_eligible": push_open_eligible, "open_pending": push_open_pending,
+        "open_rate": _percent(push_opened, push_open_eligible) if push_open_eligible else None,
+        "action_eligible": push_action_eligible, "action_pending": push_action_pending,
+        "action_rate": _percent(push_acted, push_action_eligible) if push_action_eligible else None,
+        "campaigns": [{"id": name, "name": push_campaign_labels[name],
+                       "target": (_push_target_label(push_campaign_targets[name])
+                                  if push_campaign_targets[name]
+                                  else "только открытие; целевое действие не задано"),
+                       "sent": values["sent"], "opened": values["opened"],
+                       "acted": values["acted"],
+                       "open_eligible": values["open_eligible"],
+                       "open_pending": values["open_pending"],
+                       "open_rate": (_percent(values["opened"], values["open_eligible"])
+                                     if values["open_eligible"] else None),
+                       "action_eligible": values["action_eligible"],
+                       "action_pending": values["action_pending"],
+                       "action_rate": (_percent(values["acted"], values["action_eligible"])
+                                       if values["action_eligible"] else None)}
                       for name, values in sorted(push_campaigns.items(), key=lambda pair: -pair[1]["sent"])],
     }
 
@@ -439,7 +526,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
             continue
         completed += 1; completion = min(completion_times)
         engaged_rows = [r for r in after if r["ts"] >= completion and r["name"] in ENGAGEMENT_NAMES]
-        value_rows = [r for r in after if r["ts"] >= completion and r["name"] in VALUE_NAMES]
+        value_rows = [r for r in after if r["ts"] >= completion and _is_delivered_answer(r)]
         if engaged_rows: engaged += 1
         if value_rows:
             valued += 1; time_to_value.append(max(0, min(r["ts"] for r in value_rows) - started))
@@ -450,9 +537,114 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "help": "Из начавших онбординг: дошли до финального шага настройки профиля."},
         {"label": "Сделали первое действие", "value": engaged, "rate": _percent(engaged, len(starts)),
          "help": "После завершения онбординга открыли mini app, написали AIWA или сделали запись в продукте."},
-        {"label": "Сделали ключевое действие", "value": valued, "rate": _percent(valued, len(starts)),
-         "help": "Proxy ценности, а не оценка ощущений пользователя: получен ответ AIWA, завершён чек-ин, добавлены еда/тренировка или открыта сводка."},
+        {"label": "Получили ответ AIWA", "value": valued, "rate": _percent(valued, len(starts)),
+         "help": ("Согласованное определение ценности: после онбординга AIWA отправила пользователю "
+                  "хотя бы один ответ. В смешанном режиме legacy-часть приблизительна; переключатель "
+                  "«Только точные» оставляет лишь подтверждённые post-send события. Retry и внутренние "
+                  "вызовы модели не считаются."
+                  if has_reconstructed_answers else
+                  "Согласованное определение ценности: после онбординга AIWA подтверждённо отправила "
+                  "пользователю хотя бы один ответ. Retry и внутренние вызовы модели не считаются.")},
     ]
+
+    immediate_users = {r["device_id"] for r in selected if _is_delivered_answer(r)}
+    checkin_started_by_cohort: dict[tuple[str, str], float] = {}
+    for item in exact_checkins:
+        checkin_day = _product_day(item["ts"])
+        cohort = (item["device_id"], checkin_day)
+        checkin_started_by_cohort[cohort] = min(
+            checkin_started_by_cohort.get(cohort, item["ts"]), item["ts"]
+        )
+    followup_maturity = 36 * 3600
+    checkins_by_user: dict[str, list[tuple[tuple[str, str], float]]] = defaultdict(list)
+    summaries_by_user: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    summary_opens_by_key: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for cohort, checkin_at in checkin_started_by_cohort.items():
+        checkins_by_user[cohort[0]].append((cohort, checkin_at))
+    for item in rows:
+        if (item["provenance"] == "observed" and item["name"] == "push_sent"
+                and str(item["properties"].get("campaign_type") or "") == "daily_summary"):
+            summaries_by_user[item["device_id"]].append(item)
+        elif item["provenance"] == "observed" and item["name"] == "push_opened":
+            campaign = str(item["properties"].get("campaign_id") or "")
+            if campaign:
+                summary_opens_by_key[(item["device_id"], campaign)].append(item["ts"])
+    for items in checkins_by_user.values():
+        items.sort(key=lambda pair: pair[1])
+    for items in summaries_by_user.values():
+        items.sort(key=lambda item: item["ts"])
+    for timestamps in summary_opens_by_key.values():
+        timestamps.sort()
+
+    # One scheduled summary can fulfil at most one preceding check-in user-day.
+    paired_summaries: dict[tuple[str, str], dict[str, Any]] = {}
+    for user, user_checkins in checkins_by_user.items():
+        pending: deque[tuple[tuple[str, str], float]] = deque()
+        index = 0
+        for summary_item in summaries_by_user.get(user, []):
+            sent_at = summary_item["ts"]
+            while index < len(user_checkins) and user_checkins[index][1] < sent_at:
+                pending.append(user_checkins[index]); index += 1
+            while pending and pending[0][1] + followup_maturity < sent_at:
+                pending.popleft()
+            if pending:
+                cohort, _ = pending.popleft()
+                paired_summaries[cohort] = summary_item
+
+    delivery_eligible: set[tuple[str, str]] = set()
+    delivery_pending: set[tuple[str, str]] = set()
+    followup_sent = set(paired_summaries)
+    followup_opened: set[tuple[str, str]] = set()
+    open_eligible: set[tuple[str, str]] = set()
+    open_pending: set[tuple[str, str]] = set()
+    for cohort, checkin_at in checkin_started_by_cohort.items():
+        summary_item = paired_summaries.get(cohort)
+        if summary_item is None:
+            (delivery_eligible if checkin_at + followup_maturity <= now
+             else delivery_pending).add(cohort)
+            continue
+        delivery_eligible.add(cohort)
+        sent_at = summary_item["ts"]
+        campaign = str(summary_item["properties"].get("campaign_id") or "")
+        opens = summary_opens_by_key.get((cohort[0], campaign), [])
+        was_opened = any(sent_at <= opened_at <= sent_at + 86400 for opened_at in opens)
+        if was_opened:
+            followup_opened.add(cohort)
+            open_eligible.add(cohort)
+        elif sent_at + 86400 <= now:
+            open_eligible.add(cohort)
+        else:
+            open_pending.add(cohort)
+
+    value_delivery = {
+        "immediate": {
+            "users": len(immediate_users),
+            "help": ("Уникальные пользователи, для которых есть сигнал ответа AIWA в выбранном периоде. "
+                     "В смешанном режиме legacy-часть приблизительна; «Только точные» считает лишь "
+                     "подтверждённые отправки."
+                     if has_reconstructed_answers else
+                     "Уникальные пользователи, которым AIWA подтверждённо отправила хотя бы один ответ "
+                     "в выбранном периоде."),
+        },
+        "delayed_checkin": {
+            "checkin_user_days": len(checkin_started_by_cohort),
+            "excluded_reconstructed_events": len(reconstructed_checkins),
+            "eligible_user_days": len(delivery_eligible),
+            "delivery_eligible_user_days": len(delivery_eligible),
+            "pending_user_days": len(delivery_pending),
+            "delivery_pending_user_days": len(delivery_pending),
+            "summary_delivered_user_days": len(followup_sent),
+            "open_eligible_user_days": len(open_eligible),
+            "open_pending_user_days": len(open_pending),
+            "summary_opened_user_days": len(followup_opened),
+            "delivery_rate": (_percent(len(followup_sent), len(delivery_eligible))
+                              if delivery_eligible else None),
+            "open_rate": (_percent(len(followup_opened), len(open_eligible))
+                          if open_eligible else None),
+            "maturity_hours": 36,
+            "help": "Отложенная польза чек-ина считается только по точным v2-событиям: следующая запланированная утренняя сводка отправлена не позднее 36 часов после сохранения, затем открыта по тому же campaign_id в течение 24 часов. Один push относится только к одному чек-ин user-day; день считается по Москве. Восстановленные чек-ины исключены, ручной /today не входит, а незавершённые окна показаны как ожидающие и не занижают конверсию.",
+        },
+    }
 
     active_days_by_user: dict[str, set[str]] = defaultdict(set)
     feature_set_by_user: dict[str, set[str]] = defaultdict(set)
@@ -463,14 +655,20 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         if feature: feature_set_by_user[row["device_id"]].add(feature)
     returning_users = sum(len(days_set) >= 2 for days_set in active_days_by_user.values())
     multi_feature_users = sum(len(feature_set) >= 2 for feature_set in feature_set_by_user.values())
-    checkin_users = {r["device_id"] for r in checkins}
+    checkin_users = {r["device_id"] for r in all_checkins}
     product_health = [
-        {"label": "Activation proxy", "value": _percent(valued, len(starts)) if starts else None,
+        {"label": "Answer activation", "value": _percent(valued, len(starts)) if starts else None,
          "unit": "%", "note": f"{valued} из {len(starts)} начавших",
-         "help": "Доля начавших онбординг, которые затем сделали хотя бы одно ключевое действие. Это proxy, пока нет пользовательской оценки пользы."},
-        {"label": "Time to value p50", "value": _pct(time_to_value, .5) if time_to_value else None,
+         "help": ("Доля начавших онбординг, для которых затем есть сигнал ответа AIWA. "
+                  "В смешанном режиме legacy-часть приблизительна."
+                  if has_reconstructed_answers else
+                  "Доля начавших онбординг, которым AIWA затем подтверждённо отправила хотя бы один ответ.")},
+        {"label": "Time to first answer p50", "value": _pct(time_to_value, .5) if time_to_value else None,
          "unit": "duration", "note": "от старта онбординга",
-         "help": "Медианное время от начала онбординга до первого ключевого действия. Считается только для активированных пользователей."},
+         "help": ("Медианное время от начала онбординга до первого сигнала ответа AIWA; "
+                  "для восстановленной legacy-истории это приблизительный pre-send сигнал."
+                  if has_reconstructed_answers else
+                  "Медианное время от начала онбординга до первого подтверждённо отправленного ответа AIWA.")},
         {"label": "Returning users", "value": (_percent(returning_users, len(selected_ids))
                                                    if available_days >= 2 and selected_ids else None),
          "unit": "%", "note": f"{returning_users} активны в 2+ дня",
@@ -539,7 +737,11 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     exact_request_coverage = _percent(exact_request_covered, len(exact_ai_rows))
     exact_request_ready = bool(exact_ai_rows) and exact_request_coverage >= 80
     product_actions = sum(r["name"] in PRODUCT_ACTION_NAMES for r in selected)
-    value_actions = sum(r["name"] in KEY_RESULT_NAMES for r in selected)
+    response_user_days = {
+        (r["device_id"], datetime.fromtimestamp(r["ts"], timezone.utc).date().isoformat())
+        for r in selected if _is_delivered_answer(r)
+    }
+    value_actions = len(response_user_days)
     feature_days: dict[tuple[str, str], set[str]] = defaultdict(set)
     for row in active_selected:
         feature = _feature(row)
@@ -607,12 +809,12 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
          "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
          "help": "Среднее число разных продуктовых зон, которыми человек воспользовался за активный день. Повторное использование одной зоны в тот же день не увеличивает показатель."},
-        {"id": "value_actions", "label": "Ключевые результаты / user-day",
+        {"id": "value_actions", "label": "Дни с ответом AIWA / user-day",
          "value": per_active_day_or_none(value_actions), "numerator": value_actions,
-         "numerator_label": "ключевых результатов",
+         "numerator_label": "user-days с ответом AIWA",
          "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
          "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
-         "help": "Ответ AIWA, завершённый чек-ин, сохранённые еда или тренировка либо открытая сводка. Это proxy полученной ценности, а не прямая оценка пользователя."},
+         "help": "Доля активных пользовательских дней, в которые AIWA успешно отправила хотя бы один ответ. Несколько ответов за день не раздувают показатель."},
     ]
 
     overview = {
@@ -697,10 +899,10 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                        "avg_session_min": round(sum(session_lengths) / len(session_lengths) / 60, 1) if session_lengths else 0,
                        "events_per_session": round(sum(session_events) / len(session_events), 1) if session_events else 0,
                        "features": features,
-                       "pushes_sent": len(pushes), "checkins_completed": len(checkins)},
+                       "pushes_sent": len(pushes), "checkins_completed": len(all_checkins)},
         "tool_definitions": tool_definitions,
         "diagnostics": diagnostics,
-        "funnel": funnel, "feature_funnels": feature_funnels,
+        "funnel": funnel, "value_delivery": value_delivery, "feature_funnels": feature_funnels,
         "product_health": product_health, "answer_quality": answer_quality,
         "push_funnel": push_funnel, "retention": _retention(rows),
         "series": series_data,
