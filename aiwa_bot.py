@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v93-no-double-bullets"
+AIWA_VERSION = "2026-07-23-v94-rich-everywhere"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1427,10 +1427,16 @@ def _clip_tg(text, limit=TG_QUOTE_LIMIT):
     return text[:keep].rstrip() + "…"
 
 async def reply_long(message, text, reply_markup=None):
-    """Reply with every chunk; interactive buttons belong only to the final part."""
+    """Ответ с rich-форматированием; фолбэк — HTML по кускам. Кнопки только у последней части."""
+    if RICH_OK:
+        try:
+            await send_rich(message.get_bot(), message.chat_id, text, reply_markup=reply_markup)
+            return
+        except Exception as _e:
+            log.info("rich fallback: %s", str(_e)[:120])
     parts = split_tg(text) or [str(text or "")]
     for i, part in enumerate(parts):
-        await message.reply_text(part, reply_markup=(reply_markup if i == len(parts) - 1 else None))
+        await message.reply_text(tg_rich(part), reply_markup=(reply_markup if i == len(parts) - 1 else None), parse_mode="HTML")
 def chat_hint(cid):
     base = last_hint(cid) or ""
     u = row(cid)
