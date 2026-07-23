@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-24-v103-delivery-leases"
+AIWA_VERSION = "2026-07-24-v104-multilingual-tts"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -1776,18 +1776,31 @@ async def _send_audio_fallback(context, cid, audio):
     await context.bot.send_audio(cid, buf, title="Ответ Айвы", performer="Айва")
 
 async def _send_voice_reply(context, cid, text):
-    """Speak the complete answer in bounded requests instead of truncating it."""
+    """Speak the complete multilingual answer; synthesize chunks in parallel but send in order."""
     try:
-        chunks = L.tts_chunks(text)
-        total_ms = 0; total_chars = 0; calls = 0; how = "tts:salute"
-        for chunk in chunks:
+        requests_ = L.tts_ssml_requests(text)
+        try:
+            parallelism = int(os.environ.get("AIWA_TTS_PARALLELISM", "1"))
+        except (TypeError, ValueError):
+            parallelism = 1
+        parallelism = max(1, min(int(getattr(L, "_tts_provider_concurrency")()), parallelism))
+        gate = asyncio.Semaphore(parallelism)
+
+        async def synthesize_one(request_):
             info = {}
-            audio = await llm_to_thread(cid, "tts", L.synthesize, chunk, info)
-            if not audio:
-                continue
+            async with gate:
+                audio = await llm_to_thread(cid, "tts", L.synthesize_request, request_, info)
+            return audio, info
+
+        results = await asyncio.gather(*(synthesize_one(request_) for request_ in requests_))
+        if not results or any(not audio for audio, _ in results):
+            log.warning("voice reply: one or more multilingual chunks failed")
+            return
+        total_ms = 0; total_chars = 0; calls = 0; how = "tts:salute"
+        for audio, info in results:
             calls += 1
             total_ms += int(info.get("ms") or 0)
-            total_chars += int(info.get("chars") or len(chunk))
+            total_chars += int(info.get("chars") or 0)
             try:
                 await context.bot.send_voice(cid, audio)
             except Exception as exc:
