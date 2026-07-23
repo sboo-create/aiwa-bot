@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v89-tg-rich-tov"
+AIWA_VERSION = "2026-07-23-v90-summary-images"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1156,7 +1156,30 @@ async def send_infographic(bot, cid):
         png = await asyncio.to_thread(IMG.render_cycle, date.fromisoformat(u["last_period"]), u["cycle_len"], dtoday())
         bio = io.BytesIO(png); bio.name = "cycle.png"
         await bot.send_photo(cid, photo=bio, caption=f"AIWA · {st['subphase']} {st['phase_ru'].lower()}, день {st['day']}. Месячные через ~{st['days_to_next']} дн.")
+        return True
     except Exception as e: log.warning("infographic: %s", e)
+    return False
+
+async def send_general_infographic(bot, cid, u=None):
+    """Картинка к сводке для беременности и режимов без прогноза фазы цикла."""
+    if not IMG: return False
+    u = u or row(cid)
+    if not u: return False
+    mode = u.get("mode") or "none"
+    pregnancy = None
+    if mode == "preg" and u.get("last_period"):
+        try:
+            pregnancy = C.preg_status(u["last_period"])
+        except Exception:
+            pregnancy = None
+    try:
+        png = await asyncio.to_thread(IMG.render_general_summary, mode, dtoday(), pregnancy)
+        bio = io.BytesIO(png); bio.name = "summary.png"
+        await bot.send_photo(cid, photo=bio)
+        return True
+    except Exception as e:
+        log.warning("general infographic (%s): %s", mode, e)
+        return False
 
 async def send_training_card(context, cid, st):
     if not IMG: return
@@ -1537,8 +1560,10 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
         await _send_voice_reply(context, cid, clean)
 
-async def push_general(context, cid, campaign=None):
+async def push_general(context, cid, with_image=True, campaign=None):
     u = row(cid); usage = []; _ds = dtoday().isoformat()
+    if with_image:
+        await send_general_infographic(context.bot, cid, u)
     _key = (cid, _ds, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
     body = _SUM_CACHE.get(_key)
     if body is None:
@@ -1677,7 +1702,8 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
 
 async def push_summary(context, cid, with_image=True, campaign=None):
     u0 = row(cid)
-    if u0 and not is_cycle(u0): return await push_general(context, cid, campaign=campaign)
+    if u0 and not is_cycle(u0):
+        return await push_general(context, cid, with_image=with_image, campaign=campaign)
     u, st = status_of(cid)
     if not st: return
     if st["status"] != "normal": return await send_delay(context, cid, st, campaign=campaign)

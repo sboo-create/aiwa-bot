@@ -119,6 +119,46 @@ def render_delay(st):
     buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
 
 
+def render_general_summary(mode, today, pregnancy=None):
+    """Карточка утренней сводки для режимов, где фазу цикла не прогнозируем."""
+    W,H=720,540
+    img=Image.new("RGB",(W*S,H*S),PAPER); d=ImageDraw.Draw(img)
+    def X(v): return int(v*S)
+    f_eye=_f("DejaVuSans-Bold.ttf",22); f_date=_f("DejaVuSans.ttf",20)
+    f_h=_f("DejaVuSerif.ttf",38); f_big=_f("DejaVuSerif.ttf",58)
+    f_sm=_f("DejaVuSans.ttf",21); f_lab=_f("DejaVuSans-Bold.ttf",15)
+
+    cards={
+        "irregular": ("Нерегулярный цикл", "Сегодня", "Опираемся на самочувствие и отметки,\nа не на прогноз фазы цикла."),
+        "meno": ("Менопауза", "Сегодня", "В фокусе сон, энергия, настроение\nи другие отмеченные симптомы."),
+        "none": ("Без месячных", "Сегодня", "Фазу цикла не прогнозируем.\nСводка учитывает твои отметки."),
+        "preg": ("Беременность", "Сегодня", "Сводка учитывает срок беременности\nи сегодняшнее самочувствие."),
+    }
+    title,big,note=cards.get(mode,cards["none"])
+    if mode=="preg" and pregnancy:
+        week=max(1,int(pregnancy.get("week") or 1))
+        trimester=max(1,int(pregnancy.get("trimester") or 1))
+        big=f"{week} неделя"
+        note=f"{trimester} триместр. Сводка учитывает срок\nбеременности и самочувствие."
+
+    d.text((X(40),X(34)),"AIWA",font=f_eye,fill=ROSE)
+    d.text((X(W-40),X(38)),f"{today.day} {MONTHS[today.month-1]}",font=f_date,fill=SOFT,anchor="ra")
+    d.text((X(40),X(78)),title,font=f_h,fill=INK)
+
+    d.rounded_rectangle([X(40),X(150),X(W-40),X(350)],radius=X(34),fill=ROSEWASH)
+    d.text((X(W//2),X(202)),"СВОДКА НА СЕГОДНЯ",font=f_lab,fill=ROSE,anchor="mm")
+    d.text((X(W//2),X(265)),big,font=f_big,fill=INK,anchor="mm")
+
+    y=X(394)
+    for line in note.splitlines():
+        d.text((X(40),y),line,font=f_sm,fill=INKMID)
+        y+=X(31)
+    d.text((X(40),X(500)),"Открой сводку, чтобы увидеть рекомендации на день.",font=f_sm,fill=INK)
+
+    img=img.resize((W,H),Image.LANCZOS)
+    buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
+
+
 def render_menu(data, phase_ru="Лютеиновая", target_kcal=None):
     """Карточка питания на день. Единый рендер (3x супер-сэмплинг), длинный текст обрезается, а не вылезает."""
     W=720
