@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v90-native-rich"
+AIWA_VERSION = "2026-07-23-v91-unified-summaries"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1613,7 +1613,7 @@ async def push_general(context, cid, with_image=True, campaign=None):
     u = row(cid); usage = []; _ds = dtoday().isoformat()
     if with_image:
         await send_general_infographic(context.bot, cid, u)
-    _key = (cid, _ds, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
+    _key = (cid, _ds, AIWA_VERSION, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
     body = _SUM_CACHE.get(_key)
     if body is None:
         body = await llm_to_thread(cid, "daily_summary", L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
@@ -1766,7 +1766,7 @@ async def push_summary(context, cid, with_image=True, campaign=None):
     if st["status"] != "normal": return await send_delay(context, cid, st, campaign=campaign)
     if with_image: await send_infographic(context.bot, cid)
     usage = []; _ds = dtoday().isoformat()
-    _key = (cid, _ds, st.get("phase"), str(log_get(cid, _ds) or ""))
+    _key = (cid, _ds, AIWA_VERSION, st.get("phase"), str(log_get(cid, _ds) or ""))
     body = _SUM_CACHE.get(_key)
     if body is None:
         body = await llm_to_thread(cid, "daily_summary", L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
