@@ -158,6 +158,65 @@ class SecurityAnalyticsTests(unittest.TestCase):
             self.assertTrue(item["device_id"].startswith("u_"))
             self.assertFalse({"chat_id", "telegram_id", "user_id"} & set(item["properties"]))
 
+    def test_daily_checkin_push_is_sent_once_per_campaign(self):
+        cid = 123
+        campaign = "daily_checkin:2026-07-23"
+        context = types.SimpleNamespace(bot=types.SimpleNamespace(send_message=mock.AsyncMock()))
+        with mock.patch.object(bot, "row", return_value={"chat_id": cid}), \
+             mock.patch.object(bot, "is_onboarded", return_value=True), \
+             mock.patch.object(bot, "log_ensure"), \
+             mock.patch.object(bot, "en_kb", return_value=None), \
+             mock.patch.object(bot, "ev"):
+            first = asyncio.run(bot.push_checkin(context, cid, campaign=campaign))
+            second = asyncio.run(bot.push_checkin(context, cid, campaign=campaign))
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        context.bot.send_message.assert_awaited_once()
+        conn = sqlite3.connect(bot.DB)
+        self.assertEqual(
+            conn.execute(
+                "SELECT status FROM push_deliveries WHERE chat_id=? AND campaign_id=?",
+                (cid, campaign),
+            ).fetchone(),
+            ("sent",),
+        )
+        conn.close()
+
+    def test_failed_checkin_send_releases_claim_for_retry(self):
+        cid = 124
+        campaign = "daily_checkin:2026-07-23"
+        send_message = mock.AsyncMock(side_effect=[RuntimeError("telegram unavailable"), None])
+        context = types.SimpleNamespace(bot=types.SimpleNamespace(send_message=send_message))
+        with mock.patch.object(bot, "row", return_value={"chat_id": cid}), \
+             mock.patch.object(bot, "is_onboarded", return_value=True), \
+             mock.patch.object(bot, "log_ensure"), \
+             mock.patch.object(bot, "en_kb", return_value=None), \
+             mock.patch.object(bot, "ev"):
+            failed = asyncio.run(bot.push_checkin(context, cid, campaign=campaign))
+            retried = asyncio.run(bot.push_checkin(context, cid, campaign=campaign))
+
+        self.assertFalse(failed)
+        self.assertTrue(retried)
+        self.assertEqual(send_message.await_count, 2)
+
+    def test_sent_checkin_keeps_claim_if_delivery_bookkeeping_fails(self):
+        cid = 125
+        campaign = "daily_checkin:2026-07-23"
+        context = types.SimpleNamespace(bot=types.SimpleNamespace(send_message=mock.AsyncMock()))
+        with mock.patch.object(bot, "row", return_value={"chat_id": cid}), \
+             mock.patch.object(bot, "is_onboarded", return_value=True), \
+             mock.patch.object(bot, "log_ensure"), \
+             mock.patch.object(bot, "en_kb", return_value=None), \
+             mock.patch.object(bot, "_complete_push_delivery", side_effect=RuntimeError("db busy")), \
+             mock.patch.object(bot, "ev"):
+            first = asyncio.run(bot.push_checkin(context, cid, campaign=campaign))
+            second = asyncio.run(bot.push_checkin(context, cid, campaign=campaign))
+
+        self.assertFalse(first)
+        self.assertFalse(second)
+        context.bot.send_message.assert_awaited_once()
+
     def test_traction_payload_upgrade_is_requeued_once(self):
         conn = sqlite3.connect(bot.DB)
         a2.init_schema(conn)

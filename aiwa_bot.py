@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v87-partner-copy"
+AIWA_VERSION = "2026-07-23-v88-checkin-idempotency"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -253,6 +253,13 @@ def db():
     c.execute("CREATE TABLE IF NOT EXISTS proactive_state(chat_id INTEGER, signal TEXT, last_ts TEXT, PRIMARY KEY(chat_id, signal))")
     c.execute("CREATE TABLE IF NOT EXISTS memory(chat_id INTEGER, mkey TEXT, mval TEXT, updated TEXT, PRIMARY KEY(chat_id, mkey))")
     c.execute("CREATE TABLE IF NOT EXISTS referrals(chat_id INTEGER PRIMARY KEY, source TEXT, ts TEXT)")
+    c.execute("""CREATE TABLE IF NOT EXISTS push_deliveries(
+        chat_id INTEGER NOT NULL,
+        campaign_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        sent_at TEXT,
+        PRIMARY KEY(chat_id, campaign_id))""")
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
                 "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
@@ -594,7 +601,7 @@ def meno_users():
 def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
-              "proactive_log", "proactive_state", "memory", "referrals"):
+              "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries"):
         c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))  # nosec B608
     c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid))
     A2.delete_user(c, cid)
@@ -971,6 +978,69 @@ def summary_sent_today(cid):
     c.close()
     return bool(r)
 
+def _claim_push_delivery(cid, campaign):
+    """Atomically reserve one daily push across workers, replicas and restarts."""
+    if not campaign:
+        return True
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        already_sent = c.execute(
+            """SELECT 1 FROM events
+               WHERE chat_id=? AND action='broadcast' AND meta=?
+               LIMIT 1""",
+            (cid, "sent|" + campaign),
+        ).fetchone()
+        if already_sent:
+            c.execute(
+                """INSERT OR IGNORE INTO push_deliveries
+                   (chat_id,campaign_id,status,claimed_at,sent_at)
+                   VALUES(?,?,'sent',?,?)""",
+                (cid, campaign, datetime.now(TZ).isoformat(), datetime.now(TZ).isoformat()),
+            )
+            c.commit()
+            return False
+        claimed = c.execute(
+            """INSERT OR IGNORE INTO push_deliveries
+               (chat_id,campaign_id,status,claimed_at)
+               VALUES(?,?,'claimed',?)""",
+            (cid, campaign, datetime.now(TZ).isoformat()),
+        ).rowcount == 1
+        c.commit()
+        return claimed
+    finally:
+        c.close()
+
+def _complete_push_delivery(cid, campaign):
+    if not campaign:
+        return
+    c = db()
+    try:
+        c.execute(
+            """UPDATE push_deliveries
+               SET status='sent', sent_at=?
+               WHERE chat_id=? AND campaign_id=?""",
+            (datetime.now(TZ).isoformat(), cid, campaign),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+def _release_push_delivery(cid, campaign):
+    """Allow retry only when Telegram definitely rejected the send."""
+    if not campaign:
+        return
+    c = db()
+    try:
+        c.execute(
+            """DELETE FROM push_deliveries
+               WHERE chat_id=? AND campaign_id=? AND status='claimed'""",
+            (cid, campaign),
+        )
+        c.commit()
+    finally:
+        c.close()
+
 def should_catchup_broadcast(cid, hhmm):
     actual, _, _ = scheduled_hhmm(cid, hhmm)
     h, m = map(int, actual.split(":"))
@@ -1173,7 +1243,7 @@ async def send_section(context, cid, st, key):
     text = L.section_text(st, key)
     await send_answer(context, cid, text, st, text, usage=usage)
 
-async def send_delay(context, cid, st):
+async def send_delay(context, cid, st, campaign=None):
     if IMG:
         try:
             bio = io.BytesIO(await asyncio.to_thread(IMG.render_delay, st)); bio.name = "delay.png"; await context.bot.send_photo(cid, photo=bio)
@@ -1216,6 +1286,9 @@ async def send_delay(context, cid, st):
     body = msgs.get(st["status"], "")
     await context.bot.send_message(cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
         reply_markup=summary_sugg_kb(cid, u, st, app_label="Открыть календарь"), parse_mode="HTML")
+    if campaign:
+        ev(cid, "goal", meta="summary")
+        ev(cid, "broadcast", meta="sent|" + campaign)
 
 async def send_guide(context, cid, g):
     path = os.path.join(GUIDE_DIR, g["file"])
@@ -1592,7 +1665,7 @@ async def push_summary(context, cid, with_image=True, campaign=None):
     if u0 and not is_cycle(u0): return await push_general(context, cid, campaign=campaign)
     u, st = status_of(cid)
     if not st: return
-    if st["status"] != "normal": return await send_delay(context, cid, st)
+    if st["status"] != "normal": return await send_delay(context, cid, st, campaign=campaign)
     if with_image: await send_infographic(context.bot, cid)
     usage = []; _ds = dtoday().isoformat()
     _key = (cid, _ds, st.get("phase"), str(log_get(cid, _ds) or ""))
@@ -1613,16 +1686,31 @@ async def push_summary(context, cid, with_image=True, campaign=None):
 
 async def push_checkin(context, cid, campaign=None):
     """После утренней сводки — быстрый чек-ин. Переиспользует существующий поток ci:* (энергия→настроение→симптомы)."""
+    claimed = False
+    delivered = False
     try:
         u = row(cid)
         if not is_onboarded(u): return
+        if campaign:
+            claimed = _claim_push_delivery(cid, campaign)
+            if not claimed:
+                log.info("checkin push skipped as duplicate: %s %s", cid, campaign)
+                return False
         log_ensure(cid, dtoday().isoformat())
         await context.bot.send_message(cid,
             "Как ты сегодня? Отметь за 10 секунд — подстрою совет дня под твоё реальное состояние.\n\nКакая энергия?",
             reply_markup=en_kb("e"))
-        if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
+        delivered = True
+        if campaign:
+            _complete_push_delivery(cid, campaign)
+            ev(cid, "broadcast", meta="sent|" + campaign)
+        return True
     except Exception as e:
+        if claimed and not delivered:
+            try: _release_push_delivery(cid, campaign)
+            except Exception as release_error: log.warning("checkin claim release %s: %s", cid, release_error)
         log.warning("checkin push %s: %s", cid, e)
+        return False
 
 # ================= Проактивный движок =================
 PROACTIVE_MIN = int(os.environ.get("AIWA_PROACTIVE_MIN", "40"))
