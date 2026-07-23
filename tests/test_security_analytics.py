@@ -257,6 +257,69 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertTrue(retried)
         self.assertEqual(send_message.await_count, 2)
 
+    def test_expired_push_claim_is_recovered_but_fresh_claim_is_not(self):
+        cid = 126
+        campaign = "daily_summary:2026-07-23"
+        conn = bot.db()
+        conn.execute(
+            """INSERT INTO push_deliveries
+               (chat_id,campaign_id,status,claimed_at) VALUES(?,?,'claimed',?)""",
+            (cid, campaign, "2020-01-01T00:00:00+03:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.dict(os.environ, {"AIWA_PUSH_CLAIM_TTL_SEC": "60"}):
+            self.assertTrue(bot._claim_push_delivery(cid, campaign))
+            self.assertFalse(bot._claim_push_delivery(cid, campaign))
+
+    def test_scheduled_summary_cache_miss_uses_fast_fallback_without_llm(self):
+        cycle_cid = 127
+        general_cid = 128
+        bot.upsert(
+            cycle_cid,
+            mode="cycle",
+            last_period=date.today().isoformat(),
+            cycle_len=28,
+        )
+        bot.upsert(general_cid, mode="irregular")
+        context = types.SimpleNamespace(
+            bot=types.SimpleNamespace(send_message=mock.AsyncMock(), send_photo=mock.AsyncMock())
+        )
+        llm_call = mock.AsyncMock(side_effect=AssertionError("delivery must not call the model"))
+        with mock.patch.object(bot, "RICH_OK", False), \
+             mock.patch.object(bot, "llm_to_thread", new=llm_call), \
+             mock.patch.object(bot, "sugg_kb", return_value=None):
+            cycle_sent = asyncio.run(
+                bot.push_summary(
+                    context,
+                    cycle_cid,
+                    with_image=False,
+                    campaign="daily_summary:cycle-test",
+                )
+            )
+            general_sent = asyncio.run(
+                bot.push_summary(
+                    context,
+                    general_cid,
+                    with_image=False,
+                    campaign="daily_summary:general-test",
+                )
+            )
+
+        self.assertTrue(cycle_sent)
+        self.assertTrue(general_sent)
+        llm_call.assert_not_awaited()
+        conn = sqlite3.connect(bot.DB)
+        self.assertEqual(
+            conn.execute(
+                """SELECT COUNT(*) FROM events
+                   WHERE action='fallback' AND meta='static:summary_delivery_cache_miss'"""
+            ).fetchone()[0],
+            2,
+        )
+        conn.close()
+
     def test_sent_checkin_keeps_claim_if_delivery_bookkeeping_fails(self):
         cid = 125
         campaign = "daily_checkin:2026-07-23"
@@ -854,7 +917,8 @@ class SecurityAnalyticsTests(unittest.TestCase):
             self.assertEqual(bot.scheduled_hhmm(15, "10:00")[0], "10:00")
             self.assertEqual(
                 bot.schedule_text(15, "10:00"),
-                "Время сводки: 10:00 по Москве — соберу заранее и пришлю к этому времени.",
+                "Время сводки: 10:00 по Москве — подготовлю заранее и начну отправку в это время. "
+                "При высокой нагрузке доставка может занять несколько минут.",
             )
             self.assertEqual(bot.summary_prepare_hhmm(15, "10:00"), "09:35")
 
