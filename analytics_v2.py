@@ -211,6 +211,12 @@ def _legacy_event_name(action, meta):
         return "checkin_completed", None
     if text == "web_checkin":
         return "checkin_updated", None
+    if text == "web_checkin_complete":
+        return "checkin_completed", None
+    if text == "web_proactive_on":
+        return "proactive_enabled", None
+    if text == "web_proactive_off":
+        return "proactive_disabled", None
     if text.startswith("ci:s:"):
         # The actual symptom is health data and intentionally not copied.
         return "checkin_symptom_selected", None

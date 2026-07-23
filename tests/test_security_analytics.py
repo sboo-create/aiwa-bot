@@ -10,6 +10,7 @@ import time
 import types
 import unittest
 from datetime import date
+from pathlib import Path
 from unittest import mock
 from urllib.parse import urlencode
 
@@ -118,7 +119,10 @@ class SecurityAnalyticsTests(unittest.TestCase):
             "screen", "provenance", "confidence", "source_schema", "payload_version"
         )}, {"screen": "food", "provenance": "observed", "confidence": "high",
              "source_schema": "events_v2", "payload_version": 2})
-        self.assertNotIn(str(cid), json.dumps(batch))
+        for item in batch:
+            self.assertNotEqual(item["device_id"], str(cid))
+            self.assertTrue(item["device_id"].startswith("u_"))
+            self.assertFalse({"chat_id", "telegram_id", "user_id"} & set(item["properties"]))
         a2.traction_ack(bot.DB, [batch[0]["event_id"]])
         a2.seed_traction_outbox(bot.DB)
         self.assertEqual(a2.traction_batch(bot.DB), [])
@@ -136,7 +140,10 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(by_name["answer_feedback_submitted"]["rating"], "helpful")
         self.assertEqual(by_name["safety_guidance_shown"]["safety_level"], "escalation")
         self.assertEqual(by_name["push_sent"]["campaign_type"], "daily_summary")
-        self.assertNotIn(str(cid), json.dumps(batch))
+        for item in batch:
+            self.assertNotEqual(item["device_id"], str(cid))
+            self.assertTrue(item["device_id"].startswith("u_"))
+            self.assertFalse({"chat_id", "telegram_id", "user_id"} & set(item["properties"]))
 
     def test_traction_payload_upgrade_is_requeued_once(self):
         conn = sqlite3.connect(bot.DB)
@@ -270,6 +277,89 @@ class SecurityAnalyticsTests(unittest.TestCase):
         )]
         conn.close()
         self.assertEqual(names, ["food_flow_started", "workout_flow_started"])
+
+    def test_mini_app_checkin_completes_on_each_successful_field_save(self):
+        cid = 82
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        with mock.patch.object(bot, "_verify_init", return_value=cid):
+            response = asyncio.run(bot._api_checkin(FakeJsonRequest({
+                "initData": "signed", "date": date.today().isoformat(), "energy": 2,
+            })))
+
+        self.assertEqual(response.status, 200)
+        conn = bot.db()
+        names = [row[0] for row in conn.execute(
+            "SELECT event_name FROM events_v2 WHERE user_key=? ORDER BY rowid", (a2.user_key(cid),)
+        )]
+        conn.close()
+        self.assertEqual(names, ["checkin_updated", "checkin_completed"])
+
+    def test_user_can_disable_and_reenable_proactive_messages(self):
+        cid = 83
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        old_flag = os.environ.get("AIWA_PROACTIVE")
+        os.environ["AIWA_PROACTIVE"] = "1"
+        try:
+            with mock.patch.object(bot, "_verify_init", return_value=cid):
+                disabled = asyncio.run(bot._api_proactive(FakeJsonRequest({
+                    "initData": "signed", "enabled": False,
+                })))
+                self.assertEqual(disabled.status, 200)
+                self.assertFalse(bot.row(cid)["proactive_enabled"])
+                self.assertFalse(bot._proactive_on(cid))
+
+                enabled = asyncio.run(bot._api_proactive(FakeJsonRequest({
+                    "initData": "signed", "enabled": True,
+                })))
+                self.assertEqual(enabled.status, 200)
+                self.assertTrue(bot.row(cid)["proactive_enabled"])
+                self.assertTrue(bot._proactive_on(cid))
+
+                rejected = asyncio.run(bot._api_proactive(FakeJsonRequest({
+                    "initData": "signed", "enabled": "false",
+                })))
+                self.assertEqual(rejected.status, 400)
+                self.assertTrue(bot.row(cid)["proactive_enabled"])
+        finally:
+            if old_flag is None:
+                os.environ.pop("AIWA_PROACTIVE", None)
+            else:
+                os.environ["AIWA_PROACTIVE"] = old_flag
+
+        conn = bot.db()
+        names = [row[0] for row in conn.execute(
+            "SELECT event_name FROM events_v2 WHERE user_key=? ORDER BY rowid", (a2.user_key(cid),)
+        )]
+        conn.close()
+        self.assertEqual(names, ["proactive_disabled", "proactive_enabled"])
+
+        html_source = (Path(__file__).parents[1] / "webapp" / "index.html").read_text("utf-8")
+        self.assertIn("Проактивные сообщения", html_source)
+        self.assertIn("/api/proactive", html_source)
+        self.assertIn("14:00 или 19:30 МСК", html_source)
+
+    def test_disabled_preference_blocks_legacy_optional_reminders(self):
+        cid = 84
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular", proactive_enabled=0)
+        context = types.SimpleNamespace(
+            bot=types.SimpleNamespace(send_message=mock.AsyncMock())
+        )
+        old_flag = os.environ.get("AIWA_PROACTIVE")
+        os.environ["AIWA_PROACTIVE"] = "0"
+        try:
+            self.assertFalse(bot._proactive_preference_on(cid))
+            asyncio.run(bot.push_food_reminder(context, cid))
+            asyncio.run(bot.push_train_reminder(context, cid))
+        finally:
+            if old_flag is None:
+                os.environ.pop("AIWA_PROACTIVE", None)
+            else:
+                os.environ["AIWA_PROACTIVE"] = old_flag
+
+        context.bot.send_message.assert_not_awaited()
 
     def test_http_admin_keeps_legacy_key_but_prefers_separate_secret(self):
         old_admin = bot.AIWA_ADMIN

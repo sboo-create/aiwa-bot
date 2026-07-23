@@ -86,10 +86,11 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(data["data_quality"]["mode"], "mixed")
         self.assertEqual(data["data_quality"]["reconstructed_events"], 1)
         self.assertEqual([x["value"] for x in data["funnel"]], [1, 1, 1, 1])
-        self.assertIn("Proxy ценности", data["funnel"][3]["help"])
+        self.assertEqual(data["funnel"][3]["label"], "Получили ответ AIWA")
+        self.assertIn("подтверждённо отправила", data["funnel"][3]["help"])
         health = {x["label"]: x for x in data["product_health"]}
-        self.assertEqual(health["Activation proxy"]["value"], 100.0)
-        self.assertEqual(health["Time to value p50"]["value"], 110)
+        self.assertEqual(health["Answer activation"]["value"], 100.0)
+        self.assertEqual(health["Time to first answer p50"]["value"], 109)
         self.assertEqual(health["Fallback requests"]["value"], 100.0)
         self.assertTrue(all(x.get("help") for x in data["primary"]))
         self.assertEqual(data["answer_quality"]["helpful_rate"], 100.0)
@@ -98,6 +99,8 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(data["push_funnel"]["sent"], 1)
         self.assertEqual(data["push_funnel"]["opened"], 1)
         self.assertEqual(data["push_funnel"]["acted"], 1)
+        self.assertEqual(data["push_funnel"]["action_eligible"], 1)
+        self.assertEqual(data["value_delivery"]["immediate"]["users"], 1)
         food = next(x for x in data["feature_funnels"] if x["label"] == "Питание")
         self.assertEqual((food["started"], food["completed"], food["rate"]), (1, 1, 100.0))
         chat = next(x for x in data["feature_funnels"] if x["label"] == "Чат с AIWA")
@@ -124,7 +127,8 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual((exact_tool["value"], exact_tool["numerator"],
                           exact_tool["denominator"]), (2.0, 2, 1))
         self.assertEqual(tools["logical_ai_requests"]["value"], 1.0)
-        self.assertEqual(tools["value_actions"]["value"], 1.5)
+        self.assertEqual(tools["value_actions"]["value"], 0.5)
+        self.assertEqual(tools["value_actions"]["label"], "Дни с ответом AIWA / user-day")
         self.assertEqual(data["overview"]["tools_per_dau"], 1.0)
         self.assertEqual(len(data["diagnostics"]), 10)
 
@@ -199,11 +203,141 @@ class StatsModuleTests(unittest.TestCase):
 
         before = self.module.compute_dashboard(1)
         self.assertEqual(before["push_funnel"]["acted"], 0)
+        self.assertEqual(before["push_funnel"]["action_eligible"], 0)
+        self.assertEqual(before["push_funnel"]["action_pending"], 2)
 
         self.add("checkin-target", "u1", "checkin_completed", ts=now - 70)
         self.add("food-target", "u2", "meal_add_completed", ts=now - 70)
         after = self.module.compute_dashboard(1)
         self.assertEqual(after["push_funnel"]["acted"], 2)
+
+    def test_checkin_delayed_value_excludes_pending_and_tracks_next_summary(self):
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
+        self.add("mature-checkin", "u1", "checkin_completed", ts=now - 48 * 3600)
+        self.add("followup-summary", "u1", "push_sent", {
+            "campaign_id": "daily_summary:2026-07-22", "campaign_type": "daily_summary",
+        }, now - 36 * 3600)
+        self.add("followup-open", "u1", "push_opened", {
+            "campaign_id": "daily_summary:2026-07-22", "campaign_type": "daily_summary",
+        }, now - 35 * 3600)
+        self.add("pending-checkin", "u2", "checkin_completed", ts=now - 2 * 3600)
+        self.add("manual-checkin", "u3", "checkin_completed", ts=now - 48 * 3600)
+        self.add("manual-summary", "u3", "summary_delivered", ts=now - 36 * 3600)
+
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            data = self.module.compute_dashboard(7)
+
+        delayed = data["value_delivery"]["delayed_checkin"]
+        self.assertEqual(delayed["checkin_user_days"], 3)
+        self.assertEqual(delayed["eligible_user_days"], 2)
+        self.assertEqual(delayed["pending_user_days"], 1)
+        self.assertEqual(delayed["summary_delivered_user_days"], 1)
+        self.assertEqual(delayed["summary_opened_user_days"], 1)
+        self.assertEqual(delayed["delivery_rate"], 50.0)
+        self.assertEqual(delayed["open_eligible_user_days"], 1)
+        self.assertEqual(delayed["open_pending_user_days"], 0)
+        self.assertEqual(delayed["open_rate"], 100.0)
+
+    def test_checkin_followup_is_one_to_one_and_uses_moscow_product_day(self):
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+        first = datetime(2026, 7, 22, 22, 30, tzinfo=timezone.utc).timestamp()
+        same_moscow_day = datetime(2026, 7, 23, 0, 30, tzinfo=timezone.utc).timestamp()
+        next_day = datetime(2026, 7, 23, 22, 30, tzinfo=timezone.utc).timestamp()
+        self.add("checkin-a", "u1", "checkin_completed", ts=first)
+        self.add("checkin-a-duplicate-day", "u1", "checkin_completed", ts=same_moscow_day)
+        self.add("checkin-b", "u1", "checkin_completed", ts=next_day)
+        self.add("single-summary", "u1", "push_sent", {
+            "campaign_id": "daily_summary:2026-07-24", "campaign_type": "daily_summary",
+        }, next_day + 10 * 3600)
+
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            delayed = self.module.compute_dashboard(7)["value_delivery"]["delayed_checkin"]
+
+        self.assertEqual(delayed["checkin_user_days"], 2)
+        self.assertEqual(delayed["delivery_eligible_user_days"], 2)
+        self.assertEqual(delayed["summary_delivered_user_days"], 1)
+        self.assertEqual(delayed["delivery_rate"], 50.0)
+
+    def test_checkin_followups_use_fifo_and_campaign_specific_open(self):
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+        checkin_a = datetime(2026, 7, 22, 17, 0, tzinfo=timezone.utc).timestamp()
+        checkin_b = datetime(2026, 7, 23, 4, 0, tzinfo=timezone.utc).timestamp()
+        summary_a = datetime(2026, 7, 23, 5, 0, tzinfo=timezone.utc).timestamp()
+        summary_b = datetime(2026, 7, 24, 7, 0, tzinfo=timezone.utc).timestamp()
+        self.add("checkin-a", "u1", "checkin_completed", ts=checkin_a)
+        self.add("checkin-b", "u1", "checkin_completed", ts=checkin_b)
+        self.add("summary-a", "u1", "push_sent", {
+            "campaign_id": "daily_summary:a", "campaign_type": "daily_summary",
+        }, summary_a)
+        self.add("summary-b", "u1", "push_sent", {
+            "campaign_id": "daily_summary:b", "campaign_type": "daily_summary",
+        }, summary_b)
+        self.add("open-only-b", "u1", "push_opened", {
+            "campaign_id": "daily_summary:b", "campaign_type": "daily_summary",
+        }, summary_b + 60)
+
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            delayed = self.module.compute_dashboard(7)["value_delivery"]["delayed_checkin"]
+
+        self.assertEqual(delayed["summary_delivered_user_days"], 2)
+        self.assertEqual(delayed["summary_opened_user_days"], 1)
+        self.assertEqual(delayed["delivery_rate"], 100.0)
+        self.assertEqual(delayed["open_rate"], 50.0)
+
+    def test_reconstructed_checkins_are_excluded_from_exact_delayed_value(self):
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+        self.add("legacy-checkin", "u1", "checkin_completed", ts=now - 48 * 3600,
+                 provenance="reconstructed")
+        self.add("legacy-push", "u1", "push_sent", ts=now - 36 * 3600,
+                 provenance="reconstructed")
+
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            data = self.module.compute_dashboard(7, "mixed")
+        delayed = data["value_delivery"]["delayed_checkin"]
+
+        self.assertEqual(delayed["checkin_user_days"], 0)
+        self.assertEqual(delayed["excluded_reconstructed_events"], 1)
+        self.assertIsNone(delayed["delivery_rate"])
+        self.assertEqual(data["engagement"]["checkins_completed"], 1)
+
+    def test_fresh_pushes_remain_pending_until_attribution_window_closes(self):
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
+        self.add("fresh", "u1", "push_sent", {
+            "campaign_id": "daily_summary:fresh", "campaign_type": "daily_summary",
+        }, now - 100)
+        self.add("mature", "u2", "push_sent", {
+            "campaign_id": "daily_summary:mature", "campaign_type": "daily_summary",
+        }, now - 25 * 3600)
+
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            push = self.module.compute_dashboard(7)["push_funnel"]
+
+        self.assertEqual(push["open_eligible"], 1)
+        self.assertEqual(push["open_pending"], 1)
+        self.assertEqual(push["open_rate"], 0.0)
+        self.assertEqual(push["action_eligible"], 1)
+        self.assertEqual(push["action_pending"], 1)
+        self.assertEqual(push["action_rate"], 0.0)
+
+    def test_proactive_without_product_target_does_not_report_zero_action_rate(self):
+        now = time.time()
+        self.add("push", "u1", "push_sent", {
+            "campaign_id": "proactive_felt_bad:2026-07-23",
+            "campaign_type": "proactive_felt_bad",
+        }, now - 100)
+        self.add("open", "u1", "push_opened", {
+            "campaign_id": "proactive_felt_bad:2026-07-23",
+            "campaign_type": "proactive_felt_bad",
+        }, now - 90)
+
+        data = self.module.compute_dashboard(1)
+        campaign = data["push_funnel"]["campaigns"][0]
+
+        self.assertEqual(campaign["id"], "proactive")
+        self.assertEqual(campaign["open_rate"], 100.0)
+        self.assertEqual(campaign["action_eligible"], 0)
+        self.assertIsNone(campaign["action_rate"])
+        self.assertIsNone(data["push_funnel"]["action_rate"])
 
     def test_activity_series_counts_user_messages_not_ai_messages(self):
         now = time.time()
