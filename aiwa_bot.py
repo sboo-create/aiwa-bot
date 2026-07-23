@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v78-short-answers-and-telegram-voice"
+AIWA_VERSION = "2026-07-23-v79-daily-tokens-suggs"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -984,6 +984,9 @@ def sym_kb(selected):
     rows.append([InlineKeyboardButton("Готово", callback_data="ci:done")]); return InlineKeyboardMarkup(rows)
 def sugg_kb(cid, items, app_user=None, app_label=None, feedback_id=None, campaign=None):
     def _short(t): return t if len(t) <= 28 else t[:26].rstrip(" ,.-") + "…"
+    # единая точка сборки кнопок: каждый саджест с заглавной буквы (в т.ч. статичные)
+    norm = getattr(L, "_norm_sugg1", None)
+    items = [(norm(t) if norm else t) for t in (items or []) if t]
     rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
     if app_user and AIWA_WEBAPP_URL:
         rows.append([InlineKeyboardButton(app_label or APP_BUTTON_TEXT,
@@ -4623,6 +4626,7 @@ def analytics_data(days=7, frm=None, to=None):
     ev_src = Counter(); actions = Counter(); tool_meta = Counter()
     answered = fallback = errors = tokens = tool_total = ev_total = 0
     tok_in = tok_out = 0; by_model = {}
+    tokens_by_day = Counter(); tin_by_day = Counter(); tout_by_day = Counter()
     lat = []; sess = defaultdict(list); modeseg = defaultdict(set); mode_active_day = defaultdict(lambda: defaultdict(set))
     bcast = Counter(); ans_by_day = Counter(); err_by_day = Counter(); tool_src = Counter()
     push_days = defaultdict(set); act_days = defaultdict(set); new_by_day = Counter(); gper = defaultdict(set)
@@ -4630,6 +4634,7 @@ def analytics_data(days=7, frm=None, to=None):
     for cid, ts, action, tok, meta, ms, calls, t_in, t_out, mdl in evs:
         d = dparse(ts); iso = d.isoformat(); tokens += (tok or 0)
         tok_in += (t_in or 0); tok_out += (t_out or 0)
+        tokens_by_day[iso] += (tok or 0); tin_by_day[iso] += (t_in or 0); tout_by_day[iso] += (t_out or 0)
         if (tok or 0) or (t_in or 0):
             mk = mdl or "(не указана)"
             mstat = by_model.setdefault(mk, {"model": mk, "tokens": 0, "tok_in": 0, "tok_out": 0, "calls": 0, "ms": 0, "n": 0})
@@ -4735,6 +4740,7 @@ def analytics_data(days=7, frm=None, to=None):
         series.append({"date": iso[5:], "full": iso,
             "dau": len(active_by_day.get(iso, set())), "wau": len(win_union(d, 7)), "mau": len(win_union(d, 30)),
             "events": events_by_day[iso], "toolcalls": tool_by_day[iso],
+            "tokens": tokens_by_day[iso], "tok_in": tin_by_day[iso], "tok_out": tout_by_day[iso],
             "answered": ans_by_day[iso], "errors": err_by_day[iso], "new": new_by_day[iso],
             "stick": (round(len(active_by_day.get(iso, set())) / len(win_union(d, 30)) * 100) if len(win_union(d, 30)) else 0)})
         d += timedelta(days=1)
