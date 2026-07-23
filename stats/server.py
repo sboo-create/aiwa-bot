@@ -548,15 +548,42 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
             feature_days[(row["device_id"], day)].add(feature)
     distinct_feature_uses = sum(len(feature_set) for feature_set in feature_days.values())
 
+    trailing_cutoff = now - 86400
+    trailing_sessions, _, _ = _sessions(rows, trailing_cutoff)
+    trailing_ai_attempts = sum(r["name"] == "ai_call" and r["ts"] >= trailing_cutoff and
+                               r["provenance"] == "observed" for r in rows)
+    per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
+    overview_tools_per_dau = per_dau(trailing_ai_attempts)
+    overview_tool_denominator = ("rolling DAU всей доступной истории" if source_mode == "mixed"
+                                 else "rolling DAU точного v2-слоя")
+    overview_tool_help = (
+        "Текущая legacy-compatible формула общей страницы: точно записанные AI-попытки "
+        "за 24 часа делятся на общий rolling DAU, включая восстановленных пользователей. "
+        "Она сохраняет непрерывность метрики, но может занижать техническую интенсивность, "
+        "потому что старые AI-вызовы восстановлены неполно."
+        if source_mode == "mixed" else
+        "Та же формула рассчитана только на точном v2-слое: точно записанные AI-попытки "
+        "за 24 часа делятся на rolling DAU без восстановленных пользователей. Поэтому "
+        "значение может отличаться от общей страницы, которая по умолчанию показывает всю историю."
+    )
+
     tool_definitions = [
-        {"id": "ai_provider_attempts", "label": "AI-попытки / user-day",
+        {"id": "overview_ai_attempts_mixed_dau", "label": "Overview: AI-попытки / DAU",
+         "value": overview_tools_per_dau, "numerator": trailing_ai_attempts,
+         "numerator_label": "точных AI-попыток за 24 часа",
+         "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
+         "status": ("no_data" if not trailing_ai_attempts else
+                    "no_active_users" if not dau_ids else "ok"),
+         "selected_for_overview": True,
+         "help": overview_tool_help},
+        {"id": "ai_provider_attempts", "label": "AI-попытки / точный user-day",
          "value": per_exact_active_day(len(exact_ai_rows)), "numerator": len(exact_ai_rows),
          "numerator_label": "AI-попыток",
          "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
          "status": ("no_data" if not exact_ai_rows else
                     "no_active_users" if not exact_active_user_days else "ok"),
-         "selected_for_overview": True,
-         "help": "Текущий тип события для Tools / DAU в общей сводке: все точно записанные обращения к AI-провайдерам, включая retry и fallback. Overview делит их за последние 24 часа на rolling DAU; здесь период нормализован только на user-days точного v2-слоя, потому что старые AI-вызовы восстановлены неполно. Это техническая нагрузка, а не число использованных функций."},
+         "selected_for_overview": False,
+         "help": "Все точно записанные обращения к AI-провайдерам, включая retry и fallback, нормализованные только на user-days точного v2-слоя. Это сопоставимые числитель и знаменатель, но показатель отражает техническую нагрузку, а не число использованных функций."},
         {"id": "logical_ai_requests", "label": "AI-запросы / user-day",
          "value": (per_exact_active_day(logical_ai_requests) if exact_request_ready else None),
          "numerator": (logical_ai_requests if exact_request_ready else None),
@@ -588,15 +615,6 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "help": "Ответ AIWA, завершённый чек-ин, сохранённые еда или тренировка либо открытая сводка. Это proxy полученной ценности, а не прямая оценка пользователя."},
     ]
 
-    trailing_cutoff = now - 86400
-    trailing_sessions, _, _ = _sessions(rows, trailing_cutoff)
-    trailing_ai_attempts = sum(r["name"] == "ai_call" and r["ts"] >= trailing_cutoff and
-                               r["provenance"] == "observed" for r in rows)
-    per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
-    exact_dau_ids = {r["device_id"] for r in rows if r["ts"] >= trailing_cutoff and
-                     r["provenance"] == "observed" and _is_active(r["name"])}
-    overview_tools_per_dau = (round(trailing_ai_attempts / len(exact_dau_ids), 2)
-                              if exact_dau_ids else (0 if not trailing_ai_attempts else None))
     overview = {
         "ever_used": len(ever_ids), "dau": len(dau_ids), "wau": len(wau_ids), "mau": len(mau_ids),
         "sessions_per_dau": per_dau(trailing_sessions),
@@ -616,8 +634,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "note": "сессии за 24 ч / rolling DAU",
          "help": "Та же формула, что в общей сводке: сессии за последние 24 часа, делённые на уникальных активных пользователей за эти же 24 часа. Новая сессия начинается после 30 минут без продуктовых событий."},
         {"label": "Tools / DAU", "value": overview_tools_per_dau,
-         "note": "сейчас: точные AI-попытки за 24 ч / точный DAU",
-         "help": "Та же текущая формула, что в общей сводке: точно записанные AI-попытки за последние 24 часа, включая retry и fallback, делённые на rolling DAU точного v2-слоя. Восстановленные пользователи не входят в знаменатель, потому что старые AI-вызовы неполны. Варианты более продуктового определения показаны ниже."},
+         "note": f"точные AI-попытки за 24 ч / {'общий' if source_mode == 'mixed' else 'точный'} DAU",
+         "help": overview_tool_help + " Точная и продуктовые альтернативы показаны ниже."},
     ]
 
     classified_active = sum(_feature(r) is not None for r in active_selected)

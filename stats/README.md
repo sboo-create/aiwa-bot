@@ -17,14 +17,16 @@ cycle dates, photos and audio are never sent.
 The `overview` object intentionally keeps the six-field Disrupt Analytics
 contract: `ever_used`, `dau`, `wau`, `mau`, `sessions_per_dau` and
 `tools_per_dau`. Both ratios always use trailing-24-hour numerators regardless
-of the period selected on the detailed dashboard. Sessions use the selected
-history layer's rolling DAU; the exact AI-attempt ratio uses observed v2
-rolling DAU so reconstructed users cannot dilute a numerator whose old calls
-are incomplete.
+of the period selected on the detailed dashboard. For continuity with the
+existing Overview, sessions and tools use the selected history layer's rolling
+DAU. The tools numerator contains observed v2 AI attempts, so this
+legacy-compatible ratio is explicitly marked as potentially diluted by
+reconstructed users and is shown next to an observed-only alternative.
 
 For backward compatibility, `tools_per_dau` currently means observed v2 AI
 provider attempts, including retry and fallback. If attempts exist without a
-rolling DAU denominator, the ratio is `null` rather than a misleading zero.
+rolling DAU denominator, the optional ratio key is omitted rather than
+publishing a misleading zero.
 The detailed dashboard exposes the
 top-level `tool_definitions` candidates with stable IDs, numerators,
 denominators and `selected_for_overview`. This makes the current choice
