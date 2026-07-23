@@ -524,6 +524,41 @@ class SecurityAnalyticsTests(unittest.TestCase):
             asyncio.run(bot.on_text(update, context))
         voice_reply.assert_not_awaited()
 
+    def test_non_cycle_summary_sends_context_image_and_text(self):
+        cid = 88
+        bot.upsert(cid, mode="irregular")
+        telegram_bot = types.SimpleNamespace(
+            send_photo=mock.AsyncMock(),
+            send_message=mock.AsyncMock(),
+        )
+        context = types.SimpleNamespace(bot=telegram_bot)
+        with mock.patch.object(bot.IMG, "render_general_summary", return_value=b"png") as render, \
+             mock.patch.object(bot, "llm_to_thread", new=mock.AsyncMock(return_value="Сводка готова.")), \
+             mock.patch.object(bot.L, "split_followups", return_value=("Сводка готова.", [])), \
+             mock.patch.object(bot, "sugg_kb", return_value=None):
+            asyncio.run(bot.push_summary(context, cid))
+
+        render.assert_called_once()
+        self.assertEqual(render.call_args.args[0], "irregular")
+        telegram_bot.send_photo.assert_awaited_once()
+        telegram_bot.send_message.assert_awaited_once()
+
+    def test_non_cycle_summary_can_skip_context_image(self):
+        cid = 89
+        bot.upsert(cid, mode="meno")
+        telegram_bot = types.SimpleNamespace(
+            send_photo=mock.AsyncMock(),
+            send_message=mock.AsyncMock(),
+        )
+        context = types.SimpleNamespace(bot=telegram_bot)
+        with mock.patch.object(bot, "llm_to_thread", new=mock.AsyncMock(return_value="Сводка готова.")), \
+             mock.patch.object(bot.L, "split_followups", return_value=("Сводка готова.", [])), \
+             mock.patch.object(bot, "sugg_kb", return_value=None):
+            asyncio.run(bot.push_summary(context, cid, with_image=False))
+
+        telegram_bot.send_photo.assert_not_awaited()
+        telegram_bot.send_message.assert_awaited_once()
+
     def test_joy_voice_uses_erm_24000_for_salutespeech(self):
         response = types.SimpleNamespace(
             status_code=200,
