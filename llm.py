@@ -1462,18 +1462,7 @@ def _scale_menu(menu, target):
 
 def menu_today(st, profile=None, target=None, usage=None):
     # Без диет-ограничений отдаём готовый набор под фазу (без обращения к модели, экономим лимит).
-    has_diet = bool(profile and (profile.get("diet") or profile.get("diet_note")))
-    phase_key = (st or {}).get("phase")
-    if not has_diet:
-        import datetime as _dt
-        seed = _dt.date.today().toordinal()
-        phase = phase_key if phase_key in MEAL_POOLS else "follicular"
-        pools = MEAL_POOLS[phase]; times = {"b": "08:00", "l": "13:00", "s": "16:00", "d": "20:00"}
-        meals = []
-        for idx, k in enumerate(("b", "l", "s", "d")):
-            opt = pools[k][(seed + idx) % len(pools[k])]
-            meals.append({"time": times[k], "dish": opt[0], "note": opt[1], "kcal": opt[2]})
-        return _scale_menu({"macros": dict(CURATED_MACROS.get(phase, CURATED_MACROS["follicular"])), "meals": meals}, target)
+    phase_key = (st or {}).get("phase")   # меню всегда генерит модель; пул блюд остался только аварийным фолбэком
     extra = ""
     if target:
         extra += (f" Ориентир по дню: примерно {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, "
@@ -1512,8 +1501,7 @@ def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
     except Exception:
         idx = 0
     k = slots[idx]
-    has_diet = bool(profile and (profile.get("diet") or profile.get("diet_note")))
-    if has_diet:
+    if True:   # замену блюда тоже всегда делает модель; пул — фолбэк ниже
         extra = ""
         parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
         if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
