@@ -62,6 +62,12 @@ VALUE_NAMES = {
     "assistant_response_received", "checkin_completed", "meal_add_completed",
     "workout_add_completed", "summary_opened", "feature_value_completed",
 }
+PRODUCT_ACTION_NAMES = {
+    "user_message_sent", "checkin_updated", "checkin_symptom_selected", "checkin_completed",
+    "food_flow_started", "meal_add_completed", "workout_flow_started", "workout_add_completed",
+    "summary_opened", "feature_value_completed",
+}
+KEY_RESULT_NAMES = VALUE_NAMES - {"feature_value_completed"}
 ENGAGEMENT_NAMES = VALUE_NAMES | {
     "user_message_sent", "assistant_message_sent", "app_opened", "screen_viewed", "checkin_updated",
 }
@@ -504,48 +510,182 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                      if source_mode == "mixed" and reconstructed else []),
     }
 
-    avg_dau = active_user_days / max(1, available_days)
+    series_data = _series(rows, window_days, now, available_start)
+    avg_dau = (len(dau_ids) if window_days <= 1.1 else
+               (sum(point["active"] for point in series_data) / len(series_data)
+                if series_data else 0))
+    avg_dau_note = ("rolling 24 часа" if window_days <= 1.1 else
+                    f"по {len(series_data)} календарным дням с данными")
     per_active_day = lambda n: round(n / active_user_days, 2) if active_user_days else 0
+    per_active_day_or_none = lambda n: round(n / active_user_days, 2) if active_user_days else None
+    exact_ai_rows = [r for r in ai_rows if r["provenance"] == "observed"]
+    exact_requests: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    exact_request_covered = 0
+    for row in exact_ai_rows:
+        request_id = row["properties"].get("request_id")
+        if request_id:
+            exact_request_covered += 1
+            exact_requests[str(request_id)].append(row)
+    exact_untraced_attempts = len(exact_ai_rows) - exact_request_covered
+    logical_ai_requests = len(exact_requests) + exact_untraced_attempts
+    exact_active_days: dict[str, set[str]] = defaultdict(set)
+    for row in active_selected:
+        if row["provenance"] == "observed":
+            day = datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()
+            exact_active_days[day].add(row["device_id"])
+    exact_active_user_days = sum(len(users) for users in exact_active_days.values())
+    per_exact_active_day = lambda n: (round(n / exact_active_user_days, 2)
+                                      if exact_active_user_days else None)
+    exact_request_coverage = _percent(exact_request_covered, len(exact_ai_rows))
+    exact_request_ready = bool(exact_ai_rows) and exact_request_coverage >= 80
+    product_actions = sum(r["name"] in PRODUCT_ACTION_NAMES for r in selected)
+    value_actions = sum(r["name"] in KEY_RESULT_NAMES for r in selected)
+    feature_days: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in active_selected:
+        feature = _feature(row)
+        if feature:
+            day = datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()
+            feature_days[(row["device_id"], day)].add(feature)
+    distinct_feature_uses = sum(len(feature_set) for feature_set in feature_days.values())
+
+    tool_definitions = [
+        {"id": "ai_provider_attempts", "label": "AI-попытки / user-day",
+         "value": per_exact_active_day(len(exact_ai_rows)), "numerator": len(exact_ai_rows),
+         "numerator_label": "AI-попыток",
+         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
+         "status": ("no_data" if not exact_ai_rows else
+                    "no_active_users" if not exact_active_user_days else "ok"),
+         "selected_for_overview": True,
+         "help": "Текущий тип события для Tools / DAU в общей сводке: все точно записанные обращения к AI-провайдерам, включая retry и fallback. Overview делит их за последние 24 часа на rolling DAU; здесь период нормализован только на user-days точного v2-слоя, потому что старые AI-вызовы восстановлены неполно. Это техническая нагрузка, а не число использованных функций."},
+        {"id": "logical_ai_requests", "label": "AI-запросы / user-day",
+         "value": (per_exact_active_day(logical_ai_requests) if exact_request_ready else None),
+         "numerator": (logical_ai_requests if exact_request_ready else None),
+         "numerator_label": "AI-запросов",
+         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
+         "coverage": exact_request_coverage,
+         "status": ("no_data" if not exact_ai_rows else
+                    "insufficient_coverage" if not exact_request_ready else
+                    "no_active_users" if not exact_active_user_days else "ok"),
+         "selected_for_overview": False,
+         "help": "Логические AI-запросы после объединения retry и fallback по request_id. Попытки без request_id считаются отдельными запросами, поэтому метрика зависит от полноты трассировки."},
+        {"id": "product_actions", "label": "Действия в функциях / user-day",
+         "value": per_active_day_or_none(product_actions), "numerator": product_actions,
+         "numerator_label": "действий",
+         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
+         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
+         "help": "Явные действия пользователя в чате, чек-ине, питании и нагрузке. Простые открытия экранов и технические AI-попытки не считаются."},
+        {"id": "feature_breadth", "label": "Разные функции / user-day",
+         "value": per_active_day_or_none(distinct_feature_uses), "numerator": distinct_feature_uses,
+         "numerator_label": "использований разных функций",
+         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
+         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
+         "help": "Среднее число разных продуктовых зон, которыми человек воспользовался за активный день. Повторное использование одной зоны в тот же день не увеличивает показатель."},
+        {"id": "value_actions", "label": "Ключевые результаты / user-day",
+         "value": per_active_day_or_none(value_actions), "numerator": value_actions,
+         "numerator_label": "ключевых результатов",
+         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
+         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
+         "help": "Ответ AIWA, завершённый чек-ин, сохранённые еда или тренировка либо открытая сводка. Это proxy полученной ценности, а не прямая оценка пользователя."},
+    ]
+
+    trailing_cutoff = now - 86400
+    trailing_sessions, _, _ = _sessions(rows, trailing_cutoff)
+    trailing_ai_attempts = sum(r["name"] == "ai_call" and r["ts"] >= trailing_cutoff and
+                               r["provenance"] == "observed" for r in rows)
+    per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
+    exact_dau_ids = {r["device_id"] for r in rows if r["ts"] >= trailing_cutoff and
+                     r["provenance"] == "observed" and _is_active(r["name"])}
+    overview_tools_per_dau = (round(trailing_ai_attempts / len(exact_dau_ids), 2)
+                              if exact_dau_ids else (0 if not trailing_ai_attempts else None))
     overview = {
         "ever_used": len(ever_ids), "dau": len(dau_ids), "wau": len(wau_ids), "mau": len(mau_ids),
-        "sessions_per_dau": per_active_day(sessions), "tools_per_dau": per_active_day(len(ai_rows)),
+        "sessions_per_dau": per_dau(trailing_sessions),
     }
-    label = "24h" if abs(window_days - 1) < 0.01 else f"{window_days:g}d"
+    if overview_tools_per_dau is not None:
+        overview["tools_per_dau"] = overview_tools_per_dau
     primary = [
         {"label": "Ever used", "value": len(ever_ids), "note": "уникальные пользователи · всё время",
          "help": "Уникальные псевдонимные пользователи, у которых было хотя бы одно продуктовое действие за всю доступную историю."},
+        {"label": "DAU", "value": len(dau_ids), "note": "активные за последние 24 часа",
+         "help": "Уникальные пользователи с продуктовой активностью за последние 24 часа. Технические AI-попытки и push-отправки не считаются активностью."},
+        {"label": "WAU", "value": len(wau_ids), "note": "активные за последние 7 дней",
+         "help": "Уникальные пользователи с продуктовой активностью за последние 7 суток. Это скользящее окно, а не календарная неделя."},
         {"label": "MAU", "value": len(mau_ids), "note": "активные за последние 30 дней",
          "help": "Уникальные пользователи с продуктовой активностью за последние 30 суток. Системные AI-попытки и push-отправки не считаются активностью."},
-        {"label": "Avg DAU", "value": round(avg_dau, 1),
-         "note": f"среднее за {available_days} дн. с данными · окно {label}",
-         "help": "Среднее число уникальных активных пользователей в день. Дни до начала сбора не входят в знаменатель."},
-        {"label": "Daily sessions / user", "value": per_active_day(sessions), "note": "сессии на активного пользователя в день",
-         "help": "Среднее число сессий на активного пользователя-день. Новая сессия начинается после 30 минут без продуктовых событий."},
-        {"label": "Daily messages / user", "value": per_active_day(messages), "note": "сообщения пользователя в день",
-         "help": "Среднее число сообщений пользователя AIWA на активного пользователя-день. Ответы AIWA сюда не входят."},
-        {"label": "Daily AI calls / user", "value": per_active_day(len(ai_rows)), "note": "все попытки модели, включая retry",
-         "help": "Среднее число технических обращений к AI-провайдерам на активного пользователя-день. Один запрос может создать несколько попыток из-за retry/fallback."},
+        {"label": "Sessions / DAU", "value": overview["sessions_per_dau"],
+         "note": "сессии за 24 ч / rolling DAU",
+         "help": "Та же формула, что в общей сводке: сессии за последние 24 часа, делённые на уникальных активных пользователей за эти же 24 часа. Новая сессия начинается после 30 минут без продуктовых событий."},
+        {"label": "Tools / DAU", "value": overview_tools_per_dau,
+         "note": "сейчас: точные AI-попытки за 24 ч / точный DAU",
+         "help": "Та же текущая формула, что в общей сводке: точно записанные AI-попытки за последние 24 часа, включая retry и fallback, делённые на rolling DAU точного v2-слоя. Восстановленные пользователи не входят в знаменатель, потому что старые AI-вызовы неполны. Варианты более продуктового определения показаны ниже."},
+    ]
+
+    classified_active = sum(_feature(r) is not None for r in active_selected)
+    observed_rows = [r for r in all_rows if r["provenance"] == "observed"]
+    ingest_lags = [max(0.0, r["ingested_at"] - r["ts"]) for r in selected
+                   if r["provenance"] == "observed" and r["ingested_at"] > 0]
+    latest_observed_ts = max((r["ts"] for r in observed_rows), default=None)
+    diagnostics = [
+        {"label": "Avg DAU", "value": round(avg_dau, 1), "unit": "number",
+         "note": avg_dau_note,
+         "help": "Для окна 1 день это rolling DAU за последние 24 часа. Для 7/30 дней — среднее число активных пользователей по доступным календарным дням; дни до начала сбора не входят в знаменатель."},
+        {"label": "Сессии / user-day", "value": per_active_day_or_none(sessions), "unit": "number",
+         "note": f"{sessions} сессий / {active_user_days} user-days",
+         "help": "Периодная глубина использования. В отличие от верхнего Sessions / DAU, учитывает каждый активный user-day выбранного окна."},
+        {"label": "События / user-day", "value": per_active_day_or_none(len(active_selected)), "unit": "number",
+         "note": f"{len(active_selected)} продуктовых событий",
+         "help": "Все события, считающиеся продуктовой активностью, на активный пользовательский день. Рост может означать вовлечённость или лишние повторные события — проверяйте вместе с воронками."},
+        {"label": "Сообщения / user-day", "value": per_active_day_or_none(messages), "unit": "number",
+         "note": f"{messages} сообщений пользователя",
+         "help": "Сообщения пользователей AIWA на активный пользовательский день. Ответы ассистента не входят в числитель."},
+        {"label": "Ответы / сообщения", "value": (_percent(responses, messages) if messages else None), "unit": "%",
+         "note": f"{responses} ответов / {messages} сообщений",
+         "help": "Грубая диагностическая сверка объёма ответов и входящих сообщений без связывания по request_id. Не является точной долей успешно отвеченных запросов."},
+        {"label": "Размечено по функциям", "value": (_percent(classified_active, len(active_selected))
+                                                        if active_selected else None), "unit": "%",
+         "note": f"{classified_active} из {len(active_selected)} событий",
+         "help": "Доля активных событий, которые удалось отнести к продуктовой зоне. Низкое значение помогает найти новые или неправильно размеченные события; онбординг может оставаться без зоны намеренно."},
+        {"label": "Свежесть событий", "value": (max(0.0, now - latest_observed_ts)
+                                                   if latest_observed_ts is not None else None),
+         "unit": "duration", "note": "с последнего точного события",
+         "help": "Сколько времени прошло с последнего события, напрямую записанного аналитикой v2. Большое значение при живом продукте указывает на проблему доставки."},
+        {"label": "Ingest lag p50 / p95", "value": (_pct(ingest_lags, .5) if ingest_lags else None),
+         "secondary": (_pct(ingest_lags, .95) if ingest_lags else None), "unit": "duration_pair",
+         "note": f"{len(ingest_lags)} точных событий",
+         "help": "Задержка между временем события и его приёмом модулем аналитики. p95 помогает заметить очереди, сетевые задержки и отложенную доставку."},
+        {"label": "Ошибки / 100 user-days", "value": (round(explicit_errors * 100 / active_user_days, 2)
+                                                         if active_user_days else None), "unit": "number",
+         "note": f"{explicit_errors} явно записанных ошибок",
+         "help": "Явно записанные error-события на 100 активных пользовательских дней. Ошибки отдельных AI-попыток вынесены в AI-блок и сюда не добавляются."},
+        {"label": "Request ID coverage", "value": _percent(request_covered, len(ai_rows)) if ai_rows else None,
+         "unit": "%", "note": f"{request_covered} из {len(ai_rows)} AI-попыток",
+         "help": "Доля AI-попыток с request_id. Ниже 80% нельзя надёжно объединять retry/fallback в пользовательские запросы."},
     ]
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "window_days": window_days,
         "installs": len(ever_ids), "dau": len(selected_ids), "events": len(selected),
         "errors": (failed_requests if requests else 0) + explicit_errors, "overview": overview,
-        "metrics": [{"label": x["label"], "value": str(x["value"]), "good": True} for x in primary],
+        "metrics": [{"label": x["label"], "value": ("—" if x["value"] is None else str(x["value"])),
+                     "good": True} for x in primary],
         "primary": primary,
         "audience": {"ever_used": len(ever_ids), "active": len(selected_ids), "dau": len(dau_ids),
                      "wau": len(wau_ids), "mau": len(mau_ids), "avg_dau": round(avg_dau, 1),
                      "active_user_days": active_user_days},
         "engagement": {"sessions": sessions, "messages": messages, "responses": responses,
                        "sessions_per_active_day": per_active_day(sessions),
+                       "tools_per_active_day": per_active_day(len(ai_rows)),
                        "messages_per_active_day": per_active_day(messages),
+                       "avg_dau": round(avg_dau, 1),
                        "avg_session_min": round(sum(session_lengths) / len(session_lengths) / 60, 1) if session_lengths else 0,
                        "events_per_session": round(sum(session_events) / len(session_events), 1) if session_events else 0,
                        "features": features,
                        "pushes_sent": len(pushes), "checkins_completed": len(checkins)},
+        "tool_definitions": tool_definitions,
+        "diagnostics": diagnostics,
         "funnel": funnel, "feature_funnels": feature_funnels,
         "product_health": product_health, "answer_quality": answer_quality,
         "push_funnel": push_funnel, "retention": _retention(rows),
-        "series": _series(rows, window_days, now, available_start),
+        "series": series_data,
         "ai": {"attempts": len(ai_rows), "requests": len(requests), "untraced_attempts": len(ai_rows) - request_covered,
                "successful_requests": successful_requests,
                "failed_requests": failed_requests,

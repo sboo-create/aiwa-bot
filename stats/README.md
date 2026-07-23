@@ -12,6 +12,25 @@ Only the HMAC-pseudonymous `user_key`, canonical event name and an allow-list
 of coarse properties are accepted. Telegram IDs, message text, symptoms,
 cycle dates, photos and audio are never sent.
 
+## Overview and tool semantics
+
+The `overview` object intentionally keeps the six-field Disrupt Analytics
+contract: `ever_used`, `dau`, `wau`, `mau`, `sessions_per_dau` and
+`tools_per_dau`. Both ratios always use trailing-24-hour numerators regardless
+of the period selected on the detailed dashboard. Sessions use the selected
+history layer's rolling DAU; the exact AI-attempt ratio uses observed v2
+rolling DAU so reconstructed users cannot dilute a numerator whose old calls
+are incomplete.
+
+For backward compatibility, `tools_per_dau` currently means observed v2 AI
+provider attempts, including retry and fallback. If attempts exist without a
+rolling DAU denominator, the ratio is `null` rather than a misleading zero.
+The detailed dashboard exposes the
+top-level `tool_definitions` candidates with stable IDs, numerators,
+denominators and `selected_for_overview`. This makes the current choice
+explicit while product can compare logical AI requests, product actions,
+feature breadth and completed value proxies before changing the canonical KPI.
+
 ## Historical migration
 
 Legacy history is intentionally not blended into the exact layer. Run the
