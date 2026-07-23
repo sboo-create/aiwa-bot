@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v91-unified-summaries"
+AIWA_VERSION = "2026-07-23-v92-gfm-lists-len"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1384,6 +1384,7 @@ def md_plain(text):
             ln = "• " + ", ".join(cells)
         lines.append(ln)
     t = "\n".join(lines)
+    t = re.sub(r"(?m)^(\s*)-\s+", r"\1• ", t)          # в мини-аппе плейн: «- » -> «• »
     return t.replace("**", "").replace("__", "")
 
 TG_MESSAGE_LIMIT = 4096
