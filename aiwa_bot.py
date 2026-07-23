@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v96-model-first"
+AIWA_VERSION = "2026-07-23-v97-partner-model-rich"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -2578,7 +2578,17 @@ async def push_partner(context, woman_cid):
     hint = last_hint(woman_cid)
     if u and u.get("mode") == "preg" and u.get("last_period"):
         try:
-            return await context.bot.send_message(pid, partner_preg_text(C.preg_status(u["last_period"]), hint))
+            _preg = C.preg_status(u["last_period"]); _pu = []
+            text = None
+            try: text = await llm_to_thread(woman_cid, "partner_brief", L.partner_preg_brief, _preg, hint, _pu)
+            except Exception as e: log.warning("partner_preg_brief: %s", e)
+            if _pu: ev(woman_cid, "tokens", sum(_pu), meta="partner_brief", calls=len(_pu))
+            if not text: text = partner_preg_text(_preg, hint)
+            try:
+                await send_rich(context.bot, pid, text)
+            except Exception:
+                await context.bot.send_message(pid, tg_rich(text), parse_mode="HTML")
+            return
         except Exception as e:
             return log.warning("partner preg push: %s", e)
     u, st = status_of(woman_cid)
@@ -2594,7 +2604,10 @@ async def push_partner(context, woman_cid):
     if _pu: ev(woman_cid, "tokens", sum(_pu), meta="partner_brief", calls=len(_pu))
     if not text: text = partner_text(st, hint)
     try:
-        await context.bot.send_message(pid, text)
+        try:
+            await send_rich(context.bot, pid, text)
+        except Exception:
+            await context.bot.send_message(pid, tg_rich(text), parse_mode="HTML")
     except Exception as e:
         log.warning("partner push: %s", e)
 
