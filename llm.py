@@ -2039,9 +2039,11 @@ def synthesize(text, info=None):
     tok = _salute_auth()
     if not tok:
         return None
-    # Голос задают техническим коротким именем (например, erm для Joy);
-    # сервису нужен суффикс частоты.
-    voice = SALUTE_VOICE if re.search(r"_\d+$", SALUTE_VOICE) else SALUTE_VOICE + "_24000"
+    # В переменной можно хранить документированное короткое имя (например, erm для Joy).
+    # API SaluteSpeech регистрозависим и принимает Erm_24000.
+    voice_name = (SALUTE_VOICE or "erm").strip()
+    voice_name = voice_name[:1].upper() + voice_name[1:]
+    voice = voice_name if re.search(r"_\d+$", voice_name) else voice_name + "_24000"
     for attempt in (1, 2):
         try:
             r = _HTTP.post(SALUTE_TTS, params={"format": TTS_FORMAT, "voice": voice},

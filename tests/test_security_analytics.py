@@ -466,7 +466,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
             audio = llm.synthesize("Привет от Айвы")
 
         self.assertEqual(audio, b"joy-audio")
-        self.assertEqual(post.call_args.kwargs["params"]["voice"], "erm_24000")
+        self.assertEqual(post.call_args.kwargs["params"]["voice"], "Erm_24000")
 
     def test_http_admin_keeps_legacy_key_but_prefers_separate_secret(self):
         old_admin = bot.AIWA_ADMIN
