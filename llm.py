@@ -2011,7 +2011,7 @@ def _transcribe_groq(audio_bytes, filename, ext):
 
 SALUTE_TTS = (os.environ.get("SBER_SALUTE_SYNTH_URL") or os.environ.get("SALUTE_SPEECH_SYNTH_URL")
               or "https://speech.giga.chat/rest/v1/text:synthesize")
-SALUTE_VOICE = os.environ.get("AIWA_TTS_VOICE") or "Nec"   # женский голос «Наталья»
+SALUTE_VOICE = os.environ.get("AIWA_TTS_VOICE") or "erm"   # голос Joy
 TTS_FORMAT = os.environ.get("AIWA_TTS_FORMAT") or "opus"   # opus — родной для голосовых Telegram
 TTS_MAXCHARS = int(os.environ.get("AIWA_TTS_MAXCHARS", "700"))
 
@@ -2039,7 +2039,8 @@ def synthesize(text, info=None):
     tok = _salute_auth()
     if not tok:
         return None
-    # голос задают коротким именем (Nec), сервису нужен суффикс частоты
+    # Голос задают техническим коротким именем (например, erm для Joy);
+    # сервису нужен суффикс частоты.
     voice = SALUTE_VOICE if re.search(r"_\d+$", SALUTE_VOICE) else SALUTE_VOICE + "_24000"
     for attempt in (1, 2):
         try:

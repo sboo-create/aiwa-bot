@@ -452,6 +452,22 @@ class SecurityAnalyticsTests(unittest.TestCase):
             asyncio.run(bot.on_text(update, context))
         voice_reply.assert_not_awaited()
 
+    def test_joy_voice_uses_erm_24000_for_salutespeech(self):
+        response = types.SimpleNamespace(
+            status_code=200,
+            content=b"joy-audio",
+            text="",
+            raise_for_status=lambda: None,
+        )
+        with mock.patch.object(llm, "SALUTE_VOICE", "erm"), \
+             mock.patch.object(llm, "_salute_auth", return_value="speech-token"), \
+             mock.patch.object(llm._HTTP, "post", return_value=response) as post, \
+             mock.patch.object(llm, "_capture_media"):
+            audio = llm.synthesize("Привет от Айвы")
+
+        self.assertEqual(audio, b"joy-audio")
+        self.assertEqual(post.call_args.kwargs["params"]["voice"], "erm_24000")
+
     def test_http_admin_keeps_legacy_key_but_prefers_separate_secret(self):
         old_admin = bot.AIWA_ADMIN
         old_key = os.environ.get("AIWA_ADMIN_KEY")
