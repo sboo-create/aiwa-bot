@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v85-food-classes"
+AIWA_VERSION = "2026-07-23-v86-onboarding-copy"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -163,14 +163,25 @@ def symptom_label(code):
 def symptoms_labels(items):
     return [symptom_label(x) for x in (items or []) if symptom_label(x)]
 
-START_TEXT = ("🌸 Привет, я Айва, персональный ИИ-ассистент по циклу и женскому здоровью.\n\n"
- "Я помогаю понимать цикл и получать персональные рекомендации по питанию, нагрузке и симптомам.\n\n"
- "Можно писать мне текстом или голосом, получать сводку на день, меню, тренировки, выписку для врача и подсказки для партнёра.\n\n"
- "Айва учитывает твои отметки, пищевые ограничения и медицинские рекомендации. Чтобы начать, выбери один из вариантов ниже.")
-ABOUT_TEXT = ("🌸 Я Айва — ИИ-ассистент по женскому здоровью.\n\n"
- "Веду твой цикл и подстраиваюсь под его фазы: утренние сводки, персональное питание и тренировки, ответы на вопросы о здоровье, "
- "отслеживание симптомов, выписка для врача и бережный партнёрский режим. Опираюсь на медицинские рекомендации и твои отметки.\n\n"
- "Быстрые действия есть в Меню, а календарь, симптомы, питание, нагрузка и статистика живут в приложении. Вопросы можно писать или наговаривать голосом прямо в чат.")
+START_TEXT = ("Привет, я Айва — ИИ-ассистент по циклу и женскому здоровью.\n\n"
+ "Что я умею:\n"
+ "• считать цикл и присылать утреннюю сводку под твою фазу\n"
+ "• подбирать питание и нагрузку\n"
+ "• отвечать на вопросы о здоровье — текстом или голосом\n"
+ "• вести дневник еды, можно просто по фото\n"
+ "• собирать выписку для врача\n"
+ "• подсказывать партнёру, как поддержать\n\n"
+ "Настройка займёт около минуты. Выбери, что ближе:")
+ABOUT_TEXT = ("Я Айва — ИИ-ассистент по женскому здоровью.\n\n"
+ "Что я умею:\n"
+ "• веду календарь цикла и присылаю утреннюю сводку под фазу\n"
+ "• подбираю питание и тренировки\n"
+ "• отвечаю на вопросы о здоровье — текстом или голосом\n"
+ "• веду дневник еды, можно по фото\n"
+ "• отслеживаю симптомы и самочувствие\n"
+ "• собираю выписку для врача\n"
+ "• подсказываю партнёру, как поддержать\n\n"
+ "Опираюсь на медицинские рекомендации и твои отметки. Быстрые действия — в Меню, календарь и разделы — в приложении.")
 PRIVACY_TEXT = ("🔒 Про данные: Айва хранит данные профиля и отмеченные тобой сведения о цикле, самочувствии, питании, "
  "нагрузке и переписке, чтобы персонализировать ответы и работу приложения. Для генерации ответов, распознавания фото и речи "
  "необходимые данные могут передаваться подключённым ИИ- и речевым провайдерам. Данные не используются Айвой для рекламы. "
@@ -906,7 +917,7 @@ ACT_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Очень высокая", callback_data="act:5")],
 ])
 def diet_kb(selected):
-    rows = [[InlineKeyboardButton("Ограничений нет 👌", callback_data="diet:none")]]
+    rows = [[InlineKeyboardButton("Ограничений нет", callback_data="diet:none")]]
     rows += [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"diet:s:{code}")] for code, ru in DIET]
     rows.append([InlineKeyboardButton("Готово", callback_data="diet:done")]); return InlineKeyboardMarkup(rows)
 
@@ -938,12 +949,10 @@ def scheduled_hhmm(cid, hhmm):
 def schedule_text(cid, hhmm):
     actual, offset, window = scheduled_hhmm(cid, hhmm)
     if hhmm == "08:00":
-        return (f"Утреннюю сводку присылаю в интервале 08:00-11:00 (МСК) — у тебя примерно в {actual}.\n\n"
-                f"Так нагрузка размазывается по утру и сводки не уходят всем в одну минуту. Точное время можно задать в Меню.")
+        return (f"Утренняя сводка будет приходить около {actual} по Москве. Точное время можно поменять в Меню.")
     if not offset:
         return f"Время сводки: {hhmm} (МСК)."
-    return (f"Время сводки: {hhmm} (МСК). Для тебя фактически около {actual}.\n\n"
-            f"Разброс до {window - 1} минут нужен, чтобы сводки не уходили всем в одну секунду.")
+    return f"Время сводки: {hhmm} по Москве, фактически около {actual}."
 
 def today_start_iso():
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
@@ -2167,7 +2176,7 @@ def finish_onboarding(context, cid, last_period_iso, n):
 
 async def welcome_finish(context, cid, msg):
     ev(cid, "onboarding_completed", meta=(row(cid).get("mode") or "cycle"))
-    await msg.reply_text("Готово. " + schedule_text(cid, "08:00") + "\n\nВремя меняется в Меню. Историю прошлых циклов можно добавить позже командой /addcycles.",
+    await msg.reply_text("Готово. " + schedule_text(cid, "08:00") + "\n\nИсторию прошлых циклов можно добавить позже командой /addcycles.",
         reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
     await push_summary(context, cid)
 
@@ -2928,9 +2937,9 @@ async def handle_text(update, context, txt):
             return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
         upsert(cid, pending_date=d.isoformat(), state="await_len")
         return await update.message.reply_text(
-            "Поняла. Теперь длина цикла.\n\n"
-            "Это количество дней от первого дня одних месячных до первого дня следующих. Например, если месячные начались 1 мая, а следующие 29 мая, длина цикла 28 дней.\n\n"
-            "Напиши число. Норма обычно 21-35 дней. Если не знаешь точно, напиши примерное значение, потом его можно поправить.")
+            "Теперь длина цикла — сколько дней от первого дня одних месячных до первого дня следующих. "
+            "Например, месячные начались 1 мая, следующие 29 мая — цикл 28 дней.\n\n"
+            "Напиши число. Обычно это 21–35 дней; если не помнишь точно, укажи примерно — потом можно поправить.")
     if state == "await_len":
         try:
             n = int(txt); assert 20 <= n <= 60
@@ -2947,7 +2956,7 @@ async def handle_text(update, context, txt):
                     "Ориентировочные фазы я всё равно посчитаю и буду следить за симптомами.\n\n")
         upsert(cid, state="await_profile")
         return await update.message.reply_text(note +
-            "Осталось немного для персонального питания и калорий.\nНапиши через пробел рост (см), вес (кг) и возраст. Например: 168 60 30.", reply_markup=SKIP_KB)
+            "Напиши через пробел рост, вес и возраст — например: 168 60 30.\nПо ним я рассчитаю калории и подберу питание.", reply_markup=SKIP_KB)
 
     if state == "await_diet":
         upsert(cid, diet_note=txt[:200])
@@ -2975,7 +2984,7 @@ async def handle_text(update, context, txt):
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
         upsert(cid, height=int(cm), weight=kg, age=age, state="await_activity")
-        return await update.message.reply_text("Принято 💪 Какой у тебя уровень физической активности?\n\n"
+        return await update.message.reply_text("Записала. Какой у тебя уровень физической активности?\n\n"
             "• Минимальная — сидячий образ жизни, почти без спорта\n"
             "• Лёгкая — лёгкие тренировки 1–3 раза в неделю\n"
             "• Умеренная — спорт 3–5 раз в неделю\n"
@@ -2995,7 +3004,7 @@ async def handle_text(update, context, txt):
         if _act is None:
             return await update.message.reply_text("Выбери уровень активности кнопкой ниже — так точнее.", reply_markup=ACT_KB)
         upsert(cid, activity=_act, state="await_diet")
-        return await update.message.reply_text("Есть ограничения в еде? Если нет — жми «Ограничений нет». Или отметь кнопками / напиши своё текстом (например «без свинины, без сахара»), потом «Готово».", reply_markup=diet_kb(set()))
+        return await update.message.reply_text("Есть ограничения в еде? Отметь варианты или напиши своё текстом, например «без свинины, без сахара». Если ограничений нет, нажми «Ограничений нет».", reply_markup=diet_kb(set()))
 
     if state == "await_symptom_custom":
         code = symptom_code(txt)
@@ -3167,14 +3176,14 @@ async def on_cb(update, context):
     if data == "onb_cycle":
         upsert(cid, state="await_date", pending_date=None)
         return await q.message.reply_text(
-            "Ок. Напиши дату начала последних месячных. По этой дате Айва поймёт день цикла и подстроит питание, нагрузку и подсказки.\n\n"
-            "Например: 25.05.2026 или 26 мая 2026. Потом даты можно редактировать в приложении.")
+            "Напиши дату начала последних месячных — например 25.05.2026 или 26 мая 2026.\n\n"
+            "По ней я определю день цикла и подстрою питание и нагрузку. Даты потом можно править в приложении.")
     if data == "prof_skip":
         upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
     if data.startswith("act:"):
         upsert(cid, activity=int(data.split(":")[1]), state="await_diet")
         upsert(cid, state="await_diet")
-        return await q.message.reply_text("Есть ограничения в еде? Если нет — жми «Ограничений нет». Или отметь кнопками / напиши своё текстом (например «без свинины, без сахара»), потом «Готово».", reply_markup=diet_kb(set()))
+        return await q.message.reply_text("Есть ограничения в еде? Отметь варианты или напиши своё текстом, например «без свинины, без сахара». Если ограничений нет, нажми «Ограничений нет».", reply_markup=diet_kb(set()))
     if data.startswith("diet:s:"):
         code = data.split(":")[2]; cur = set((row(cid).get("diet") or "").split(",")) - {""}
         cur.symmetric_difference_update({code}); upsert(cid, diet=",".join(sorted(cur)))
@@ -3186,8 +3195,8 @@ async def on_cb(update, context):
         upsert(cid, state=None); return await welcome_finish(context, cid, q.message)
     if data == "no_cycle":
         return await q.message.reply_text(
-            "Ок. Айва может работать и без регулярного цикла: при нерегулярных месячных, беременности, менопаузе или если месячных сейчас нет.\n\n"
-            "Выбери, что ближе сейчас. Это можно поменять позже.", reply_markup=NOCYCLE_KB)
+            "Выбери, что ближе сейчас — это можно поменять позже.\n\n"
+            "Айва работает и без регулярного цикла: при нерегулярных месячных, беременности и менопаузе.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
         m = data.split(":")[1]; upsert(cid, mode=m)
         schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
