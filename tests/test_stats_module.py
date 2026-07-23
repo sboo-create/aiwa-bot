@@ -108,7 +108,33 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(month["data_quality"]["available_days"], 1)
         self.assertEqual(month["audience"]["avg_dau"], 2.0)
         self.assertEqual(len(month["series"]), 1)
-        self.assertEqual(month["primary"][2]["label"], "Avg DAU")
+        self.assertEqual([x["label"] for x in month["primary"]],
+                         ["Ever used", "DAU", "WAU", "MAU", "Sessions / DAU", "Tools / DAU"])
+        self.assertEqual(month["overview"], data["overview"])
+        self.assertEqual(set(month["overview"]), {
+            "ever_used", "dau", "wau", "mau", "sessions_per_dau", "tools_per_dau",
+        })
+        tools = {x["id"]: x for x in data["tool_definitions"]}
+        self.assertTrue(tools["ai_provider_attempts"]["selected_for_overview"])
+        self.assertEqual(tools["logical_ai_requests"]["value"], 0.5)
+        self.assertEqual(tools["value_actions"]["value"], 1.5)
+        self.assertEqual(len(data["diagnostics"]), 10)
+
+    def test_overview_ratios_use_rolling_dau_not_calendar_user_days(self):
+        now = datetime(2026, 7, 23, 0, 30, tzinfo=timezone.utc).timestamp()
+        self.add("msg-before-midnight", "u1", "user_message_sent", ts=now - 40 * 60)
+        self.add("msg-after-midnight", "u1", "user_message_sent", ts=now - 20 * 60)
+        self.add("call1", "u1", "ai_call", {"request_id": "r1", "status": "success"}, now - 19 * 60)
+        self.add("call2", "u1", "ai_call", {"request_id": "r2", "status": "success"}, now - 18 * 60)
+
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            day = self.module.compute_dashboard(1)
+            week = self.module.compute_dashboard(7)
+
+        self.assertEqual(day["overview"]["dau"], 1)
+        self.assertEqual(day["overview"]["sessions_per_dau"], 1.0)
+        self.assertEqual(day["overview"]["tools_per_dau"], 2.0)
+        self.assertEqual(day["overview"], week["overview"])
 
     def test_ingest_allow_list_drops_sensitive_properties_and_upgrades_payload(self):
         safe = self.module._safe_properties({"screen": "food", "symptoms": "secret", "cycle_date": "secret"})
@@ -121,6 +147,9 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIn("могут быть неполными", html)
         self.assertIn("Точно записанные (observed)", html)
         self.assertIn("Восстановленные (reconstructed)", html)
+        self.assertIn("Что считать «Tools»?", html)
+        self.assertIn("в Overview как Tools / DAU", html)
+        self.assertIn("Диагностика продукта и данных", html)
 
     def test_request_success_is_hidden_when_request_ids_are_missing(self):
         self.add("call", "u1", "ai_call", {"provider": "p", "model": "m", "status": "error"})
@@ -131,6 +160,9 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(data["ai"]["requests"], 0)
         self.assertEqual(data["ai"]["untraced_attempts"], 1)
         self.assertIsNone(data["ai"]["request_success_rate"])
+        tools = {x["id"]: x for x in data["tool_definitions"]}
+        self.assertIsNone(tools["ai_provider_attempts"]["value"])
+        self.assertIsNone(tools["logical_ai_requests"]["value"])
         self.assertEqual(data["errors"], 0)
         self.assertEqual(data["ai"]["providers"][0]["success"], 0)
 
