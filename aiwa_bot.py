@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v88-checkin-idempotency"
+AIWA_VERSION = "2026-07-23-v89-tg-rich-tov"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1307,6 +1307,21 @@ async def send_guide(context, cid, g):
         log.warning("guide: %s", e)
         with open(path, "rb") as fh: await context.bot.send_photo(cid, photo=fh, caption=g["title"])
 
+def tg_rich(text):
+    """Лёгкие маркеры от модели -> Telegram HTML: **жирный**, __курсив__, ```моноширинный блок```."""
+    if not text: return ""
+    t = html.escape(str(text), quote=False)
+    t = re.sub(r"```[a-z]*\n?(.*?)```", lambda m: "<pre>" + m.group(1).strip("\n") + "</pre>", t, flags=re.S)
+    t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t, flags=re.S)
+    t = re.sub(r"__(.+?)__", r"<i>\1</i>", t, flags=re.S)
+    return t.replace("**", "").replace("__", "")     # непарные хвосты после нарезки
+
+def md_plain(text):
+    """Для мини-аппа: те же маркеры просто убираем, он рендерит плейн."""
+    if not text: return text
+    t = re.sub(r"```[a-z]*\n?(.*?)```", r"\1", str(text), flags=re.S)
+    return t.replace("**", "").replace("__", "")
+
 TG_MESSAGE_LIMIT = 4096
 # Leave room for Telegram entity parsing and for a short quoted question.
 TG_TEXT_CHUNK = 3600
@@ -1508,10 +1523,10 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     for i, part in enumerate(parts):
         last = i == len(parts) - 1
         if i == 0 and quote_text:
-            body = f"<blockquote>{html.escape(quote_text)}</blockquote>\n{html.escape(part)}"
+            body = f"<blockquote>{html.escape(quote_text)}</blockquote>\n{tg_rich(part)}"
             await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
         else:
-            await context.bot.send_message(cid, part, reply_markup=(kb if last else None))
+            await context.bot.send_message(cid, tg_rich(part), reply_markup=(kb if last else None), parse_mode="HTML")
     ev(cid, "assistant_message", meta="bot")
     if feedback_id:
         ev(cid, "feedback_prompt", meta=f"{answer_id}|bot")
@@ -1534,7 +1549,7 @@ async def push_general(context, cid, campaign=None):
     clean, extra = L.split_followups(body)
     kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u,
                  app_label=APP_BUTTON_TEXT, campaign=campaign)
-    await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
+    await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
         reply_markup=kb, parse_mode="HTML")
     if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
     ev(cid, "goal", meta="summary")
@@ -1678,7 +1693,7 @@ async def push_summary(context, cid, with_image=True, campaign=None):
     clean, extra = L.split_followups(body)
     kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u,
                  app_label=APP_BUTTON_TEXT, campaign=campaign)
-    await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
+    await context.bot.send_message(cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
         reply_markup=kb, parse_mode="HTML")
     if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
     ev(cid, "goal", meta="summary")
@@ -4180,7 +4195,7 @@ async def _chat_reply(cid, u, msg, user_generation=None):
             asyncio.create_task(_memory_learn(cid, msg, clean, generation))
         except Exception:
             pass
-    return {"answer": clean, "suggestions": sugg[:2]}
+    return {"answer": md_plain(clean), "suggestions": sugg[:2]}
 
 async def _api_voice(request):
     try:
