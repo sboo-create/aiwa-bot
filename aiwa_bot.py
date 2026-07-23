@@ -3104,7 +3104,7 @@ async def on_photo(update, context):
     mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
     rows = [[B("🗑 Убрать из дневника", f"mdel:{mid}")]]
     wu = webapp_url(u) or AIWA_WEBAPP_URL
-    if wu: rows.append([InlineKeyboardButton("📱 Открыть дневник", web_app=WebAppInfo(url=wu))])
+    if wu: rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
     await update.message.reply_text(food_card(rec), reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
 
 async def handle_text(update, context, txt):
