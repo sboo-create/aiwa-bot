@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Сводка, ответы и динамические саджесты через GigaChat/LiteLLM."""
-import os, re, json, requests, unicodedata, threading, contextvars, uuid
+import os, re, json, html, requests, unicodedata, threading, contextvars, uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -351,11 +351,11 @@ SYSTEM = (
     "Ты сама ведёшь календарь цикла и отмечаешь месячные прямо в этом боте (кнопка Отметить месячные или команда /period). НИКОГДА не советуй пользователю сторонние приложения, календари или бумажные дневники для отслеживания цикла, всё это делается здесь, у тебя. "
     "ОЧЕНЬ ВАЖНО: ты НЕ можешь сама вносить, изменять или удалять данные (даты месячных, длину цикла, профиль, время рассылки, отметки) через чат, у тебя нет такой возможности. Никогда не пиши, что ты «добавила», «внесла», «изменила», «удалила» или «отметила» что-то. Если просят это сделать, честно объясни, ГДЕ это сделать: отметить месячные — кнопка «Отметить месячные» в меню или тап по дате в календаре приложения; изменить рост/вес/возраст — команда /profile; добавить историю циклов — «Изменить данные» → «История циклов». "
     "Команды бота, существуют только эти: /menu, /today, /checkin, /period, /calendar, /report, /partner, /unlink, /addcycles, /profile, /app, /time, /about, /id, /stop. Никогда не выдумывай других команд (например, нет команды /settings). Рост, вес и возраст меняются командой /profile. "
-    "Формат строго для мессенджера: разрешена только лёгкая разметка Telegram — **жирный** для коротких подзаголовков, "
-    "__курсив__ для редкого акцента и тройные обратные кавычки для моноширинной таблицы. "
-    "Не используй #, markdown-таблицы с вертикальной чертой |, одиночные обратные кавычки и ссылки в скобках. "
-    "Если пользователь прямо просит таблицу, обязательно дай компактную таблицу внутри тройных обратных кавычек, "
-    "с короткими колонками, выровненными пробелами. Не используй длинные тире, ставь обычный дефис, запятую или скобки. "
+    "Формат строго для мессенджера: GitHub Markdown, который Telegram рендерит нативно. "
+    "Используй ### для коротких подзаголовков, **жирный** для ключевых слов, строки с - для списков "
+    "и GFM-таблицы с вертикальными чертами и обязательной строкой-разделителем. "
+    "Если пользователь прямо просит таблицу, обязательно ответь настоящей таблицей и включи все запрошенные периоды. "
+    "Не используй HTML-теги, одиночные обратные кавычки и ссылки в скобках. Не используй длинные тире. "
     "Отвечай точно на заданный вопрос и ровно в том объёме, который он требует. НЕ добавляй разделы про питание, нагрузку, фазу или прогноз, если о них прямо не спрашивали. Если в ответе несколько смысловых частей, можешь предварять их уместным эмодзи, но не навязывай фиксированную структуру ответ-питание-нагрузка-рекомендации. "
     "Перечисления оформляй списком: каждая строка с новой строки, начинается с «- » (дефис и пробел). "
     "Пиши строго и только на грамотном русском языке кириллицей. Никогда не вставляй латинские буквы и слова из других языков внутрь русских слов: пиши «сперматозоиды», а не «Сpermatozoиды»; «помогает», а не «giúpает»; «силовая тренировка», а не «силачья»; «кости», а не «bones». "
@@ -2232,14 +2232,58 @@ SALUTE_TTS = (os.environ.get("SBER_SALUTE_SYNTH_URL") or os.environ.get("SALUTE_
               or "https://speech.giga.chat/rest/v1/text:synthesize")
 SALUTE_VOICE = os.environ.get("AIWA_TTS_VOICE") or "erm"   # голос Joy
 TTS_FORMAT = os.environ.get("AIWA_TTS_FORMAT") or "opus"   # opus — родной для голосовых Telegram
-TTS_MAXCHARS = int(os.environ.get("AIWA_TTS_MAXCHARS", "700"))
+TTS_MAXCHARS = int(os.environ.get("AIWA_TTS_MAXCHARS", "3500"))
+
+def _tts_spoken_text(text):
+    """Convert messenger markup, tables and formulas into pronounceable prose."""
+    t = html.unescape(re.sub(r"<[^>]+>", " ", str(text or "")))
+    t = re.sub(r"```[a-z]*\n?", "\n", t, flags=re.I)
+    t = t.replace("```", "\n").replace("**", "").replace("__", "")
+    t = re.sub(r"(?m)^\s*#{1,6}\s*", "", t)
+    rows = []
+    for line in t.splitlines():
+        if re.match(r"^\s*\|?[\s:|-]+\|?\s*$", line) and "|" in line:
+            continue
+        cells = [c.strip() for c in re.split(r"\t+|\s*\|\s*", line.strip().strip("|")) if c.strip()]
+        rows.append(". ".join(cells) if len(cells) > 1 else line)
+    t = "\n".join(rows)
+    t = re.sub(r"\bBMR\b", "базовый обмен", t, flags=re.I)
+    t = re.sub(r"\bTDEE\b", "суточный расход энергии", t, flags=re.I)
+    t = re.sub(r"(?<=\d)\.(?=\d)", ",", t)
+    t = re.sub(r"(?<=\d)\s*[-–—]\s*(?=\d)", " до ", t)
+    t = t.replace("×", " умножить на ").replace("*", " умножить на ")
+    t = t.replace("≈", " примерно ").replace("=", " равно ").replace("+", " плюс ")
+    t = re.sub(r"(?<!\w)-(?=\s*\d)", " минус ", t)
+    t = re.sub(r"(?<=\d)\s*%", " процентов", t)
+    t = re.sub(r"\bккал\s*/\s*день\b", "килокалорий в день", t, flags=re.I)
+    t = re.sub(r"\bккал\b", "килокалорий", t, flags=re.I)
+    t = re.sub(r"\bг\s*/\s*день\b", "граммов в день", t, flags=re.I)
+    t = re.sub(r"\s*[•·]\s*", ". ", t)
+    t = re.sub(r"[^\w\s.,!?;:()«»\"'\-–—/%°]", " ", t, flags=re.U)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def tts_chunks(text, limit=None):
+    """Return complete spoken chunks; never silently discard the tail."""
+    lim = max(200, min(3800, int(TTS_MAXCHARS if limit is None else limit)))
+    rest = _tts_spoken_text(text)
+    chunks = []
+    while rest:
+        if len(rest) <= lim:
+            chunks.append(rest)
+            break
+        window = rest[:lim + 1]
+        floor = int(lim * 0.55)
+        boundaries = [m.end() for m in re.finditer(r"(?<=[.!?])\s+|;\s+|,\s+|\s+", window)]
+        cut = max((p for p in boundaries if floor <= p <= lim), default=lim)
+        chunks.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    return [chunk for chunk in chunks if chunk]
 
 def _tts_trim(text, limit=None):
-    """Готовит текст к озвучке: убирает эмодзи и маркеры списка, режет по границе предложения."""
+    """Prepare one bounded TTS request; multi-part callers should use tts_chunks."""
     lim = TTS_MAXCHARS if limit is None else limit
-    t = re.sub(r"[^\w\s.,!?;:()«»\"'\-–—/%°]", " ", text or "", flags=re.U)
-    t = re.sub(r"\s*[•·]\s*", ". ", t)
-    t = re.sub(r"\s+", " ", t).strip()
+    t = _tts_spoken_text(text)
     if len(t) <= lim:
         return t
     cut = t[:lim]

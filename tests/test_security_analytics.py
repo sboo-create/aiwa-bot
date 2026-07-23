@@ -91,6 +91,61 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertFalse(bot._feedback_prompt_exists(202, answer_id))
         self.assertFalse(bot._feedback_prompt_exists(101, "ffffffffffffffff"))
 
+    def test_feedback_is_durable_idempotent_and_owned_by_the_recipient(self):
+        answer_id = "a1b2c3d4e5f60708"
+        self.assertTrue(bot._register_feedback_prompt(101, answer_id, "bot"))
+
+        self.assertEqual(bot._submit_feedback(202, answer_id, "helpful", "bot"), "missing")
+        self.assertEqual(bot._submit_feedback(101, answer_id, "helpful", "bot"), "saved")
+        self.assertEqual(bot._submit_feedback(101, answer_id, "unhelpful", "bot"), "duplicate")
+
+        conn = sqlite3.connect(bot.DB)
+        request = conn.execute(
+            "SELECT channel,rating,submitted_at FROM feedback_requests WHERE chat_id=? AND answer_id=?",
+            (101, answer_id),
+        ).fetchone()
+        feedback_events = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE chat_id=? AND action='feedback'",
+            (101,),
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(request[:2], ("bot", "helpful"))
+        self.assertTrue(request[2])
+        self.assertEqual(feedback_events, 1)
+
+    def test_rich_answer_registers_feedback_and_runs_common_instrumentation(self):
+        cid = 303
+        context = types.SimpleNamespace(bot=types.SimpleNamespace(send_message=mock.AsyncMock()))
+        rich_send = mock.AsyncMock()
+        with mock.patch.object(bot, "RICH_OK", True), \
+             mock.patch.object(bot, "send_rich", rich_send), \
+             mock.patch.object(bot, "_feedback_sampled", return_value=True), \
+             mock.patch.object(bot, "sugg_kb", return_value=None), \
+             mock.patch.object(bot.L, "split_followups", return_value=("Ответ", [])), \
+             mock.patch.object(bot.L, "followups", return_value=[]), \
+             mock.patch.object(bot, "_voice_reply_on", return_value=False):
+            asyncio.run(bot.send_answer(context, cid, "Ответ", None, "Вопрос", usage=[]))
+
+        rich_send.assert_awaited_once()
+        context.bot.send_message.assert_not_awaited()
+        conn = sqlite3.connect(bot.DB)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM feedback_requests WHERE chat_id=?",
+                (cid,),
+            ).fetchone()[0],
+            1,
+        )
+        actions = [
+            row[0] for row in conn.execute(
+                "SELECT action FROM events WHERE chat_id=? ORDER BY id",
+                (cid,),
+            ).fetchall()
+        ]
+        conn.close()
+        self.assertIn("feedback_prompt", actions)
+        self.assertIn("tokens", actions)
+
     def test_feedback_sampling_can_be_disabled_or_enabled_for_all_answers(self):
         with mock.patch.dict(os.environ, {"AIWA_FEEDBACK_SAMPLE_RATE": "0"}):
             self.assertFalse(bot._feedback_sampled("answer-1"))
@@ -255,6 +310,9 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn.execute("""INSERT INTO prepared_summaries
                         (chat_id,summary_date,context_key,body,prepared_at)
                         VALUES(?,?,?,?,?)""", (cid, "2026-07-23", "ctx", "private", "now"))
+        conn.execute("""INSERT INTO feedback_requests
+                        (chat_id,answer_id,channel,created_at)
+                        VALUES(?,?,?,?)""", (cid, "abcdef1234567890", "bot", "now"))
         conn.execute("INSERT INTO partners(partner_id,woman_id,created) VALUES(?,?,?)", (88, cid, "now"))
         a2.insert_legacy_event(conn, cid, "manual", meta="text")
         conn.commit(); conn.close()
@@ -265,7 +323,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn = bot.db()
         for table in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals",
                       "workouts", "proactive_log", "proactive_state", "memory", "referrals",
-                      "prepared_summaries"):
+                      "prepared_summaries", "feedback_requests"):
             self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE chat_id=?", (cid,)).fetchone()[0], 0, table)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid)).fetchone()[0], 0)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM events_v2 WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 0)
@@ -516,7 +574,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
              mock.patch.object(bot, "ev"):
             asyncio.run(bot.on_voice(update, context))
 
-        self.assertEqual(spoken, ["Сводка готова\nВсё хорошо."])
+        self.assertEqual(spoken, ["Сводка готова Всё хорошо."])
         telegram_bot.send_voice.assert_awaited_once_with(cid, b"summary-audio")
 
     def test_telegram_text_never_enables_voice_reply(self):
@@ -582,6 +640,25 @@ class SecurityAnalyticsTests(unittest.TestCase):
 
         self.assertEqual(audio, b"joy-audio")
         self.assertEqual(post.call_args.kwargs["params"]["voice"], "Erm_24000")
+
+    def test_tts_pronounces_formula_operators_and_table_cells(self):
+        spoken = llm._tts_spoken_text(
+            "BMR = 10×57 + 6.25×170 - 5×23 - 161 = 1357 ккал\n"
+            "Показатель\tБелки (г)\tКалории (ккал)\n"
+            "Дневная норма\t115\t2100"
+        )
+        self.assertIn("базовый обмен равно 10 умножить на 57", spoken)
+        self.assertIn("6,25 умножить на 170", spoken)
+        self.assertIn("1357 килокалорий", spoken)
+        self.assertNotIn("×", spoken)
+        self.assertNotIn("\t", spoken)
+
+    def test_tts_chunks_keep_the_complete_answer(self):
+        text = " ".join(f"Предложение номер {i}." for i in range(1, 80))
+        chunks = llm.tts_chunks(text, limit=220)
+        self.assertGreater(len(chunks), 1)
+        self.assertIn("Предложение номер 79.", " ".join(chunks))
+        self.assertTrue(all(len(chunk) <= 220 for chunk in chunks))
 
     def test_legacy_admin_is_gone_for_page_login_and_api(self):
         response = asyncio.run(bot._legacy_admin_removed(FakeRequest()))
@@ -713,7 +790,8 @@ class SecurityAnalyticsTests(unittest.TestCase):
 
     def test_rich_contract_does_not_forbid_its_own_markup(self):
         self.assertIn("**жирный**", llm.SYSTEM)
-        self.assertIn("тройные обратные кавычки", llm.SYSTEM)
+        self.assertIn("GFM-таблицы", llm.SYSTEM)
+        self.assertIn("все запрошенные периоды", llm.SYSTEM)
         self.assertNotIn("НИКОГДА не используй символы #, *, _", llm.SYSTEM)
 
     def test_followup_fallback_matches_answer_topic(self):
@@ -774,7 +852,10 @@ class SecurityAnalyticsTests(unittest.TestCase):
             "AIWA_SUMMARY_PREPARE_SPREAD_MIN": "20",
         }):
             self.assertEqual(bot.scheduled_hhmm(15, "10:00")[0], "10:00")
-            self.assertEqual(bot.schedule_text(15, "10:00"), "Время сводки: 10:00 (МСК).")
+            self.assertEqual(
+                bot.schedule_text(15, "10:00"),
+                "Время сводки: 10:00 по Москве — соберу заранее и пришлю к этому времени.",
+            )
             self.assertEqual(bot.summary_prepare_hhmm(15, "10:00"), "09:35")
 
     def test_prepared_summary_survives_memory_cache_loss(self):

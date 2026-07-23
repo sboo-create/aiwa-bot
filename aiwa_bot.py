@@ -267,6 +267,14 @@ def db():
         body TEXT NOT NULL,
         prepared_at TEXT NOT NULL,
         PRIMARY KEY(chat_id, summary_date))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS feedback_requests(
+        chat_id INTEGER NOT NULL,
+        answer_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        rating TEXT,
+        submitted_at TEXT,
+        PRIMARY KEY(chat_id, answer_id))""")
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
                 "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
@@ -610,7 +618,7 @@ def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
               "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries",
-              "prepared_summaries"):
+              "prepared_summaries", "feedback_requests"):
         c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))  # nosec B608
     c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid))
     A2.delete_user(c, cid)
@@ -1727,21 +1735,27 @@ async def _send_audio_fallback(context, cid, audio):
     await context.bot.send_audio(cid, buf, title="Ответ Айвы", performer="Айва")
 
 async def _send_voice_reply(context, cid, text):
-    """Озвучка ответа. Молча пропускаем, если синтез недоступен — текст уже отправлен."""
+    """Speak the complete answer in bounded requests instead of truncating it."""
     try:
-        _ti = {}
-        audio = await llm_to_thread(cid, "tts", L.synthesize, text, _ti)
-        if not audio:
-            return
-        how = "tts:salute"
-        try:
-            await context.bot.send_voice(cid, audio)
-        except Exception as e:
-            if "voice_messages_forbidden" not in str(e).lower():
-                raise
-            await _send_audio_fallback(context, cid, audio)   # у получателя закрыты голосовые
-            how = "tts:audio"
-        ev(cid, "tts", meta=how, ms=int(_ti.get("ms") or 0), n=int(_ti.get("chars") or 0), calls=1)
+        chunks = L.tts_chunks(text)
+        total_ms = 0; total_chars = 0; calls = 0; how = "tts:salute"
+        for chunk in chunks:
+            info = {}
+            audio = await llm_to_thread(cid, "tts", L.synthesize, chunk, info)
+            if not audio:
+                continue
+            calls += 1
+            total_ms += int(info.get("ms") or 0)
+            total_chars += int(info.get("chars") or len(chunk))
+            try:
+                await context.bot.send_voice(cid, audio)
+            except Exception as exc:
+                if "voice_messages_forbidden" not in str(exc).lower():
+                    raise
+                await _send_audio_fallback(context, cid, audio)
+                how = "tts:audio"
+        if calls:
+            ev(cid, "tts", meta=how, ms=total_ms, n=total_chars, calls=calls)
     except Exception as e:
         log.warning("voice reply: %s", e)
 
@@ -1775,22 +1789,100 @@ def _instrument_feedback_prompt(cid, answer, channel="bot"):
     answer_id = secrets.token_hex(8)
     sampled = _feedback_sampled(answer_id)
     if sampled:
-        ev(cid, "feedback_prompt", meta=f"{answer_id}|{channel}")
+        _register_feedback_prompt(cid, answer_id, channel)
     level = _safety_level(answer)
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|{channel}")
     return answer_id if sampled else None
 
+def _register_feedback_prompt(cid, answer_id, channel="bot"):
+    """Persist the button entitlement independently from analytics events."""
+    answer_id = re.sub(r"[^a-f0-9]", "", str(answer_id or ""))[:32]
+    if not answer_id:
+        return False
+    c = db()
+    try:
+        if not _user_write_allowed(cid, conn=c):
+            return False
+        cur = c.execute(
+            """INSERT OR IGNORE INTO feedback_requests
+               (chat_id,answer_id,channel,created_at) VALUES(?,?,?,?)""",
+            (cid, answer_id, str(channel or "bot")[:24], datetime.now(TZ).isoformat()),
+        )
+        c.commit()
+        created = cur.rowcount > 0
+    finally:
+        c.close()
+    if created:
+        ev(cid, "feedback_prompt", meta=f"{answer_id}|{channel}")
+    return True
+
 def _feedback_prompt_exists(cid, answer_id):
     """Accept feedback only for an answer actually shown to this user."""
     c = db()
     try:
+        if c.execute(
+            "SELECT 1 FROM feedback_requests WHERE chat_id=? AND answer_id=? LIMIT 1",
+            (cid, answer_id),
+        ).fetchone() is not None:
+            return True
+        # Compatibility with buttons sent before feedback_requests was introduced.
         return c.execute(
             "SELECT 1 FROM events WHERE chat_id=? AND action='feedback_prompt' AND meta LIKE ? LIMIT 1",
             (cid, answer_id + "|%"),
         ).fetchone() is not None
     finally:
         c.close()
+
+def _submit_feedback(cid, answer_id, rating, channel="bot"):
+    """Atomically save one rating; repeated taps are successful but do not duplicate analytics."""
+    answer_id = re.sub(r"[^a-f0-9]", "", str(answer_id or ""))[:32]
+    rating = str(rating or "")
+    if not answer_id or rating not in {"helpful", "unhelpful"}:
+        return "missing"
+    c = db()
+    saved_channel = str(channel or "bot")[:24]
+    try:
+        if not _user_write_allowed(cid, conn=c):
+            return "missing"
+        c.execute("BEGIN IMMEDIATE")
+        row_ = c.execute(
+            "SELECT channel,rating FROM feedback_requests WHERE chat_id=? AND answer_id=?",
+            (cid, answer_id),
+        ).fetchone()
+        if row_ is None:
+            # Migrate a still-visible legacy button on first click.
+            legacy = c.execute(
+                """SELECT meta FROM events
+                   WHERE chat_id=? AND action='feedback_prompt' AND meta LIKE ?
+                   ORDER BY id DESC LIMIT 1""",
+                (cid, answer_id + "|%"),
+            ).fetchone()
+            if legacy is None:
+                c.rollback()
+                return "missing"
+            if "|" in (legacy[0] or ""):
+                saved_channel = legacy[0].split("|", 1)[1][:24] or saved_channel
+            c.execute(
+                """INSERT INTO feedback_requests
+                   (chat_id,answer_id,channel,created_at) VALUES(?,?,?,?)""",
+                (cid, answer_id, saved_channel, datetime.now(TZ).isoformat()),
+            )
+            row_ = (saved_channel, None)
+        saved_channel = row_[0] or saved_channel
+        if row_[1] in {"helpful", "unhelpful"}:
+            c.commit()
+            return "duplicate"
+        c.execute(
+            """UPDATE feedback_requests SET rating=?,submitted_at=?
+               WHERE chat_id=? AND answer_id=? AND rating IS NULL""",
+            (rating, datetime.now(TZ).isoformat(), cid, answer_id),
+        )
+        c.commit()
+    finally:
+        c.close()
+    ev(cid, "feedback", meta=f"{rating}|{answer_id}|{saved_channel}")
+    return "saved"
 
 async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None):
     if usage is None: usage = []
@@ -1808,33 +1900,34 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     feedback_id = answer_id if _feedback_sampled(answer_id) else None
     kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label, feedback_id=feedback_id)
     quote_text = _clip_tg(quote) if quote else None
+    rich_sent = False
     if RICH_OK:
         try:
             md = (("> " + quote_text.replace("\n", " ") + "\n\n") if quote_text else "") + clean
             await send_rich(context.bot, cid, md, reply_markup=kb)
-            ev(cid, "assistant_message", meta="bot_rich")
-            return
+            rich_sent = True
         except Exception as _re_:
             log.info("rich fallback: %s", str(_re_)[:120])
-    first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
-    parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
-    for i, part in enumerate(parts):
-        last = i == len(parts) - 1
-        if i == 0 and quote_text:
-            body = f"<blockquote>{html.escape(quote_text)}</blockquote>\n{tg_rich(part)}"
-            try:
-                await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
-            except BadRequest:
-                await context.bot.send_message(cid, quote_text + "\n\n" + md_plain(part),
-                                               reply_markup=(kb if last else None))
-        else:
-            try:
-                await context.bot.send_message(cid, tg_rich(part), reply_markup=(kb if last else None), parse_mode="HTML")
-            except BadRequest:
-                await context.bot.send_message(cid, md_plain(part), reply_markup=(kb if last else None))
-    ev(cid, "assistant_message", meta="bot")
+    if not rich_sent:
+        first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
+        parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
+        for i, part in enumerate(parts):
+            last = i == len(parts) - 1
+            if i == 0 and quote_text:
+                body = f"<blockquote>{html.escape(quote_text)}</blockquote>\n{tg_rich(part)}"
+                try:
+                    await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
+                except BadRequest:
+                    await context.bot.send_message(cid, quote_text + "\n\n" + md_plain(part),
+                                                   reply_markup=(kb if last else None))
+            else:
+                try:
+                    await context.bot.send_message(cid, tg_rich(part), reply_markup=(kb if last else None), parse_mode="HTML")
+                except BadRequest:
+                    await context.bot.send_message(cid, md_plain(part), reply_markup=(kb if last else None))
+    ev(cid, "assistant_message", meta="bot_rich" if rich_sent else "bot")
     if feedback_id:
-        ev(cid, "feedback_prompt", meta=f"{answer_id}|bot")
+        _register_feedback_prompt(cid, answer_id, "bot")
     level = _safety_level(clean)
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|bot")
@@ -3682,10 +3775,13 @@ async def on_cb(update, context):
         parts = data.split(":", 2)
         rating = parts[1] if len(parts) > 1 else ""
         answer_id = re.sub(r"[^a-f0-9]", "", parts[2] if len(parts) > 2 else "")[:32]
-        if rating not in {"helpful", "unhelpful"} or not answer_id or not _feedback_prompt_exists(cid, answer_id):
+        feedback_result = _submit_feedback(cid, answer_id, rating, "bot")
+        if feedback_result == "missing":
             return await q.answer("Не получилось сохранить оценку")
-        ev(cid, "feedback", meta=f"{rating}|{answer_id}|bot")
-        await q.answer("Спасибо, это помогает улучшать Айву 💛")
+        if feedback_result == "duplicate":
+            await q.answer("Оценка уже сохранена 💛")
+        else:
+            await q.answer("Спасибо, это помогает улучшать Айву 💛")
         rows = []
         for row_buttons in (getattr(q.message.reply_markup, "inline_keyboard", None) or []):
             if any(str(getattr(button, "callback_data", "") or "").startswith("fb:") for button in row_buttons):
@@ -4458,10 +4554,10 @@ async def _api_feedback(request):
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     rating = str(body.get("rating") or "")
     answer_id = re.sub(r"[^a-f0-9]", "", str(body.get("answer_id") or ""))[:32]
-    if rating not in {"helpful", "unhelpful"} or not answer_id or not _feedback_prompt_exists(cid, answer_id):
+    feedback_result = _submit_feedback(cid, answer_id, rating, "webapp")
+    if feedback_result == "missing":
         return _cors(web.json_response({"error": "bad_feedback"}, status=400))
-    ev(cid, "feedback", meta=f"{rating}|{answer_id}|webapp")
-    return _cors(web.json_response({"ok": True}))
+    return _cors(web.json_response({"ok": True, "duplicate": feedback_result == "duplicate"}))
 
 def _agent_tools_spec():
     return [
