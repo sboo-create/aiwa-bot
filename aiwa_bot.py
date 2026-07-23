@@ -90,12 +90,12 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v99-token-headroom"
+AIWA_VERSION = "2026-07-23-v100-unified-app-buttons"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
-APP_BUTTON_TEXT = "📱 Приложение"
+APP_BUTTON_TEXT = "Открыть Айву"
 APP_MENU_BUTTON_TEXT = "Айва"
-APP_CTA_HTML = "📱 <b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
+APP_CTA_HTML = "<b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
 ANNOUNCE_TEXT = (
     "🌸 Большое обновление в приложении Айвы: теперь можно вести дневник питания и отмечать тренировки.\n\n"
     "🍎 Дневник калорий. Отмечай приёмы пищи по фото тарелки, текстом или вручную — Айва посчитает калории и БЖУ, "
@@ -1257,7 +1257,7 @@ async def send_section(context, cid, st, key):
         text = await think_llm(context, cid, L.answer_question, st, _fq, profile_of(row(cid)), None, usage=usage)
         if not text or "не вернула ответ" in text:
             text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
-        text += "\n\n📱 В приложении Айвы можно посмотреть нагрузку рядом с календарём, симптомами и фазой цикла. Открой приложение кнопкой ниже."
+        text += "\n\nВ приложении Айвы можно посмотреть нагрузку рядом с календарём, симптомами и фазой цикла. Открой приложение кнопкой ниже."
         return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage,
             app_user=row(cid), app_label="Открыть нагрузку")
     if key == "food":
@@ -1267,7 +1267,7 @@ async def send_section(context, cid, st, key):
             text = L.menu_text(st, mdata, target)
         else:
             text = L.section_text(st, "food")
-        text += "\n\n📱 В приложении Айвы меню удобнее: рядом с каждым блюдом есть кнопка «Заменить», можно быстро выбрать другой вариант без пересборки всего дня. Открой приложение кнопкой ниже."
+        text += "\n\nВ приложении Айвы меню удобнее: рядом с каждым блюдом есть кнопка «Заменить», можно быстро выбрать другой вариант без пересборки всего дня. Открой приложение кнопкой ниже."
         return await send_answer(context, cid, text, st, "питание сегодня", usage=usage,
             app_user=row(cid), app_label="Открыть питание")
     text = L.section_text(st, key)
@@ -1662,10 +1662,10 @@ async def send_general(context, cid, key):
     ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), q, hint=chat_hint(cid), usage=usage)
     _, st = status_of(cid)
     if key == "food":
-        ans += "\n\n📱 В приложении Айвы можно открыть питание и заменить блюдо кнопкой «Заменить»."
+        ans += "\n\nВ приложении Айвы можно открыть питание и заменить блюдо кнопкой «Заменить»."
         return await send_answer(context, cid, ans, st, q, usage=usage, app_user=u, app_label="Открыть питание")
     if key == "training":
-        ans += "\n\n📱 В приложении Айвы можно смотреть нагрузку рядом с календарём, симптомами и статистикой."
+        ans += "\n\nВ приложении Айвы можно смотреть нагрузку рядом с календарём, симптомами и статистикой."
         return await send_answer(context, cid, ans, st, q, usage=usage, app_user=u, app_label="Открыть нагрузку")
     await send_answer(context, cid, ans, st, q, usage=usage)
 
@@ -2753,7 +2753,7 @@ async def app_cmd(update, context):
     url = webapp_url(u)
     if not url:
         return await update.message.reply_text("Приложение скоро подключим.")
-    await update.message.reply_text("📱 Приложение Айвы:",
+    await update.message.reply_text("Приложение Айвы:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=url))]]))
 async def stop(update, context):
     cid = update.effective_chat.id
