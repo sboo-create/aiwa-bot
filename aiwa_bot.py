@@ -65,6 +65,8 @@ def hist_get(cid):
         pass
     return []
 def hist_push(cid, q, a):
+    if not _user_write_allowed(cid):
+        return False
     dq = CHAT_HIST.setdefault(cid, deque(maxlen=6))
     clean = a
     try: clean = L.split_followups(a)[0]
@@ -72,6 +74,7 @@ def hist_push(cid, q, a):
     dq.append({"role": "user", "content": q[:600]}); dq.append({"role": "assistant", "content": (clean or a)[:1200]})
     try: chatlog_add(cid, "user", q[:1000]); chatlog_add(cid, "ai", (clean or a)[:1500])
     except Exception: pass
+    return True
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 # httpx логирует полный URL с токеном бота на уровне INFO — глушим, чтобы токен не утекал в логи
@@ -87,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v73-cost-source-filter"
+AIWA_VERSION = "2026-07-23-v74-deletion-and-canonical-events"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -260,6 +263,31 @@ def db():
         except sqlite3.OperationalError: pass
     return c
 
+def _user_generation(cid):
+    c = db()
+    try:
+        return A2.lifecycle_generation(c, cid)
+    finally:
+        c.close()
+
+def _user_write_allowed(cid, generation=None, conn=None):
+    own_connection = conn is None
+    c = conn or db()
+    try:
+        return A2.write_allowed(c, chat_id=cid, generation=generation)
+    finally:
+        if own_connection:
+            c.close()
+
+def _activate_user(cid):
+    c = db()
+    try:
+        generation = A2.activate_user(c, cid)
+        c.commit()
+        return generation
+    finally:
+        c.close()
+
 def row(cid):
     c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
@@ -277,14 +305,20 @@ def upsert(cid, **kw):
     if unknown:
         raise ValueError("unknown user fields: " + ", ".join(sorted(unknown)))
     c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close()
+        return False
     if not c.execute("SELECT 1 FROM users WHERE chat_id=?", (cid,)).fetchone():
         c.execute("INSERT INTO users(chat_id,created) VALUES(?,?)", (cid, datetime.now().isoformat()))
     # Dynamic identifier is safe because every key was checked against _USER_UPDATE_COLUMNS.
     for k, v in kw.items(): c.execute(f"UPDATE users SET {k}=? WHERE chat_id=?", (v, cid))  # nosec B608
-    c.commit(); c.close()
+    c.commit(); c.close(); return True
 
 def add_sugg(cid, q):
-    c = db(); sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?)", (cid, q)).lastrowid; c.commit(); c.close(); return sid
+    c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return None
+    sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?)", (cid, q)).lastrowid; c.commit(); c.close(); return sid
 def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None):
@@ -293,7 +327,10 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
     if usage:
         try: tin, tout, model = L.usage_split(usage)
         except Exception: pass
-    c = db(); c.execute(
+    c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return False
+    c.execute(
         "INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n,calls,tok_in,tok_out,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (cid, datetime.now(TZ).isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls),
          int(tin), int(tout), model or None))
@@ -303,13 +340,15 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
     except Exception as exc:
         # Analytics must never break a product action; the legacy write remains.
         log.warning("events_v2 write failed: %s", exc)
-    c.commit(); c.close()
+    c.commit(); c.close(); return True
 
-async def llm_to_thread(cid, purpose, func, *args, request_id=None, **kwargs):
+async def llm_to_thread(cid, purpose, func, *args, request_id=None, user_generation=None, **kwargs):
     """Run a provider call with a shared trace id and pseudonymous user key."""
     request_id = request_id or ("r_" + secrets.token_hex(16))
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
     def run():
-        with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose):
+        with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose,
+                            user_generation=generation):
             return func(*args, **kwargs)
     return await asyncio.to_thread(run)
 
@@ -357,7 +396,10 @@ def slot_for_now():
 def meal_add(cid, rec, d=None):
     d = d or dtoday().isoformat()
     slot = rec.get("slot") or slot_for_now()
-    c = db(); mid = c.execute(
+    c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return None
+    mid = c.execute(
         "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (cid, d, datetime.now().isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
          float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
@@ -419,6 +461,8 @@ def workout_calories(wtype, duration, rpe, weight_kg):
 def workout_add(cid, rec, d=None):
     d = d or dtoday().isoformat()
     c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return None
     cur = c.execute("INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note,review,kcal,muscles) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (cid, d, datetime.now(TZ).isoformat(), rec.get("type", ""), json.dumps(rec.get("items", []), ensure_ascii=False),
          rec.get("duration", ""), rec.get("rpe", ""), rec.get("note", ""), rec.get("review", ""),
@@ -463,15 +507,19 @@ def diary_totals(cid, d=None):
 
 def cyc_add(cid, d, end=None):
     c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return False
     c.execute("INSERT OR IGNORE INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?)", (cid, d, end))
     if end: c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end, cid, d))
-    c.commit(); c.close()
+    c.commit(); c.close(); return True
 def cyc_set_end(cid, start_iso, end_iso):
     c = db(); c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end_iso, cid, start_iso)); c.commit(); c.close()
 def pa_list(cid):
     c = db(); r = c.execute("SELECT d FROM intimacy WHERE chat_id=? ORDER BY d", (cid,)).fetchall(); c.close(); return [x[0] for x in r]
 def pa_toggle(cid, iso):
     c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return False
     ex = c.execute("SELECT 1 FROM intimacy WHERE chat_id=? AND d=?", (cid, iso)).fetchone()
     if ex:
         c.execute("DELETE FROM intimacy WHERE chat_id=? AND d=?", (cid, iso)); marked = False
@@ -482,15 +530,21 @@ def log_get(cid, d):
     c = db(); r = c.execute("SELECT energy,mood,symptoms FROM logs WHERE chat_id=? AND log_date=?", (cid, d)).fetchone(); c.close()
     return {"energy": r[0], "mood": r[1], "symptoms": (r[2].split(",") if r[2] else [])} if r else None
 def log_ensure(cid, d):
-    c = db(); c.execute("INSERT OR IGNORE INTO logs(chat_id,log_date,symptoms) VALUES(?,?,'')", (cid, d)); c.commit(); c.close()
+    c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return False
+    c.execute("INSERT OR IGNORE INTO logs(chat_id,log_date,symptoms) VALUES(?,?,'')", (cid, d)); c.commit(); c.close(); return True
 def log_set(cid, d, **kw):
     unknown = set(kw) - {"energy", "mood", "symptoms"}
     if unknown:
         raise ValueError("unknown log fields: " + ", ".join(sorted(unknown)))
-    log_ensure(cid, d); c = db()
+    if not log_ensure(cid, d): return False
+    c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return False
     # Dynamic identifier is safe because every key was checked above.
     for k, v in kw.items(): c.execute(f"UPDATE logs SET {k}=? WHERE chat_id=? AND log_date=?", (v, cid, d))  # nosec B608
-    c.commit(); c.close()
+    c.commit(); c.close(); return True
 def log_toggle(cid, d, code):
     lg = log_get(cid, d) or {"symptoms": []}; s = set(lg["symptoms"]); s.symmetric_difference_update({code}); log_set(cid, d, symptoms=",".join(sorted(s)))
 def log_add_symptom(cid, d, code):
@@ -524,9 +578,11 @@ def del_user(cid):
 def chatlog_add(cid, role, text):
     if not text: return
     c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return False
     c.execute("INSERT INTO chat_log(chat_id,ts,role,text) VALUES(?,?,?,?)", (cid, datetime.now().isoformat(), role, text[:1500]))
     c.execute("DELETE FROM chat_log WHERE chat_id=? AND id NOT IN (SELECT id FROM chat_log WHERE chat_id=? ORDER BY id DESC LIMIT 120)", (cid, cid))
-    c.commit(); c.close()
+    c.commit(); c.close(); return True
 def chatlog_get(cid, limit=60):
     c = db(); r = c.execute("SELECT role,text FROM chat_log WHERE chat_id=? ORDER BY id DESC LIMIT ?", (cid, limit)).fetchall(); c.close()
     return [{"role": x[0], "text": x[1]} for x in reversed(r)]
@@ -534,7 +590,10 @@ def set_partner_code(cid, code): upsert(cid, partner_code=code)
 def woman_by_code(code):
     c = db(); r = c.execute("SELECT chat_id FROM users WHERE partner_code=?", (code,)).fetchone(); c.close(); return r[0] if r else None
 def link_partner(partner_id, woman_id):
-    c = db(); c.execute("INSERT OR REPLACE INTO partners(partner_id,woman_id,created) VALUES(?,?,?)", (partner_id, woman_id, datetime.now().isoformat())); c.commit(); c.close()
+    c = db()
+    if not (_user_write_allowed(partner_id, conn=c) and _user_write_allowed(woman_id, conn=c)):
+        c.close(); return False
+    c.execute("INSERT OR REPLACE INTO partners(partner_id,woman_id,created) VALUES(?,?,?)", (partner_id, woman_id, datetime.now().isoformat())); c.commit(); c.close(); return True
 def partner_of(woman_id):
     c = db(); r = c.execute("SELECT partner_id FROM partners WHERE woman_id=?", (woman_id,)).fetchone(); c.close(); return r[0] if r else None
 def woman_of_partner(pid):
@@ -1282,6 +1341,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
             await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
         else:
             await context.bot.send_message(cid, part, reply_markup=(kb if last else None))
+    ev(cid, "assistant_message", meta="bot")
     ev(cid, "feedback_prompt", meta=f"{answer_id}|bot")
     level = _safety_level(clean)
     if level:
@@ -1489,8 +1549,12 @@ def _pa_recent(cid, key, days):
         return False
 def _pa_mark(cid, key):
     try:
-        c = db(); c.execute("INSERT OR REPLACE INTO proactive_state(chat_id,signal,last_ts) VALUES(?,?,?)",
+        c = db()
+        if not _user_write_allowed(cid, conn=c):
+            c.close(); return False
+        c.execute("INSERT OR REPLACE INTO proactive_state(chat_id,signal,last_ts) VALUES(?,?,?)",
                             (cid, key, datetime.now(TZ).isoformat())); c.commit(); c.close()
+        return True
     except Exception as e:
         log.warning("pa_mark: %s", e)
 def _pa_logged_today(cid):
@@ -1502,8 +1566,12 @@ def _pa_logged_today(cid):
         return False
 def _pa_logrow(cid, key, score, sent, text):
     try:
-        c = db(); c.execute("INSERT INTO proactive_log(chat_id,ts,signal,score,sent,text) VALUES(?,?,?,?,?,?)",
+        c = db()
+        if not _user_write_allowed(cid, conn=c):
+            c.close(); return False
+        c.execute("INSERT INTO proactive_log(chat_id,ts,signal,score,sent,text) VALUES(?,?,?,?,?,?)",
                             (cid, datetime.now(TZ).isoformat(), key, int(score), int(sent), text or "")); c.commit(); c.close()
+        return True
     except Exception as e:
         log.warning("pa_logrow: %s", e)
 
@@ -1521,6 +1589,8 @@ def mem_set(cid, key, val):
         return False
     try:
         c = db()
+        if not _user_write_allowed(cid, conn=c):
+            c.close(); return False
         c.execute("INSERT OR REPLACE INTO memory(chat_id, mkey, mval, updated) VALUES(?,?,?,?)",
                   (cid, key, val, datetime.now(TZ).isoformat()))
         c.execute("DELETE FROM memory WHERE chat_id=? AND mkey NOT IN (SELECT mkey FROM memory WHERE chat_id=? ORDER BY updated DESC LIMIT ?)",
@@ -1547,8 +1617,12 @@ def _with_memory(cid, q):
 def _ref_touch(cid, src):
     """Первое касание источника перехода (deep-link ?start=<source>)."""
     try:
-        c = db(); c.execute("INSERT OR IGNORE INTO referrals(chat_id, source, ts) VALUES(?,?,?)",
+        c = db()
+        if not _user_write_allowed(cid, conn=c):
+            c.close(); return False
+        c.execute("INSERT OR IGNORE INTO referrals(chat_id, source, ts) VALUES(?,?,?)",
                             (cid, src, datetime.now(TZ).isoformat())); c.commit(); c.close()
+        return True
     except Exception as e:
         log.warning("ref_touch: %s", e)
 
@@ -2248,6 +2322,9 @@ async def partner_join(context, partner_cid, msg, code):
 # ---------- commands ----------
 async def start(update, context):
     cid = update.effective_chat.id
+    # /start is the only operation that begins a fresh lifecycle after /stop.
+    # Incrementing the generation keeps older in-flight tasks permanently stale.
+    _activate_user(cid)
     if context.args and context.args[0].startswith("p_"):
         return await partner_join(context, cid, update.message, context.args[0][2:])
     if context.args and context.args[0] and not context.args[0].startswith("p_"):
@@ -2616,12 +2693,16 @@ async def on_text(update, context):
 
 async def on_voice(update, context):
     cid = update.effective_chat.id; txt = None; _sti = {}
+    generation = _user_generation(cid)
     await context.bot.send_chat_action(cid, "typing")
     try:
         f = await context.bot.get_file(update.message.voice.file_id)
-        ba = await f.download_as_bytearray(); txt = await llm_to_thread(cid, "stt", L.transcribe, bytes(ba), "voice.ogg", _sti)
+        ba = await f.download_as_bytearray(); txt = await llm_to_thread(cid, "stt", L.transcribe, bytes(ba), "voice.ogg", _sti,
+                                                                       user_generation=generation)
     except Exception as e:
         log.warning("voice: %s", e)
+    if not _user_write_allowed(cid, generation):
+        return await update.message.reply_text("Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start.")
     if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1)
     if not txt:
         return await update.message.reply_text("Не разобрала голосовое, попробуй ещё раз или напиши текстом.")
@@ -2651,6 +2732,7 @@ async def on_photo(update, context):
         return await _announce_capture(update, context, cid)
     if not is_onboarded(u):
         return await update.message.reply_text("Сначала настрой Айву: /start.")
+    generation = _user_generation(cid)
     ev(cid, "flow_start", meta="food")
     await context.bot.send_chat_action(cid, "typing")
     try:
@@ -2663,9 +2745,12 @@ async def on_photo(update, context):
         return await update.message.reply_text("Не смогла скачать фото, попробуй ещё раз.")
     prof = profile_of(u); usage = []
     try:
-        parsed = await llm_to_thread(cid, "food_vision", L.analyze_food, bytes(ba), "food.jpg", prof, usage)
+        parsed = await llm_to_thread(cid, "food_vision", L.analyze_food, bytes(ba), "food.jpg", prof, usage,
+                                     user_generation=generation)
     except Exception as e:
         log.warning("on_photo analyze %s: %s", cid, e); parsed = None
+    if not _user_write_allowed(cid, generation):
+        return await update.message.reply_text("Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start.")
     ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage), usage=usage)
     rec = normalize_food(parsed, "photo") if parsed else None
     if not rec:
@@ -2891,6 +2976,7 @@ async def handle_text(update, context, txt):
             return await dispatch_intent(context, update, cid, u, _intent, txt)
 
     if is_onboarded(u) and not is_cycle(u):
+        if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
         ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
@@ -2898,6 +2984,7 @@ async def handle_text(update, context, txt):
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, None, txt, usage=usage, quote=txt)
     if is_onboarded(u):
+        if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
         _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing")
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
@@ -2951,6 +3038,7 @@ async def on_cb(update, context):
         _query = _QQ.get(_intent)
         if not _query:
             return
+        ev(cid, "user_message", meta="suggest", n=len(_query))
         await context.bot.send_chat_action(cid, "typing")
         try:
             _res = await _chat_reply(cid, _u, _query)
@@ -2961,6 +3049,7 @@ async def on_cb(update, context):
             _ans = "Не получилось собрать прямо сейчас, попробуй ещё раз чуть позже."
         _wu = webapp_url(_u) or AIWA_WEBAPP_URL
         _kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=_wu))]]) if _wu else None
+        ev(cid, "assistant_message", meta="bot")
         return await context.bot.send_message(cid, _ans, reply_markup=_kb)
     if data == "go_start": return await begin_onboard(cid, q.message, force=True)
     if data == "keep":
@@ -3068,6 +3157,7 @@ async def on_cb(update, context):
         except Exception: pass
     elif data.startswith("q:"):
         question = get_sugg(int(data.split(":")[1])) or "Дай рекомендацию"
+        ev(cid, "user_message", meta="suggest", n=len(question))
         await context.bot.send_chat_action(cid, "typing")
         if general:
             usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
@@ -3340,6 +3430,8 @@ async def _api_data(request):
     campaign = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(body.get("campaign") or ""))[:80]
     if campaign:
         ev(cid, "push_open", meta=campaign)
+        if campaign.split(":", 1)[0] == "daily_summary":
+            ev(cid, "summary_open", meta="daily_summary")
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
@@ -3636,12 +3728,17 @@ async def _api_chat(request):
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"answer": "Сначала настрой Айву в боте: /start.", "suggestions": []}, status=403))
+    generation = _user_generation(cid)
     msg = (body.get("message") or "").strip()
     if not msg: return _cors(web.json_response({"answer": "Напиши вопрос.", "suggestions": []}))
     msg, addressed = strip_aiwa_address(msg)
     if addressed and not msg:
         return _cors(web.json_response({"answer": "Я тут. Напиши вопрос про цикл, питание, нагрузку или самочувствие.", "suggestions": ["Когда овуляция?", "Что есть сегодня?"]}))
-    reply = await _chat_reply(cid, u, msg)
+    ev(cid, "user_message", meta="webapp", n=len(msg))
+    reply = await _chat_reply(cid, u, msg, user_generation=generation)
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response({"error": "deleted"}, status=409))
+    ev(cid, "assistant_message", meta="webapp")
     answer_id = _instrument_feedback_prompt(cid, reply.get("answer"), "webapp")
     reply["answer_id"] = answer_id
     return _cors(web.json_response(reply))
@@ -3717,7 +3814,7 @@ def _agent_exec(cid, name, args):
         return {"error": str(e)}
     return {"error": "unknown tool"}
 
-async def _agent_answer(cid, u, msg, usage, request_id):
+async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None):
     """Агентный ответ в два этапа:
     1) модель через инструменты сама добывает реальные данные пользовательницы (реальные тул-колы);
     2) финальный ответ пишется прежним качественным промптом (answer_question/general_answer) с этими данными.
@@ -3730,9 +3827,10 @@ async def _agent_answer(cid, u, msg, usage, request_id):
     tools = _agent_tools_spec()
     gathered = []
     for _r in range(2):
-        m = await llm_to_thread(cid, "tool_plan", L.call_tools, messages, tools, usage, 0.2, 480, request_id=request_id)
+        m = await llm_to_thread(cid, "tool_plan", L.call_tools, messages, tools, usage, 0.2, 480,
+                                request_id=request_id, user_generation=user_generation)
         if not m:
-            return None if _r == 0 else await _agent_final(cid, u, msg, gathered, usage, request_id)
+            return None if _r == 0 else await _agent_final(cid, u, msg, gathered, usage, request_id, user_generation)
         tc = m.get("tool_calls")
         if not tc:
             break
@@ -3744,27 +3842,34 @@ async def _agent_answer(cid, u, msg, usage, request_id):
                 a = json.loads(fn.get("arguments") or "{}")
             except Exception:
                 a = {}
+            if not _user_write_allowed(cid, user_generation):
+                return None
             res = _agent_exec(cid, nm, a)
             gathered.append(nm + ": " + json.dumps(res, ensure_ascii=False))
             messages.append({"role": "tool", "tool_call_id": call.get("id"),
                              "content": json.dumps(res, ensure_ascii=False)})
-    return await _agent_final(cid, u, msg, gathered, usage, request_id)
+    return await _agent_final(cid, u, msg, gathered, usage, request_id, user_generation)
 
-async def _agent_final(cid, u, msg, gathered, usage, request_id):
+async def _agent_final(cid, u, msg, gathered, usage, request_id, user_generation=None):
     _, st = status_of(cid); prof = profile_of(u)
     q = msg
     if gathered:
         q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про здоровье, цикл, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
     q = _with_memory(cid, q)
     if st is not None:
-        return await llm_to_thread(cid, "final_answer", L.answer_question, st, q, prof, hist_get(cid), usage=usage, request_id=request_id)
-    return await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid), usage=usage, request_id=request_id)
+        return await llm_to_thread(cid, "final_answer", L.answer_question, st, q, prof, hist_get(cid), usage=usage,
+                                   request_id=request_id, user_generation=user_generation)
+    return await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid), usage=usage,
+                               request_id=request_id, user_generation=user_generation)
 
-async def _memory_learn(cid, umsg, amsg):
+async def _memory_learn(cid, umsg, amsg, user_generation=None):
     """Фоновая выжимка устойчивых фактов из диалога в долгую память (не блокирует ответ)."""
     try:
         existing = mem_text(cid, 30); usage = []
-        facts = await llm_to_thread(cid, "memory_extract", L.memory_extract, umsg, amsg, existing, usage)
+        facts = await llm_to_thread(cid, "memory_extract", L.memory_extract, umsg, amsg, existing, usage,
+                                    user_generation=user_generation)
+        if not _user_write_allowed(cid, user_generation):
+            return
         for f in (facts or []):
             mem_set(cid, f.get("key"), f.get("value"))
         if usage:
@@ -3772,8 +3877,9 @@ async def _memory_learn(cid, umsg, amsg):
     except Exception as e:
         log.warning("memory_learn: %s", e)
 
-async def _chat_reply(cid, u, msg):
+async def _chat_reply(cid, u, msg, user_generation=None):
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
     intent = match_intent(msg)
     if intent == "phases":
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", PHASES_TEXT)
@@ -3803,7 +3909,7 @@ async def _chat_reply(cid, u, msg):
     request_id = "r_" + secrets.token_hex(16)
     ans = None
     try:
-        ans = await _agent_answer(cid, u, msg, usage, request_id)
+        ans = await _agent_answer(cid, u, msg, usage, request_id, user_generation=generation)
     except Exception as _ae:
         log.warning("agent fallback: %s", _ae); ans = None
     if not ans:
@@ -3813,26 +3919,33 @@ async def _chat_reply(cid, u, msg):
                   "Какая физическая активность мне сегодня подходит и почему? Дай 2-3 конкретных варианта. Отвечай про тренировки, тему цикла не разворачивай.")
             fq = _with_memory(cid, fq)
             if st is not None:
-                ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, fq, prof, hist_get(cid), usage=usage, request_id=request_id)
+                ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, fq, prof, hist_get(cid), usage=usage,
+                                          request_id=request_id, user_generation=generation)
             else:
-                ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage, request_id=request_id)
+                ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage,
+                                          request_id=request_id, user_generation=generation)
         elif st is not None:
-            ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid), usage=usage, request_id=request_id)
+            ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid), usage=usage,
+                                      request_id=request_id, user_generation=generation)
         else:
-            ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid), usage=usage, request_id=request_id)
-    hist_push(cid, msg, ans)
+            ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid), usage=usage,
+                                      request_id=request_id, user_generation=generation)
+    current = _user_write_allowed(cid, generation)
+    if current:
+        hist_push(cid, msg, ans)
     clean, sugg = L.split_followups(ans)
     if st is not None and len(sugg) < 2:
         try:
             for e in L.followups(st, msg, clean):
                 if e not in sugg and len(sugg) < 2: sugg.append(e)
         except Exception: pass
-    ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage),
-       request_id=request_id, usage=usage)
-    try:
-        asyncio.create_task(_memory_learn(cid, msg, clean))
-    except Exception:
-        pass
+    if current:
+        ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage),
+           request_id=request_id, usage=usage)
+        try:
+            asyncio.create_task(_memory_learn(cid, msg, clean, generation))
+        except Exception:
+            pass
     return {"answer": clean, "suggestions": sugg[:2]}
 
 async def _api_voice(request):
@@ -3845,6 +3958,7 @@ async def _api_voice(request):
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"answer": "Сначала настрой Айву в боте: /start.", "suggestions": []}, status=403))
+    generation = _user_generation(cid)
     field = data.get("audio")
     raw = b""
     if field is not None:
@@ -3855,14 +3969,19 @@ async def _api_voice(request):
     if not raw:
         return _cors(web.json_response({"transcript": "", "answer": "Пустая запись, попробуй ещё раз.", "suggestions": []}))
     _sti = {}
-    txt = await llm_to_thread(cid, "stt", L.transcribe, bytes(raw), fn, _sti)
+    txt = await llm_to_thread(cid, "stt", L.transcribe, bytes(raw), fn, _sti, user_generation=generation)
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response({"error": "deleted"}, status=409))
     if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1)
     if not txt:
         return _cors(web.json_response({"transcript": "", "answer": "Не расслышала, попробуй ещё раз или напиши текстом.", "suggestions": []}))
     ev(cid, "voice", n=len(txt))
     msg, _addr = strip_aiwa_address(txt.strip())
     if not msg: msg = txt.strip()
-    reply = await _chat_reply(cid, u, msg)
+    reply = await _chat_reply(cid, u, msg, user_generation=generation)
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response({"error": "deleted"}, status=409))
+    ev(cid, "assistant_message", meta="webapp")
     answer_id = _instrument_feedback_prompt(cid, reply.get("answer"), "webapp")
     reply["answer_id"] = answer_id
     reply["transcript"] = txt.strip()
@@ -3899,6 +4018,7 @@ async def answer_diary(cid, usage=None):
 
 async def log_food_from_text(cid, u, text):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
+    generation = _user_generation(cid)
     ev(cid, "flow_start", meta="food")
     slot = slot_from_text(text)
     food = re.sub(r"(?i)^\s*(айва[,\s]*)?(добав\w*|запиш\w*|занес\w*|залогир\w*|логни|отмет\w*)\b", "", text)
@@ -3907,7 +4027,10 @@ async def log_food_from_text(cid, u, text):
     if not food:
         food = text
     usage = []
-    parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, food, profile_of(u), usage)
+    parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, food, profile_of(u), usage,
+                                 user_generation=generation)
+    if not _user_write_allowed(cid, generation):
+        return "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."
     ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage)
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
@@ -3935,6 +4058,7 @@ async def _api_food_photo(request):
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте: /start."}, status=403))
+    generation = _user_generation(cid)
     ev(cid, "flow_start", meta="food")
     raw, fn = _read_upload(data.get("photo"))
     if not raw:
@@ -3943,9 +4067,12 @@ async def _api_food_photo(request):
         return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
     prof = profile_of(u); usage = []
     try:
-        parsed = await llm_to_thread(cid, "food_vision", L.analyze_food, raw, fn, prof, usage)
+        parsed = await llm_to_thread(cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
+                                     user_generation=generation)
     except Exception as e:
         log.warning("food_photo analyze %s: %s", cid, e); parsed = None
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage), usage=usage)
     rec = normalize_food(parsed, "photo") if parsed else None
     if not rec:
@@ -3969,14 +4096,18 @@ async def _api_food_text(request):
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте."}, status=403))
+    generation = _user_generation(cid)
     txt = (body.get("text") or "").strip()
     if not txt: return _cors(web.json_response({"ok": False, "message": "Напиши, что съела."}))
     ev(cid, "flow_start", meta="food")
     prof = profile_of(u); usage = []
     try:
-        parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, txt, prof, usage)
+        parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, txt, prof, usage,
+                                     user_generation=generation)
     except Exception as e:
         log.warning("food_text analyze %s: %s", cid, e); parsed = None
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage)
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
@@ -3997,8 +4128,12 @@ async def _api_track(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     scr = re.sub(r"[^a-z0-9_]", "", str(body.get("screen") or "").lower())[:20]
-    if scr and is_onboarded(row(cid)):
+    flow = re.sub(r"[^a-z0-9_]", "", str(body.get("flow") or "").lower())[:20]
+    onboarded = is_onboarded(row(cid))
+    if scr and onboarded:
         ev(cid, "button", meta="view_" + scr)
+    if flow in {"food", "workout"} and onboarded:
+        ev(cid, "flow_start", meta=flow)
     return _cors(web.json_response({"ok": True}))
 
 async def _api_train(request):
@@ -4020,6 +4155,7 @@ async def _api_workout(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    generation = _user_generation(cid)
     ev(cid, "flow_start", meta="workout")
     items = []; groups = []
     for i in (body.get("items") or [])[:24]:
@@ -4043,9 +4179,12 @@ async def _api_workout(request):
     _, st = status_of(cid); phase_ru = (st or {}).get("phase_ru") if st else None
     usage = []
     try:
-        review = await llm_to_thread(cid, "workout_review", L.training_review, wk, workouts_recent(cid), phase_ru, u.get("mode"), train_profile_get(cid), usage)
+        review = await llm_to_thread(cid, "workout_review", L.training_review, wk, workouts_recent(cid), phase_ru, u.get("mode"), train_profile_get(cid), usage,
+                                     user_generation=generation)
     except Exception as e:
         review = ""; log.warning("train review %s: %s", cid, e)
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response({"error": "deleted"}, status=409))
     wk["review"] = review
     d_iso = str(body.get("date") or "")[:10]
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", d_iso):
@@ -4321,7 +4460,7 @@ def _feat_of(action, meta):
     if m in ("view_train", "web_training", "web_train_profile", "workout"): return "Нагрузка"
     if m in ("view_food", "web_food", "web_diary", "food_log", "web_meal_replace", "web_diary_del",
              "web_diary_edit", "web_diary_scale", "web_diary_slot") or m.startswith("food"): return "Питание"
-    if m == "view_chat" or (action == "answered" and m in ("webapp", "answer", "general")): return "Чат"
+    if m == "view_chat" or action == "user_message" or (action == "answered" and m in ("webapp", "answer", "general")): return "Чат"
     if m in ("view_stats", "web_partner"): return "Статистика"
     if m in ("view_today", "web_today", "web_checkin", "web_period") or m.startswith("ci:"): return "Сегодня"
     return None
@@ -4329,7 +4468,7 @@ def _feat_of(action, meta):
 def analytics_data(days=7, frm=None, to=None):
     """Чистый слой аналитики (спека v2). tool-calls = Σ calls (все хопы к модели)."""
     from collections import Counter, defaultdict
-    ACTIVE = ("command", "button", "suggest", "manual", "answered", "voice", "fallback", "onboarding_completed")
+    ACTIVE = ("command", "button", "suggest", "manual", "answered", "user_message", "voice", "fallback", "onboarding_completed")
     APP_PREF = ("web_", "view_", "app_open")
     PUSH_META = ("sent", "checkin_push", "food_reminder_sent", "train_reminder_sent", "phase_push", "reactivation_sent", "announce_sent", "meno_update_sent")
     today = dtoday()
@@ -4354,7 +4493,7 @@ def analytics_data(days=7, frm=None, to=None):
     partners = c.execute("SELECT partner_id, woman_id FROM partners").fetchall()
     wmin = datetime.combine(until - timedelta(days=120), dtime.min).isoformat()
     wide = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=? AND ts<=?", (wmin, until_ts)).fetchall()
-    first_rows = c.execute("SELECT chat_id, MIN(ts) FROM events WHERE action IN ('command','button','suggest','manual','answered','voice','fallback','onboarding_completed') GROUP BY chat_id").fetchall()
+    first_rows = c.execute("SELECT chat_id, MIN(ts) FROM events WHERE action IN ('command','button','suggest','manual','answered','user_message','voice','fallback','onboarding_completed') GROUP BY chat_id").fetchall()
     goalrows = c.execute("SELECT DISTINCT chat_id, meta FROM events WHERE action='goal'").fetchall()
     refrows = c.execute("SELECT source, chat_id, ts FROM referrals").fetchall()
     pmin = datetime.combine(since - timedelta(days=span), dtime.min).isoformat()
@@ -4365,7 +4504,7 @@ def analytics_data(days=7, frm=None, to=None):
                             FROM llm_calls WHERE occurred_at>=? AND occurred_at<=?""",
                          (since_ts, until_ts)).fetchall()
     c.close()
-    _ACT = ("command", "button", "suggest", "manual", "answered", "voice", "fallback", "onboarding_completed")
+    _ACT = ("command", "button", "suggest", "manual", "answered", "user_message", "voice", "fallback", "onboarding_completed")
     pv_events = 0; pv_tool = 0; pv_days = defaultdict(set)
     for cid, ts, action, calls in prev:
         if calls: pv_tool += calls

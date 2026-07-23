@@ -55,7 +55,7 @@ SYSTEM_NAMES = {
     "ai_call", "ai_usage_recorded", "legacy_ai_usage", "user_deleted", "error",
     "legacy_error", "legacy_tokens", "legacy_broadcast", "push_sent", "push_queued", "push_shadowed",
     "push_failed", "push_opened", "answer_feedback_prompted",
-    "answer_feedback_submitted", "safety_guidance_shown",
+    "answer_feedback_submitted", "safety_guidance_shown", "summary_delivered",
 }
 SUCCESS = {"success", "ok", "completed"}
 VALUE_NAMES = {
@@ -63,8 +63,22 @@ VALUE_NAMES = {
     "workout_add_completed", "summary_opened", "feature_value_completed",
 }
 ENGAGEMENT_NAMES = VALUE_NAMES | {
-    "assistant_message_sent", "app_opened", "screen_viewed", "checkin_updated",
+    "user_message_sent", "assistant_message_sent", "app_opened", "screen_viewed", "checkin_updated",
 }
+
+PUSH_ACTION_TARGETS = {
+    "daily_summary": {"summary_opened"},
+    "daily_checkin": {"checkin_completed"},
+    "food_reminder": {"meal_add_completed"},
+    "train_reminder": {"workout_add_completed"},
+    "proactive_low_protein": {"meal_add_completed"},
+    "proactive_no_move": {"workout_add_completed"},
+}
+
+
+def _push_action_targets(campaign_type: str) -> set[str]:
+    """Return only an explicitly defined target; unknown campaigns never claim conversion."""
+    return PUSH_ACTION_TARGETS.get(campaign_type, set())
 
 app = FastAPI()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -179,7 +193,7 @@ def _sessions(rows: list[dict[str, Any]], cutoff: float) -> tuple[int, list[floa
 
 def _feature(row: dict[str, Any]) -> str | None:
     name = row["name"]; props = row["properties"]; screen = props.get("screen")
-    if name in {"assistant_message_sent", "assistant_response_received"} or screen == "chat": return "Чат с AIWA"
+    if name in {"user_message_sent", "assistant_message_sent", "assistant_response_received"} or screen == "chat": return "Чат с AIWA"
     if name.startswith("checkin_") or screen == "today": return "Сегодня / чек-ин"
     if name == "meal_add_completed" or screen == "food": return "Питание"
     if name == "workout_add_completed" or screen == "train": return "Нагрузка"
@@ -224,7 +238,7 @@ def _series(rows: list[dict[str, Any]], days: float, now: float, available_start
             result.append({
                 "label": datetime.fromtimestamp(lo, timezone.utc).strftime("%H:00"),
                 "active": len({r["device_id"] for r in chunk if _is_active(r["name"])}),
-                "messages": sum(r["name"] == "assistant_message_sent" for r in chunk),
+                "messages": sum(r["name"] == "user_message_sent" for r in chunk),
                 "ai_calls": sum(r["name"] == "ai_call" for r in chunk),
             })
         return result
@@ -238,7 +252,7 @@ def _series(rows: list[dict[str, Any]], days: float, now: float, available_start
         result.append({
             "label": day.strftime("%d.%m"),
             "active": len({r["device_id"] for r in chunk if _is_active(r["name"])}),
-            "messages": sum(r["name"] == "assistant_message_sent" for r in chunk),
+            "messages": sum(r["name"] == "user_message_sent" for r in chunk),
             "ai_calls": sum(r["name"] == "ai_call" for r in chunk),
         })
         day += timedelta(days=1)
@@ -269,7 +283,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         daily_users[datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()].add(row["device_id"])
     active_user_days = sum(len(v) for v in daily_users.values())
     sessions, session_lengths, session_events = _sessions(rows, since)
-    messages = sum(r["name"] == "assistant_message_sent" for r in selected)
+    messages = sum(r["name"] == "user_message_sent" for r in selected)
     responses = sum(r["name"] == "assistant_response_received" for r in selected)
 
     ai_rows = [r for r in selected if r["name"] == "ai_call"]
@@ -333,8 +347,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                 "rate": _percent(completed, len(started_at)) if started_at else None, "help": help_text}
 
     feature_funnels = [
-        _feature_funnel("Чат с AIWA", {"assistant_message_sent"},
-                        {"assistant_response_received", "answer_feedback_prompted"},
+        _feature_funnel("Чат с AIWA", {"user_message_sent"},
+                        {"assistant_message_sent", "assistant_response_received", "answer_feedback_prompted"},
                         "Из написавших AIWA: получили ответ. Считаются уникальные люди, а не сообщения."),
         _feature_funnel("Ежедневный чек-ин", {"checkin_updated", "checkin_symptom_selected"},
                         {"checkin_completed"},
@@ -392,8 +406,9 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
             continue
         push_opened += 1; push_campaigns[campaign_type]["opened"] += 1
         opened_at = min(item["ts"] for item in opens)
-        acted = any(item["name"] in VALUE_NAMES and opened_at <= item["ts"] <= opened_at + 86400
-                    for item in events_by_user[user])
+        targets = _push_action_targets(campaign_type)
+        acted = bool(targets) and any(item["name"] in targets and opened_at <= item["ts"] <= opened_at + 86400
+                                      for item in events_by_user[user])
         if acted:
             push_acted += 1; push_campaigns[campaign_type]["acted"] += 1
     push_failed = sum(item["name"] == "push_failed" for item in selected)

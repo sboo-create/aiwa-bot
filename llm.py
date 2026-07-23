@@ -43,8 +43,9 @@ def set_usage_sink(sink):
     _USAGE_SINK = sink
 
 @contextmanager
-def call_context(user_key=None, request_id=None, purpose=None):
-    token = _CALL_CONTEXT.set({"user_key": user_key, "request_id": request_id, "purpose": purpose})
+def call_context(user_key=None, request_id=None, purpose=None, user_generation=None):
+    token = _CALL_CONTEXT.set({"user_key": user_key, "request_id": request_id, "purpose": purpose,
+                               "user_generation": user_generation})
     try:
         yield
     finally:
@@ -70,6 +71,7 @@ def _capture_usage(usage_list, data, provider, model, started, status="success",
         record = {
             "call_id": str(uuid.uuid4()), "occurred_at": datetime.now(timezone.utc).isoformat(),
             "user_key": ctx.get("user_key"), "request_id": ctx.get("request_id"),
+            "user_generation": ctx.get("user_generation"),
             "purpose": ctx.get("purpose"), "provider": provider, "model": model,
             "status": status, "latency_ms": int((_t.time() - started) * 1000),
             "input_tokens": inp, "output_tokens": out, "cached_tokens": cached,
@@ -94,6 +96,7 @@ def _capture_media(provider, model, started, status, purpose, meta=None):
     record = {
         "call_id": str(uuid.uuid4()), "occurred_at": datetime.now(timezone.utc).isoformat(),
         "user_key": ctx.get("user_key"), "request_id": ctx.get("request_id"),
+        "user_generation": ctx.get("user_generation"),
         "purpose": ctx.get("purpose") or purpose, "provider": provider, "model": model,
         "status": status, "latency_ms": int((_t.time() - started) * 1000), "meta": meta or {},
     }

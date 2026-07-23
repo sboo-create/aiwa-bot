@@ -48,7 +48,8 @@ class StatsModuleTests(unittest.TestCase):
         now = time.time()
         self.add("start", "u1", "onboarding_started", ts=now - 300)
         self.add("done", "u1", "onboarding_completed", ts=now - 250)
-        self.add("msg", "u1", "assistant_message_sent", ts=now - 200)
+        self.add("msg", "u1", "user_message_sent", ts=now - 200)
+        self.add("answer-sent", "u1", "assistant_message_sent", ts=now - 191)
         self.add("answer", "u1", "assistant_response_received", ts=now - 190)
         self.add("feedback-prompt", "u1", "answer_feedback_prompted", {"answer_id": "a1"}, now - 185)
         self.add("feedback", "u1", "answer_feedback_submitted",
@@ -94,6 +95,8 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(data["push_funnel"]["acted"], 1)
         food = next(x for x in data["feature_funnels"] if x["label"] == "Питание")
         self.assertEqual((food["started"], food["completed"], food["rate"]), (1, 1, 100.0))
+        chat = next(x for x in data["feature_funnels"] if x["label"] == "Чат с AIWA")
+        self.assertEqual((chat["started"], chat["completed"], chat["rate"]), (1, 1, 100.0))
 
         month = self.module.compute_dashboard(30)
         self.assertEqual(month["data_quality"]["available_days"], 1)
@@ -116,6 +119,43 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIsNone(data["ai"]["request_success_rate"])
         self.assertEqual(data["errors"], 0)
         self.assertEqual(data["ai"]["providers"][0]["success"], 0)
+
+    def test_push_action_requires_campaign_specific_target(self):
+        now = time.time()
+        self.add("checkin-sent", "u1", "push_sent",
+                 {"campaign_id": "daily_checkin:2026-07-23", "campaign_type": "daily_checkin"}, now - 100)
+        self.add("checkin-open", "u1", "push_opened",
+                 {"campaign_id": "daily_checkin:2026-07-23", "campaign_type": "daily_checkin"}, now - 90)
+        self.add("unrelated-meal", "u1", "meal_add_completed", ts=now - 80)
+        self.add("food-sent", "u2", "push_sent",
+                 {"campaign_id": "food_reminder:2026-07-23", "campaign_type": "food_reminder"}, now - 100)
+        self.add("food-open", "u2", "push_opened",
+                 {"campaign_id": "food_reminder:2026-07-23", "campaign_type": "food_reminder"}, now - 90)
+        self.add("unrelated-chat", "u2", "assistant_response_received", ts=now - 80)
+
+        before = self.module.compute_dashboard(1)
+        self.assertEqual(before["push_funnel"]["acted"], 0)
+
+        self.add("checkin-target", "u1", "checkin_completed", ts=now - 70)
+        self.add("food-target", "u2", "meal_add_completed", ts=now - 70)
+        after = self.module.compute_dashboard(1)
+        self.assertEqual(after["push_funnel"]["acted"], 2)
+
+    def test_activity_series_counts_user_messages_not_ai_messages(self):
+        now = time.time()
+        rows = [
+            {"event_id": "u", "ts": now - 20, "device_id": "u1", "name": "user_message_sent",
+             "raw_name": "user_message_sent", "properties": {}, "ingested_at": now,
+             "provenance": "observed", "confidence": "high", "payload_version": 2},
+            {"event_id": "a1", "ts": now - 15, "device_id": "u1", "name": "assistant_message_sent",
+             "raw_name": "assistant_message_sent", "properties": {}, "ingested_at": now,
+             "provenance": "observed", "confidence": "high", "payload_version": 2},
+            {"event_id": "a2", "ts": now - 10, "device_id": "u1", "name": "assistant_message_sent",
+             "raw_name": "assistant_message_sent", "properties": {}, "ingested_at": now,
+             "provenance": "observed", "confidence": "high", "payload_version": 2},
+        ]
+        series = self.module._series(rows, 1, now, now - 30)
+        self.assertEqual(sum(point["messages"] for point in series), 1)
 
     def test_observed_filter_recalculates_metrics_and_openrouter_credits_are_usd(self):
         now = time.time()

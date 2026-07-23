@@ -75,6 +75,12 @@ SCHEMA = (
         sent_at REAL NOT NULL,
         payload_version INTEGER NOT NULL DEFAULT 1
     )""",
+    """CREATE TABLE IF NOT EXISTS user_lifecycle(
+        user_key TEXT PRIMARY KEY,
+        generation INTEGER NOT NULL DEFAULT 1,
+        active INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+    )""",
     "CREATE INDEX IF NOT EXISTS ix_traction_outbox_time ON traction_outbox(occurred_at)",
 )
 
@@ -116,6 +122,67 @@ def user_key(chat_id):
     return "u_" + digest[:32]
 
 
+def _lifecycle_row(conn, key):
+    return conn.execute(
+        "SELECT generation,active FROM user_lifecycle WHERE user_key=?", (key,)
+    ).fetchone()
+
+
+def lifecycle_generation(conn, chat_id):
+    """Return the current pseudonymous lifecycle generation without creating user data."""
+    row = _lifecycle_row(conn, user_key(chat_id))
+    return int(row[0]) if row else 0
+
+
+def activate_user(conn, chat_id):
+    """Start a fresh lifecycle. Old in-flight work keeps the previous generation."""
+    key = user_key(chat_id)
+    now = datetime.now(timezone.utc).isoformat()
+    row = _lifecycle_row(conn, key)
+    generation = (int(row[0]) + 1) if row else 1
+    conn.execute(
+        """INSERT INTO user_lifecycle(user_key,generation,active,updated_at) VALUES(?,?,1,?)
+           ON CONFLICT(user_key) DO UPDATE SET generation=excluded.generation,
+             active=1,updated_at=excluded.updated_at""",
+        (key, generation, now),
+    )
+    return generation
+
+
+def mark_user_deleted(conn, chat_id):
+    """Persist a pseudonymous tombstone so late tasks cannot recreate deleted data."""
+    key = user_key(chat_id)
+    now = datetime.now(timezone.utc).isoformat()
+    row = _lifecycle_row(conn, key)
+    generation = (int(row[0]) + 1) if row else 1
+    conn.execute(
+        """INSERT INTO user_lifecycle(user_key,generation,active,updated_at) VALUES(?,?,0,?)
+           ON CONFLICT(user_key) DO UPDATE SET generation=excluded.generation,
+             active=0,updated_at=excluded.updated_at""",
+        (key, generation, now),
+    )
+    return generation
+
+
+def write_allowed(conn, chat_id=None, key=None, generation=None):
+    """Fail closed only for known tombstones; pre-migration active users remain compatible."""
+    key = key or user_key(chat_id)
+    row = _lifecycle_row(conn, key)
+    if not row:
+        return generation in (None, 0)
+    current, active = int(row[0]), bool(row[1])
+    return active and (generation is None or int(generation) == current)
+
+
+def write_allowed_path(db_path, chat_id, generation=None):
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        init_schema(conn)
+        return write_allowed(conn, chat_id=chat_id, generation=generation)
+    finally:
+        conn.close()
+
+
 def _source_for(action, meta):
     text = str(meta or "")
     if text.startswith("web_") or text.startswith("view_") or text == "app_open" or text.endswith("|webapp"):
@@ -133,12 +200,17 @@ def _legacy_event_name(action, meta):
         return "screen_viewed", text[5:]
     if text == "app_open":
         return "app_opened", None
+    # Flow starts must win over legacy completion metadata (notably "workout").
+    if action == "flow_start" and text in {"food", "workout"}:
+        return text + "_flow_started", None
     if text == "food_log":
         return "meal_add_completed", None
     if text == "workout":
         return "workout_add_completed", None
-    if text in {"checkin", "web_checkin", "ci:done"}:
+    if text in {"checkin", "ci:done"}:
         return "checkin_completed", None
+    if text == "web_checkin":
+        return "checkin_updated", None
     if text.startswith("ci:s:"):
         # The actual symptom is health data and intentionally not copied.
         return "checkin_symptom_selected", None
@@ -150,8 +222,12 @@ def _legacy_event_name(action, meta):
         return "onboarding_completed", None
     if action == "answered":
         return "assistant_response_received", None
-    if action in {"manual", "voice", "suggest"}:
+    if action == "user_message" or action == "voice":
+        return "user_message_sent", None
+    if action == "assistant_message":
         return "assistant_message_sent", None
+    if action in {"manual", "suggest"}:
+        return "legacy_message_interaction", None
     if action == "tokens":
         return "ai_usage_recorded", None
     if action in {"broadcast", "proactive", "reactivation"}:
@@ -171,9 +247,9 @@ def _legacy_event_name(action, meta):
         return "answer_feedback_submitted", None
     if action == "safety":
         return "safety_guidance_shown", None
-    if action == "flow_start" and text in {"food", "workout"}:
-        return text + "_flow_started", None
     if action == "goal" and text == "summary":
+        return "summary_delivered", None
+    if action == "summary_open":
         return "summary_opened", None
     if action == "goal" and text == "food_log":
         return "meal_add_completed", None
@@ -217,6 +293,8 @@ def _epoch(value):
 
 def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_version=None,
                         request_id=None, calls=0):
+    if not write_allowed(conn, chat_id=chat_id):
+        return None
     event_name, screen = _legacy_event_name(action, meta)
     text = str(meta or "")
     props = {}
@@ -276,6 +354,7 @@ def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_vers
 
 def delete_user(conn, chat_id):
     key = user_key(chat_id)
+    mark_user_deleted(conn, chat_id)
     conn.execute("DELETE FROM events_v2 WHERE user_key=?", (key,))
     conn.execute("DELETE FROM llm_calls WHERE user_key=?", (key,))
     conn.execute("DELETE FROM traction_outbox WHERE device_id=?", (key,))
@@ -289,6 +368,9 @@ def persist_llm_call(db_path, record):
     try:
         conn = sqlite3.connect(db_path, timeout=30)
         init_schema(conn)
+        if not write_allowed(conn, key=record.get("user_key"),
+                             generation=record.get("user_generation")):
+            return
         call_id = record.get("call_id") or str(uuid.uuid4())
         occurred_at = record.get("occurred_at") or datetime.now(timezone.utc).isoformat()
         provider = record.get("provider") or "unknown"
