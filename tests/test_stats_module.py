@@ -115,11 +115,17 @@ class StatsModuleTests(unittest.TestCase):
             "ever_used", "dau", "wau", "mau", "sessions_per_dau", "tools_per_dau",
         })
         tools = {x["id"]: x for x in data["tool_definitions"]}
-        self.assertTrue(tools["ai_provider_attempts"]["selected_for_overview"])
-        self.assertEqual(tools["ai_provider_attempts"]["denominator"], 1)
+        overview_tool = tools["overview_ai_attempts_mixed_dau"]
+        exact_tool = tools["ai_provider_attempts"]
+        self.assertTrue(overview_tool["selected_for_overview"])
+        self.assertFalse(tools["ai_provider_attempts"]["selected_for_overview"])
+        self.assertEqual((overview_tool["value"], overview_tool["numerator"],
+                          overview_tool["denominator"]), (1.0, 2, 2))
+        self.assertEqual((exact_tool["value"], exact_tool["numerator"],
+                          exact_tool["denominator"]), (2.0, 2, 1))
         self.assertEqual(tools["logical_ai_requests"]["value"], 1.0)
         self.assertEqual(tools["value_actions"]["value"], 1.5)
-        self.assertEqual(data["overview"]["tools_per_dau"], 2.0)
+        self.assertEqual(data["overview"]["tools_per_dau"], 1.0)
         self.assertEqual(len(data["diagnostics"]), 10)
 
     def test_overview_ratios_use_rolling_dau_not_calendar_user_days(self):
@@ -226,7 +232,7 @@ class StatsModuleTests(unittest.TestCase):
             "input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
         }, ts=now - 10)
 
-        mixed = self.module.compute_dashboard(1, "mixed")
+        mixed = self.module.compute_dashboard(1, "MIXED")
         exact = self.module.compute_dashboard(1, "observed")
 
         self.assertEqual(mixed["audience"]["ever_used"], 2)
@@ -236,3 +242,9 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(exact["data_quality"]["reconstructed_events"], 1)
         self.assertEqual(exact["ai"]["cost_usd"], 0.003)
         self.assertEqual(exact["data_quality"]["cost_coverage"], 100.0)
+        mixed_tool = next(x for x in mixed["tool_definitions"] if x["selected_for_overview"])
+        exact_tool = next(x for x in exact["tool_definitions"] if x["selected_for_overview"])
+        self.assertIn("всей доступной истории", mixed_tool["denominator_label"])
+        self.assertIn("включая восстановленных", mixed_tool["help"])
+        self.assertIn("точного v2-слоя", exact_tool["denominator_label"])
+        self.assertIn("без восстановленных", exact_tool["help"])
