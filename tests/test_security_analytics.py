@@ -89,6 +89,19 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertFalse(bot._feedback_prompt_exists(202, answer_id))
         self.assertFalse(bot._feedback_prompt_exists(101, "ffffffffffffffff"))
 
+    def test_feedback_sampling_can_be_disabled_or_enabled_for_all_answers(self):
+        with mock.patch.dict(os.environ, {"AIWA_FEEDBACK_SAMPLE_RATE": "0"}):
+            self.assertFalse(bot._feedback_sampled("answer-1"))
+        with mock.patch.dict(os.environ, {"AIWA_FEEDBACK_SAMPLE_RATE": "1"}):
+            self.assertTrue(bot._feedback_sampled("answer-1"))
+
+    def test_feedback_instrumentation_logs_prompt_only_when_sampled(self):
+        with mock.patch.object(bot, "_feedback_sampled", return_value=False), \
+             mock.patch.object(bot, "ev") as event:
+            answer_id = bot._instrument_feedback_prompt(7, "Обычный ответ", "bot")
+        self.assertIsNone(answer_id)
+        event.assert_not_called()
+
     def test_telegram_init_data_signature_and_ttl(self):
         self.assertEqual(bot._verify_init(signed_init_data(42)), 42)
         stale = signed_init_data(42, int(time.time()) - 90_000)
