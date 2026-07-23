@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v100-unified-app-buttons"
+AIWA_VERSION = "2026-07-24-v101-on-time-summaries"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -951,7 +951,7 @@ def summary_spread_min():
 def scheduled_hhmm(cid, hhmm):
     h, m = map(int, hhmm.split(":"))
     # дефолтную утреннюю сводку (08:00) размазываем по окну 08:00-11:00; кастомное время — маленький анти-коллизионный джиттер
-    window = summary_spread_min() if hhmm == "08:00" else schedule_jitter_min()
+    window = summary_spread_min() if hhmm == "08:00" else 0   # кастомное время шлём ровно, сводка прегревается заранее
     offset = abs(int(cid)) % window if window else 0
     m += offset
     h = (h + m // 60) % 24
@@ -961,9 +961,7 @@ def schedule_text(cid, hhmm):
     actual, offset, window = scheduled_hhmm(cid, hhmm)
     if hhmm == "08:00":
         return (f"Утренняя сводка будет приходить около {actual} по Москве. Точное время можно поменять в Меню.")
-    if not offset:
-        return f"Время сводки: {hhmm} (МСК)."
-    return f"Время сводки: {hhmm} по Москве, фактически около {actual}."
+    return f"Время сводки: {hhmm} по Москве — соберу заранее и пришлю ровно в срок."
 
 def today_start_iso():
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
@@ -1205,6 +1203,8 @@ def menu_cached(cid, st, prof, target, mode=None, usage=None):
         m = L.menu_today(st, profile=prof, target=target, usage=usage)
     else:
         m = L.general_menu(prof, mode, target, usage=usage)
+    if isinstance(m, dict) and m.pop("_fallback", None):
+        ev(cid, "fallback", meta="static:menu_pool")
     _MENU_CACHE[key] = m
     _prune_day(_MENU_CACHE)
     return m
@@ -1718,6 +1718,14 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
     if intent == "history":
         return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
     if intent == "phases":
+        _pu = []
+        _pa = None
+        try: _pa = await llm_to_thread(cid, "phases", L.answer_question, status_of(cid)[1], "Расскажи кратко про четыре фазы цикла: сколько длится каждая, какие гормоны ведут и как это отражается на самочувствии, питании и нагрузке.", profile_of(row(cid)), None, usage=_pu)
+        except Exception: pass
+        if _pu: ev(cid, "tokens", sum(_pu), meta="answer", calls=len(_pu), usage=_pu)
+        if _pa:
+            return await reply_long(msg, L.split_followups(_pa)[0])
+        ev(cid, "fallback", meta="static:phases")
         return await msg.reply_text(PHASES_TEXT)
     if intent == "addcycles":
         return await addcycles_entry(context, cid, msg)
@@ -2121,11 +2129,40 @@ async def proactive_cmd(update, context):
         except Exception:
             pass
 
+async def prepare_summary_body(cid):
+    """Прегрев: собираем сводку в дневной кэш заранее, отправка в срок берёт её мгновенно.
+    Если между прегревом и отправкой появится новый чек-ин — ключ изменится и пуш перегенерит по свежим данным."""
+    u = row(cid)
+    if not is_onboarded(u): return
+    _ds = dtoday().isoformat()
+    if not is_cycle(u):
+        _key = (cid, _ds, AIWA_VERSION, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
+        if _SUM_CACHE.get(_key) is None:
+            body = await llm_to_thread(cid, "daily_summary", L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=[])
+            if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
+        return
+    u2, st = status_of(cid)
+    if not st or st["status"] != "normal": return
+    _key = (cid, _ds, AIWA_VERSION, st.get("phase"), str(log_get(cid, _ds) or ""))
+    if _SUM_CACHE.get(_key) is None:
+        body = await llm_to_thread(cid, "daily_summary", L.generate_summary, st, u2["modules"], hint=chat_hint(cid), usage=[])
+        if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
+
+async def prewarm_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await prepare_summary_body(context.job.chat_id)
+    except Exception as e:
+        log.warning("prewarm %s: %s", context.job.chat_id, e)
+
 def schedule_daily(app, cid, hhmm):
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+    for j in app.job_queue.get_jobs_by_name("pw_" + str(cid)): j.schedule_removal()
     actual, _, _ = scheduled_hhmm(cid, hhmm)
     h, m = map(int, actual.split(":"))
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
+    pm = m - 12; ph = h
+    if pm < 0: pm += 60; ph = (ph - 1) % 24
+    app.job_queue.run_daily(prewarm_job, time=dtime(ph, pm, tzinfo=TZ), chat_id=cid, name="pw_" + str(cid))
 
 def db_mark_period(cid, iso):
     """Записывает старт месячных в БД и включает трекинг цикла. Без планировщика, безопасно из веб-обработчика."""
@@ -4067,6 +4104,7 @@ async def _api_section(request):
             if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
             return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt, "suggestions": sugg}))
         _su = []; plan = await llm_to_thread(cid, "training_recommendation", L.training_today, None, prof, _recent_workouts_text(cid), u.get("mode"), _su)
+        if isinstance(plan, dict) and plan.pop("_fallback", None): ev(cid, "fallback", meta="static:training_plan")
         if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
         return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
     if kind == "food":
@@ -4079,6 +4117,7 @@ async def _api_section(request):
         if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
         return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text, "suggestions": sugg}))
     _su = []; plan = await llm_to_thread(cid, "training_recommendation", L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
+    if isinstance(plan, dict) and plan.pop("_fallback", None): ev(cid, "fallback", meta="static:training_plan")
     if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
     return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
 async def _api_today(request):
@@ -4252,8 +4291,15 @@ async def _chat_reply(cid, u, msg, user_generation=None):
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     intent = match_intent(msg)
     if intent == "phases":
-        chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", PHASES_TEXT)
-        return {"answer": PHASES_TEXT, "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}
+        _pu = []
+        _pa = None
+        try: _pa = await asyncio.to_thread(L.answer_question, status_of(cid)[1], "Расскажи кратко про четыре фазы цикла: сколько длится каждая, какие гормоны ведут и как это отражается на самочувствии, питании и нагрузке.", profile_of(u), None, usage=_pu)
+        except Exception: pass
+        if _pu: ev(cid, "answered", tokens=sum(_pu), meta="webapp", calls=len(_pu), usage=_pu)
+        _txt = L.split_followups(_pa)[0] if _pa else PHASES_TEXT
+        if not _pa: ev(cid, "fallback", meta="static:phases")
+        chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", _txt)
+        return {"answer": md_plain(_txt), "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}
     if intent in ("period", "addcycles", "profile", "cyclelen", "time", "wipe", "unlink", "partner", "checkin"):
         guide = {
             "period": "Через чат я не меняю календарь, чтобы случайно не записать ошибку. Открой в приложении экран «Сегодня», нажми «Редактировать месячные», отметь нужные дни прямо на календаре и нажми «Сохранить». В боте можно ещё написать /period.",
@@ -4787,7 +4833,7 @@ _EV_LBL = {
     "web_diary_edit": "Правка в дневнике", "web_diary_scale": "Граммовка в дневнике", "web_diary_slot": "Перенос приёма",
     "web_today": "Открыла «Сегодня»", "food_suggest": "Идеи по питанию", "training_today": "Разбор нагрузки", "today_note": "Сводка дня",
     "proactive_compose": "Проактив-сообщение", "partner_brief": "Партнёрский пуш", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
-    "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа", "tts:audio": "Озвучка (файлом)",
+    "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа", "tts:audio": "Озвучка (файлом)", "static:menu_pool": "Фолбэк: меню из пула", "static:training_plan": "Фолбэк: план нагрузки", "static:phases": "Фолбэк: текст фаз",
     "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
     "answer": "Вопрос в чате", "general": "Вопрос в чате", "webapp": "Вопрос в приложении", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
     "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",

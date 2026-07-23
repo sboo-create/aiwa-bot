@@ -806,7 +806,8 @@ def health_check(usage=None):
 FMT_TG = ("Форматирование — GitHub-маркдаун, Telegram рендерит его нативно: подзаголовки «### Название» (можно с эмодзи), "
           "**жирный** для ключевых слов, списки строками с «- », таблицы в GFM-синтаксисе (| Колонка | Колонка | с разделительной строкой |---|---|) — "
           "используй таблицу, когда сравниваешь числа или даёшь нормы КБЖУ. Цитата — строка с «> ». "
-          "Не используй HTML-теги и не вставляй ссылки.")
+          "Не используй HTML-теги и не вставляй ссылки. "
+          "ВАЖНО: если пользовательница просит конкретный формат (таблицу, список, шаги) — ОБЯЗАТЕЛЬНО оформи именно им; просьба «в таблице» = настоящая GFM-таблица.")
 
 SUGG_RULES = ("Каждый саджест: от лица пользовательницы, начинается С ЗАГЛАВНОЙ буквы, 2-4 слова, "
               "ЗАКАНЧИВАЕТСЯ знаком вопроса, БЕЗ слова «вопрос», без точки, без нумерации и без кавычек.")
@@ -1155,10 +1156,10 @@ def training_today(st, profile=None, recent=None, mode=None, usage=None):
             data = None
     base = training_plan(st, profile) if st else general_training(profile, mode)
     if not isinstance(data, dict):
-        return base
+        return dict(base, _fallback="training_plan")
     opts = [o for o in (data.get("options") or []) if isinstance(o, dict) and o.get("name")]
     if len(opts) < 2 or not (data.get("summary") or "").strip():
-        return base
+        return dict(base, _fallback="training_plan")
     sugg = _parse_str_list(json.dumps(data.get("suggestions") or [], ensure_ascii=False), 3)
     return {
         "title": (data.get("level") or base.get("level", "")) + " нагрузка",
@@ -1505,7 +1506,9 @@ def menu_today(st, profile=None, target=None, usage=None):
         except Exception:
             pass
     import copy
-    return _scale_menu(copy.deepcopy(CURATED_MENU.get(phase_key, CURATED_MENU["follicular"])), target)
+    _fb = _scale_menu(copy.deepcopy(CURATED_MENU.get(phase_key, CURATED_MENU["follicular"])), target)
+    _fb["_fallback"] = "menu_pool"
+    return _fb
 
 
 def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
@@ -1660,7 +1663,9 @@ def general_menu(profile, mode, target=None, usage=None):
         except Exception:
             pass
     import copy
-    return _scale_menu(copy.deepcopy(CURATED_MENU.get("follicular")), target)
+    _fb = _scale_menu(copy.deepcopy(CURATED_MENU.get("follicular")), target)
+    _fb["_fallback"] = "menu_pool"
+    return _fb
 
 def general_training(profile, mode):
     base = {
