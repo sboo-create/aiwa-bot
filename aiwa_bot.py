@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v92-gfm-lists-len"
+AIWA_VERSION = "2026-07-23-v93-no-double-bullets"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1335,6 +1335,7 @@ RICH_OK = os.environ.get("AIWA_RICH", "1") in ("1", "true", "True", "on")
 async def send_rich(bot, cid, md_text, reply_markup=None):
     """Отправка через sendRichMessage (Bot API 10.1+): Telegram сам рендерит GFM —
     таблицы, ### заголовки, списки, цитаты. Бросает исключение, если метод недоступен."""
+    md_text = re.sub(r"(?m)^(\s*)•\s+", r"\1- ", str(md_text))   # любые «• » -> GFM-список, иначе рендер склеит/задвоит
     data = {"chat_id": cid, "rich_message": json.dumps({"markdown": md_text})}
     if reply_markup is not None:
         data["reply_markup"] = reply_markup.to_json()
