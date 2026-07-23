@@ -90,7 +90,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v82-joy-erm-case"
+AIWA_VERSION = "2026-07-23-v83-sampled-feedback"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "📱 Приложение"
@@ -1363,13 +1363,29 @@ def _safety_level(text):
         return "disclaimer"
     return None
 
+def _feedback_sampled(answer_id):
+    """Показывает оценку на стабильной доле ответов, а не после каждой реплики."""
+    try:
+        rate = float(os.environ.get("AIWA_FEEDBACK_SAMPLE_RATE", "0.20"))
+    except (TypeError, ValueError):
+        rate = 0.20
+    rate = max(0.0, min(1.0, rate))
+    if rate <= 0:
+        return False
+    if rate >= 1:
+        return True
+    bucket = int(_hashlib.sha256(str(answer_id).encode("utf-8")).hexdigest()[:8], 16)
+    return bucket < int(rate * (2 ** 32))
+
 def _instrument_feedback_prompt(cid, answer, channel="bot"):
     answer_id = secrets.token_hex(8)
-    ev(cid, "feedback_prompt", meta=f"{answer_id}|{channel}")
+    sampled = _feedback_sampled(answer_id)
+    if sampled:
+        ev(cid, "feedback_prompt", meta=f"{answer_id}|{channel}")
     level = _safety_level(answer)
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|{channel}")
-    return answer_id
+    return answer_id if sampled else None
 
 def _feedback_prompt_exists(cid, answer_id):
     """Accept feedback only for an answer actually shown to this user."""
@@ -1392,7 +1408,8 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
                 if e not in sugg and len(sugg) < 2: sugg.append(e)
         except Exception: pass
     answer_id = secrets.token_hex(8)
-    kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label, feedback_id=answer_id)
+    feedback_id = answer_id if _feedback_sampled(answer_id) else None
+    kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label, feedback_id=feedback_id)
     quote_text = _clip_tg(quote) if quote else None
     first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
     parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
@@ -1404,7 +1421,8 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
         else:
             await context.bot.send_message(cid, part, reply_markup=(kb if last else None))
     ev(cid, "assistant_message", meta="bot")
-    ev(cid, "feedback_prompt", meta=f"{answer_id}|bot")
+    if feedback_id:
+        ev(cid, "feedback_prompt", meta=f"{answer_id}|bot")
     level = _safety_level(clean)
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|bot")
