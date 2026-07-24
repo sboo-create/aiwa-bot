@@ -9,6 +9,7 @@ import tempfile
 import time
 import types
 import unittest
+import requests
 from datetime import date
 from pathlib import Path
 from unittest import mock
@@ -809,6 +810,54 @@ class SecurityAnalyticsTests(unittest.TestCase):
             config = llm._proxy_configs()[0]
         self.assertEqual(config["name"], "litellm")
         self.assertEqual(config["cost_unit"], "usd")
+
+    def test_llm_route_circuit_opens_immediately_for_auth_failure(self):
+        cfg = {"name": "broken", "url": "https://proxy.test/v1/chat/completions", "model": "m"}
+        response = mock.Mock(status_code=403, text="forbidden", headers={})
+        llm._ROUTE_CIRCUITS.clear()
+        with mock.patch.object(llm._HTTP, "post", return_value=response) as post:
+            self.assertIsNone(llm._call_proxy_one(
+                cfg, [{"role": "user", "content": "hello"}], 10, 0.2, [], attempts=2,
+            ))
+            self.assertIsNone(llm._call_proxy_one(
+                cfg, [{"role": "user", "content": "hello"}], 10, 0.2, [], attempts=2,
+            ))
+        self.assertEqual(post.call_count, 1)
+        llm._ROUTE_CIRCUITS.clear()
+
+    def test_llm_route_circuit_opens_after_repeated_transport_failures(self):
+        cfg = {"name": "broken", "url": "https://proxy.test/v1/chat/completions", "model": "m"}
+        llm._ROUTE_CIRCUITS.clear()
+        with mock.patch.object(llm._HTTP, "post",
+                               side_effect=requests.ConnectionError("offline")) as post, \
+                mock.patch.dict(os.environ, {"AIWA_LLM_CIRCUIT_FAILURES": "3"}, clear=False):
+            for _ in range(4):
+                self.assertIsNone(llm._call_proxy_one(
+                    cfg, [{"role": "user", "content": "hello"}], 10, 0.2, [], attempts=1,
+                ))
+        self.assertEqual(post.call_count, 3)
+        llm._ROUTE_CIRCUITS.clear()
+
+    def test_empty_provider_response_is_recorded_as_failure_not_success(self):
+        cfg = {"name": "proxy", "url": "https://proxy.test/v1/chat/completions", "model": "m"}
+        response = mock.Mock(status_code=200, headers={})
+        response.json.return_value = {
+            "provider": "upstream", "model": "m",
+            "choices": [{"message": {"content": ""}}],
+        }
+        captured = []
+        previous_sink = llm._USAGE_SINK
+        llm._ROUTE_CIRCUITS.clear()
+        llm.set_usage_sink(captured.append)
+        try:
+            with mock.patch.object(llm._HTTP, "post", return_value=response):
+                self.assertIsNone(llm._call_proxy_one(
+                    cfg, [{"role": "user", "content": "hello"}], 10, 0.2, [], attempts=1,
+                ))
+        finally:
+            llm.set_usage_sink(previous_sink)
+            llm._ROUTE_CIRCUITS.clear()
+        self.assertEqual([item["status"] for item in captured], ["empty_response"])
 
     def test_long_telegram_text_is_split_without_losing_content(self):
         text = (("🌿 Длинный ответ с полезными пояснениями. " * 140) + "\n\n") * 3
