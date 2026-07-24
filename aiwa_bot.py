@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging
+import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
 try:
@@ -91,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-24-v107-chat-journal-actions"
+AIWA_VERSION = "2026-07-24-v108-semantic-journal-router"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -1076,6 +1076,45 @@ ADDCYCLES_TEXT = ("\U0001F4C5 История цикла вручную.\n\n"
     "12.04.2026 - 16.04.2026\n14.05.2026 - 18.05.2026\n10.06.2026\n\n"
     "Этот список ПОЛНОСТЬЮ заменит твою историю циклов в календаре, поэтому пришли все нужные даты разом. Если ошиблась в дате раньше, просто пришли правильный список, и старые даты заменятся.")
 
+_JOURNAL_THIRD_PARTY_EVENT_RE = (
+    r"(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|выпил\w*|"
+    r"тренировал\w*|потренир\w*|занимал\w*|сделал\w*|бегал\w*|"
+    r"ходил\w*|плавал\w*|начал\w*|пришл\w*|законч\w*|завершил\w*)"
+)
+_JOURNAL_NON_NAME_STARTERS = (
+    r"Сегодня|Вчера|Позавчера|Пожалуйста|Айва|После|Перед|Только|На|"
+    r"Как|Можешь|Запиши|Записать|Добавь|Добавить|Внеси|Внести|"
+    r"Отметь|Отметить|Зафиксируй|Зафиксировать|"
+    r"Месячные|Менструация|Тренировка|Тренировку|Тренировки|Кардио|"
+    r"Силовая|Силовую|Йога|Завтрак|Обед|Ужин|Перекус"
+)
+
+def _journal_third_party_source(text):
+    """Общий fail-closed guard для старого и семантического mutation router."""
+    raw = str(text or "")
+    low = raw.lower()
+    if re.search(r"\b(?:по\s+словам|со\s+слов|как\s+рассказал\w*|как\s+сообщил\w*)\b", low):
+        return True
+    if re.search(
+        r"\bу\s+(?!меня\b)(?:[А-ЯЁ][а-яё-]{1,30}|подруг\w*|дочер\w*|дочк\w*|"
+        r"сестр\w*|мам\w*|жен\w*|девушк\w*)\b",
+        raw,
+        re.I,
+    ):
+        return True
+    if re.search(
+        r"\b(?:моя\s+|мой\s+)?(?:дочь|дочка|подруга|сестра|мама|жена|девушка|"
+        r"сын|муж|парень|она|он)\b.{0,55}" + _JOURNAL_THIRD_PARTY_EVENT_RE,
+        low,
+        re.I,
+    ):
+        return True
+    return bool(re.search(
+        r"\b(?!(?:" + _JOURNAL_NON_NAME_STARTERS + r")\b)"
+        r"[А-ЯЁ][а-яё-]{1,30}\b.{0,55}" + _JOURNAL_THIRD_PARTY_EVENT_RE,
+        raw,
+    ))
+
 def match_intent(t):
     raw_t = str(t or "")
     t = t.lower()
@@ -1085,7 +1124,8 @@ def match_intent(t):
         t,
     ))
     _mutation_context_blocked = bool(
-        "?" in t
+        _journal_third_party_source(raw_t)
+        or "?" in t
         or re.search(r"\b(кажется|вроде|возможно|наверное|не\s+уверен\w*|может\s+быть|"
                      r"допустим|например|представим|цитат\w*|если|в\s+случае|когда|"
                      r"у\s+(?:подруг\w*|дочк\w*|сестр\w*|мам\w*)|"
@@ -1201,6 +1241,159 @@ def match_intent(t):
     if re.search(r"месячн|менструац|критическ\w* дн", t) and re.search(r"(отмет|отмеч|добав|записа|внес|залог|зафиксир|поменя|измен|обнов|исправ|как.{0,14}(отмет|добав|внес))", t): return "period"
     if re.search(r"(месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн|сегодня начал\w* месячн|снова месячн|опять месячн)", t): return "period"
     return None
+
+_JOURNAL_MUTATION_INTENTS = frozenset({"logmeal", "logworkout", "logperiod", "period_end"})
+_JOURNAL_SEMANTIC_CANDIDATE_RE = re.compile(
+    r"\b(?:"
+    r"съел\w*|поел\w*|ел[аи]?\b|кушал\w*|скушал\w*|покушал\w*|выпил\w*|"
+    r"завтрак\w*|обед\w*|ужин\w*|перекус\w*|"
+    r"тренир\w*|потренир\w*|занимал\w*|спорт\w*|зал\w*|упражнен\w*|"
+    r"бегал\w*|пробеж\w*|ходил\w*|гулял\w*|плавал\w*|бассейн\w*|"
+    r"йог\w*|пилатес\w*|кардио\w*|силов\w*|растяж\w*|зарядк\w*|"
+    r"велосипед\w*|присед\w*|выпад\w*|планк\w*|отжим\w*|подтяг\w*|"
+    r"месячн\w*|менструац\w*|критическ\w*\s+дн\w*"
+    r")\b",
+    re.I,
+)
+_JOURNAL_SEMANTIC_HARD_BLOCK_RE = re.compile(
+    r"\b(?:"
+    r"если|допустим|представим|кажется|вроде|возможно|наверное|не\s+уверен\w*|"
+    r"может\s+быть|планир\w*|собира\w*|буду|хочу|хотел\w*|"
+    r"посовет\w*|подскаж\w*|состав\w*|порекоменду\w*|"
+    r"говорят|сказали|сообщили|рассказали|цитат\w*"
+    r")\b",
+    re.I,
+)
+_JOURNAL_META_INSTRUCTION_RE = re.compile(
+    r"\b(?:игнорируй|инструкц\w*|системн\w*\s+промпт|system|assistant|json|"
+    r"action|subject|confidence|primary_purpose|верни\s+ответ|ответь\s+строго)\b",
+    re.I,
+)
+_JOURNAL_PERIOD_SOURCE_RE = re.compile(r"\b(?:месячн\w*|менструац\w*|критическ\w*\s+дн\w*)\b", re.I)
+_JOURNAL_FOOD_COMPLETED_RE = re.compile(
+    r"\b(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|скушал\w*|покушал\w*|выпил\w*)\b|"
+    r"\b(?:на\s+)?(?:завтрак\w*|обед\w*|ужин\w*|перекус\w*)\b"
+    r"(?:\s+у\s+меня)?\s+(?:был[аи]?|были|съел\w*|поел\w*|:|-)",
+    re.I,
+)
+_JOURNAL_WORKOUT_COMPLETED_RE = re.compile(
+    r"\b(?:потренир\w*|тренировал\w*|занимал\w*|бегал\w*|пробежал\w*|"
+    r"ходил\w*|сходил\w*|гулял\w*|плавал\w*|качал\w*|танцевал\w*)\b|"
+    r"\b(?:был[аи]?|сходил\w*)\s+(?:сегодня\s+|вчера\s+|позавчера\s+)?"
+    r"(?:на|в)\s+(?:трениров\w*|йог\w*|пилатес\w*|фитнес\w*|бокс\w*|"
+    r"танц\w*|бассейн\w*|зал\w*)\b|"
+    r"\b(?:сделал\w*|провел\w*|закончил\w*)\b.{0,45}"
+    r"\b(?:трениров\w*|кардио\w*|силов\w*|растяж\w*|зарядк\w*)\b|"
+    r"\b(?:трениров\w*|кардио\w*|силов\w*|растяж\w*|зарядк\w*)\b.{0,45}"
+    r"\b(?:сделал\w*|провел\w*|закончил\w*)\b",
+    re.I,
+)
+_JOURNAL_PERIOD_START_RE = re.compile(
+    r"\b(?:начал\w*|пришл\w*|пошл\w*|открыл\w*)\b", re.I,
+)
+_JOURNAL_PERIOD_END_RE = re.compile(
+    r"\b(?:законч\w*|кончил\w*|завершил\w*|прошл\w*|перестал\w*|отошл\w*)\b", re.I,
+)
+
+def _semantic_journal_candidate(text):
+    """Дешёвый prefilter; решение принимает модель, а не набор фраз/порядок слов."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if "?" in raw or "\n" in raw or "\r" in raw or re.search(r"[«»\"]", raw):
+        return False
+    if _JOURNAL_META_INSTRUCTION_RE.search(raw):
+        return False
+    if _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(raw):
+        return False
+    if _journal_third_party_source(raw):
+        return False
+    if re.search(r"^\s*(?:айва[,\s]*)?(?:что|как|какая|какую|какие|почему|зачем|когда|сколько|можно\s+ли|нужно\s+ли)\b", raw, re.I):
+        return False
+    domain_hint = bool(_JOURNAL_SEMANTIC_CANDIDATE_RE.search(raw))
+    personal_report_shape = bool(
+        re.search(r"^\s*(?:(?:ну|а|кстати|короче)[,\s]+)*(?:я|сегодня|вчера|позавчера)\b", raw, re.I)
+        or (len(raw) <= 220 and re.search(r"\b[а-яё-]{3,}(?:ла|лась)\b", raw, re.I))
+    )
+    return domain_hint or personal_report_shape
+
+def _semantic_source_subject_safe(text):
+    return not _journal_third_party_source(text)
+
+def _semantic_action_matches_source(action, text):
+    """Модель выбирает смысл, код независимо подтверждает разрешённый домен события."""
+    raw = str(text or "").strip()
+    if not raw or "\n" in raw or "\r" in raw or _JOURNAL_META_INSTRUCTION_RE.search(raw):
+        return False
+    if not _semantic_source_subject_safe(raw):
+        return False
+    if action == "food":
+        return bool(_JOURNAL_FOOD_COMPLETED_RE.search(raw))
+    if action == "workout":
+        return bool(_JOURNAL_WORKOUT_COMPLETED_RE.search(raw))
+    if action == "period_start":
+        return bool(_JOURNAL_PERIOD_SOURCE_RE.search(raw) and _JOURNAL_PERIOD_START_RE.search(raw))
+    if action == "period_end":
+        return bool(_JOURNAL_PERIOD_SOURCE_RE.search(raw) and _JOURNAL_PERIOD_END_RE.search(raw))
+    return False
+
+def _normalize_semantic_journal(data, source_text=""):
+    """Fail-closed валидация решения модели перед любой записью в БД."""
+    if not isinstance(data, dict):
+        return None
+    action_to_intent = {
+        "food": "logmeal",
+        "workout": "logworkout",
+        "period_start": "logperiod",
+        "period_end": "period_end",
+    }
+    action = str(data.get("action") or "").strip().lower()
+    confidence_raw = data.get("confidence")
+    confidence = (
+        float(confidence_raw)
+        if isinstance(confidence_raw, (int, float)) and not isinstance(confidence_raw, bool)
+        else -1.0
+    )
+    if (
+        action not in action_to_intent
+        or not math.isfinite(confidence)
+        or not 0.85 <= confidence <= 1.0
+        or not _semantic_action_matches_source(action, source_text)
+        or str(data.get("subject") or "").lower() != "self"
+        or str(data.get("status") or "").lower() != "completed"
+        or str(data.get("polarity") or "").lower() != "positive"
+        or str(data.get("certainty") or "").lower() != "certain"
+        or str(data.get("primary_purpose") or "").lower() != "journal"
+    ):
+        return None
+    out = {"intent": action_to_intent[action], "confidence": confidence}
+    if action == "food":
+        out["food_text"] = str(data.get("food_text") or "").strip()[:500]
+    elif action == "workout":
+        workout = data.get("workout")
+        out["workout"] = workout if isinstance(workout, dict) else {}
+    return out
+
+async def resolve_semantic_journal_action(cid, text, user_generation=None):
+    """Распознаёт естественное журналирование без привязки к порядку конкретных слов."""
+    if not _semantic_journal_candidate(text):
+        return None
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    usage = []
+    try:
+        classified = await llm_to_thread(
+            cid, "journal_route", L.classify_journal_event, text, usage,
+            user_generation=generation,
+        )
+    except Exception as exc:
+        log.warning("journal route %s: %s", cid, exc)
+        return None
+    if not _user_write_allowed(cid, generation):
+        return None
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="journal_route", calls=len(usage), usage=usage,
+           user_generation=generation)
+    return _normalize_semantic_journal(classified, text)
 
 def is_question_like(txt):
     t = (txt or "").strip().lower()
@@ -2496,8 +2689,9 @@ def cycle_text_analysis(cid):
     parts.append("\nПодробную выписку для врача можно собрать кнопкой ниже.")
     return "\n".join(parts)
 
-async def dispatch_intent(context, update, cid, u, intent, txt=""):
+async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None, user_generation=None):
     msg = update.message; general = not is_cycle(u); ev(cid, "manual", meta="intent_" + intent)
+    turn_generation = _user_generation(cid) if user_generation is None else int(user_generation)
     if intent == "analysis":
         return await msg.reply_text(cycle_text_analysis(cid),
             reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
@@ -2528,6 +2722,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         result = await log_period_end_action(
             cid, u, txt,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            user_generation=turn_generation,
         )
         return await msg.reply_text(result["text"])
     if intent == "cyclelen":
@@ -2550,14 +2745,16 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         result = await log_period_action(
             cid, u, txt, context=context,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            user_generation=turn_generation,
         )
         return await msg.reply_text(result["text"])
     if intent == "logworkout":
         await context.bot.send_chat_action(cid, "typing")
-        generation = _user_generation(cid)
+        generation = turn_generation
         result = await log_workout_action(
             cid, u, txt, user_generation=generation,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_workout=((journal or {}).get("workout")),
         )
         rows = []
         if result.get("ok") and result.get("record_id"):
@@ -2571,10 +2768,11 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         _, st = status_of(cid); return await send_section(context, cid, st, "training")
     if intent == "logmeal":
         await context.bot.send_chat_action(cid, "typing")
-        generation = _user_generation(cid)
+        generation = turn_generation
         result = await log_food_action(
             cid, u, txt, user_generation=generation,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_food_text=((journal or {}).get("food_text")),
         )
         rows = []
         if result.get("ok") and result.get("record_id"):
@@ -4069,7 +4267,7 @@ async def on_photo(update, context):
     if not is_onboarded(u):
         return await update.message.reply_text("Сначала настрой Айву: /start.")
     generation = _user_generation(cid)
-    ev(cid, "flow_start", meta="food")
+    ev(cid, "flow_start", meta="food", user_generation=generation)
     await context.bot.send_chat_action(cid, "typing")
     try:
         ph = update.message.photo
@@ -4307,9 +4505,25 @@ async def handle_text(update, context, txt):
         return await update.message.reply_text("Не поняла запрос. Напиши вопрос словами, например: «почему тянет на сладкое» или «какая тренировка сегодня».")
 
     if is_onboarded(u):
+        _turn_generation = _user_generation(cid)
         _intent = match_intent(txt)
+        _journal = None
+        if _intent not in _JOURNAL_MUTATION_INTENTS:
+            _telegram_mutation_key = chat_mutation_key(
+                "telegram", getattr(update, "update_id", None),
+            )
+            _journal = chat_mutation_route_preflight(cid, _telegram_mutation_key)
+            if not _journal:
+                _journal = await resolve_semantic_journal_action(
+                    cid, txt, user_generation=_turn_generation,
+                )
+            if _journal:
+                _intent = _journal["intent"]
         if _intent:
-            return await dispatch_intent(context, update, cid, u, _intent, txt)
+            return await dispatch_intent(
+                context, update, cid, u, _intent, txt, journal=_journal,
+                user_generation=_turn_generation,
+            )
 
     if is_onboarded(u) and not is_cycle(u):
         if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
@@ -5273,6 +5487,15 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None, requ
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     intent = match_intent(msg)
+    journal = None
+    if intent not in _JOURNAL_MUTATION_INTENTS:
+        journal = chat_mutation_route_preflight(cid, mutation_key)
+        if not journal:
+            journal = await resolve_semantic_journal_action(
+                cid, msg, user_generation=generation,
+            )
+        if journal:
+            intent = journal["intent"]
     if intent == "phases":
         _pu = []
         _pa = None
@@ -5325,6 +5548,7 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None, requ
                     "suggestions": ["Открыть нагрузку"]}
         result = await log_workout_action(
             cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+            preparsed_workout=((journal or {}).get("workout")),
         )
         out = {"answer": result["text"], "suggestions": ["Открыть нагрузку", "Что делать завтра?"]}
         if result.get("mutation"):
@@ -5336,6 +5560,7 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None, requ
                     "suggestions": ["Открыть питание"]}
         result = await log_food_action(
             cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+            preparsed_food_text=((journal or {}).get("food_text")),
         )
         out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
         if result.get("mutation"):
@@ -5472,6 +5697,26 @@ def chat_mutation_args_hash(kind, text):
     normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
     return _hashlib.sha256((str(kind) + "\n" + normalized).encode("utf-8")).hexdigest()
 
+def chat_mutation_route_preflight(cid, mutation_key):
+    """Возвращает уже зафиксированный маршрут retry до повторного вызова классификатора."""
+    if not mutation_key:
+        return None
+    c = db()
+    prior = c.execute(
+        "SELECT kind FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+        (cid, mutation_key),
+    ).fetchone()
+    c.close()
+    if not prior:
+        return None
+    intent = {
+        "food": "logmeal",
+        "workout": "logworkout",
+        "period_start": "logperiod",
+        "period_end": "period_end",
+    }.get(prior[0])
+    return {"intent": intent, "replay": True} if intent else None
+
 def chat_mutation_preflight(cid, mutation_key, kind, args_hash):
     if not mutation_key:
         return None
@@ -5595,7 +5840,7 @@ def extract_food_log_text(text):
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.:;—-\t")
     return cleaned
 
-async def log_food_action(cid, u, text, user_generation=None, mutation_key=None):
+async def log_food_action(cid, u, text, user_generation=None, mutation_key=None, preparsed_food_text=None):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     args_hash = chat_mutation_args_hash("food", text)
@@ -5615,7 +5860,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None)
     event_date, date_error = chat_event_date(text, max_past_days=31)
     if date_error:
         return {"ok": False, "text": "Не стала записывать: укажи сегодняшнюю дату или один из последних 31 дней."}
-    food = extract_food_log_text(text)
+    food = str(preparsed_food_text or "").strip()[:500] or extract_food_log_text(text)
     if not food:
         return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «съела 200 г творога, запиши»."}
     usage = []
@@ -5652,7 +5897,7 @@ async def log_food_from_text(cid, u, text, user_generation=None, mutation_key=No
     result = await log_food_action(cid, u, text, user_generation=user_generation, mutation_key=mutation_key)
     return result["text"]
 
-async def log_workout_action(cid, u, text, user_generation=None, mutation_key=None):
+async def log_workout_action(cid, u, text, user_generation=None, mutation_key=None, preparsed_workout=None):
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     args_hash = chat_mutation_args_hash("workout", text)
     prior = chat_mutation_preflight(cid, mutation_key, "workout", args_hash)
@@ -5669,16 +5914,18 @@ async def log_workout_action(cid, u, text, user_generation=None, mutation_key=No
     event_date, date_error = chat_event_date(text, max_past_days=90)
     if date_error:
         return {"ok": False, "text": "Не стала записывать: тренировка должна быть сегодня или в последние 90 дней."}
-    ev(cid, "flow_start", meta="workout")
+    ev(cid, "flow_start", meta="workout", user_generation=generation)
     usage = []
-    try:
-        parsed = await llm_to_thread(
-            cid, "workout_text", L.analyze_workout_text, text, usage,
-            user_generation=generation,
-        )
-    except Exception as exc:
-        log.warning("workout text analyze %s: %s", cid, exc)
-        parsed = None
+    parsed = preparsed_workout if isinstance(preparsed_workout, dict) else None
+    if parsed is None:
+        try:
+            parsed = await llm_to_thread(
+                cid, "workout_text", L.analyze_workout_text, text, usage,
+                user_generation=generation,
+            )
+        except Exception as exc:
+            log.warning("workout text analyze %s: %s", cid, exc)
+            parsed = None
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     if usage:
