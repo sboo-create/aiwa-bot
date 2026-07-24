@@ -91,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-24-v109-ai-route-circuit"
+AIWA_VERSION = "2026-07-24-v110-push-delivery"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -313,7 +313,8 @@ def db():
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
                 "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER",
                 "last_phase_notified TEXT", "last_reactivation TEXT",
-                "proactive_enabled INTEGER DEFAULT 1", "tg_first_name TEXT"):
+                "proactive_enabled INTEGER DEFAULT 1", "tg_first_name TEXT",
+                "push_suppressed_at TEXT", "push_suppression_reason TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     c.commit()
@@ -345,7 +346,7 @@ def _activate_user(cid):
         c.close()
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled,tg_first_name FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled,tg_first_name,push_suppressed_at,push_suppression_reason FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
             "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
@@ -353,12 +354,13 @@ def row(cid):
             "mode": r[13] or "cycle", "diet_note": r[14] or "", "period_end": r[15], "period_len": r[16],
             "train_profile": r[17], "kcal_goal": r[18], "last_phase_notified": r[19],
             "last_reactivation": r[20], "proactive_enabled": r[21] is None or bool(r[21]),
-            "tg_first_name": r[22] or ""}
+            "tg_first_name": r[22] or "", "push_suppressed_at": r[23],
+            "push_suppression_reason": r[24] or ""}
 
 _USER_UPDATE_COLUMNS = frozenset({"activity", "age", "cycle_len", "diet", "diet_note", "height", "kcal_goal",
     "last_period", "last_phase_notified", "last_reactivation", "mode", "partner_code", "pending_date",
-    "period_end", "period_len", "proactive_enabled", "send_time", "state", "tg_first_name",
-    "train_profile", "weight"})
+    "period_end", "period_len", "proactive_enabled", "push_suppressed_at",
+    "push_suppression_reason", "send_time", "state", "tg_first_name", "train_profile", "weight"})
 def upsert(cid, *, user_generation=None, **kw):
     unknown = set(kw) - _USER_UPDATE_COLUMNS
     if unknown:
@@ -411,6 +413,13 @@ def _sync_telegram_identity(update, allow_create=False):
 async def sync_telegram_identity(update, context):
     """Run before normal Telegram handlers so this turn sees the current name."""
     _sync_telegram_identity(update)
+    chat = getattr(update, "effective_chat", None)
+    cid = getattr(chat, "id", None)
+    if cid is not None and getattr(chat, "type", "private") == "private":
+        if _clear_push_suppression(cid):
+            user = row(cid) or {}
+            if is_onboarded(user):
+                schedule_daily(context.application, cid, user.get("send_time") or "08:00")
 
 def add_sugg(cid, q):
     c = db()
@@ -844,10 +853,13 @@ def last_hint(cid):
     return "; ".join(parts) or None
 def all_users():
     c = db(); rows = c.execute("""SELECT chat_id FROM users
-        WHERE (last_period IS NOT NULL AND cycle_len IS NOT NULL)
-           OR mode IN ('irregular','none','meno','preg')""").fetchall(); c.close(); return [x[0] for x in rows]
+        WHERE push_suppressed_at IS NULL
+          AND ((last_period IS NOT NULL AND cycle_len IS NOT NULL)
+               OR mode IN ('irregular','none','meno','preg'))""").fetchall(); c.close(); return [x[0] for x in rows]
 def meno_users():
-    c = db(); rows = c.execute("SELECT chat_id FROM users WHERE mode='meno'").fetchall(); c.close(); return [x[0] for x in rows]
+    c = db(); rows = c.execute(
+        "SELECT chat_id FROM users WHERE mode='meno' AND push_suppressed_at IS NULL"
+    ).fetchall(); c.close(); return [x[0] for x in rows]
 def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
@@ -1538,6 +1550,114 @@ def summary_sent_today(cid):
     c.close()
     return bool(r)
 
+_PERMANENT_PUSH_FAILURES = frozenset({"blocked", "chat_not_found", "user_deactivated"})
+_RETRYABLE_PUSH_FAILURES = frozenset({"rate_limit", "timeout", "network"})
+
+def _push_failure_class(exc):
+    """Map Telegram exceptions to stable, privacy-safe delivery diagnostics."""
+    if isinstance(exc, Forbidden):
+        return "blocked"
+    if isinstance(exc, RetryAfter):
+        return "rate_limit"
+    if isinstance(exc, TimedOut):
+        return "timeout"
+    if isinstance(exc, NetworkError):
+        return "network"
+    if isinstance(exc, BadRequest):
+        text = str(exc or "").lower()
+        if "chat not found" in text:
+            return "chat_not_found"
+        if "user is deactivated" in text or "user deactivated" in text:
+            return "user_deactivated"
+        return "bad_request"
+    return "internal_or_unknown"
+
+def _suppress_push_delivery(cid, reason):
+    if reason not in _PERMANENT_PUSH_FAILURES:
+        return False
+    c = db()
+    try:
+        changed = c.execute(
+            """UPDATE users
+               SET push_suppressed_at=?, push_suppression_reason=?
+               WHERE chat_id=? AND push_suppressed_at IS NULL""",
+            (datetime.now(TZ).isoformat(), reason, cid),
+        ).rowcount == 1
+        c.commit()
+        return changed
+    finally:
+        c.close()
+
+def _clear_push_suppression(cid):
+    """An inbound private Telegram update proves that this recipient is reachable again."""
+    c = db()
+    try:
+        changed = c.execute(
+            """UPDATE users
+               SET push_suppressed_at=NULL, push_suppression_reason=NULL
+               WHERE chat_id=? AND push_suppressed_at IS NOT NULL""",
+            (cid,),
+        ).rowcount == 1
+        c.commit()
+        if changed:
+            log.info("push delivery restored after inbound update: %s", cid)
+        return changed
+    finally:
+        c.close()
+
+def _backfill_push_suppressions():
+    """Persist legacy blocked recipients so deploy catch-up does not retry them again."""
+    c = db()
+    try:
+        changed = c.execute(
+            """UPDATE users
+               SET push_suppressed_at=(
+                     SELECT MAX(e.ts) FROM events e
+                     WHERE e.chat_id=users.chat_id
+                       AND e.action='broadcast' AND e.meta LIKE 'blocked|%'
+                   ),
+                   push_suppression_reason='blocked'
+               WHERE push_suppressed_at IS NULL
+                 AND EXISTS (
+                     SELECT 1 FROM events e
+                     WHERE e.chat_id=users.chat_id
+                       AND e.action='broadcast' AND e.meta LIKE 'blocked|%'
+                 )
+                 AND (
+                     SELECT MAX(e.ts) FROM events e
+                     WHERE e.chat_id=users.chat_id
+                       AND e.action='broadcast' AND e.meta LIKE 'blocked|%'
+                 ) > COALESCE((
+                     SELECT MAX(e.ts) FROM events e
+                     WHERE e.chat_id=users.chat_id
+                       AND (
+                           (e.action='broadcast' AND e.meta LIKE 'sent|%')
+                           OR e.action IN ('command','user_message','voice','button','suggest')
+                       )
+                 ), '')"""
+        ).rowcount
+        c.commit()
+        if changed:
+            log.info("push suppression backfilled for %d blocked recipients", changed)
+        return changed
+    finally:
+        c.close()
+
+def _record_push_failure(cid, campaign, exc):
+    """Record one attempt without leaking Telegram error text or identifiers."""
+    failure_class = _push_failure_class(exc)
+    permanent = failure_class in _PERMANENT_PUSH_FAILURES
+    if permanent:
+        _suppress_push_delivery(cid, failure_class)
+    status = "blocked" if permanent else "error"
+    ev(
+        cid,
+        "broadcast",
+        meta="|".join((status, campaign or "unknown", failure_class,
+                       "retryable" if failure_class in _RETRYABLE_PUSH_FAILURES else "terminal")),
+    )
+    return failure_class
+
 def _claim_push_delivery(cid, campaign):
     """Atomically reserve a push using a recoverable lease, not a permanent lock."""
     if not campaign:
@@ -1630,6 +1750,8 @@ def should_catchup_broadcast(cid, hhmm):
     return due <= now <= due + timedelta(hours=hours) and not summary_sent_today(cid)
 
 async def enqueue_broadcast(cid, meta="queued"):
+    if (row(cid) or {}).get("push_suppressed_at"):
+        return False
     if summary_sent_today(cid):
         return False
     if cid in BCAST_PENDING:
@@ -2882,6 +3004,8 @@ async def push_checkin(context, cid, campaign=None):
         if claimed and not delivered:
             try: _release_push_delivery(cid, campaign)
             except Exception as release_error: log.warning("checkin claim release %s: %s", cid, release_error)
+        if campaign:
+            _record_push_failure(cid, campaign, e)
         log.warning("checkin push %s: %s", cid, e)
         return False
 
@@ -3105,9 +3229,10 @@ async def proactive_job(context, slot):
             if r:
                 n += 1
                 await asyncio.sleep(delay)
-        except Forbidden:
-            pass
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("proactive"), exc)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("proactive"), e)
             log.warning("proactive_job(%s): %s", slot, e)
     log.info("proactive %s: %s (%s)", slot, n, "shadow" if shadow else "sent")
 
@@ -3342,6 +3467,9 @@ async def summary_prepare_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     cid = context.job.chat_id
+    if (row(cid) or {}).get("push_suppressed_at"):
+        _remove_daily_jobs(context.application, cid)
+        return
     if BCAST_Q is not None:
         return await enqueue_broadcast(cid)    # в очередь, обработает воркер с паузами
     try:
@@ -3349,13 +3477,13 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
         if sent:
             await push_partner(context, cid)
         await push_checkin(context, cid, campaign=campaign_id("daily_checkin"))
-    except Forbidden:
-        ev(cid, "broadcast", meta=f"blocked|{campaign_id('daily_summary')}")
+    except Forbidden as exc:
+        _record_push_failure(cid, campaign_id("daily_summary"), exc)
         try:
             _remove_daily_jobs(context.application, cid)
         except Exception: pass
     except Exception as e:
-        ev(cid, "broadcast", meta=f"error|{campaign_id('daily_summary')}")
+        _record_push_failure(cid, campaign_id("daily_summary"), e)
         raise
 
 async def broadcast_worker(app):
@@ -3369,14 +3497,14 @@ async def broadcast_worker(app):
             if sent:
                 await push_partner(ctx, cid)
             await push_checkin(ctx, cid, campaign=campaign_id("daily_checkin"))
-        except Forbidden:
+        except Forbidden as exc:
             try:
-                ev(cid, "broadcast", meta=f"blocked|{campaign_id('daily_summary')}")
+                _record_push_failure(cid, campaign_id("daily_summary"), exc)
                 _remove_daily_jobs(app, cid)
             except Exception: pass
             log.info("broadcast %s: заблокирован пользователем, снял с рассылки", cid)
         except Exception as e:
-            try: ev(cid, "broadcast", meta=f"error|{campaign_id('daily_summary')}")
+            try: _record_push_failure(cid, campaign_id("daily_summary"), e)
             except Exception: pass
             log.warning("broadcast %s: %s", cid, e)
         finally:
@@ -3432,9 +3560,11 @@ async def train_worker(app):
         cid = await TRAIN_Q.get()
         try:
             await push_train_reminder(_BCtx(app), cid)
-        except Forbidden:
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("train_reminder"), exc)
             log.info("train reminder %s: заблокирован", cid)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("train_reminder"), e)
             log.warning("train reminder %s: %s", cid, e)
         finally:
             TRAIN_PENDING.discard(cid)
@@ -3503,9 +3633,10 @@ async def phase_transition_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(cid, txt, reply_markup=kb)
             ev(cid, "broadcast", meta="sent|" + campaign); sent += 1
             await asyncio.sleep(delay)
-        except Forbidden:
-            pass
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("phase_transition"), exc)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("phase_transition"), e)
             log.warning("phase push %s: %s", cid, e)
     log.info("phase transition pushes: %d", sent)
 
@@ -3545,9 +3676,10 @@ async def reactivation_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(cid, txt, reply_markup=kb)
             ev(cid, "broadcast", meta="sent|" + campaign); sent += 1
             await asyncio.sleep(delay)
-        except Forbidden:
-            pass
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("reactivation"), exc)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("reactivation"), e)
             log.warning("reactivation %s: %s", cid, e)
     log.info("reactivation pushes: %d", sent)
 
@@ -3557,9 +3689,11 @@ async def food_worker(app):
         cid = await FOOD_Q.get()
         try:
             await push_food_reminder(_BCtx(app), cid)
-        except Forbidden:
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("food_reminder"), exc)
             log.info("food reminder %s: заблокирован", cid)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("food_reminder"), e)
             log.warning("food reminder %s: %s", cid, e)
         finally:
             FOOD_PENDING.discard(cid)
@@ -4159,7 +4293,7 @@ async def meno_update_cmd(update, context):
             await asyncio.sleep(0.25)
         except Exception as e:
             failed += 1
-            ev(uid, "broadcast", meta="error|" + campaign)
+            _record_push_failure(uid, campaign, e)
             log.warning("meno update %s: %s", uid, e)
     await update.message.reply_text(f"Пуш про мено-экран отправлен.\n\nУшло: {sent}\nОшибок: {failed}")
 
@@ -4179,10 +4313,10 @@ async def _announce_capture(update, context, cid):
                                            reply_markup=summary_kb(row(uid), campaign=campaign))
             ev(uid, "broadcast", meta="sent|" + campaign); sent += 1
             await asyncio.sleep(0.25)
-        except Forbidden:
-            failed += 1; ev(uid, "broadcast", meta="blocked|" + campaign)
+        except Forbidden as exc:
+            failed += 1; _record_push_failure(uid, campaign, exc)
         except Exception as e:
-            failed += 1; ev(uid, "broadcast", meta="error|" + campaign); log.warning("announce %s: %s", uid, e)
+            failed += 1; _record_push_failure(uid, campaign, e); log.warning("announce %s: %s", uid, e)
     await msg.reply_text(f"Готово. Ушло: {sent}, ошибок: {failed}.")
 
 async def announce_cmd(update, context):
@@ -4935,6 +5069,7 @@ async def on_startup(app):
     asyncio.create_task(load_logger(app))
     asyncio.create_task(model_probe(app))
     asyncio.create_task(traction_worker())
+    _backfill_push_suppressions()
     n = catchup = 0
     for cid in all_users():
         u = row(cid) or {}

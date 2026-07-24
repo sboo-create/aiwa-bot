@@ -175,7 +175,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn.close()
         self.assertEqual(row[1:4], ("screen_viewed", "webapp", "food"))
         self.assertNotIn("987654321", row[0])
-        self.assertEqual(json.loads(row[4]), {})
+        self.assertEqual(json.loads(row[4]), {"platform": "webapp"})
 
     def test_external_traction_outbox_is_pseudonymous_and_idempotent(self):
         cid = 987654321
@@ -240,6 +240,49 @@ class SecurityAnalyticsTests(unittest.TestCase):
             ("sent",),
         )
         conn.close()
+
+    def test_permanent_push_failure_suppresses_future_jobs_until_inbound_update(self):
+        cid = 122
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="none")
+
+        failure_class = bot._record_push_failure(
+            cid, "daily_summary:2026-07-24", bot.Forbidden("bot was blocked by the user")
+        )
+
+        self.assertEqual(failure_class, "blocked")
+        self.assertEqual(bot.row(cid)["push_suppression_reason"], "blocked")
+        self.assertNotIn(cid, bot.all_users())
+        self.assertTrue(bot._clear_push_suppression(cid))
+        self.assertIsNone(bot.row(cid)["push_suppressed_at"])
+        self.assertIn(cid, bot.all_users())
+
+        batch = a2.traction_batch(bot.DB)
+        failure = next(item for item in batch if item["name"] == "push_failed")
+        self.assertEqual(failure["properties"]["failure_class"], "blocked")
+        self.assertFalse(failure["properties"]["retryable"])
+
+    def test_legacy_blocked_recipient_is_backfilled_once(self):
+        cid = 121
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="none")
+        bot.ev(cid, "broadcast", meta="blocked|daily_summary:2026-07-23")
+
+        self.assertEqual(bot._backfill_push_suppressions(), 1)
+        self.assertEqual(bot._backfill_push_suppressions(), 0)
+        self.assertEqual(bot.row(cid)["push_suppression_reason"], "blocked")
+        self.assertNotIn(cid, bot.all_users())
+
+    def test_backfill_does_not_suppress_recipient_reachable_after_old_block(self):
+        cid = 120
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="none")
+        bot.ev(cid, "broadcast", meta="blocked|daily_summary:2026-07-22")
+        bot.ev(cid, "user_message", meta="text")
+
+        self.assertEqual(bot._backfill_push_suppressions(), 0)
+        self.assertIsNone(bot.row(cid)["push_suppressed_at"])
+        self.assertIn(cid, bot.all_users())
 
     def test_failed_checkin_send_releases_claim_for_retry(self):
         cid = 124

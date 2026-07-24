@@ -128,17 +128,15 @@ class StatsModuleTests(unittest.TestCase):
             "ever_used", "dau", "wau", "mau", "sessions_per_dau", "tools_per_dau",
         })
         tools = {x["id"]: x for x in data["tool_definitions"]}
-        overview_tool = tools["overview_ai_attempts_mixed_dau"]
-        exact_tool = tools["ai_provider_attempts"]
+        overview_tool = tools["ai_provider_attempts"]
         self.assertTrue(overview_tool["selected_for_overview"])
-        self.assertFalse(tools["ai_provider_attempts"]["selected_for_overview"])
         self.assertEqual((overview_tool["value"], overview_tool["numerator"],
                           overview_tool["denominator"]), (1.0, 2, 2))
-        self.assertEqual((exact_tool["value"], exact_tool["numerator"],
-                          exact_tool["denominator"]), (2.0, 2, 1))
         self.assertEqual(tools["logical_ai_requests"]["value"], 1.0)
-        self.assertEqual(tools["value_actions"]["value"], 0.5)
-        self.assertEqual(tools["value_actions"]["label"], "Дни с ответом AIWA / user-day")
+        self.assertEqual(len(tools), 5)
+        self.assertEqual(tools["actual_tool_executions"]["status"], "not_instrumented")
+        self.assertEqual(tools["successful_tool_executions"]["status"], "not_instrumented")
+        self.assertEqual(tools["useful_tool_outcomes"]["status"], "not_instrumented")
         self.assertEqual(data["overview"]["tools_per_dau"], 1.0)
         self.assertEqual(len(data["diagnostics"]), 10)
 
@@ -332,6 +330,49 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(push["action_eligible"], 1)
         self.assertEqual(push["action_pending"], 1)
         self.assertEqual(push["action_rate"], 0.0)
+
+    def test_push_failures_separate_attempts_deliveries_recipients_and_recovery(self):
+        now = time.time()
+        for index in range(8):
+            self.add(f"blocked-{index}", "u1", "push_failed", {
+                "campaign_id": "daily_summary:today", "campaign_type": "daily_summary",
+                "delivery_status": "blocked",
+            }, now - 100 + index)
+        self.add("timeout", "u2", "push_failed", {
+            "campaign_id": "food_reminder:today", "campaign_type": "food_reminder",
+            "delivery_status": "error", "failure_class": "timeout", "retryable": True,
+        }, now - 80)
+        self.add("recover-fail", "u3", "push_failed", {
+            "campaign_id": "daily_summary:retry", "campaign_type": "daily_summary",
+            "delivery_status": "error", "failure_class": "network", "retryable": True,
+        }, now - 70)
+        self.add("recover-sent", "u3", "push_sent", {
+            "campaign_id": "daily_summary:retry", "campaign_type": "daily_summary",
+        }, now - 60)
+
+        push = self.module.compute_dashboard(1)["push_funnel"]
+
+        self.assertEqual(push["failed_attempts"], 10)
+        self.assertEqual(push["failed"], 2)
+        self.assertEqual(push["failed_recipients"], 2)
+        self.assertEqual(push["recovered"], 1)
+        self.assertEqual(push["attempts_per_failed_delivery"], 3.33)
+        reasons = {item["id"]: item for item in push["failure_classes"]}
+        self.assertEqual((reasons["blocked"]["deliveries"], reasons["blocked"]["attempts"]), (1, 8))
+        self.assertEqual((reasons["timeout"]["deliveries"], reasons["timeout"]["attempts"]), (1, 1))
+
+    def test_platform_breakdown_separates_bot_and_mini_app_without_claiming_os(self):
+        now = time.time()
+        self.add("bot", "u1", "user_message_sent", {"platform": "bot", "channel": "text"}, now - 20)
+        self.add("web", "u1", "screen_viewed", {"platform": "webapp", "screen": "food"}, now - 15)
+        self.add("web2", "u2", "app_opened", {"platform": "webapp"}, now - 10)
+
+        platforms = self.module.compute_dashboard(1)["platforms"]
+        items = {item["id"]: item for item in platforms["items"]}
+
+        self.assertEqual((items["telegram_bot"]["users"], items["telegram_bot"]["events"]), (1, 1))
+        self.assertEqual((items["mini_app"]["users"], items["mini_app"]["events"]), (2, 2))
+        self.assertIn("iOS/Android/Desktop", platforms["help"])
 
     def test_proactive_without_product_target_does_not_report_zero_action_rate(self):
         now = time.time()

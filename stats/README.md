@@ -27,11 +27,25 @@ reconstructed users and is shown next to an observed-only alternative.
 For backward compatibility, `tools_per_dau` currently means observed v2 AI
 provider attempts, including retry and fallback. If attempts exist without a
 calendar-day DAU denominator, the optional ratio key is omitted rather than
-publishing a misleading zero. The detailed dashboard exposes the
-top-level `tool_definitions` candidates with stable IDs, numerators,
-denominators and `selected_for_overview`. This makes the current choice
-explicit while product can compare logical AI requests, product actions,
-feature breadth and completed value proxies before changing the canonical KPI.
+publishing a misleading zero. The detailed dashboard exposes exactly five
+definitions: provider attempts, logical AI requests, actual tool executions,
+successful tool executions and useful outcomes after a tool. The latter three
+are explicitly `not_instrumented` until the product emits real tool lifecycle
+events; provider calls are never silently relabelled as tool executions.
+
+## Platform and push delivery
+
+Platform means product surface, not device OS: `Telegram-бот` and `Mini App`.
+A user may appear in both rows. Telegram does not expose a trustworthy
+iOS/Android/Desktop field to the current privacy-safe analytics layer, so the
+dashboard does not infer one.
+
+Push success and failure use the same delivery identity: pseudonymous
+`user × campaign_id`. Raw Telegram API failures are reported separately as
+attempts. A failed campaign that later succeeds is recovered rather than left
+as a terminal failure. Permanent Telegram responses (`blocked`,
+`chat_not_found`, `user_deactivated`) suppress future background delivery;
+an inbound private update clears suppression and restores the user's schedule.
 
 ## Product decisions recorded on 2026-07-23
 
