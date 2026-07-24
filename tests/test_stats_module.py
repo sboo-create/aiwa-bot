@@ -74,6 +74,12 @@ class StatsModuleTests(unittest.TestCase):
                  "purpose": "answer", "status": "success", "retry_index": 1,
                  "input_tokens": 100, "output_tokens": 20,
                  "total_tokens": 120, "estimated_cost_usd": .002, "latency_ms": 500}, now - 198)
+        self.add("tool-ok", "u1", "tool_execution_completed",
+                 {"request_id": "r1", "tool_name": "cycle_status", "status": "success"}, now - 197)
+        self.add("tool-error", "u1", "tool_execution_completed",
+                 {"request_id": "r1", "tool_name": "recent_symptoms", "status": "error"}, now - 196)
+        self.add("tool-outcome", "u1", "tool_outcome_completed",
+                 {"request_id": "r1", "outcome_type": "tool_assisted_answer", "status": "success"}, now - 195)
         self.add("old", "u2", "legacy_button", {"migration_batch": "b1"}, now - 1000, "reconstructed")
 
         with mock.patch.object(self.module.time, "time", return_value=now):
@@ -129,15 +135,23 @@ class StatsModuleTests(unittest.TestCase):
         })
         tools = {x["id"]: x for x in data["tool_definitions"]}
         overview_tool = tools["ai_provider_attempts"]
-        self.assertTrue(overview_tool["selected_for_overview"])
+        self.assertFalse(overview_tool["selected_for_overview"])
         self.assertEqual((overview_tool["value"], overview_tool["numerator"],
                           overview_tool["denominator"]), (1.0, 2, 2))
         self.assertEqual(tools["logical_ai_requests"]["value"], 1.0)
         self.assertEqual(len(tools), 5)
-        self.assertEqual(tools["actual_tool_executions"]["status"], "not_instrumented")
-        self.assertEqual(tools["successful_tool_executions"]["status"], "not_instrumented")
-        self.assertEqual(tools["useful_tool_outcomes"]["status"], "not_instrumented")
-        self.assertEqual(data["overview"]["tools_per_dau"], 1.0)
+        self.assertEqual(tools["actual_tool_executions"]["value"], 2.0)
+        self.assertEqual(tools["successful_tool_executions"]["value"], 0.5)
+        self.assertTrue(tools["successful_tool_executions"]["selected_for_overview"])
+        self.assertEqual(tools["useful_tool_outcomes"]["value"], 1.0)
+        self.assertEqual(data["overview"]["tools_per_dau"], 0.5)
+        self.assertEqual(data["ai"]["tool_executions"], 2)
+        self.assertEqual(data["ai"]["successful_tool_executions"], 1)
+        self.assertEqual(data["ai"]["tool_execution_success_rate"], 50.0)
+        self.assertEqual(data["ai"]["tool_outcomes"], 1)
+        self.assertEqual(data["ai"]["tools"][0],
+                         {"name": "cycle_status", "executions": 1,
+                          "successful": 1, "failed": 0})
         self.assertEqual(len(data["diagnostics"]), 10)
 
     def test_overview_ratios_use_rolling_dau_not_calendar_user_days(self):
@@ -153,7 +167,7 @@ class StatsModuleTests(unittest.TestCase):
 
         self.assertEqual(day["overview"]["dau"], 1)
         self.assertEqual(day["overview"]["sessions_per_dau"], 1.0)
-        self.assertEqual(day["overview"]["tools_per_dau"], 2.0)
+        self.assertEqual(day["overview"]["tools_per_dau"], 0.0)
         self.assertEqual(day["audience"]["avg_dau"], 1.0)
         self.assertEqual(day["overview"], week["overview"])
 
@@ -168,7 +182,8 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIn("могут быть неполными", html)
         self.assertIn("Точно записанные (observed)", html)
         self.assertIn("Восстановленные (reconstructed)", html)
-        self.assertIn("Что считать «Tools»?", html)
+        self.assertIn("Tools / DAU", html)
+        self.assertIn("tool-breakdown", html)
         self.assertIn("в Overview как Tools / DAU", html)
         self.assertIn("Диагностика продукта и данных", html)
         self.assertIn("Ошибки AI-маршрута", html)
@@ -189,7 +204,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIsNone(tools["ai_provider_attempts"]["value"])
         self.assertIsNone(tools["logical_ai_requests"]["value"])
         self.assertEqual(tools["ai_provider_attempts"]["status"], "no_active_users")
-        self.assertNotIn("tools_per_dau", data["overview"])
+        self.assertEqual(data["overview"]["tools_per_dau"], 0)
         self.assertEqual(data["errors"], 0)
         self.assertEqual(data["ai"]["providers"][0]["success"], 0)
 
@@ -199,6 +214,7 @@ class StatsModuleTests(unittest.TestCase):
 
         self.assertEqual(tools["logical_ai_requests"]["status"], "no_data")
         self.assertIsNone(tools["logical_ai_requests"]["value"])
+        self.assertEqual(tools["actual_tool_executions"]["status"], "no_active_users")
 
     def test_push_action_requires_campaign_specific_target(self):
         now = time.time()
@@ -433,7 +449,19 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(exact["data_quality"]["cost_coverage"], 100.0)
         mixed_tool = next(x for x in mixed["tool_definitions"] if x["selected_for_overview"])
         exact_tool = next(x for x in exact["tool_definitions"] if x["selected_for_overview"])
+        self.assertEqual(mixed_tool["id"], "successful_tool_executions")
+        self.assertEqual(exact_tool["id"], "successful_tool_executions")
+        self.assertEqual((mixed_tool["value"], exact_tool["value"]), (0.0, 0.0))
         self.assertIn("всей доступной истории", mixed_tool["denominator_label"])
-        self.assertIn("включая восстановленных", mixed_tool["help"])
         self.assertIn("точного v2-слоя", exact_tool["denominator_label"])
-        self.assertIn("без восстановленных", exact_tool["help"])
+
+    def test_dashboard_cache_hits_after_first_computation(self):
+        self.add("active", "u1", "app_opened")
+
+        _, first_status, _ = self.module._cached_dashboard(1, "mixed")
+        cached, second_status, elapsed = self.module._cached_dashboard(1, "mixed")
+
+        self.assertEqual(first_status, "miss")
+        self.assertEqual(second_status, "hit")
+        self.assertEqual(cached["overview"]["dau"], 1)
+        self.assertLess(elapsed, 50)

@@ -91,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-24-v110-push-delivery"
+AIWA_VERSION = "2026-07-24-v111-tool-metrics"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -5476,6 +5476,7 @@ async def _api_chat(request):
         cid, u, msg, user_generation=generation,
         mutation_key=chat_mutation_key("webchat", body.get("request_id")),
         require_mutation_key=True,
+        channel="webapp",
     )
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
@@ -5555,7 +5556,7 @@ def _agent_exec(cid, name, args):
         return {"error": str(e)}
     return {"error": "unknown tool"}
 
-async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None):
+async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None, channel="bot"):
     """Агентный ответ в два этапа:
     1) модель через инструменты сама добывает реальные данные пользовательницы (реальные тул-колы);
     2) финальный ответ пишется прежним качественным промптом (answer_question/general_answer) с этими данными.
@@ -5567,11 +5568,25 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None):
     messages = [{"role": "system", "content": plan_sys}, {"role": "user", "content": msg}]
     tools = _agent_tools_spec()
     gathered = []
+    successful_tools = 0
+
+    async def finish():
+        answer = await _agent_final(
+            cid, u, msg, gathered, usage, request_id, user_generation,
+        )
+        if successful_tools and answer and _user_write_allowed(cid, user_generation):
+            ev(
+                cid, "tool_outcome",
+                meta=f"success|tool_assisted_answer|{channel}",
+                request_id=request_id, user_generation=user_generation,
+            )
+        return answer
+
     for _r in range(2):
         m = await llm_to_thread(cid, "tool_plan", L.call_tools, messages, tools, usage, 0.2, 480,
                                 request_id=request_id, user_generation=user_generation)
         if not m:
-            return None if _r == 0 else await _agent_final(cid, u, msg, gathered, usage, request_id, user_generation)
+            return None if _r == 0 else await finish()
         tc = m.get("tool_calls")
         if not tc:
             break
@@ -5585,11 +5600,21 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None):
                 a = {}
             if not _user_write_allowed(cid, user_generation):
                 return None
+            tool_started = time.monotonic()
             res = _agent_exec(cid, nm, a)
+            tool_status = "error" if isinstance(res, dict) and res.get("error") else "success"
+            if tool_status == "success":
+                successful_tools += 1
+            ev(
+                cid, "tool_execution",
+                meta=f"{tool_status}|{nm}|{channel}",
+                ms=int((time.monotonic() - tool_started) * 1000),
+                request_id=request_id, user_generation=user_generation,
+            )
             gathered.append(nm + ": " + json.dumps(res, ensure_ascii=False))
             messages.append({"role": "tool", "tool_call_id": call.get("id"),
                              "content": json.dumps(res, ensure_ascii=False)})
-    return await _agent_final(cid, u, msg, gathered, usage, request_id, user_generation)
+    return await finish()
 
 async def _agent_final(cid, u, msg, gathered, usage, request_id, user_generation=None):
     _, st = status_of(cid); prof = llm_profile_of(u)
@@ -5618,7 +5643,8 @@ async def _memory_learn(cid, umsg, amsg, user_generation=None):
     except Exception as e:
         log.warning("memory_learn: %s", e)
 
-async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None, require_mutation_key=False):
+async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
+                      require_mutation_key=False, channel="bot"):
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     intent = match_intent(msg)
@@ -5709,7 +5735,10 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None, requ
     request_id = "r_" + secrets.token_hex(16)
     ans = None
     try:
-        ans = await _agent_answer(cid, u, msg, usage, request_id, user_generation=generation)
+        ans = await _agent_answer(
+            cid, u, msg, usage, request_id,
+            user_generation=generation, channel=channel,
+        )
     except Exception as _ae:
         log.warning("agent fallback: %s", _ae); ans = None
     if not ans:
@@ -5783,6 +5812,7 @@ async def _api_voice(request):
         cid, u, msg, user_generation=generation,
         mutation_key=chat_mutation_key("webvoice", data.get("request_id")),
         require_mutation_key=True,
+        channel="webapp",
     )
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
