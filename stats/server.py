@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from collections import Counter, defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -42,7 +43,8 @@ SAFE_PROPERTIES = {
     "estimated_cost_usd", "feature", "provenance", "confidence", "source_schema",
     "payload_version", "app_version", "migration_batch", "token_precision",
     "answer_id", "rating", "safety_level", "campaign_id", "campaign_type",
-    "delivery_status", "failure_class", "retryable", "platform",
+    "delivery_status", "failure_class", "retryable", "platform", "tool_name",
+    "outcome_type",
 }
 NUMERIC_PROPERTIES = {
     "calls", "retry_index", "latency_ms", "input_tokens", "output_tokens",
@@ -58,6 +60,7 @@ SYSTEM_NAMES = {
     "legacy_error", "legacy_tokens", "legacy_broadcast", "push_sent", "push_queued", "push_shadowed",
     "push_failed", "push_opened", "answer_feedback_prompted",
     "answer_feedback_submitted", "safety_guidance_shown", "summary_delivered",
+    "tool_execution_completed", "tool_outcome_completed",
 }
 SUCCESS = {"success", "ok", "completed"}
 RESPONSE_NAMES = {"assistant_message_sent", "assistant_response_received"}
@@ -185,7 +188,19 @@ def _period_starts(now: float, days: float) -> tuple[float, dict[str, float]]:
     }
 
 
-app = FastAPI()
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Pay the SQLite cold-read cost during service startup, not on the first
+    # dashboard opened by a person. The function is resolved when startup runs,
+    # after the module has finished defining it.
+    try:
+        await run_in_threadpool(_cached_dashboard, 1, "mixed")
+    except Exception:
+        pass
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _db = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
 _db.execute("PRAGMA journal_mode=WAL")
@@ -211,10 +226,16 @@ _db.execute("CREATE INDEX IF NOT EXISTS ix_events_device_ts ON events(device_id,
 _db.execute("CREATE INDEX IF NOT EXISTS ix_events_name_ts ON events(name,ts)")
 _db.commit()
 DB_LOCK = threading.RLock()
+CACHE_LOCK = threading.RLock()
+_EVENT_ROWS_CACHE: dict[str, Any] = {"changes": -1, "rows": None}
+_DASHBOARD_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+DASHBOARD_CACHE_SECONDS = max(1.0, float(os.environ.get("STATS_DASHBOARD_CACHE_SECONDS", "15")))
 
 
-def _no_store(value: object, status: int = 200) -> JSONResponse:
-    return JSONResponse(value, status_code=status, headers={"Cache-Control": "no-store"})
+def _no_store(value: object, status: int = 200, headers: dict[str, str] | None = None) -> JSONResponse:
+    response_headers = {"Cache-Control": "no-store"}
+    response_headers.update(headers or {})
+    return JSONResponse(value, status_code=status, headers=response_headers)
 
 
 def _canonical(name: str) -> str:
@@ -254,6 +275,11 @@ def _safe_properties(raw: Any) -> dict[str, Any]:
 
 def _event_rows() -> list[dict[str, Any]]:
     with DB_LOCK:
+        changes = _db.total_changes
+        with CACHE_LOCK:
+            if (_EVENT_ROWS_CACHE["changes"] == changes and
+                    _EVENT_ROWS_CACHE["rows"] is not None):
+                return _EVENT_ROWS_CACHE["rows"]
         rows = _db.execute(
             "SELECT event_id,ts,device_id,name,properties,ingested_at,provenance,confidence,payload_version "
             "FROM events ORDER BY ts,event_id"
@@ -272,6 +298,9 @@ def _event_rows() -> list[dict[str, Any]]:
             "confidence": props.get("confidence") or confidence or "high",
             "payload_version": int(props.get("payload_version") or version or 1),
         })
+    with CACHE_LOCK:
+        _EVENT_ROWS_CACHE["changes"] = changes
+        _EVENT_ROWS_CACHE["rows"] = result
     return result
 
 
@@ -933,6 +962,26 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                                       if exact_active_user_days else None)
     exact_request_coverage = _percent(exact_request_covered, len(exact_ai_rows))
     exact_request_ready = bool(exact_ai_rows) and exact_request_coverage >= 80
+    exact_tool_rows = [
+        r for r in selected
+        if r["provenance"] == "observed" and r["name"] == "tool_execution_completed"
+    ]
+    successful_tool_rows = [
+        r for r in exact_tool_rows
+        if str(r["properties"].get("status") or "") in SUCCESS
+    ]
+    exact_tool_outcomes = [
+        r for r in selected
+        if r["provenance"] == "observed"
+        and r["name"] == "tool_outcome_completed"
+        and str(r["properties"].get("status") or "") in SUCCESS
+    ]
+    tool_counts: dict[str, Counter] = defaultdict(Counter)
+    for tool_row in exact_tool_rows:
+        tool_name = str(tool_row["properties"].get("tool_name") or "unknown")
+        tool_counts[tool_name]["executions"] += 1
+        if str(tool_row["properties"].get("status") or "") in SUCCESS:
+            tool_counts[tool_name]["successful"] += 1
     product_actions = sum(r["name"] in PRODUCT_ACTION_NAMES for r in selected)
     response_user_days = {
         (r["device_id"], _product_day(r["ts"]))
@@ -955,33 +1004,36 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         and r["provenance"] == "observed"
         for r in rows
     )
+    day_successful_tool_executions = sum(
+        r["name"] == "tool_execution_completed"
+        and str(r["properties"].get("status") or "") in SUCCESS
+        and calendar_day_start <= r["ts"] <= now
+        and r["provenance"] == "observed"
+        for r in rows
+    )
     per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
-    overview_tools_per_dau = per_dau(day_ai_attempts)
+    overview_tools_per_dau = per_dau(day_successful_tool_executions)
     overview_tool_denominator = (
         "DAU текущей московской даты всей доступной истории"
         if source_mode == "mixed"
         else "DAU текущей московской даты точного v2-слоя"
     )
     overview_tool_help = (
-        "Формула общей страницы: точно записанные AI-попытки с 00:00 МСК "
-        "делятся на DAU той же московской даты, включая восстановленных пользователей. "
-        "Она сохраняет непрерывность метрики, но может занижать техническую интенсивность, "
-        "потому что старые AI-вызовы восстановлены неполно."
-        if source_mode == "mixed" else
-        "Та же формула рассчитана только на точном v2-слое: AI-попытки с 00:00 МСК "
-        "делятся на DAU той же даты без восстановленных пользователей. Поэтому "
-        "значение может отличаться от общей страницы, которая по умолчанию показывает всю историю."
+        "Успешно завершённые структурированные инструменты модели с 00:00 МСК, "
+        "делённые на DAU той же московской даты. Считаются реальные исполнения "
+        "cycle_status, recent_symptoms, today_diary, recent_workouts, user_profile, "
+        "recall и remember; обращения к AI-провайдеру сюда не входят."
     )
 
     tool_definitions = [
         {"id": "ai_provider_attempts", "label": "AI provider attempts / DAU",
-         "value": overview_tools_per_dau, "numerator": day_ai_attempts,
+         "value": per_dau(day_ai_attempts), "numerator": day_ai_attempts,
          "numerator_label": "точных AI-попыток с 00:00 МСК",
          "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
          "status": ("no_data" if not day_ai_attempts else
                     "no_active_users" if not dau_ids else "ok"),
-         "selected_for_overview": True,
-         "help": overview_tool_help},
+         "selected_for_overview": False,
+         "help": "Отдельные технические обращения к AI endpoint с 00:00 МСК, включая retry и fallback. Эта метрика показывает нагрузку на провайдеров, но больше не называется Tools."},
         {"id": "logical_ai_requests", "label": "Logical AI requests / DAU",
          "value": (per_exact_active_day(logical_ai_requests) if exact_request_ready else None),
          "numerator": (logical_ai_requests if exact_request_ready else None),
@@ -994,20 +1046,28 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "selected_for_overview": False,
          "help": "Логические AI-запросы после объединения retry и fallback по request_id. Попытки без request_id считаются отдельными запросами, поэтому метрика зависит от полноты трассировки."},
         {"id": "actual_tool_executions", "label": "Actual tool executions / DAU",
-         "value": None, "numerator": None, "numerator_label": "tool executions",
+         "value": per_exact_active_day(len(exact_tool_rows)),
+         "numerator": len(exact_tool_rows), "numerator_label": "tool executions",
          "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
-         "status": "not_instrumented", "selected_for_overview": False,
-         "help": "Фактические исполнения структурированных инструментов модели: запись еды, тренировки, профиля и другие tool calls. Сейчас отдельного события tool_execution нет, поэтому provider attempt нельзя честно переименовать в tool execution."},
+         "status": ("no_active_users" if not exact_active_user_days else "ok"),
+         "selected_for_overview": False,
+         "help": "Все фактические исполнения структурированных инструментов модели за выбранный период, включая успешные и завершившиеся ошибкой. Аргументы и результаты инструментов в аналитику не передаются."},
         {"id": "successful_tool_executions", "label": "Successful tool executions / DAU",
-         "value": None, "numerator": None, "numerator_label": "успешных tool executions",
-         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
-         "status": "not_instrumented", "selected_for_overview": False,
-         "help": "Только исполнения инструментов, завершившиеся успехом. Нужны отдельные события начала и результата tool execution; текущие продуктовые goal-события не позволяют восстановить точный знаменатель."},
+         "value": overview_tools_per_dau,
+         "numerator": day_successful_tool_executions,
+         "numerator_label": "успешных tool executions с 00:00 МСК",
+         "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
+         "status": ("no_active_users" if not dau_ids else "ok"),
+         "selected_for_overview": True,
+         "help": overview_tool_help},
         {"id": "useful_tool_outcomes", "label": "Useful outcomes after tool / DAU",
-         "value": None, "numerator": None, "numerator_label": "полезных результатов после tool",
+         "value": per_exact_active_day(len(exact_tool_outcomes)),
+         "numerator": len(exact_tool_outcomes),
+         "numerator_label": "успешных tool-assisted ответов",
          "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
-         "status": "not_instrumented", "selected_for_overview": False,
-         "help": "Пользовательски полезный результат после успешного tool: запись сохранилась, затем была открыта, использована или подтверждена. Это отдельная outcome-метрика и её нельзя подменять количеством HTTP-вызовов."},
+         "status": ("no_active_users" if not exact_active_user_days else "ok"),
+         "selected_for_overview": False,
+         "help": "Запросы, в которых хотя бы один инструмент успешно вернул данные и AIWA затем сформировала итоговый ответ. Это технически подтверждённый tool-assisted outcome, но не пользовательская оценка «Полезно»."},
     ]
 
     overview = {
@@ -1029,8 +1089,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "note": "сессии сегодня МСК / DAU сегодня",
          "help": "Сессии с 00:00 МСК, делённые на уникальных активных пользователей той же календарной даты. Новая сессия начинается после 30 минут без продуктовых событий."},
         {"label": "Tools / DAU", "value": overview_tools_per_dau,
-         "note": f"точные AI-попытки сегодня МСК / {'общий' if source_mode == 'mixed' else 'точный'} DAU",
-         "help": overview_tool_help + " Точная и продуктовые альтернативы показаны ниже."},
+         "note": f"успешные tool executions сегодня МСК / {'общий' if source_mode == 'mixed' else 'точный'} DAU",
+         "help": overview_tool_help},
     ]
 
     classified_active = sum(_feature(r) is not None for r in active_selected)
@@ -1114,6 +1174,20 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                "failed_requests": failed_requests,
                "recovered_requests": recovered_requests,
                "clean_successful_requests": clean_successful_requests,
+               "tool_executions": len(exact_tool_rows),
+               "successful_tool_executions": len(successful_tool_rows),
+               "tool_execution_success_rate": _percent(len(successful_tool_rows), len(exact_tool_rows)),
+               "tool_outcomes": len(exact_tool_outcomes),
+               "tools": [
+                   {"name": name,
+                    "executions": int(counts["executions"]),
+                    "successful": int(counts["successful"]),
+                    "failed": int(counts["executions"] - counts["successful"])}
+                   for name, counts in sorted(
+                       tool_counts.items(),
+                       key=lambda item: (-item[1]["executions"], item[0]),
+                   )[:12]
+               ],
                "request_success_rate": (_percent(successful_requests, len(requests))
                                         if requests and _percent(request_covered, len(ai_rows)) >= 80 else None),
                "failed_attempts": failed_attempts, "attempt_error_rate": _percent(failed_attempts, len(ai_rows)),
@@ -1233,14 +1307,38 @@ async def delete_migration_batch(batch_id: str, request: Request) -> JSONRespons
     return _no_store({"ok": True, "batch": batch_id, "removed": removed})
 
 
+def _cached_dashboard(days: float, source: str) -> tuple[dict[str, Any], str, float]:
+    """Keep the live dashboard responsive while bounding staleness to a few seconds."""
+    key = (max(1, min(int(math.ceil(float(days))), 365)),
+           "observed" if str(source).lower() == "observed" else "mixed")
+    started = time.monotonic()
+    now_mono = started
+    with CACHE_LOCK:
+        cached = _DASHBOARD_CACHE.get(key)
+        if cached and cached[0] > now_mono:
+            return cached[1], "hit", (time.monotonic() - started) * 1000
+    value = compute_dashboard(key[0], key[1])
+    with CACHE_LOCK:
+        _DASHBOARD_CACHE[key] = (time.monotonic() + DASHBOARD_CACHE_SECONDS, value)
+    return value, "miss", (time.monotonic() - started) * 1000
+
+
+def _dashboard_response(days: float, source: str) -> JSONResponse:
+    value, cache_status, elapsed_ms = _cached_dashboard(days, source)
+    return _no_store(value, headers={
+        "Server-Timing": f'dashboard;dur={elapsed_ms:.1f};desc="{cache_status}"',
+        "X-Stats-Cache": cache_status,
+    })
+
+
 @app.get("/summary")
 def summary(days: float = 1.0, source: str = "mixed") -> JSONResponse:
-    return _no_store(compute_dashboard(days, source))
+    return _dashboard_response(days, source)
 
 
 @app.get("/dashboard")
 def dashboard_data(days: float = 1.0, source: str = "mixed") -> JSONResponse:
-    return _no_store(compute_dashboard(days, source))
+    return _dashboard_response(days, source)
 
 
 @app.get("/logo.png")

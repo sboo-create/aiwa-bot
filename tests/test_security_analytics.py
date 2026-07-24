@@ -216,6 +216,64 @@ class SecurityAnalyticsTests(unittest.TestCase):
             self.assertTrue(item["device_id"].startswith("u_"))
             self.assertFalse({"chat_id", "telegram_id", "user_id"} & set(item["properties"]))
 
+    def test_tool_lifecycle_exports_status_without_arguments_or_results(self):
+        cid = 456
+        request_id = "r_tool_test"
+        bot.ev(
+            cid, "tool_execution",
+            meta="success|today_diary|webapp",
+            ms=12, request_id=request_id,
+        )
+        bot.ev(
+            cid, "tool_outcome",
+            meta="success|tool_assisted_answer|webapp",
+            request_id=request_id,
+        )
+
+        batch = a2.traction_batch(bot.DB)
+        by_name = {item["name"]: item["properties"] for item in batch}
+        execution = by_name["tool_execution_completed"]
+        outcome = by_name["tool_outcome_completed"]
+        self.assertEqual(execution["tool_name"], "today_diary")
+        self.assertEqual(execution["status"], "success")
+        self.assertEqual(execution["request_id"], request_id)
+        self.assertEqual(execution["platform"], "webapp")
+        self.assertEqual(outcome["outcome_type"], "tool_assisted_answer")
+        self.assertFalse({"arguments", "result", "profile", "symptoms"} & set(execution))
+
+    def test_agent_records_real_tool_execution_and_assisted_outcome(self):
+        plan = {
+            "content": "",
+            "tool_calls": [{
+                "id": "call_1",
+                "function": {"name": "cycle_status", "arguments": "{}"},
+            }],
+        }
+        no_more_tools = {"content": "", "tool_calls": None}
+        with mock.patch.object(
+            bot, "llm_to_thread",
+            new=mock.AsyncMock(side_effect=[plan, no_more_tools]),
+        ), mock.patch.object(
+            bot, "_agent_exec", return_value={"tracked": True, "day": 12},
+        ), mock.patch.object(
+            bot, "_agent_final", new=mock.AsyncMock(return_value="Готовый ответ"),
+        ):
+            answer = asyncio.run(bot._agent_answer(
+                789, {"mode": "cycle"}, "Какой день?", [], "r_agent",
+                channel="webapp",
+            ))
+
+        self.assertEqual(answer, "Готовый ответ")
+        conn = sqlite3.connect(bot.DB)
+        actions = conn.execute(
+            "SELECT action,meta FROM events WHERE chat_id=? ORDER BY id", (789,)
+        ).fetchall()
+        conn.close()
+        self.assertEqual(actions, [
+            ("tool_execution", "success|cycle_status|webapp"),
+            ("tool_outcome", "success|tool_assisted_answer|webapp"),
+        ])
+
     def test_daily_checkin_push_is_sent_once_per_campaign(self):
         cid = 123
         campaign = "daily_checkin:2026-07-23"

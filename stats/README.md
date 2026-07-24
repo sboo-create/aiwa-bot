@@ -19,19 +19,23 @@ contract: `ever_used`, `dau`, `wau`, `mau`, `sessions_per_dau` and
 `tools_per_dau`. DAU uses the current `Europe/Moscow` calendar date, WAU the
 current Moscow ISO week, and MAU the current Moscow calendar month. Both ratios
 use numerators from the same current Moscow date as their DAU denominator,
-regardless of the detailed-dashboard period. The tools numerator contains
-observed v2 AI attempts, so this legacy-compatible ratio is explicitly marked
-as potentially diluted by
-reconstructed users and is shown next to an observed-only alternative.
+regardless of the detailed-dashboard period. `tools_per_dau` now means
+successfully completed structured model tools since 00:00 Moscow time divided
+by DAU for the same date. Provider attempts, retries and fallback calls do not
+inflate it.
 
-For backward compatibility, `tools_per_dau` currently means observed v2 AI
-provider attempts, including retry and fallback. If attempts exist without a
-calendar-day DAU denominator, the optional ratio key is omitted rather than
-publishing a misleading zero. The detailed dashboard exposes exactly five
-definitions: provider attempts, logical AI requests, actual tool executions,
-successful tool executions and useful outcomes after a tool. The latter three
-are explicitly `not_instrumented` until the product emits real tool lifecycle
-events; provider calls are never silently relabelled as tool executions.
+The detailed dashboard exposes exactly five definitions: provider attempts,
+logical AI requests, actual tool executions, successful tool executions and
+tool-assisted outcomes. Tool lifecycle events contain only a safe tool name,
+status, request id, timing and product surface; arguments, returned profile
+data and medical context are never exported. A tool-assisted outcome means a
+tool succeeded and AIWA subsequently generated the final answer; it does not
+replace explicit user feedback.
+
+Dashboard responses are cached in-process for 15 seconds and include
+`Server-Timing` plus `X-Stats-Cache` diagnostics. Parsed SQLite rows are reused
+until the connection's change counter advances, and the one-day dashboard is
+prewarmed at service startup.
 
 ## Platform and push delivery
 
