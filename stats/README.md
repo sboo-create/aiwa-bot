@@ -19,18 +19,22 @@ contract: `ever_used`, `dau`, `wau`, `mau`, `sessions_per_dau` and
 `tools_per_dau`. DAU uses the current `Europe/Moscow` calendar date, WAU the
 current Moscow ISO week, and MAU the current Moscow calendar month. Both ratios
 use numerators from the same current Moscow date as their DAU denominator,
-regardless of the detailed-dashboard period. `tools_per_dau` now means
-successfully completed structured model tools since 00:00 Moscow time divided
-by DAU for the same date. Provider attempts, retries and fallback calls do not
-inflate it.
+regardless of the detailed-dashboard period. `tools_per_dau` uses AIWA's
+product-defined tool contract: every actual AI-provider invocation since
+00:00 Moscow time divided by DAU for the same date. Successful and failed
+invocations both count as usage; retries and fallback hops are separate
+attempts, matching MultiTool's volume semantics. Attempt quality and terminal
+request failures are reported separately.
 
 The detailed dashboard exposes exactly five definitions: provider attempts,
 logical AI requests, actual tool executions, successful tool executions and
 tool-assisted outcomes. Tool lifecycle events contain only a safe tool name,
 status, request id, timing and product surface; arguments, returned profile
-data and medical context are never exported. A tool-assisted outcome means a
-tool succeeded and AIWA subsequently generated the final answer; it does not
-replace explicit user feedback.
+data and medical context are never exported. Structured function executions
+are a narrower diagnostic and are not added to `tools_per_dau`, because their
+model hop is already counted as an AI invocation. A tool-assisted outcome
+means a tool succeeded and AIWA subsequently generated the final answer; it
+does not replace explicit user feedback.
 
 Dashboard responses are cached in-process for 15 seconds and include
 `Server-Timing` plus `X-Stats-Cache` diagnostics. Parsed SQLite rows are reused

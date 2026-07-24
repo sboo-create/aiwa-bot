@@ -1012,17 +1012,25 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         for r in rows
     )
     per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
-    overview_tools_per_dau = per_dau(day_successful_tool_executions)
+    # AIWA's product-defined Tool is one actual AI-provider invocation. This
+    # preserves the original Traction contract and mirrors MultiTool's volume
+    # semantics: completed and failed attempts both count as usage, while
+    # quality is reported separately. Structured function calls remain a
+    # narrower diagnostic and are not added here, otherwise one agent hop would
+    # be counted both as its model invocation and its local function.
+    overview_tools_per_dau = per_dau(day_ai_attempts)
     overview_tool_denominator = (
         "DAU текущей московской даты всей доступной истории"
         if source_mode == "mixed"
         else "DAU текущей московской даты точного v2-слоя"
     )
     overview_tool_help = (
-        "Успешно завершённые структурированные инструменты модели с 00:00 МСК, "
-        "делённые на DAU той же московской даты. Считаются реальные исполнения "
-        "cycle_status, recent_symptoms, today_diary, recent_workouts, user_profile, "
-        "recall и remember; обращения к AI-провайдеру сюда не входят."
+        "Все фактические AI-вызовы AIWA с 00:00 МСК, делённые на DAU той же "
+        "московской даты. Каждый вызов модели, STT/TTS и другая AI-подоперация "
+        "считается отдельно независимо от результата; retry и fallback тоже "
+        "являются отдельными попытками. Ошибки не вычитаются из объёма, а "
+        "показываются рядом в Attempt errors и Terminal failures. Структурированные "
+        "function calls показаны отдельной более узкой метрикой."
     )
 
     tool_definitions = [
@@ -1032,8 +1040,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
          "status": ("no_data" if not day_ai_attempts else
                     "no_active_users" if not dau_ids else "ok"),
-         "selected_for_overview": False,
-         "help": "Отдельные технические обращения к AI endpoint с 00:00 МСК, включая retry и fallback. Эта метрика показывает нагрузку на провайдеров, но больше не называется Tools."},
+         "selected_for_overview": True,
+         "help": overview_tool_help},
         {"id": "logical_ai_requests", "label": "Logical AI requests / DAU",
          "value": (per_exact_active_day(logical_ai_requests) if exact_request_ready else None),
          "numerator": (logical_ai_requests if exact_request_ready else None),
@@ -1051,15 +1059,15 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
          "status": ("no_active_users" if not exact_active_user_days else "ok"),
          "selected_for_overview": False,
-         "help": "Все фактические исполнения структурированных инструментов модели за выбранный период, включая успешные и завершившиеся ошибкой. Аргументы и результаты инструментов в аналитику не передаются."},
+         "help": "Более узкая диагностика function calls модели за выбранный период: cycle_status, recent_symptoms, today_diary, recent_workouts, user_profile, recall и remember. Учитываются успешные и завершившиеся ошибкой исполнения. Аргументы и результаты в аналитику не передаются."},
         {"id": "successful_tool_executions", "label": "Successful tool executions / DAU",
-         "value": overview_tools_per_dau,
+         "value": per_dau(day_successful_tool_executions),
          "numerator": day_successful_tool_executions,
          "numerator_label": "успешных tool executions с 00:00 МСК",
          "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
          "status": ("no_active_users" if not dau_ids else "ok"),
-         "selected_for_overview": True,
-         "help": overview_tool_help},
+         "selected_for_overview": False,
+         "help": "Только успешно завершённые структурированные function calls с 00:00 МСК. Это диагностическая подметрика, а не общий Tools / DAU: неуспешный вызов всё равно является фактической попыткой использования инструмента."},
         {"id": "useful_tool_outcomes", "label": "Useful outcomes after tool / DAU",
          "value": per_exact_active_day(len(exact_tool_outcomes)),
          "numerator": len(exact_tool_outcomes),
@@ -1089,7 +1097,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "note": "сессии сегодня МСК / DAU сегодня",
          "help": "Сессии с 00:00 МСК, делённые на уникальных активных пользователей той же календарной даты. Новая сессия начинается после 30 минут без продуктовых событий."},
         {"label": "Tools / DAU", "value": overview_tools_per_dau,
-         "note": f"успешные tool executions сегодня МСК / {'общий' if source_mode == 'mixed' else 'точный'} DAU",
+         "note": f"все AI-вызовы сегодня МСК / {'общий' if source_mode == 'mixed' else 'точный'} DAU",
          "help": overview_tool_help},
     ]
 
