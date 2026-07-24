@@ -534,6 +534,67 @@ def _proxy_verify():
 def _proxy_is_messages(url=None):
     return "/messages" in ((url or PROXY_URL) or "")
 
+
+_ROUTE_CIRCUITS = {}
+_ROUTE_CIRCUITS_LOCK = threading.Lock()
+
+
+def _route_key(cfg):
+    return "|".join((str(cfg.get("name") or "unknown"),
+                     str(cfg.get("url") or ""), str(cfg.get("model") or "")))
+
+
+def _route_available(cfg, now=None):
+    """Return false while a repeatedly failing route is cooling down."""
+    import time as _t
+    moment = _t.monotonic() if now is None else float(now)
+    with _ROUTE_CIRCUITS_LOCK:
+        state = _ROUTE_CIRCUITS.get(_route_key(cfg)) or {}
+        return moment >= float(state.get("open_until") or 0)
+
+
+def _route_record_success(cfg):
+    with _ROUTE_CIRCUITS_LOCK:
+        _ROUTE_CIRCUITS.pop(_route_key(cfg), None)
+
+
+def _route_record_failure(cfg, status, retry_after=None, now=None):
+    """Record a failure and open the circuit when retrying would just add latency."""
+    import time as _t
+    moment = _t.monotonic() if now is None else float(now)
+    value = str(status or "error").lower()
+    threshold = max(1, int(os.environ.get("AIWA_LLM_CIRCUIT_FAILURES", "3")))
+    cooldown = max(10.0, float(os.environ.get("AIWA_LLM_CIRCUIT_SECONDS", "90")))
+    if value in {"http_401", "http_403"}:
+        threshold = 1
+        cooldown = max(cooldown, 600.0)
+    elif value == "http_429":
+        threshold = 1
+        try:
+            cooldown = max(10.0, min(float(retry_after or cooldown), 600.0))
+        except (TypeError, ValueError):
+            pass
+    key = _route_key(cfg)
+    with _ROUTE_CIRCUITS_LOCK:
+        state = dict(_ROUTE_CIRCUITS.get(key) or {})
+        failures = int(state.get("failures") or 0) + 1
+        state.update({"failures": failures, "last_status": value})
+        if failures >= threshold:
+            state["open_until"] = moment + cooldown
+        _ROUTE_CIRCUITS[key] = state
+        return float(state.get("open_until") or 0) > moment
+
+
+def _provider_exception_status(exc):
+    """Classify failures without storing exception text or request content."""
+    if isinstance(exc, requests.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.ConnectionError):
+        return "connection_error"
+    if isinstance(exc, (requests.exceptions.InvalidJSONError, json.JSONDecodeError)):
+        return "invalid_json"
+    return "error"
+
 def _proxy_payload(messages, max_tokens, temperature, url=None, model=None, provider_preferences=None):
     model = model or PROXY_MODEL
     if not _proxy_is_messages(url):
@@ -634,6 +695,9 @@ def _openrouter_vision_config():
 
 def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
     import time as _t
+    if not _route_available(cfg):
+        print("LLM route circuit open:", cfg.get("name"), cfg.get("model"))
+        return None
     headers = {"Content-Type": "application/json"}
     if cfg.get("key"): headers["Authorization"] = f"Bearer {cfg['key']}"
     if cfg.get("xkey"): headers["X-API-Key"] = cfg["xkey"]
@@ -649,24 +713,40 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
                 timeout=(6, 30), verify=_proxy_verify())
             if r.status_code == 429:
                 _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, "http_429", i)
+                if _route_record_failure(cfg, "http_429", r.headers.get("Retry-After")):
+                    return None
                 _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             if r.status_code >= 400:
-                _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, "http_%s" % r.status_code, i)
+                failure_status = "http_%s" % r.status_code
+                _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, failure_status, i)
                 print("Proxy error:", cfg.get("name"), r.status_code, (r.text or "")[:500])
+                if _route_record_failure(cfg, failure_status):
+                    return None
                 if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
                 return None
             data = r.json()
             actual_provider = data.get("provider") or cfg.get("name") or "litellm"
             actual_model = data.get("model") or cfg.get("model")
-            _capture_usage(usage, data, actual_provider, actual_model, started, retry_index=i,
-                           cost_unit=cfg.get("cost_unit"))
             txt = _response_text(data)
             txt = (txt or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
-            return txt or None
+            if not txt:
+                _capture_failure(actual_provider, actual_model, started, "empty_response", i)
+                if _route_record_failure(cfg, "empty_response"):
+                    return None
+                if i < attempts - 1:
+                    continue
+                return None
+            _capture_usage(usage, data, actual_provider, actual_model, started, retry_index=i,
+                           cost_unit=cfg.get("cost_unit"))
+            _route_record_success(cfg)
+            return txt
         except Exception as e:
-            _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, "error", i)
+            failure_status = _provider_exception_status(e)
+            _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, failure_status, i)
             print("Proxy error:", cfg.get("name"), e)
+            if _route_record_failure(cfg, failure_status):
+                return None
             if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
             return None
     return None
@@ -684,7 +764,8 @@ def _call_proxy(messages, max_tokens, temperature, usage, attempts=4):
 def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
     """Один раунд OpenAI-style function-calling. Возвращает {content, tool_calls} или None,
     если провайдер недоступен/не поддержал инструменты (тогда вызывающий откатывается к обычному ответу)."""
-    cfgs = [c for c in _proxy_configs() if not _proxy_is_messages(c.get("url"))]
+    cfgs = [c for c in _proxy_configs()
+            if not _proxy_is_messages(c.get("url")) and _route_available(c)]
     if not cfgs:
         return None
     cfg = cfgs[0]
@@ -706,7 +787,9 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
         if cfg.get("provider"): payload["provider"] = cfg["provider"]
         r = _HTTP.post(cfg["url"], headers=headers, json=payload, timeout=(6, 45), verify=_proxy_verify())
         if r.status_code >= 400:
-            _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), t1, "http_%s" % r.status_code)
+            failure_status = "http_%s" % r.status_code
+            _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), t1, failure_status)
+            _route_record_failure(cfg, failure_status, r.headers.get("Retry-After"))
             print("call_tools proxy error:", r.status_code, (r.text or "")[:300])
             return None
         data = r.json()
@@ -718,10 +801,13 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
         content = msg.get("content")
         if isinstance(content, str):
             content = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
+        _route_record_success(cfg)
         ok = True
         return {"content": content, "tool_calls": msg.get("tool_calls")}
     except Exception as e:
-        _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), t1, "error")
+        failure_status = _provider_exception_status(e)
+        _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), t1, failure_status)
+        _route_record_failure(cfg, failure_status)
         print("call_tools error:", e)
         return None
     finally:
