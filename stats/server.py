@@ -110,6 +110,26 @@ def _is_delivered_answer(row: dict[str, Any]) -> bool:
             (row["name"] == "assistant_response_received" and row["provenance"] != "observed"))
 
 
+def _ai_failure_class(status: str) -> str:
+    """Collapse transport-specific statuses into stable operator-facing buckets."""
+    value = str(status or "unknown").strip().lower()
+    if value in {"http_401", "http_403"}:
+        return "auth"
+    if value == "http_429":
+        return "rate_limit"
+    if value.startswith("http_5"):
+        return "upstream_5xx"
+    if value in {"http_400", "http_404", "http_409", "http_422"}:
+        return "request_rejected"
+    if "timeout" in value or value in {"timed_out", "deadline_exceeded"}:
+        return "timeout"
+    if value in {"empty_response", "invalid_response", "invalid_json"}:
+        return "invalid_response"
+    if value in {"error", "network_error", "connection_error"}:
+        return "transport_or_unknown"
+    return value or "unknown"
+
+
 def _product_day(ts: float) -> str:
     return datetime.fromtimestamp(ts, PRODUCT_TZ).date().isoformat()
 
@@ -380,7 +400,39 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     failed_requests = len(requests) - successful_requests
     fallback_requests = sum(len({str(r["properties"].get("provider") or "") for r in rr}) > 1 or
                             any(int(r["properties"].get("retry_index") or 0) > 0 for r in rr) for rr in requests.values())
-    failed_attempts = sum(str(r["properties"].get("status") or "") not in SUCCESS for r in ai_rows)
+    failed_ai_rows = [
+        r for r in ai_rows
+        if str(r["properties"].get("status") or "") not in SUCCESS
+    ]
+    failed_attempts = len(failed_ai_rows)
+    recovered_requests = sum(
+        any(str(r["properties"].get("status") or "") not in SUCCESS for r in rr)
+        and any(str(r["properties"].get("status") or "") in SUCCESS for r in rr)
+        for rr in requests.values()
+    )
+    clean_successful_requests = sum(
+        all(str(r["properties"].get("status") or "") in SUCCESS for r in rr)
+        for rr in requests.values()
+    )
+    failure_statuses: Counter = Counter()
+    failure_classes: Counter = Counter()
+    failure_routes: Counter = Counter()
+    purpose_attempts: Counter = Counter()
+    purpose_failures: Counter = Counter()
+    for row in ai_rows:
+        props = row["properties"]
+        purpose = str(props.get("purpose") or "unknown")
+        purpose_attempts[purpose] += 1
+    for row in failed_ai_rows:
+        props = row["properties"]
+        status = str(props.get("status") or "unknown")
+        provider = str(props.get("provider") or "unknown")
+        model = str(props.get("model") or "unknown")
+        purpose = str(props.get("purpose") or "unknown")
+        failure_statuses[status] += 1
+        failure_classes[_ai_failure_class(status)] += 1
+        failure_routes[(provider, model, status)] += 1
+        purpose_failures[purpose] += 1
     explicit_errors = sum(r["name"] in {"error", "legacy_error"} for r in selected)
     pushes = [r for r in selected if r["name"] in {"push_sent", "legacy_broadcast"}]
     all_checkins = [r for r in selected if r["name"] == "checkin_completed"]
@@ -943,6 +995,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         "ai": {"attempts": len(ai_rows), "requests": len(requests), "untraced_attempts": len(ai_rows) - request_covered,
                "successful_requests": successful_requests,
                "failed_requests": failed_requests,
+               "recovered_requests": recovered_requests,
+               "clean_successful_requests": clean_successful_requests,
                "request_success_rate": (_percent(successful_requests, len(requests))
                                         if requests and _percent(request_covered, len(ai_rows)) >= 80 else None),
                "failed_attempts": failed_attempts, "attempt_error_rate": _percent(failed_attempts, len(ai_rows)),
@@ -953,7 +1007,28 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                "providers": [{"name": k, "calls": int(v["calls"]), "success": int(v["success"])}
                              for k, v in sorted(providers.items(), key=lambda kv: -kv[1]["calls"])],
                "models": [{"name": k, "calls": int(v["calls"]), "success": int(v["success"])}
-                          for k, v in sorted(models.items(), key=lambda kv: -kv[1]["calls"])]},
+                          for k, v in sorted(models.items(), key=lambda kv: -kv[1]["calls"])],
+               "failure_classes": [
+                   {"name": name, "attempts": int(count),
+                    "share": _percent(count, failed_attempts) if failed_attempts else 0}
+                   for name, count in failure_classes.most_common()
+               ],
+               "failure_statuses": [
+                   {"name": name, "attempts": int(count),
+                    "share": _percent(count, failed_attempts) if failed_attempts else 0}
+                   for name, count in failure_statuses.most_common()
+               ],
+               "failure_routes": [
+                   {"provider": provider, "model": model, "status": status,
+                    "attempts": int(count)}
+                   for (provider, model, status), count in failure_routes.most_common(12)
+               ],
+               "failure_purposes": [
+                   {"purpose": purpose, "failed": int(count),
+                    "attempts": int(purpose_attempts[purpose]),
+                    "failure_rate": _percent(count, purpose_attempts[purpose])}
+                   for purpose, count in purpose_failures.most_common(12)
+               ]},
         "data_quality": quality,
     }
 

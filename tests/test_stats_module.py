@@ -68,9 +68,11 @@ class StatsModuleTests(unittest.TestCase):
         self.add("food-start", "u1", "food_flow_started", ts=now - 160)
         self.add("food-done", "u1", "meal_add_completed", ts=now - 150)
         self.add("call1", "u1", "ai_call", {"request_id": "r1", "provider": "a", "model": "m",
-                 "status": "error", "retry_index": 0, "reported_cost": 99, "cost_unit": "TOK"}, now - 199)
+                 "purpose": "answer", "status": "http_429", "retry_index": 0,
+                 "reported_cost": 99, "cost_unit": "TOK"}, now - 199)
         self.add("call2", "u1", "ai_call", {"request_id": "r1", "provider": "b", "model": "m",
-                 "status": "success", "retry_index": 1, "input_tokens": 100, "output_tokens": 20,
+                 "purpose": "answer", "status": "success", "retry_index": 1,
+                 "input_tokens": 100, "output_tokens": 20,
                  "total_tokens": 120, "estimated_cost_usd": .002, "latency_ms": 500}, now - 198)
         self.add("old", "u2", "legacy_button", {"migration_batch": "b1"}, now - 1000, "reconstructed")
 
@@ -82,6 +84,14 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(data["ai"]["attempts"], 2)
         self.assertEqual(data["ai"]["successful_requests"], 1)
         self.assertEqual(data["ai"]["failed_attempts"], 1)
+        self.assertEqual(data["ai"]["recovered_requests"], 1)
+        self.assertEqual(data["ai"]["clean_successful_requests"], 0)
+        self.assertEqual(data["ai"]["failure_classes"],
+                         [{"name": "rate_limit", "attempts": 1, "share": 100.0}])
+        self.assertEqual(data["ai"]["failure_routes"][0],
+                         {"provider": "a", "model": "m", "status": "http_429", "attempts": 1})
+        self.assertEqual(data["ai"]["failure_purposes"][0],
+                         {"purpose": "answer", "failed": 1, "attempts": 2, "failure_rate": 50.0})
         self.assertEqual(data["ai"]["cost_usd"], .002)
         self.assertEqual(data["data_quality"]["mode"], "mixed")
         self.assertEqual(data["data_quality"]["reconstructed_events"], 1)
@@ -163,6 +173,10 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIn("Что считать «Tools»?", html)
         self.assertIn("в Overview как Tools / DAU", html)
         self.assertIn("Диагностика продукта и данных", html)
+        self.assertIn("Ошибки AI-маршрута", html)
+        self.assertIn("Recovered request", html)
+        self.assertIn("Terminal failure", html)
+        self.assertIn("Attempt error rate", html)
 
     def test_request_success_is_hidden_when_request_ids_are_missing(self):
         self.add("call", "u1", "ai_call", {"provider": "p", "model": "m", "status": "error"})
