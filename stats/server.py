@@ -42,7 +42,7 @@ SAFE_PROPERTIES = {
     "estimated_cost_usd", "feature", "provenance", "confidence", "source_schema",
     "payload_version", "app_version", "migration_batch", "token_precision",
     "answer_id", "rating", "safety_level", "campaign_id", "campaign_type",
-    "delivery_status",
+    "delivery_status", "failure_class", "retryable", "platform",
 }
 NUMERIC_PROPERTIES = {
     "calls", "retry_index", "latency_ms", "input_tokens", "output_tokens",
@@ -103,6 +103,45 @@ def _push_target_label(targets: set[str]) -> str:
         "workout_add_completed": "запись тренировки",
     }
     return ", ".join(labels.get(name, name) for name in sorted(targets))
+
+def _push_failure_label(name: str) -> str:
+    return {
+        "blocked": "Пользователь заблокировал бота",
+        "chat_not_found": "Чат не найден",
+        "user_deactivated": "Telegram-аккаунт удалён",
+        "rate_limit": "Лимит Telegram",
+        "timeout": "Таймаут",
+        "network": "Сетевая ошибка",
+        "bad_request": "Некорректный запрос Telegram",
+        "internal_or_unknown": "Внутренняя / неизвестная",
+    }.get(name, name or "Не классифицировано")
+
+def _push_failure_action(name: str) -> str:
+    return {
+        "blocked": "Исключён из фоновых очередей; входящее сообщение восстановит доставку",
+        "chat_not_found": "Исключён из фоновых очередей до нового входящего сообщения",
+        "user_deactivated": "Исключён из фоновых очередей",
+        "rate_limit": "Временная: повторять по retry_after и следить за лимитом",
+        "timeout": "Временная: ограниченный retry с backoff",
+        "network": "Временная: ограниченный retry с backoff",
+        "bad_request": "Проверить payload и формат конкретной кампании",
+        "internal_or_unknown": "Проверить логи и добавить точную классификацию",
+    }.get(name, "Проверить логи")
+
+def _event_surface(row: dict[str, Any]) -> str:
+    """Best available product surface; Telegram does not expose device OS here."""
+    props = row["properties"]
+    platform = str(props.get("platform") or "").lower()
+    channel = str(props.get("channel") or "").lower()
+    if platform == "webapp" or channel == "webapp" or props.get("screen"):
+        return "mini_app"
+    if platform == "bot" or channel in {"text", "voice", "food_photo", "food_text", "diary_reco"}:
+        return "telegram_bot"
+    # Reconstructed product events predate explicit platform tracking. Their
+    # legacy bot handlers are the safest coarse attribution.
+    if row["provenance"] != "observed":
+        return "telegram_bot"
+    return "unattributed"
 
 def _is_delivered_answer(row: dict[str, Any]) -> bool:
     """Prefer the post-send event; reconstructed history may only have the legacy response event."""
@@ -449,6 +488,31 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     features = sorted(({"name": name, "users": len(users), "events": feature_events[name],
                         "adoption": _percent(len(users), len(selected_ids))}
                        for name, users in feature_users.items()), key=lambda x: (-x["users"], x["name"]))
+    surface_users: dict[str, set[str]] = defaultdict(set)
+    surface_user_days: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    surface_events: Counter = Counter()
+    for item in active_selected:
+        surface = _event_surface(item)
+        surface_users[surface].add(item["device_id"])
+        surface_user_days[surface].add((item["device_id"], _product_day(item["ts"])))
+        surface_events[surface] += 1
+    surface_labels = {
+        "telegram_bot": "Telegram-бот",
+        "mini_app": "Mini App",
+        "unattributed": "Не определено",
+    }
+    platform_breakdown = [
+        {
+            "id": surface,
+            "name": surface_labels[surface],
+            "users": len(surface_users[surface]),
+            "user_days": len(surface_user_days[surface]),
+            "events": surface_events[surface],
+            "share": _percent(len(surface_users[surface]), len(selected_ids)),
+        }
+        for surface in ("telegram_bot", "mini_app", "unattributed")
+        if surface_events[surface]
+    ]
 
     def _feature_funnel(label: str, start_names: set[str], done_names: set[str], help_text: str,
                         done_predicate=None) -> dict[str, Any]:
@@ -515,6 +579,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
 
     sent_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     opened_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    failed_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     events_by_user: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in selected:
         events_by_user[item["device_id"]].append(item)
@@ -527,6 +592,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                 sent_by_key[key] = item
         elif item["name"] == "push_opened":
             opened_by_key[key].append(item)
+        elif item["name"] == "push_failed":
+            failed_by_key[key].append(item)
     push_campaigns: dict[str, Counter] = defaultdict(Counter)
     push_campaign_labels: dict[str, str] = {}
     push_campaign_targets: dict[str, set[str]] = defaultdict(set)
@@ -571,9 +638,60 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         elif targets:
             push_action_pending += 1
             push_campaigns[family]["action_pending"] += 1
-    push_failed = sum(item["name"] == "push_failed" for item in selected)
+    push_failure_attempts = sum(len(items) for items in failed_by_key.values())
+    terminal_failure_keys: set[tuple[str, str]] = set()
+    recovered_failure_keys: set[tuple[str, str]] = set()
+    failure_attempt_classes: Counter = Counter()
+    failure_delivery_classes: Counter = Counter()
+    for key, failures in failed_by_key.items():
+        latest_failure = max(item["ts"] for item in failures)
+        sent_item = sent_by_key.get(key)
+        if sent_item and sent_item["ts"] >= latest_failure:
+            recovered_failure_keys.add(key)
+        else:
+            terminal_failure_keys.add(key)
+        for item in failures:
+            props = item["properties"]
+            failure_class = str(props.get("failure_class") or "")
+            if not failure_class:
+                failure_class = ("blocked" if props.get("delivery_status") == "blocked"
+                                 else "internal_or_unknown")
+            failure_attempt_classes[failure_class] += 1
+        if key in terminal_failure_keys:
+            latest = max(failures, key=lambda item: item["ts"])
+            props = latest["properties"]
+            failure_class = str(props.get("failure_class") or "")
+            if not failure_class:
+                failure_class = ("blocked" if props.get("delivery_status") == "blocked"
+                                 else "internal_or_unknown")
+            failure_delivery_classes[failure_class] += 1
+            campaign_type = str(
+                props.get("campaign_type") or key[1].split(":", 1)[0] or "unknown"
+            )
+            family, family_label = _push_family(campaign_type)
+            push_campaign_labels[family] = family_label
+            push_campaigns[family]["failed"] += 1
+    failed_recipients = {key[0] for key in terminal_failure_keys}
     push_funnel = {
-        "sent": len(sent_by_key), "opened": push_opened, "acted": push_acted, "failed": push_failed,
+        "sent": len(sent_by_key), "opened": push_opened, "acted": push_acted,
+        "failed": len(terminal_failure_keys),
+        "failed_attempts": push_failure_attempts,
+        "failed_recipients": len(failed_recipients),
+        "recovered": len(recovered_failure_keys),
+        "attempts_per_failed_delivery": (
+            round(push_failure_attempts / len(failed_by_key), 2) if failed_by_key else 0
+        ),
+        "failure_classes": [
+            {"id": name, "name": _push_failure_label(name),
+             "deliveries": failure_delivery_classes[name],
+             "attempts": failure_attempt_classes[name],
+             "share": _percent(failure_delivery_classes[name], len(terminal_failure_keys)),
+             "action": _push_failure_action(name)}
+            for name in sorted(
+                failure_delivery_classes,
+                key=lambda value: (-failure_delivery_classes[value], value),
+            )
+        ],
         "open_eligible": push_open_eligible, "open_pending": push_open_pending,
         "open_rate": _percent(push_opened, push_open_eligible) if push_open_eligible else None,
         "action_eligible": push_action_eligible, "action_pending": push_action_pending,
@@ -583,7 +701,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                                   if push_campaign_targets[name]
                                   else "только открытие; целевое действие не задано"),
                        "sent": values["sent"], "opened": values["opened"],
-                       "acted": values["acted"],
+                       "acted": values["acted"], "failed": values["failed"],
                        "open_eligible": values["open_eligible"],
                        "open_pending": values["open_pending"],
                        "open_rate": (_percent(values["opened"], values["open_eligible"])
@@ -856,7 +974,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     )
 
     tool_definitions = [
-        {"id": "overview_ai_attempts_mixed_dau", "label": "Overview: AI-попытки / DAU",
+        {"id": "ai_provider_attempts", "label": "AI provider attempts / DAU",
          "value": overview_tools_per_dau, "numerator": day_ai_attempts,
          "numerator_label": "точных AI-попыток с 00:00 МСК",
          "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
@@ -864,15 +982,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                     "no_active_users" if not dau_ids else "ok"),
          "selected_for_overview": True,
          "help": overview_tool_help},
-        {"id": "ai_provider_attempts", "label": "AI-попытки / точный user-day",
-         "value": per_exact_active_day(len(exact_ai_rows)), "numerator": len(exact_ai_rows),
-         "numerator_label": "AI-попыток",
-         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
-         "status": ("no_data" if not exact_ai_rows else
-                    "no_active_users" if not exact_active_user_days else "ok"),
-         "selected_for_overview": False,
-         "help": "Все точно записанные обращения к AI-провайдерам, включая retry и fallback, нормализованные только на user-days точного v2-слоя. Это сопоставимые числитель и знаменатель, но показатель отражает техническую нагрузку, а не число использованных функций."},
-        {"id": "logical_ai_requests", "label": "AI-запросы / user-day",
+        {"id": "logical_ai_requests", "label": "Logical AI requests / DAU",
          "value": (per_exact_active_day(logical_ai_requests) if exact_request_ready else None),
          "numerator": (logical_ai_requests if exact_request_ready else None),
          "numerator_label": "AI-запросов",
@@ -883,24 +993,21 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                     "no_active_users" if not exact_active_user_days else "ok"),
          "selected_for_overview": False,
          "help": "Логические AI-запросы после объединения retry и fallback по request_id. Попытки без request_id считаются отдельными запросами, поэтому метрика зависит от полноты трассировки."},
-        {"id": "product_actions", "label": "Действия в функциях / user-day",
-         "value": per_active_day_or_none(product_actions), "numerator": product_actions,
-         "numerator_label": "действий",
-         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
-         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
-         "help": "Явные действия пользователя в чате, чек-ине, питании и нагрузке. Простые открытия экранов и технические AI-попытки не считаются."},
-        {"id": "feature_breadth", "label": "Разные функции / user-day",
-         "value": per_active_day_or_none(distinct_feature_uses), "numerator": distinct_feature_uses,
-         "numerator_label": "использований разных функций",
-         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
-         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
-         "help": "Среднее число разных продуктовых зон, которыми человек воспользовался за активный день. Повторное использование одной зоны в тот же день не увеличивает показатель."},
-        {"id": "value_actions", "label": "Дни с ответом AIWA / user-day",
-         "value": per_active_day_or_none(value_actions), "numerator": value_actions,
-         "numerator_label": "user-days с ответом AIWA",
-         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
-         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
-         "help": "Доля активных пользовательских дней, в которые AIWA успешно отправила хотя бы один ответ. Несколько ответов за день не раздувают показатель."},
+        {"id": "actual_tool_executions", "label": "Actual tool executions / DAU",
+         "value": None, "numerator": None, "numerator_label": "tool executions",
+         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
+         "status": "not_instrumented", "selected_for_overview": False,
+         "help": "Фактические исполнения структурированных инструментов модели: запись еды, тренировки, профиля и другие tool calls. Сейчас отдельного события tool_execution нет, поэтому provider attempt нельзя честно переименовать в tool execution."},
+        {"id": "successful_tool_executions", "label": "Successful tool executions / DAU",
+         "value": None, "numerator": None, "numerator_label": "успешных tool executions",
+         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
+         "status": "not_instrumented", "selected_for_overview": False,
+         "help": "Только исполнения инструментов, завершившиеся успехом. Нужны отдельные события начала и результата tool execution; текущие продуктовые goal-события не позволяют восстановить точный знаменатель."},
+        {"id": "useful_tool_outcomes", "label": "Useful outcomes after tool / DAU",
+         "value": None, "numerator": None, "numerator_label": "полезных результатов после tool",
+         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
+         "status": "not_instrumented", "selected_for_overview": False,
+         "help": "Пользовательски полезный результат после успешного tool: запись сохранилась, затем была открыта, использована или подтверждена. Это отдельная outcome-метрика и её нельзя подменять количеством HTTP-вызовов."},
     ]
 
     overview = {
@@ -986,6 +1093,16 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                        "events_per_session": round(sum(session_events) / len(session_events), 1) if session_events else 0,
                        "features": features,
                        "pushes_sent": len(pushes), "checkins_completed": len(all_checkins)},
+        "platforms": {
+            "items": platform_breakdown,
+            "help": (
+                "Разбивка по поверхности продукта: диалог с Telegram-ботом и Mini App внутри "
+                "Telegram. Один человек может использовать обе поверхности и попадёт в обе "
+                "строки, поэтому доли пользователей не обязаны суммироваться до 100%. "
+                "iOS/Android/Desktop надёжно не показываются: Telegram Web App не передаёт "
+                "операционную систему в текущую privacy-safe аналитику."
+            ),
+        },
         "tool_definitions": tool_definitions,
         "diagnostics": diagnostics,
         "funnel": funnel, "value_delivery": value_delivery, "feature_funnels": feature_funnels,
@@ -1124,6 +1241,11 @@ def summary(days: float = 1.0, source: str = "mixed") -> JSONResponse:
 @app.get("/dashboard")
 def dashboard_data(days: float = 1.0, source: str = "mixed") -> JSONResponse:
     return _no_store(compute_dashboard(days, source))
+
+
+@app.get("/logo.png")
+def dashboard_logo() -> FileResponse:
+    return FileResponse(HERE / "logo.png", media_type="image/png")
 
 
 @app.get("/")
