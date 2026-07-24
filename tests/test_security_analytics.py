@@ -376,6 +376,9 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn.execute("""INSERT INTO feedback_requests
                         (chat_id,answer_id,channel,created_at)
                         VALUES(?,?,?,?)""", (cid, "abcdef1234567890", "bot", "now"))
+        conn.execute("""INSERT INTO chat_mutations
+                        (chat_id,mutation_key,generation,kind,record_id,created_at)
+                        VALUES(?,?,?,?,?,?)""", (cid, "telegram:test", 1, "food", "1", "now"))
         conn.execute("INSERT INTO partners(partner_id,woman_id,created) VALUES(?,?,?)", (88, cid, "now"))
         a2.insert_legacy_event(conn, cid, "manual", meta="text")
         conn.commit(); conn.close()
@@ -386,7 +389,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn = bot.db()
         for table in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals",
                       "workouts", "proactive_log", "proactive_state", "memory", "referrals",
-                      "prepared_summaries", "feedback_requests"):
+                      "prepared_summaries", "feedback_requests", "chat_mutations"):
             self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE chat_id=?", (cid,)).fetchone()[0], 0, table)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid)).fetchone()[0], 0)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM events_v2 WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 0)

@@ -720,7 +720,7 @@ async function addReco(btn,i){
   else toast((r&&r.message)||'Не получилось добавить');
 }
 async function renderFood(){
-  var el=document.getElementById('scr-food');if(loadedFood)return;
+  var el=document.getElementById('scr-food');if(loadedFood){loadDiary();return;}
   el.innerHTML="<div class='h'>Питание</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва собирает меню")+"</div><div class='card'><div class='skel' style='width:52%;height:20px'></div><div class='skel' style='width:90%;margin-top:12px'></div><div class='skel' style='width:74%;margin-top:8px'></div></div>";
   var r=await api('/api/section',{kind:'food'});
   if(!(r&&r.menu&&r.menu.meals)){r=(!INIT||r&&r.error==='net')?{menu:DEMO_MENU,kcal:1850,text:DEMO_FOODT}:{text:(r&&r.text)||"Выбираем простую еду с белком в каждом приёме и нормальной сытостью."};}
@@ -1064,7 +1064,17 @@ function bubbleAI(text){var d=document.createElement('div');d.className='msg ai'
 function bubbleMe(text){var d=document.createElement('div');d.className='msg me';d.textContent=text;document.getElementById('chatlog').appendChild(d);return d;}
 function scrollBottom(){var c=document.getElementById('chatlog');if(c){c.scrollTop=c.scrollHeight;}else{window.scrollTo(0,document.body.scrollHeight);}}
 function addFeedback(t,answerId){if(!answerId)return;var c=document.createElement('div');c.className='chips';var lab=document.createElement('span');lab.textContent='Ответ помог?';lab.style.cssText='font-size:12px;color:var(--inkSoft);align-self:center';c.appendChild(lab);[['👍 Да','helpful'],['👎 Нет','unhelpful']].forEach(function(x){var b=document.createElement('button');b.className='chip';b.textContent=x[0];b.onclick=async function(){c.querySelectorAll('button').forEach(function(y){y.disabled=true;});var r=await api('/api/feedback',{answer_id:answerId,rating:x[1]});c.textContent=(r&&r.ok)?'Спасибо, это помогает улучшать Айву 💛':'Не получилось сохранить оценку';};c.appendChild(b);});t.appendChild(c);}
-async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML("Айва думает");scrollBottom();var r=await api('/api/chat',{message:text});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+"…":s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}addFeedback(t,r.answer_id);scrollBottom();}
+function chatRequestId(){try{return crypto.randomUUID();}catch(e){return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);}}
+async function applyChatMutation(m){
+  if(!m)return;
+  if(m.kind==='food'){loadedFood=false;DIARY=null;}
+  if(m.kind==='workout'){loadedTrain=false;}
+  if(m.kind==='period'){
+    try{var d=await api('/api/data',{});if(d&&d.onboarded){D=d;loadedFood=false;loadedTrain=false;syncMarks();renderToday();}}catch(e){}
+  }
+}
+document.addEventListener('visibilitychange',function(){if(!document.hidden){if(loadedFood)loadDiary();if(loadedTrain)renderTrainLog();}});
+async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML("Айва думает");scrollBottom();var r=await api('/api/chat',{message:text,request_id:chatRequestId()});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.mutation)await applyChatMutation(r.mutation);if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+"…":s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}addFeedback(t,r.answer_id);scrollBottom();}
 function initChat(){
   if(chatInited)return;chatInited=true;var log=(D&&D.chatlog)||[];
   if(log.length){log.forEach(function(m){if(m.role==="user")bubbleMe(m.text);else bubbleAI(m.text);});scrollBottom();}
@@ -1094,10 +1104,11 @@ async function sendVoice(blob,type){
   var me=bubbleMe('🎤 …');var t=bubbleAI('');t.innerHTML=thinkHTML('Слушаю');scrollBottom();
   try{
     var ext=(type&&type.indexOf('mp4')>=0)?'mp4':'webm';
-    var fd=new FormData();fd.append('initData',INIT);fd.append('audio',blob,'voice.'+ext);
+    var fd=new FormData();fd.append('initData',INIT);fd.append('request_id',chatRequestId());fd.append('audio',blob,'voice.'+ext);
     var r=await fetch('/api/voice',{method:'POST',body:fd});var d=await r.json();
     me.textContent=(d&&d.transcript)?d.transcript:'🎤 (не расслышала)';
     t.textContent=(d&&d.answer)||'Не получилось ответить, попробуй ещё раз.';
+    if(d&&d.mutation)await applyChatMutation(d.mutation);
     if(d&&d.suggestions&&d.suggestions.length){var c=document.createElement('div');c.className='chips';d.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+'…':s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}
     addFeedback(t,d&&d.answer_id);
   }catch(e){t.textContent='Не получилось распознать голос, попробуй ещё раз.';}

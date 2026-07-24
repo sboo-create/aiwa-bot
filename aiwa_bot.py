@@ -91,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-24-v106-telegram-user-identity"
+AIWA_VERSION = "2026-07-24-v107-chat-journal-actions"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -276,6 +276,17 @@ def db():
         rating TEXT,
         submitted_at TEXT,
         PRIMARY KEY(chat_id, answer_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS chat_mutations(
+        chat_id INTEGER NOT NULL,
+        mutation_key TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        record_id TEXT,
+        args_hash TEXT,
+        result_json TEXT,
+        created_at TEXT NOT NULL,
+        reversed_at TEXT,
+        PRIMARY KEY(chat_id, mutation_key))""")
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
                 "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
@@ -348,12 +359,14 @@ _USER_UPDATE_COLUMNS = frozenset({"activity", "age", "cycle_len", "diet", "diet_
     "last_period", "last_phase_notified", "last_reactivation", "mode", "partner_code", "pending_date",
     "period_end", "period_len", "proactive_enabled", "send_time", "state", "tg_first_name",
     "train_profile", "weight"})
-def upsert(cid, **kw):
+def upsert(cid, *, user_generation=None, **kw):
     unknown = set(kw) - _USER_UPDATE_COLUMNS
     if unknown:
         raise ValueError("unknown user fields: " + ", ".join(sorted(unknown)))
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close()
         return False
     if not c.execute("SELECT 1 FROM users WHERE chat_id=?", (cid,)).fetchone():
@@ -406,14 +419,17 @@ def add_sugg(cid, q):
     sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?)", (cid, q)).lastrowid; c.commit(); c.close(); return sid
 def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
-def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None):
+def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None,
+       user_generation=None):
     """Dual-write legacy counters and privacy-preserving analytics v2."""
     tin = tout = 0; model = None
     if usage:
         try: tin, tout, model = L.usage_split(usage)
         except Exception: pass
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close(); return False
     c.execute(
         "INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n,calls,tok_in,tok_out,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -448,19 +464,23 @@ def normalize_food(data, source="photo"):
     if not isinstance(data, dict):
         return None
     items = []
-    for it in (data.get("items") or []):
+    for it in (data.get("items") or [])[:24]:
         if not isinstance(it, dict):
             continue
+        grams = max(0, min(5000, int(_num(it.get("grams")))))
+        kcal = max(0, min(10000, int(_num(it.get("kcal")))))
+        protein = max(0, min(1000, round(_num(it.get("protein")), 1)))
+        fat = max(0, min(1000, round(_num(it.get("fat")), 1)))
+        carbs = max(0, min(1000, round(_num(it.get("carbs")), 1)))
         items.append({"name": str(it.get("name") or "").strip()[:60],
-                      "grams": int(_num(it.get("grams"))), "kcal": int(_num(it.get("kcal"))),
-                      "protein": round(_num(it.get("protein")), 1), "fat": round(_num(it.get("fat")), 1),
-                      "carbs": round(_num(it.get("carbs")), 1)})
+                      "grams": grams, "kcal": kcal,
+                      "protein": protein, "fat": fat, "carbs": carbs})
     tot = data.get("total") or {}
-    kcal = int(_num(tot.get("kcal"))) or int(_num(data.get("kcal"))) or sum(i["kcal"] for i in items)
-    protein = round(_num(tot.get("protein")) or _num(data.get("protein")) or sum(i["protein"] for i in items), 1)
-    fat = round(_num(tot.get("fat")) or _num(data.get("fat")) or sum(i["fat"] for i in items), 1)
-    carbs = round(_num(tot.get("carbs")) or _num(data.get("carbs")) or sum(i["carbs"] for i in items), 1)
-    grams = int(_num(data.get("grams"))) or sum(i["grams"] for i in items) or None
+    kcal = max(0, min(10000, int(_num(tot.get("kcal"))) or int(_num(data.get("kcal"))) or sum(i["kcal"] for i in items)))
+    protein = max(0, min(1000, round(_num(tot.get("protein")) or _num(data.get("protein")) or sum(i["protein"] for i in items), 1)))
+    fat = max(0, min(1000, round(_num(tot.get("fat")) or _num(data.get("fat")) or sum(i["fat"] for i in items), 1)))
+    carbs = max(0, min(1000, round(_num(tot.get("carbs")) or _num(data.get("carbs")) or sum(i["carbs"] for i in items), 1)))
+    grams = max(0, min(5000, int(_num(data.get("grams"))) or sum(i["grams"] for i in items))) or None
     has_title = bool(str(data.get("title") or "").strip())
     title = str(data.get("title") or (items[0]["name"] if items else "Приём пищи")).strip()[:80]
     if not (kcal or items or has_title):
@@ -479,19 +499,50 @@ def slot_for_now():
     if 18 <= h < 24: return "dinner"
     return "snack"
 
-def meal_add(cid, rec, d=None):
+def meal_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_hash=None, return_status=False):
     d = d or dtoday().isoformat()
     slot = rec.get("slot") or slot_for_now()
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None or mutation_key:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close(); return None
+    if mutation_key:
+        prior = c.execute(
+            "SELECT kind,record_id,args_hash,result_json,reversed_at FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            try: prior_id = int(prior[1])
+            except (TypeError, ValueError): prior_id = None
+            status = "mismatch" if prior[0] != "food" or (prior[2] or "") != (args_hash or "") else (
+                "reversed" if prior[4] else "duplicate"
+            )
+            try: saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError): saved_data = {}
+            result = {"id": prior_id, "created": False, "status": status, "data": saved_data}
+            return result if return_status else prior_id
     mid = c.execute(
         "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (cid, d, datetime.now(TZ).isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
          float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
          json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo", slot,
          rec.get("fclass") or None)).lastrowid
-    c.commit(); c.close(); return mid
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (cid, mutation_key,
+             int(user_generation if user_generation is not None else A2.lifecycle_generation(c, cid)),
+             "food", str(mid), args_hash or "",
+             json.dumps(dict(rec, slot=slot, date=d), ensure_ascii=False, sort_keys=True),
+             datetime.now(TZ).isoformat()),
+        )
+    c.commit(); c.close()
+    result = {"id": mid, "created": True, "status": "created", "data": dict(rec, slot=slot, date=d)}
+    return result if return_status else mid
 
 def meal_set_slot(cid, mid, slot):
     if slot not in ("breakfast", "lunch", "snack", "dinner"): return False
@@ -524,7 +575,13 @@ def meals_of(cid, d=None):
              "fclass": x[11] or None} for x in r]
 
 def meal_del(cid, mid):
-    c = db(); c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, int(mid))); c.commit(); c.close()
+    c = db()
+    c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, int(mid)))
+    c.execute(
+        "UPDATE chat_mutations SET reversed_at=?,result_json=NULL WHERE chat_id=? AND kind='food' AND record_id=?",
+        (datetime.now(TZ).isoformat(), cid, str(int(mid))),
+    )
+    c.commit(); c.close()
 
 def meal_scale(cid, mid, new_grams):
     """Пересчитывает КБЖУ приёма пропорционально новой граммовке."""
@@ -536,7 +593,8 @@ def meal_scale(cid, mid, new_grams):
               (int(round(r[0] * k)), round(r[1] * k, 1), round(r[2] * k, 1), round(r[3] * k, 1), int(new_grams), cid, int(mid)))
     c.commit(); c.close(); return True
 
-_MET = {"Силовая": 5.0, "Кардио": 8.0, "Йога": 3.0, "Ходьба": 3.5, "Плавание": 7.0}
+_MET = {"Силовая": 5.0, "Кардио": 8.0, "Йога": 3.0, "Ходьба": 3.5, "Плавание": 7.0,
+        "Пилатес": 3.0, "Растяжка": 2.5}
 def workout_calories(wtype, duration, rpe, weight_kg):
     m = re.search(r"\d+", str(duration or "")); mins = int(m.group()) if m else 40
     met = _MET.get(wtype, 5.0)
@@ -546,16 +604,138 @@ def workout_calories(wtype, duration, rpe, weight_kg):
     w = weight_kg if (weight_kg and weight_kg > 30) else 65
     return int(round(met * w * (mins / 60.0)))
 
-def workout_add(cid, rec, d=None):
+def workout_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_hash=None, return_status=False):
     d = d or dtoday().isoformat()
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None or mutation_key:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close(); return None
+    if mutation_key:
+        prior = c.execute(
+            "SELECT kind,record_id,args_hash,result_json,reversed_at FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            try: prior_id = int(prior[1])
+            except (TypeError, ValueError): prior_id = None
+            status = "mismatch" if prior[0] != "workout" or (prior[2] or "") != (args_hash or "") else (
+                "reversed" if prior[4] else "duplicate"
+            )
+            try: saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError): saved_data = {}
+            result = {"id": prior_id, "created": False, "status": status, "data": saved_data}
+            return result if return_status else prior_id
     cur = c.execute("INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note,review,kcal,muscles) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (cid, d, datetime.now(TZ).isoformat(), rec.get("type", ""), json.dumps(rec.get("items", []), ensure_ascii=False),
          rec.get("duration", ""), rec.get("rpe", ""), rec.get("note", ""), rec.get("review", ""),
          int(rec.get("kcal") or 0), rec.get("muscles", "")))
-    wid = cur.lastrowid; c.commit(); c.close(); return wid
+    wid = cur.lastrowid
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (cid, mutation_key,
+             int(user_generation if user_generation is not None else A2.lifecycle_generation(c, cid)),
+             "workout", str(wid), args_hash or "",
+             json.dumps(dict(rec, date=d), ensure_ascii=False, sort_keys=True),
+             datetime.now(TZ).isoformat()),
+        )
+    c.commit(); c.close()
+    result = {"id": wid, "created": True, "status": "created", "data": dict(rec, date=d)}
+    return result if return_status else wid
+
+_WORKOUT_TYPES = {
+    "бассейн": "Плавание", "плав": "Плавание", "силов": "Силовая", "кардио": "Кардио",
+    "бег": "Кардио", "пробеж": "Кардио", "йог": "Йога", "ход": "Ходьба", "гуля": "Ходьба",
+    "пилатес": "Пилатес", "растяж": "Растяжка",
+    "стретч": "Растяжка", "велосипед": "Кардио", "вело": "Кардио",
+}
+
+def _workout_type_from_text(text):
+    low = (text or "").lower()
+    for marker, canonical in _WORKOUT_TYPES.items():
+        if marker in low:
+            return canonical
+    return ""
+
+def _workout_minutes(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        mins = int(round(float(value)))
+    else:
+        raw = str(value).lower().replace(",", ".")
+        hour = re.search(r"(\d+(?:\.\d+)?)\s*(?:ч|час)", raw)
+        minute = re.search(r"(\d+)\s*(?:мин)", raw)
+        if hour:
+            mins = int(round(float(hour.group(1)) * 60)) + (int(minute.group(1)) if minute else 0)
+        else:
+            number = re.search(r"\d+", raw)
+            mins = int(number.group()) if number else 0
+    return mins if 1 <= mins <= 600 else None
+
+def normalize_workout(data, source_text=""):
+    """Очищает извлечённую моделью тренировку; отсутствующие факты не выдумываются."""
+    data = data if isinstance(data, dict) else {}
+    raw_type = str(data.get("type") or "").strip()[:40]
+    allowed = {"Силовая", "Кардио", "Йога", "Ходьба", "Плавание", "Пилатес", "Растяжка", "Другая"}
+    wtype = raw_type if raw_type in allowed else _workout_type_from_text(raw_type or source_text)
+    items = []
+    groups = []
+    for item in (data.get("items") or [])[:24]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:60]
+        if not name:
+            continue
+        group = str(item.get("group") or "").strip()[:30]
+        clean = {"name": name}
+        for key in ("sets", "reps"):
+            val = int(_num(item.get(key))) if item.get(key) not in (None, "", 0) else None
+            clean[key] = val if val and 1 <= val <= 1000 else None
+        weight = _num(item.get("weight")) if item.get("weight") not in (None, "", 0) else None
+        clean["weight"] = weight if weight and 0 < weight <= 1000 else None
+        clean["group"] = group or None
+        items.append(clean)
+        if group and group not in groups:
+            groups.append(group)
+    if not wtype and items:
+        wtype = "Силовая"
+    if not wtype and not items:
+        return None
+    minutes = _workout_minutes(data.get("duration_minutes") or data.get("duration"))
+    rpe_raw = str(data.get("rpe") or "").lower()
+    rpe = "лёгкая" if "лег" in rpe_raw or "лёг" in rpe_raw else (
+        "тяжёлая" if "тяж" in rpe_raw else ("средняя" if "сред" in rpe_raw else "")
+    )
+    return {
+        "type": wtype or "Другая",
+        "items": items,
+        "duration": (f"{minutes} мин" if minutes else ""),
+        "rpe": rpe,
+        "note": str(data.get("note") or "").strip()[:200],
+        "review": "",
+        "kcal": 0,
+        "muscles": ", ".join(groups),
+    }
+
+def basic_workout_from_text(text):
+    """Детерминированный фолбэк, если модель недоступна."""
+    wtype = _workout_type_from_text(text)
+    if not wtype:
+        return None
+    low = (text or "").lower()
+    duration = None
+    duration_match = re.search(r"\d+(?:[.,]\d+)?\s*(?:ч(?:ас(?:а|ов)?)?|мин(?:ут[аы]?)?)", low)
+    if duration_match:
+        duration = _workout_minutes(duration_match.group(0))
+    rpe = "лёгкая" if re.search(r"л[её]гк", low) else (
+        "тяжёлая" if re.search(r"тяж", low) else ("средняя" if re.search(r"средн", low) else "")
+    )
+    return {"type": wtype, "items": [], "duration_minutes": duration, "rpe": rpe, "note": ""}
 
 def workouts_of(cid, d=None):
     d = d or dtoday().isoformat()
@@ -569,7 +749,13 @@ def workouts_recent(cid, days=10, limit=8):
     return [{"d": x[0], "type": x[1], "items": json.loads(x[2] or "[]"), "duration": x[3], "rpe": x[4]} for x in r]
 
 def workout_del(cid, wid):
-    c = db(); c.execute("DELETE FROM workouts WHERE chat_id=? AND id=?", (cid, int(wid))); c.commit(); c.close()
+    c = db()
+    c.execute("DELETE FROM workouts WHERE chat_id=? AND id=?", (cid, int(wid)))
+    c.execute(
+        "UPDATE chat_mutations SET reversed_at=?,result_json=NULL WHERE chat_id=? AND kind='workout' AND record_id=?",
+        (datetime.now(TZ).isoformat(), cid, str(int(wid))),
+    )
+    c.commit(); c.close()
 
 def train_week(cid, offset=0):
     today = datetime.now(TZ).date(); monday = today - timedelta(days=today.weekday()) + timedelta(days=offset * 7)
@@ -593,15 +779,23 @@ def diary_totals(cid, d=None):
     return {"kcal": sum(m["kcal"] for m in ms), "protein": round(sum(m["protein"] for m in ms)),
             "fat": round(sum(m["fat"] for m in ms)), "carbs": round(sum(m["carbs"] for m in ms)), "count": len(ms)}
 
-def cyc_add(cid, d, end=None):
+def cyc_add(cid, d, end=None, user_generation=None):
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close(); return False
     c.execute("INSERT OR IGNORE INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?)", (cid, d, end))
     if end: c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end, cid, d))
     c.commit(); c.close(); return True
-def cyc_set_end(cid, start_iso, end_iso):
-    c = db(); c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end_iso, cid, start_iso)); c.commit(); c.close()
+def cyc_set_end(cid, start_iso, end_iso, user_generation=None):
+    c = db()
+    if user_generation is not None:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close(); return False
+    c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end_iso, cid, start_iso))
+    c.commit(); c.close(); return True
 def pa_list(cid):
     c = db(); r = c.execute("SELECT d FROM intimacy WHERE chat_id=? ORDER BY d", (cid,)).fetchall(); c.close(); return [x[0] for x in r]
 def pa_toggle(cid, iso):
@@ -658,7 +852,7 @@ def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
               "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries",
-              "prepared_summaries", "feedback_requests"):
+              "prepared_summaries", "feedback_requests", "chat_mutations"):
         c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))  # nosec B608
     c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid))
     A2.delete_user(c, cid)
@@ -883,15 +1077,117 @@ ADDCYCLES_TEXT = ("\U0001F4C5 История цикла вручную.\n\n"
     "Этот список ПОЛНОСТЬЮ заменит твою историю циклов в календаре, поэтому пришли все нужные даты разом. Если ошиблась в дате раньше, просто пришли правильный список, и старые даты заменятся.")
 
 def match_intent(t):
+    raw_t = str(t or "")
     t = t.lower()
+    _mutation_denied = bool(re.search(
+        r"\b(?:не|не\s+надо|не\s+нужно)\s+(?:запис\w*|запиш\w*|добав\w*|внос\w*|"
+        r"внес\w*|занос\w*|занес\w*|отмеч\w*|отмет\w*|фиксир\w*|зафиксир\w*)",
+        t,
+    ))
+    _mutation_context_blocked = bool(
+        "?" in t
+        or re.search(r"\b(кажется|вроде|возможно|наверное|не\s+уверен\w*|может\s+быть|"
+                     r"допустим|например|представим|цитат\w*|если|в\s+случае|когда|"
+                     r"у\s+(?:подруг\w*|дочк\w*|сестр\w*|мам\w*)|"
+                     r"(?:я|она|он|мне)\s+(?:сказал\w*|говорил\w*)|мне\s+говорят|"
+                     r"(?:говорят|сказали|сообщили|рассказали)|"
+                     r"не\s+был[оаи]?|нет\s+(?:месячн\w*|трениров\w*))\b", t)
+        or re.search(
+            r"\b(?:моя\s+|мой\s+)?(?:дочь|дочка|подруга|сестра|мама|жена|девушка|"
+            r"сын|муж|парень|она|он)\s+.{0,24}(?:съел\w*|поел\w*|ел\w*|кушал\w*|"
+            r"тренировал\w*|бегал\w*|ходил\w*|плавал\w*|начал\w*|пришл\w*)",
+            t,
+        )
+        or re.search(r"[«»\"]", t)
+        or re.search(
+            r"^\s*У\s+(?!меня\b)[А-ЯЁ][а-яё-]{1,30}\s+.{0,30}"
+            r"(?:начал\w*|пришл\w*|съел\w*|поел\w*|бегал\w*|ходил\w*|плавал\w*)",
+            raw_t,
+        )
+        or re.search(
+            r"\b(?!(?:Сегодня|Вчера|Позавчера|Месячные|Менструация|Я|Айва|Как|"
+            r"Можешь|Пожалуйста|После|Перед|Только)\b)"
+            r"[А-ЯЁ][а-яё-]{1,30}\s+(?:(?:сегодня|вчера|позавчера)\s+)?"
+            r"(?:начал\w*|пришл\w*|съел\w*|поел\w*|бегал\w*|ходил\w*|плавал\w*)",
+            raw_t,
+        )
+    )
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
     if re.search(r"(добав|ввес|внес|загруз|импорт)\w*.{0,16}(истори\w*\s*цикл|цикл)|истори\w*\s*цикл\w*\s*вручную|(импорт|перенес\w*).{0,12}(flo|фло)", t): return "addcycles"
     if re.search(r"(ввес\w*|поменя\w*|измен\w*|обнов\w*|исправ\w*|задат\w*|укаж\w*|написа\w*|внес\w*|поправ\w*)\s*(свой|свои|мой|мои)?\s*(вес|рост|возраст|данные|параметр)|мой вес|новый вес|неправильн\w*.{0,18}(вес|рост|возраст|данные)", t): return "profile"
     if re.search(r"фаз", t) and re.search(r"(что так|что значит|расскаж|объясн|не понима|не разбира|какие бывают|подробнее|про фаз)", t): return "phases"
-    if re.search(r"месячн|менструац", t) and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t): return "period_end"
+    if (
+        re.search(r"месячн|менструац", t)
+        and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t)
+        and not re.search(r"\b(когда|как|почему|сколько|можно\s+ли)\b", t)
+        and not re.search(r"\bне\s+(?:законч\w*|кончил\w*|завершил\w*|прошл\w*|перестал\w*|отошл\w*)", t)
+        and not _mutation_denied
+        and not _mutation_context_blocked
+    ):
+        return "period_end"
+    _write = re.search(r"\b(запис\w*|запиш\w*|добав\w*|внес\w*|занес\w*|отмет\w*|зафиксир\w*|залогир\w*|логни)\b", t)
+    if _mutation_denied:
+        _write = None
+    _hard_write_question = re.search(
+        r"^\s*(?:айва[,\s]*)?(?:как|где|когда|почему)\s+(?:мне\s+|это\s+)?"
+        r"(?:запис\w*|добав\w*|внес\w*|занес\w*|отмет\w*|зафиксир\w*)",
+        t,
+    )
+    _capability_question = re.search(r"\b(можно\s+ли|можешь\s+ли|можешь|умеешь\s+ли)\b", t)
+    _food_done = re.search(
+        r"\b(?:я\s+)?(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|скушал\w*|покушал\w*|выпил\w*)",
+        t,
+    )
+    _food_negated = re.search(
+        r"\bне\s+(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|скушал\w*|покушал\w*|выпил\w*)",
+        t,
+    )
+    _food_slot = re.search(r"\b(?:завтрак\w*|обед\w*|ужин\w*|перекус\w*|полдник\w*)", t)
+    _food_non_event = re.search(r"\b(?:рецепт\w*|меню|план\w*|расписани\w*|встреч\w*)", t)
+    _workout_done = re.search(
+        r"\b(?:потренир\w*|тренировал\w*|занимал\w*|бегал\w*|пробежал\w*|"
+        r"ходил\w*|плавал\w*|сделал\w*.{0,12}трениров\w*|был[аи]?\s+на\s+(?:йог|пилатес))",
+        t,
+    )
+    _workout_negated = re.search(
+        r"\bне\s+(?:потренир\w*|тренировал\w*|занимал\w*|бегал\w*|пробежал\w*|ходил\w*|плавал\w*)",
+        t,
+    )
+    _period_started = re.search(
+        r"(?:начал\w*|пришл\w*|пошл\w*)\s+(?:сегодня\s+)?(?:месячн|менструац)|"
+        r"(?:месячн|менструац)\w*\s+(?:начал\w*|пришл\w*|пошл\w*)",
+        t,
+    )
+    _period_negated = re.search(r"\bне\s+(?:начал\w*|пришл\w*|пошл\w*)", t)
+    if (
+        re.search(r"(месячн|менструац|критическ\w*\s+дн)", t)
+        and (_write or _period_started)
+        and not _mutation_denied
+        and not _period_negated
+        and not _mutation_context_blocked
+        and not _hard_write_question
+        and not (_capability_question and not _period_started)
+    ):
+        return "logperiod"
+    if (
+        _write
+        and not _food_negated
+        and not _food_non_event
+        and not _mutation_context_blocked
+        and (_food_done or _food_slot)
+        and not _hard_write_question
+        and not (_capability_question and not _food_done)
+    ):
+        return "logmeal"
+    if _write and not _workout_negated and not _mutation_context_blocked and not _hard_write_question and not (_capability_question and not _workout_done) and re.search(
+        r"(трениров\w*|потренир\w*|занимал\w*|бегал\w*|пробеж\w*|ходил\w*|"
+        r"йог\w*|пилатес\w*|плавал\w*|кардио|силов\w*|растяж\w*|велосипед\w*|"
+        r"присед\w*|выпад\w*|планк\w*|отжим\w*|подтяг\w*|жим\w*|тяг\w*)",
+        t,
+    ):
+        return "logworkout"
     if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
     if re.search(r"(нагрузк|трениров|какой\s+спорт|каким\s+спортом|позанима|чем\s+(мне\s+)?заня|упражнени|фитнес|какая\s+(сегодня\s+)?активн|как\s+(мне\s+)?двигат|размят|разминк|зарядк|можно\s+ли\s+(мне\s+)?(бегать|качат|присед)|(какую|какая)\s+(мне\s+)?(сегодня\s+)?(трениров|нагрузк)|что\s+по\s+(спорт|трениров|нагрузк))", t): return "training"
-    if re.search(r"(?:(?:добав\w*|запиш\w*|занес\w*|отмет\w*)\s+.{0,40}(?:(?:на\s+|в\s+)?(?:завтрак|обед|ужин|полдник|перекус)\b|в\s+дневник|в\s+еду|в\s+приём|съел|поел|скушал|покушал|съела|поела|\bела\b|поем)|(?:залогир\w*|\bлогни\b)\s+\S)", t): return "logmeal"
     if re.search(r"(мой\s+дневник|дневник\s+питани|что\s+(?:мне\s+)?добрать|добрать\s+.{0,12}(белк|калор|бжу)|сколько\s+.{0,12}(съел|калор|ккал)\s*.{0,10}сегодн|мой\s+калораж|хватает\s+ли\s+.{0,12}(белк|калор)|итог\w*\s*.{0,10}(дн|калор|по\s+еде|бжу)|сколько\s+осталось\s+.{0,12}(калор|ккал|съесть))", t): return "diary"
     if re.search(r"(что\s+(?:мне\s+|тебе\s+|лучше\s+|полезн\w*\s+|стоит\s+|сейчас\s+|сегодня\s+|можно\s+|бы\s+|такого\s+|нужно\s+)*(?:есть|поесть|съесть|покушать|скушать|кушать|приготовить|готовить)\b(?!\s*(?:ли\b|у\s+мен|в\s+профил|в\s+приложени|в\s+холодильник|дома|интересн|врем|деньг|дела|презентац|отчёт|доклад))|полезн\w*\s+(?:есть|поесть|кушать|съесть)|(?:поесть|покушать|съесть|скушать|кушать)\s+полезн|что\s+(?:есть|поесть)\s+(?:полезн|при\b|для\s|чтобы|на\s+(?:завтрак|обед|ужин|перекус))|какое\s+питани|какая\s+(?:сегодня\s+)?еда|какие\s+(?:мне\s+)?продукт|какие\s+продукты\s+полезн|меню\s+(?:на\s+)?(?:сегодня|день|завтра)|составь\s+меню|подбери\s+меню|обнови\s+меню|дай\s+меню|покажи\s+меню|пересобер\w*\s+меню|чем\s+(?:мне\s+)?(?:сегодня\s+)?питат|как\s+(?:мне\s+)?(?:лучше\s+)?питат|что\s+по\s+(?:еде|питани)|(?:посоветуй|подскажи|дай|хочу|можешь|порекоменду)\w*\s+.{0,24}(?:поесть|съесть|еду|питани|меню|рацион|продукт|блюд)|\bрацион\b|еда\s+на\s+сегодня|что\s+поедим|проголодал|что\s+на\s+(?:завтрак|обед|ужин|перекус))", t): return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
@@ -2229,17 +2525,11 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         upsert(cid, state="await_profile_edit")
         return await msg.reply_text("Обновим данные. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.")
     if intent == "period_end":
-        u2 = row(cid)
-        if not (is_cycle(u2) and u2.get("last_period")):
-            return await msg.reply_text("Сначала отметь начало последних месячных, тогда посчитаю их длину. Кнопка «Отметить месячные» в Меню.")
-        mdt = _DATE_RE.search(txt or "")
-        end = (parse_date(mdt.group(0)) if mdt else None) or dtoday()
-        ln = (end - date.fromisoformat(u2["last_period"])).days + 1
-        if 1 <= ln <= 10:
-            cyc_set_end(cid, u2["last_period"], end.isoformat())
-            upsert(cid, period_end=end.isoformat(), period_len=ln)
-            return await msg.reply_text(f"Записала: месячные длились {ln} дн. Учту это в прогнозе и выписке для врача.")
-        return await msg.reply_text("Поняла, месячные закончились. Чтобы посчитать длину, отметь ещё и дату их начала кнопкой «Отметить месячные».")
+        result = await log_period_end_action(
+            cid, u, txt,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+        )
+        return await msg.reply_text(result["text"])
     if intent == "cyclelen":
         mnum = re.search(r"\b(1[5-9]|[2-5]\d|60)\b", txt or "")
         if mnum:
@@ -2256,12 +2546,43 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         return await help_cmd(update, context)
     if intent == "partner":
         return await partner_entry(context, cid, msg)
+    if intent == "logperiod":
+        result = await log_period_action(
+            cid, u, txt, context=context,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+        )
+        return await msg.reply_text(result["text"])
+    if intent == "logworkout":
+        await context.bot.send_chat_action(cid, "typing")
+        generation = _user_generation(cid)
+        result = await log_workout_action(
+            cid, u, txt, user_generation=generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+        )
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать тренировку", f"wdel:{result['record_id']}")])
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть нагрузку", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
     if intent == "training":
         if general: return await send_general(context, cid, "training")
         _, st = status_of(cid); return await send_section(context, cid, st, "training")
     if intent == "logmeal":
         await context.bot.send_chat_action(cid, "typing")
-        return await msg.reply_text(await log_food_from_text(cid, u, txt))
+        generation = _user_generation(cid)
+        result = await log_food_action(
+            cid, u, txt, user_generation=generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+        )
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
     if intent == "diary":
         await context.bot.send_chat_action(cid, "typing"); usage = []
         t = await answer_diary(cid, usage); ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage), usage=usage)
@@ -2672,15 +2993,120 @@ def schedule_daily(app, cid, hhmm):
     )
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
 
-def db_mark_period(cid, iso):
-    """Записывает старт месячных в БД и включает трекинг цикла. Без планировщика, безопасно из веб-обработчика."""
-    u = row(cid) or {}; cl = u.get("cycle_len") or 28
-    cyc_add(cid, iso)
-    latest = max(cycles_of(cid) or [iso])
-    upsert(cid, last_period=latest, cycle_len=cl, mode="cycle", state=None)
-def mark_period(context, cid, iso):
-    db_mark_period(cid, iso)
+def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=False, enforce_spacing=False,
+                              mutation_key=None, args_hash=None):
+    """Одна транзакция для cycles + users, включая проверку lifecycle и текущего режима."""
+    event_date = date.fromisoformat(iso)
+    c = db(); c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close(); return {"status": "stale"}
+    if mutation_key:
+        prior = c.execute(
+            "SELECT kind,record_id,args_hash,result_json FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            status = "mismatch" if prior[0] != "period_start" or (prior[2] or "") != (args_hash or "") else "duplicate"
+            try: saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError): saved_data = {}
+            return {"status": status, "date": saved_data.get("date") or prior[1]}
+    user = c.execute("SELECT cycle_len,mode FROM users WHERE chat_id=?", (cid,)).fetchone()
+    if not user:
+        c.close(); return {"status": "stale"}
+    mode = user[1] or "cycle"
+    if protect_modes and mode in ("preg", "meno"):
+        c.commit(); c.close(); return {"status": "protected", "mode": mode}
+    starts = [x[0] for x in c.execute(
+        "SELECT start_date FROM cycles WHERE chat_id=? ORDER BY start_date", (cid,)
+    ).fetchall()]
+    if iso in starts:
+        if mutation_key:
+            c.execute(
+                """INSERT INTO chat_mutations
+                   (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (cid, mutation_key, int(user_generation), "period_start", iso, args_hash or "",
+                 json.dumps({"date": iso}), datetime.now(TZ).isoformat()),
+            )
+        c.commit(); c.close(); return {"status": "duplicate", "date": iso}
+    if enforce_spacing:
+        close = [x for x in starts if 0 < abs((event_date - date.fromisoformat(x)).days) <= 10]
+        if close:
+            c.commit(); c.close(); return {"status": "conflict", "date": max(close)}
+    c.execute("INSERT INTO cycles(chat_id,start_date) VALUES(?,?)", (cid, iso))
+    latest = max(starts + [iso])
+    if latest == iso:
+        c.execute(
+            """UPDATE users SET last_period=?,cycle_len=?,mode='cycle',state=NULL,
+               period_end=NULL,period_len=NULL WHERE chat_id=?""",
+            (latest, user[0] or 28, cid),
+        )
+    else:
+        c.execute(
+            "UPDATE users SET last_period=?,cycle_len=?,mode='cycle',state=NULL WHERE chat_id=?",
+            (latest, user[0] or 28, cid),
+        )
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (cid, mutation_key, int(user_generation), "period_start", iso, args_hash or "",
+             json.dumps({"date": iso}), datetime.now(TZ).isoformat()),
+        )
+    c.commit(); c.close()
+    return {"status": "created", "date": iso}
+
+def _save_period_end_atomic(cid, end_iso, user_generation=None, mutation_key=None, args_hash=None):
+    event_date = date.fromisoformat(end_iso)
+    c = db(); c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close(); return {"status": "stale"}
+    if mutation_key:
+        prior = c.execute(
+            "SELECT kind,record_id,args_hash,result_json FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            status = "mismatch" if prior[0] != "period_end" or (prior[2] or "") != (args_hash or "") else "duplicate"
+            try: saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError): saved_data = {}
+            return dict(saved_data, status=status)
+    user = c.execute("SELECT last_period,mode FROM users WHERE chat_id=?", (cid,)).fetchone()
+    if not user or (user[1] or "cycle") in ("irregular", "none", "meno", "preg") or not user[0]:
+        c.commit(); c.close(); return {"status": "missing"}
+    start_iso = user[0]
+    length = (event_date - date.fromisoformat(start_iso)).days + 1
+    if not 1 <= length <= 10:
+        c.commit(); c.close(); return {"status": "invalid"}
+    c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end_iso, cid, start_iso))
+    c.execute("UPDATE users SET period_end=?,period_len=? WHERE chat_id=?", (end_iso, length, cid))
+    if mutation_key:
+        result = {"start": start_iso, "end": end_iso, "length": length}
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (cid, mutation_key, int(user_generation), "period_end", end_iso, args_hash or "",
+             json.dumps(result), datetime.now(TZ).isoformat()),
+        )
+    c.commit(); c.close()
+    return {"status": "saved", "start": start_iso, "end": end_iso, "length": length}
+
+def db_mark_period(cid, iso, user_generation=None):
+    """Записывает старт месячных атомарно. Без планировщика, безопасно из веб-обработчика."""
+    return _save_period_start_atomic(cid, iso, user_generation=user_generation).get("status") in (
+        "created", "duplicate",
+    )
+def mark_period(context, cid, iso, user_generation=None):
+    if not db_mark_period(cid, iso, user_generation=user_generation):
+        return False
+    if user_generation is not None and not _user_write_allowed(cid, user_generation):
+        return False
     schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
+    return True
 async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
     request_id = kwargs.pop("_request_id", None) or ("r_" + secrets.token_hex(16))
@@ -4072,6 +4498,10 @@ async def on_cb(update, context):
         try:
             meal_del(cid, int(data.split(":")[1])); await safe_edit(q, "🗑 Убрала из дневника.")
         except Exception: pass
+    elif data.startswith("wdel:"):
+        try:
+            workout_del(cid, int(data.split(":")[1])); await safe_edit(q, "🗑 Убрала тренировку.")
+        except Exception: pass
     elif data.startswith("q:"):
         question = get_sugg(int(data.split(":")[1])) or "Дай рекомендацию"
         ev(cid, "user_message", meta="suggest", n=len(question))
@@ -4693,7 +5123,11 @@ async def _api_chat(request):
     if addressed and not msg:
         return _cors(web.json_response({"answer": "Я тут. Напиши вопрос про цикл, питание, нагрузку или самочувствие.", "suggestions": ["Когда овуляция?", "Что есть сегодня?"]}))
     ev(cid, "user_message", meta="webapp", n=len(msg))
-    reply = await _chat_reply(cid, u, msg, user_generation=generation)
+    reply = await _chat_reply(
+        cid, u, msg, user_generation=generation,
+        mutation_key=chat_mutation_key("webchat", body.get("request_id")),
+        require_mutation_key=True,
+    )
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "assistant_message", meta="webapp")
@@ -4835,7 +5269,7 @@ async def _memory_learn(cid, umsg, amsg, user_generation=None):
     except Exception as e:
         log.warning("memory_learn: %s", e)
 
-async def _chat_reply(cid, u, msg, user_generation=None):
+async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None, require_mutation_key=False):
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     intent = match_intent(msg)
@@ -4851,7 +5285,7 @@ async def _chat_reply(cid, u, msg, user_generation=None):
         return {"answer": md_plain(_txt), "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}
     if intent in ("period", "addcycles", "profile", "cyclelen", "time", "wipe", "unlink", "partner", "checkin"):
         guide = {
-            "period": "Через чат я не меняю календарь, чтобы случайно не записать ошибку. Открой в приложении экран «Сегодня», нажми «Редактировать месячные», отметь нужные дни прямо на календаре и нажми «Сохранить». В боте можно ещё написать /period.",
+            "period": "Можно отметить начало прямо в чате: напиши «сегодня начались месячные» или «месячные начались 23 июля, запиши». Для редактирования нескольких дней открой календарь приложения.",
             "addcycles": "Историю циклов сейчас надёжнее добавлять через бота: /addcycles. Пришли даты начала месячных списком, и я заменю историю календаря.",
             "profile": "Рост, вес и возраст меняются в боте командой /profile или через Меню → Изменить данные.",
             "cyclelen": "Длину цикла меняй в боте: Меню → Изменить данные → Длина цикла.",
@@ -4863,9 +5297,50 @@ async def _chat_reply(cid, u, msg, user_generation=None):
         }[intent]
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
         return {"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}
+    if intent == "logperiod":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала менять календарь без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть календарь"]}
+        result = await log_period_action(
+            cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+        )
+        out = {"answer": result["text"], "suggestions": ["Что сейчас с циклом?", "Открыть календарь"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "period_end":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала менять календарь без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть календарь"]}
+        result = await log_period_end_action(
+            cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+        )
+        out = {"answer": result["text"], "suggestions": ["Что сейчас с циклом?", "Открыть календарь"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "logworkout":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала записывать без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть нагрузку"]}
+        result = await log_workout_action(
+            cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть нагрузку", "Что делать завтра?"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
     if intent == "logmeal":
-        _t = await log_food_from_text(cid, u, msg)
-        return {"answer": _t, "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала записывать без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть питание"]}
+        result = await log_food_action(
+            cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
     if intent == "diary":
         usage = []; txt = await answer_diary(cid, usage)
         if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage), usage=usage)
@@ -4944,7 +5419,11 @@ async def _api_voice(request):
     ev(cid, "voice", n=len(txt))
     msg, _addr = strip_aiwa_address(txt.strip())
     if not msg: msg = txt.strip()
-    reply = await _chat_reply(cid, u, msg, user_generation=generation)
+    reply = await _chat_reply(
+        cid, u, msg, user_generation=generation,
+        mutation_key=chat_mutation_key("webvoice", data.get("request_id")),
+        require_mutation_key=True,
+    )
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "assistant_message", meta="webapp")
@@ -4982,29 +5461,323 @@ async def answer_diary(cid, usage=None):
         return "За сегодня в дневнике пусто. Сфоткай еду или напиши, что съела — посчитаю калории и подскажу, чего добрать."
     return await llm_to_thread(cid, "diary_recommendation", L.diary_reco, summ, (usage if usage is not None else []))
 
-async def log_food_from_text(cid, u, text):
+def chat_mutation_key(channel, request_id):
+    raw = str(request_id or "").strip()
+    if not raw:
+        return None
+    digest = _hashlib.sha256((str(channel or "chat") + ":" + raw).encode("utf-8")).hexdigest()
+    return str(channel or "chat")[:12] + ":" + digest[:40]
+
+def chat_mutation_args_hash(kind, text):
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    return _hashlib.sha256((str(kind) + "\n" + normalized).encode("utf-8")).hexdigest()
+
+def chat_mutation_preflight(cid, mutation_key, kind, args_hash):
+    if not mutation_key:
+        return None
+    c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return {"status": "stale"}
+    prior = c.execute(
+        """SELECT kind,record_id,args_hash,result_json,reversed_at
+           FROM chat_mutations WHERE chat_id=? AND mutation_key=?""",
+        (cid, mutation_key),
+    ).fetchone()
+    c.close()
+    if not prior:
+        return None
+    status = "mismatch" if prior[0] != kind or (prior[2] or "") != (args_hash or "") else (
+        "reversed" if prior[4] else "duplicate"
+    )
+    try: record_id = int(prior[1])
+    except (TypeError, ValueError): record_id = None
+    try: data = json.loads(prior[3] or "{}")
+    except (TypeError, ValueError): data = {}
+    return {"status": status, "id": record_id, "created": False, "data": data}
+
+def _food_action_success(rec, mid, event_date):
+    slot = rec.get("slot") or slot_for_now()
+    sm = {"breakfast": "завтрак", "lunch": "обед", "snack": "перекус", "dinner": "ужин"}.get(slot, "приём")
+    grams = f", примерно {rec['grams']} г" if rec.get("grams") else ""
+    when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
+    text_out = (
+        f"Записала{when} в {sm}: {rec['title']}{grams} — около {rec['kcal']} ккал "
+        f"(Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). "
+        "Порция и КБЖУ оценочные, запись уже видна в разделе «Питание»."
+    )
+    return {"ok": True, "text": text_out, "record_id": mid, "rec": rec,
+            "mutation": {"kind": "food", "date": event_date.isoformat()}}
+
+def _workout_action_success(rec, wid, event_date):
+    details = []
+    if rec.get("duration"):
+        details.append(rec["duration"])
+    if rec.get("rpe"):
+        details.append(rec["rpe"] + " нагрузка")
+    when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
+    suffix = " · " + ", ".join(details) if details else ""
+    kcal_note = f" · около {rec['kcal']} ккал" if rec.get("kcal") else ""
+    return {
+        "ok": True,
+        "text": f"Записала тренировку{when}: {rec['type']}{suffix}{kcal_note}. Она уже видна в разделе «Нагрузка».",
+        "record_id": wid,
+        "rec": rec,
+        "mutation": {"kind": "workout", "date": event_date.isoformat()},
+    }
+
+_CHAT_DATE_RE = re.compile(
+    r"\b(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{4}-\d{2}-\d{2}|"
+    r"\d{1,2}\s+(?:январ\w*|феврал\w*|март\w*|апрел\w*|ма[йяе]|июн\w*|июл\w*|"
+    r"август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)(?:\s+\d{4})?)\b",
+    re.I,
+)
+
+def _parse_chat_absolute_date(raw):
+    value = str(raw or "").strip()
+    # Для журналирования дата без года означает текущий год. В отличие от
+    # прогнозного parse_date, будущий день нельзя молча переносить на прошлый год.
+    if re.fullmatch(r"\d{1,2}[./-]\d{1,2}", value):
+        sep = "." if "." in value else ("/" if "/" in value else "-")
+        return parse_date(value + sep + str(dtoday().year))
+    if re.fullmatch(
+        r"\d{1,2}\s+(?:январ\w*|феврал\w*|март\w*|апрел\w*|ма[йяе]|июн\w*|июл\w*|"
+        r"август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)",
+        value,
+        re.I,
+    ):
+        return parse_date(value + " " + str(dtoday().year))
+    return parse_date(value)
+
+def chat_event_date(text, max_past_days=366):
+    """Дата события из чата. Возвращает (date, error); без даты — сегодня по Москве."""
+    low = (text or "").lower()
+    today = dtoday()
+    if "позавчера" in low:
+        parsed = today - timedelta(days=2)
+    elif "вчера" in low:
+        parsed = today - timedelta(days=1)
+    elif "сегодня" in low:
+        parsed = today
+    elif "завтра" in low:
+        return None, "future"
+    else:
+        match = _CHAT_DATE_RE.search(text or "")
+        parsed = _parse_chat_absolute_date(match.group(0)) if match else today
+        if match and parsed is None:
+            return None, "invalid"
+    if parsed > today:
+        return None, "future"
+    if (today - parsed).days > max_past_days:
+        return None, "too_old"
+    return parsed, None
+
+def extract_food_log_text(text):
+    """Убирает только служебные слова команды, сохраняя продукт, количество и жирность."""
+    cleaned, _ = strip_aiwa_address(text)
+    cleaned = re.sub(r"(?i)^\s*можешь(?:\s+ли)?\s+", " ", cleaned)
+    cleaned = re.sub(
+        r"(?i)\b(запис\w*|запиш\w*|добав\w*|внес\w*|занес\w*|отмет\w*|зафиксир\w*|залогир\w*|логни)\b",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?i)\bпожалуйста\b", " ", cleaned)
+    cleaned = re.sub(
+        r"(?i)\b(?:я\s+)?(?:съел\w*|поел\w*|ел[аи]?|кушал\w*|скушал\w*|покушал\w*|выпил\w*)\b",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)\b(?:в\s+дневник(?:\s+(?:еды|питания))?|в\s+еду|в\s+при[её]м|"
+        r"на\s+(?:завтрак|обед|ужин|перекус|полдник)|в\s+(?:завтрак|обед|ужин|перекус))\b",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.:;—-\t")
+    return cleaned
+
+async def log_food_action(cid, u, text, user_generation=None, mutation_key=None):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
-    generation = _user_generation(cid)
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("food", text)
+    prior = chat_mutation_preflight(cid, mutation_key, "food", args_hash)
+    if prior:
+        if prior["status"] == "mismatch":
+            return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+        if prior["status"] == "reversed":
+            return {"ok": False, "text": "Эта запись уже была отменена и не добавлена повторно."}
+        if prior["status"] == "duplicate" and prior.get("data"):
+            saved_date = date.fromisoformat(prior["data"].get("date") or dtoday().isoformat())
+            return _food_action_success(prior["data"], prior.get("id"), saved_date)
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     ev(cid, "flow_start", meta="food")
     slot = slot_from_text(text)
-    food = re.sub(r"(?i)^\s*(айва[,\s]*)?(добав\w*|запиш\w*|занес\w*|залогир\w*|логни|отмет\w*)\b", "", text)
-    food = re.sub(r"(?i)\b(в\s+дневник|в\s+еду|в\s+приём|что\s+я\s+(съел\w*|поел\w*|ел\w*)|на\s+(завтрак|обед|ужин|перекус|полдник)|в\s+(завтрак|обед|ужин|перекус))\b", " ", food)
-    food = food.strip(" ,.:—-\t")
+    event_date, date_error = chat_event_date(text, max_past_days=31)
+    if date_error:
+        return {"ok": False, "text": "Не стала записывать: укажи сегодняшнюю дату или один из последних 31 дней."}
+    food = extract_food_log_text(text)
     if not food:
-        food = text
+        return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «съела 200 г творога, запиши»."}
     usage = []
     parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, food, profile_of(u), usage,
                                  user_generation=generation)
     if not _user_write_allowed(cid, generation):
-        return "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."
-    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage)
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage,
+       user_generation=generation)
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
-        return "Не поняла, что добавить. Напиши, например «добавь на завтрак рисовую кашу»."
+        return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «съела 200 г творога 5%, запиши»."}
     rec["slot"] = slot or slot_for_now()
-    meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
-    sm = {"breakfast": "завтрак", "lunch": "обед", "snack": "перекус", "dinner": "ужин"}.get(rec["slot"], "приём")
-    return f"Добавила в {sm}: {rec['title']} — {rec['kcal']} ккал (Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). Итоги дня — в разделе «Питание»."
+    saved = meal_add(
+        cid, rec, d=event_date.isoformat(), user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    if not saved or saved.get("status") == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved.get("status") == "reversed":
+        return {"ok": False, "text": "Эта запись уже была отменена и не добавлена повторно."}
+    mid = saved.get("id")
+    if not mid:
+        return {"ok": False, "text": "Не получилось сохранить запись. Попробуй ещё раз."}
+    rec = saved.get("data") or rec
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if saved.get("created"):
+        ev(cid, "goal", meta="food_log", user_generation=generation)
+        ev(cid, "manual", meta="food_log", user_generation=generation)
+    return _food_action_success(rec, mid, date.fromisoformat(rec.get("date") or event_date.isoformat()))
+
+async def log_food_from_text(cid, u, text, user_generation=None, mutation_key=None):
+    result = await log_food_action(cid, u, text, user_generation=user_generation, mutation_key=mutation_key)
+    return result["text"]
+
+async def log_workout_action(cid, u, text, user_generation=None, mutation_key=None):
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("workout", text)
+    prior = chat_mutation_preflight(cid, mutation_key, "workout", args_hash)
+    if prior:
+        if prior["status"] == "mismatch":
+            return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+        if prior["status"] == "reversed":
+            return {"ok": False, "text": "Эта тренировка уже была отменена и не добавлена повторно."}
+        if prior["status"] == "duplicate" and prior.get("data"):
+            saved_date = date.fromisoformat(prior["data"].get("date") or dtoday().isoformat())
+            return _workout_action_success(prior["data"], prior.get("id"), saved_date)
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    event_date, date_error = chat_event_date(text, max_past_days=90)
+    if date_error:
+        return {"ok": False, "text": "Не стала записывать: тренировка должна быть сегодня или в последние 90 дней."}
+    ev(cid, "flow_start", meta="workout")
+    usage = []
+    try:
+        parsed = await llm_to_thread(
+            cid, "workout_text", L.analyze_workout_text, text, usage,
+            user_generation=generation,
+        )
+    except Exception as exc:
+        log.warning("workout text analyze %s: %s", cid, exc)
+        parsed = None
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="workout_text", calls=len(usage), usage=usage,
+           user_generation=generation)
+    rec = normalize_workout(parsed or basic_workout_from_text(text), text)
+    if not rec:
+        return {"ok": False, "text": "Не поняла, какую тренировку записать. Напиши, например «бегала 30 минут, запиши тренировку»."}
+    prof = profile_of(u) or {}
+    if rec.get("duration"):
+        rec["kcal"] = workout_calories(rec["type"], rec["duration"], rec.get("rpe"), prof.get("weight"))
+    saved = workout_add(
+        cid, rec, d=event_date.isoformat(), user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    if not saved or saved.get("status") == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved.get("status") == "reversed":
+        return {"ok": False, "text": "Эта тренировка уже была отменена и не добавлена повторно."}
+    wid = saved.get("id")
+    if not wid:
+        return {"ok": False, "text": "Не получилось сохранить тренировку. Попробуй ещё раз."}
+    rec = saved.get("data") or rec
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if saved.get("created"):
+        ev(cid, "goal", meta="workout", user_generation=generation)
+        ev(cid, "manual", meta="workout", user_generation=generation)
+    return _workout_action_success(rec, wid, date.fromisoformat(rec.get("date") or event_date.isoformat()))
+
+async def log_period_action(cid, u, text, context=None, user_generation=None, mutation_key=None):
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("period_start", text)
+    event_date, date_error = chat_event_date(text, max_past_days=366)
+    if date_error:
+        return {"ok": False, "text": "Не стала менять календарь: дата не должна быть в будущем и старше одного года."}
+    iso = event_date.isoformat()
+    saved = _save_period_start_atomic(
+        cid, iso, user_generation=generation, protect_modes=True, enforce_spacing=True,
+        mutation_key=mutation_key, args_hash=args_hash,
+    )
+    if saved["status"] == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved["status"] == "protected":
+        label = "беременности" if saved.get("mode") == "preg" else "менопаузы"
+        return {"ok": False, "text": f"Сейчас включён режим {label}, поэтому я не стала менять календарь автоматически. Сначала переключи режим в приложении, если это неактуально."}
+    if saved["status"] == "duplicate":
+        saved_iso = saved.get("date") or iso
+        return {"ok": True, "text": f"Начало месячных {date.fromisoformat(saved_iso).strftime('%d.%m.%Y')} уже отмечено в календаре.",
+                "mutation": {"kind": "period", "date": saved_iso}}
+    if saved["status"] == "conflict":
+        return {"ok": False, "text": f"В календаре уже есть начало {date.fromisoformat(saved['date']).strftime('%d.%m.%Y')}. Не стала создавать новый цикл так близко — проверь даты в календаре приложения."}
+    if saved["status"] != "created":
+        return {"ok": False, "text": "Не получилось сохранить дату. Попробуй ещё раз."}
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if context is not None:
+        current = row(cid)
+        if current and _user_write_allowed(cid, generation):
+            schedule_daily(context.application, cid, current["send_time"] or "08:00")
+    ev(cid, "goal", meta="period", user_generation=generation)
+    ev(cid, "manual", meta="period_chat", user_generation=generation)
+    return {"ok": True,
+            "text": f"Отметила начало месячных: {event_date.strftime('%d.%m.%Y')}. Прогноз цикла обновлён, дата уже видна в календаре приложения.",
+            "mutation": {"kind": "period", "date": iso}}
+
+async def log_period_end_action(cid, u, text, user_generation=None, mutation_key=None):
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("period_end", text)
+    event_date, date_error = chat_event_date(text, max_past_days=31)
+    if date_error:
+        return {"ok": False, "text": "Не стала менять календарь: дата окончания должна быть сегодня или в последние 31 день."}
+    saved = _save_period_end_atomic(
+        cid, event_date.isoformat(), user_generation=generation,
+        mutation_key=mutation_key, args_hash=args_hash,
+    )
+    if saved["status"] == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved["status"] == "duplicate":
+        saved_end = date.fromisoformat(saved.get("end") or event_date.isoformat())
+        return {
+            "ok": True,
+            "text": f"Окончание месячных {saved_end.strftime('%d.%m.%Y')} уже записано. Длительность — {saved.get('length')} дн.",
+            "mutation": {"kind": "period", "date": saved.get("start"), "end": saved_end.isoformat()},
+        }
+    if saved["status"] == "missing":
+        return {"ok": False, "text": "Сначала отметь начало последних месячных, тогда я смогу записать окончание."}
+    if saved["status"] == "invalid":
+        return {"ok": False, "text": "Дата не сходится с последним началом месячных. Проверь начало и окончание в календаре приложения."}
+    if saved["status"] != "saved":
+        return {"ok": False, "text": "Не получилось сохранить окончание месячных. Попробуй ещё раз."}
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    ev(cid, "manual", meta="period_end_chat", user_generation=generation)
+    return {
+        "ok": True,
+        "text": f"Записала окончание месячных: {event_date.strftime('%d.%m.%Y')}. Длительность — {saved['length']} дн., календарь приложения обновлён.",
+        "mutation": {"kind": "period", "date": saved["start"], "end": event_date.isoformat()},
+    }
 
 def _read_upload(field):
     if field is None: return b"", "food.jpg"
