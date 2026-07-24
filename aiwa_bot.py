@@ -11,7 +11,7 @@ except ImportError:
         return timezone(timedelta(hours=3)) if name == "Europe/Moscow" else timezone.utc
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, WebAppInfo, MenuButtonWebApp, BotCommand
-from telegram.ext import (Application, CommandHandler, MessageHandler,
+from telegram.ext import (Application, CommandHandler, MessageHandler, TypeHandler,
                           CallbackQueryHandler, ContextTypes, filters)
 from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter, Forbidden
 from aiohttp import web
@@ -71,6 +71,7 @@ def hist_push(cid, q, a):
     clean = a
     try: clean = L.split_followups(a)[0]
     except Exception: pass
+    clean = guard_aiwa_reply(cid, clean)
     dq.append({"role": "user", "content": q[:600]}); dq.append({"role": "assistant", "content": (clean or a)[:1200]})
     try: chatlog_add(cid, "user", q[:1000]); chatlog_add(cid, "ai", (clean or a)[:1500])
     except Exception: pass
@@ -90,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-24-v105-monolingual-parallel-tts"
+AIWA_VERSION = "2026-07-24-v106-telegram-user-identity"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -301,7 +302,7 @@ def db():
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
                 "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER",
                 "last_phase_notified TEXT", "last_reactivation TEXT",
-                "proactive_enabled INTEGER DEFAULT 1"):
+                "proactive_enabled INTEGER DEFAULT 1", "tg_first_name TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     c.commit()
@@ -333,18 +334,20 @@ def _activate_user(cid):
         c.close()
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled,tg_first_name FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
             "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
             "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12],
             "mode": r[13] or "cycle", "diet_note": r[14] or "", "period_end": r[15], "period_len": r[16],
             "train_profile": r[17], "kcal_goal": r[18], "last_phase_notified": r[19],
-            "last_reactivation": r[20], "proactive_enabled": r[21] is None or bool(r[21])}
+            "last_reactivation": r[20], "proactive_enabled": r[21] is None or bool(r[21]),
+            "tg_first_name": r[22] or ""}
 
 _USER_UPDATE_COLUMNS = frozenset({"activity", "age", "cycle_len", "diet", "diet_note", "height", "kcal_goal",
     "last_period", "last_phase_notified", "last_reactivation", "mode", "partner_code", "pending_date",
-    "period_end", "period_len", "proactive_enabled", "send_time", "state", "train_profile", "weight"})
+    "period_end", "period_len", "proactive_enabled", "send_time", "state", "tg_first_name",
+    "train_profile", "weight"})
 def upsert(cid, **kw):
     unknown = set(kw) - _USER_UPDATE_COLUMNS
     if unknown:
@@ -358,6 +361,43 @@ def upsert(cid, **kw):
     # Dynamic identifier is safe because every key was checked against _USER_UPDATE_COLUMNS.
     for k, v in kw.items(): c.execute(f"UPDATE users SET {k}=? WHERE chat_id=?", (v, cid))  # nosec B608
     c.commit(); c.close(); return True
+
+def _clean_telegram_first_name(value):
+    """Telegram profile label used only for addressing, never inferred from chat."""
+    raw = re.sub(r"\s+", " ", str(value or "")).strip()
+    # first_name is user-controlled profile text. Use only its first name-like
+    # token and pass it to the model later as delimited data, never as prose.
+    tokens = re.findall(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*", raw, flags=re.UNICODE)
+    return tokens[0][:64] if tokens else ""
+
+def _store_telegram_first_name(cid, raw_name, allow_create=False):
+    """Persist a changed private-chat label without resurrecting deleted users."""
+    if raw_name is None:
+        return False
+    name = _clean_telegram_first_name(raw_name)
+    try:
+        current = row(cid)
+        if current is None and not allow_create:
+            return False
+        if current is not None and current.get("tg_first_name", "") == name:
+            return True
+        return upsert(cid, tg_first_name=name)
+    except Exception as exc:
+        log.warning("telegram identity sync %s: %s", cid, exc)
+        return False
+
+def _sync_telegram_identity(update, allow_create=False):
+    """Refresh the private-chat first name without resurrecting deleted users."""
+    user = getattr(update, "effective_user", None)
+    chat = getattr(update, "effective_chat", None)
+    cid = getattr(chat, "id", None)
+    if not user or cid is None or getattr(chat, "type", "private") != "private":
+        return False
+    return _store_telegram_first_name(cid, getattr(user, "first_name", None), allow_create)
+
+async def sync_telegram_identity(update, context):
+    """Run before normal Telegram handlers so this turn sees the current name."""
+    _sync_telegram_identity(update)
 
 def add_sugg(cid, q):
     c = db()
@@ -759,6 +799,19 @@ def profile_of(u):
         return {"height": u["height"], "weight": u["weight"], "age": u["age"], "activity": u.get("activity") or 2,
                 "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}
     return None
+def llm_profile_of(u):
+    """LLM context includes Telegram identity even when health profile was skipped."""
+    profile = dict(profile_of(u) or {})
+    name = _clean_telegram_first_name((u or {}).get("tg_first_name"))
+    if name:
+        profile["first_name"] = name
+    return profile or None
+def guard_aiwa_reply(cid, text):
+    """Final identity invariant before model text reaches history or Telegram."""
+    try:
+        return L.guard_user_address(text, llm_profile_of(row(cid)))
+    except Exception:
+        return text
 def diet_human(code_csv):
     if not code_csv: return "без ограничений"
     return ", ".join(DIETD.get(x, x) for x in code_csv.split(",") if x) or "без ограничений"
@@ -1470,7 +1523,7 @@ async def send_section(context, cid, st, key):
                + (_recent or "данных нет") + ". ОБЯЗАТЕЛЬНО учти их: если вчера была тяжёлая тренировка "
                "(например на ноги) — сегодня предложи другие группы мышц или восстановление, и скажи об этом прямо. "
                "Формат: короткий заголовок, почему именно так (гормоны и восстановление), 2-3 конкретных варианта с «как».")
-        text = await think_llm(context, cid, L.answer_question, st, _fq, profile_of(row(cid)), None, usage=usage)
+        text = await think_llm(context, cid, L.answer_question, st, _fq, llm_profile_of(row(cid)), None, usage=usage)
         if not text or "не вернула ответ" in text:
             text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
         text += "\n\nВ приложении Айвы можно посмотреть нагрузку рядом с календарём, симптомами и фазой цикла. Открой приложение кнопкой ниже."
@@ -1579,6 +1632,7 @@ RICH_OK = os.environ.get("AIWA_RICH", "1") in ("1", "true", "True", "on")
 async def send_rich(bot, cid, md_text, reply_markup=None):
     """Отправка через sendRichMessage (Bot API 10.1+): Telegram сам рендерит GFM —
     таблицы, ### заголовки, списки, цитаты. Бросает исключение, если метод недоступен."""
+    md_text = guard_aiwa_reply(cid, md_text)
     md_text = re.sub(r"(?m)^(\s*)•\s+", r"\1- ", str(md_text))   # любые «• » -> GFM-список, иначе рендер склеит/задвоит
     _LAST_SPOKEN[cid] = md_plain(md_text)                            # rich не проходит через текстовый прокси озвучки
     data = {"chat_id": cid, "rich_message": json.dumps({"markdown": md_text})}
@@ -1687,6 +1741,7 @@ def _clip_tg(text, limit=TG_QUOTE_LIMIT):
 
 async def reply_long(message, text, reply_markup=None):
     """Ответ с rich-форматированием; фолбэк — HTML по кускам. Кнопки только у последней части."""
+    text = guard_aiwa_reply(message.chat_id, text)
     if RICH_OK:
         try:
             await send_rich(message.get_bot(), message.chat_id, text, reply_markup=reply_markup)
@@ -1941,6 +1996,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
     clean, sugg = sf(text) if sf else (text, [])
+    clean = guard_aiwa_reply(cid, clean)
     try:
         topical = L.followups(st, basis_q, clean)
         # For known product topics deterministic relevance wins over a model
@@ -1990,6 +2046,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
 
 async def _send_summary_text(context, cid, clean, kb):
     """Use Telegram rich messages when available, with a safe HTML fallback."""
+    clean = guard_aiwa_reply(cid, clean)
     if RICH_OK:
         try:
             await send_rich(context.bot, cid, clean, reply_markup=kb)
@@ -2098,7 +2155,7 @@ async def send_general(context, cid, key):
     qmap = {"food": "Что мне есть сегодня под мой возраст и самочувствие? Дай конкретные продукты или меню на день.",
             "training": "Какая физическая активность мне сейчас подходит и почему? Дай конкретные варианты."}
     usage = []; q = qmap.get(key, key)
-    ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), q, hint=chat_hint(cid), usage=usage)
+    ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), q, hint=chat_hint(cid), usage=usage)
     _, st = status_of(cid)
     if key == "food":
         ans += "\n\nВ приложении Айвы можно открыть питание и заменить блюдо кнопкой «Заменить»."
@@ -2159,7 +2216,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
     if intent == "phases":
         _pu = []
         _pa = None
-        try: _pa = await llm_to_thread(cid, "phases", L.answer_question, status_of(cid)[1], "Расскажи кратко про четыре фазы цикла: сколько длится каждая, какие гормоны ведут и как это отражается на самочувствии, питании и нагрузке.", profile_of(row(cid)), None, usage=_pu)
+        try: _pa = await llm_to_thread(cid, "phases", L.answer_question, status_of(cid)[1], "Расскажи кратко про четыре фазы цикла: сколько длится каждая, какие гормоны ведут и как это отражается на самочувствии, питании и нагрузке.", llm_profile_of(row(cid)), None, usage=_pu)
         except Exception: pass
         if _pu: ev(cid, "tokens", sum(_pu), meta="answer", calls=len(_pu), usage=_pu)
         if _pa:
@@ -3162,6 +3219,7 @@ async def start(update, context):
     # /start is the only operation that begins a fresh lifecycle after /stop.
     # Incrementing the generation keeps older in-flight tasks permanently stale.
     _activate_user(cid)
+    _sync_telegram_identity(update, allow_create=True)
     if context.args and context.args[0].startswith("p_"):
         return await partner_join(context, cid, update.message, context.args[0][2:])
     if context.args and context.args[0] and not context.args[0].startswith("p_"):
@@ -3640,7 +3698,7 @@ async def handle_text(update, context, txt):
     if state in VALUE_STATES and is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
         _, _qst = status_of(cid)
-        a = await think_llm(context, cid, L.answer_question, _qst, txt, profile_of(u), None)
+        a = await think_llm(context, cid, L.answer_question, _qst, txt, llm_profile_of(u), None)
         await reply_long(update.message, L.split_followups(a)[0])
         return await update.message.reply_text("А теперь вернёмся к настройке. " + VALUE_STATES[state])
 
@@ -3666,7 +3724,7 @@ async def handle_text(update, context, txt):
         d = parse_date(txt)
         if not d:
             if is_question_like(txt):
-                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши дату начала последних месячных, например 25.05.2026. Потом даты можно редактировать в приложении.")
             return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
@@ -3680,7 +3738,7 @@ async def handle_text(update, context, txt):
             n = int(txt); assert 20 <= n <= 60
         except (ValueError, AssertionError):
             if is_question_like(txt):
-                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? Обычно это 21-35 дней, но у многих бывает иначе.")
             return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь точно, напиши примерное значение, потом его можно поправить. Если цикл нерегулярный, можно начать заново через /start и выбрать «Нет регулярного цикла».")
@@ -3714,7 +3772,7 @@ async def handle_text(update, context, txt):
             assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80
         except Exception:
             if is_question_like(txt):
-                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
@@ -3831,7 +3889,7 @@ async def handle_text(update, context, txt):
         if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
+        ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
         ev(cid, "answered", meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, None, txt, usage=usage, quote=txt)
@@ -3841,13 +3899,13 @@ async def handle_text(update, context, txt):
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.answer_question, st, txt, profile_of(u), hist_get(cid), usage=usage)
+        ans = await think_llm(context, cid, L.answer_question, st, txt, llm_profile_of(u), hist_get(cid), usage=usage)
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt)
     if is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
-        _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+        _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
         ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
         await reply_long(update.message, L.split_followups(a)[0])
     await need_onboard(update.message)
@@ -4019,11 +4077,11 @@ async def on_cb(update, context):
         ev(cid, "user_message", meta="suggest", n=len(question))
         await context.bot.send_chat_action(cid, "typing")
         if general:
-            usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, None, question, usage=usage, quote=question)
         else:
-            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, profile_of(u), hist_get(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, llm_profile_of(u), hist_get(cid), usage=usage)
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, st, question, usage=usage, quote=question)
 
@@ -4260,7 +4318,14 @@ def _verify_init(init_data):
         if not auth_date or auth_date < now - max_age or auth_date > now + 60:
             return None
         import json as _j
-        return _j.loads(pairs.get("user", "{}")).get("id")
+        telegram_user = _j.loads(pairs.get("user", "{}"))
+        cid = telegram_user.get("id") if isinstance(telegram_user, dict) else None
+        if cid is not None:
+            # The whole user object is covered by Telegram's signature. Its
+            # display name is still user-controlled, so storage/prompt helpers
+            # sanitize and delimit it before use.
+            _store_telegram_first_name(cid, telegram_user.get("first_name"))
+        return cid
     except Exception as e:
         log.warning("init verify: %s", e); return None
 def _cors(resp):
@@ -4744,7 +4809,7 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None):
     return await _agent_final(cid, u, msg, gathered, usage, request_id, user_generation)
 
 async def _agent_final(cid, u, msg, gathered, usage, request_id, user_generation=None):
-    _, st = status_of(cid); prof = profile_of(u)
+    _, st = status_of(cid); prof = llm_profile_of(u)
     q = msg
     if gathered:
         q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про здоровье, цикл, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
@@ -4777,7 +4842,7 @@ async def _chat_reply(cid, u, msg, user_generation=None):
     if intent == "phases":
         _pu = []
         _pa = None
-        try: _pa = await asyncio.to_thread(L.answer_question, status_of(cid)[1], "Расскажи кратко про четыре фазы цикла: сколько длится каждая, какие гормоны ведут и как это отражается на самочувствии, питании и нагрузке.", profile_of(u), None, usage=_pu)
+        try: _pa = await asyncio.to_thread(L.answer_question, status_of(cid)[1], "Расскажи кратко про четыре фазы цикла: сколько длится каждая, какие гормоны ведут и как это отражается на самочувствии, питании и нагрузке.", llm_profile_of(u), None, usage=_pu)
         except Exception: pass
         if _pu: ev(cid, "answered", tokens=sum(_pu), meta="webapp", calls=len(_pu), usage=_pu)
         _txt = L.split_followups(_pa)[0] if _pa else PHASES_TEXT
@@ -4805,7 +4870,7 @@ async def _chat_reply(cid, u, msg, user_generation=None):
         usage = []; txt = await answer_diary(cid, usage)
         if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage), usage=usage)
         return {"answer": txt, "suggestions": ["Открыть питание", "Что купить?"]}
-    _, st = status_of(cid); usage = []; prof = profile_of(u)
+    _, st = status_of(cid); usage = []; prof = llm_profile_of(u)
     request_id = "r_" + secrets.token_hex(16)
     ans = None
     try:
@@ -5648,6 +5713,7 @@ def build_web():
 async def run_all():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).concurrent_updates(True).build()
     global BOT_APP; BOT_APP = app
+    app.add_handler(TypeHandler(Update, sync_telegram_identity), group=-1)
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
                     ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd), ("voicetest", voicetest_cmd)):
