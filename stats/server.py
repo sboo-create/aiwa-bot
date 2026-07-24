@@ -113,6 +113,19 @@ def _is_delivered_answer(row: dict[str, Any]) -> bool:
 def _product_day(ts: float) -> str:
     return datetime.fromtimestamp(ts, PRODUCT_TZ).date().isoformat()
 
+
+def _period_starts(now: float, days: float) -> tuple[float, dict[str, float]]:
+    selected_days = max(1, min(int(math.ceil(float(days))), 365))
+    current = datetime.fromtimestamp(now, PRODUCT_TZ)
+    day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    return float(selected_days), {
+        "selected": (day_start - timedelta(days=selected_days - 1)).timestamp(),
+        "dau": day_start.timestamp(),
+        "wau": (day_start - timedelta(days=day_start.weekday())).timestamp(),
+        "mau": day_start.replace(day=1).timestamp(),
+    }
+
+
 app = FastAPI()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _db = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
@@ -203,14 +216,20 @@ def _event_rows() -> list[dict[str, Any]]:
     return result
 
 
-def _active_ids(rows: list[dict[str, Any]], cutoff: float) -> set[str]:
-    return {r["device_id"] for r in rows if r["ts"] >= cutoff and _is_active(r["name"])}
+def _active_ids(rows: list[dict[str, Any]], cutoff: float, until: float) -> set[str]:
+    return {
+        r["device_id"]
+        for r in rows
+        if cutoff <= r["ts"] <= until and _is_active(r["name"])
+    }
 
 
-def _sessions(rows: list[dict[str, Any]], cutoff: float) -> tuple[int, list[float], list[int]]:
+def _sessions(
+    rows: list[dict[str, Any]], cutoff: float, until: float
+) -> tuple[int, list[float], list[int]]:
     by_user: dict[str, list[float]] = defaultdict(list)
     for row in rows:
-        if row["ts"] >= cutoff and _is_active(row["name"]):
+        if cutoff <= row["ts"] <= until and _is_active(row["name"]):
             by_user[row["device_id"]].append(row["ts"])
     count = 0; lengths: list[float] = []; events: list[int] = []
     for timestamps in by_user.values():
@@ -240,8 +259,8 @@ def _retention(rows: list[dict[str, Any]]) -> dict[str, Any]:
     active_days: dict[str, set[str]] = defaultdict(set)
     for row in rows:
         if _is_active(row["name"]):
-            active_days[row["device_id"]].add(datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat())
-    today = datetime.now(timezone.utc).date()
+            active_days[row["device_id"]].add(_product_day(row["ts"]))
+    today = datetime.now(PRODUCT_TZ).date()
     out: dict[str, Any] = {}
     for horizon in (1, 7, 30):
         eligible = 0; returned = 0
@@ -262,25 +281,30 @@ def _series(rows: list[dict[str, Any]], days: float, now: float, available_start
     if available_start is None:
         return result
     if days <= 1.1:
-        start = max(now - 24 * 3600, available_start)
+        _, starts = _period_starts(now, 1)
+        start = max(starts["dau"], available_start)
         start = math.floor(start / 3600) * 3600
         buckets = max(1, math.ceil((now - start) / 3600))
         for i in range(buckets):
             lo = start + i * 3600; hi = min(now + 1, lo + 3600)
             chunk = [r for r in rows if lo <= r["ts"] < hi]
             result.append({
-                "label": datetime.fromtimestamp(lo, timezone.utc).strftime("%H:00"),
+                "label": datetime.fromtimestamp(lo, PRODUCT_TZ).strftime("%H:00"),
                 "active": len({r["device_id"] for r in chunk if _is_active(r["name"])}),
                 "messages": sum(r["name"] == "user_message_sent" for r in chunk),
                 "ai_calls": sum(r["name"] == "ai_call" for r in chunk),
             })
         return result
     span = max(1, int(math.ceil(days)))
-    today = datetime.fromtimestamp(now, timezone.utc).date()
-    first = max(today - timedelta(days=span - 1), datetime.fromtimestamp(available_start, timezone.utc).date())
+    today = datetime.fromtimestamp(now, PRODUCT_TZ).date()
+    first = max(
+        today - timedelta(days=span - 1),
+        datetime.fromtimestamp(available_start, PRODUCT_TZ).date(),
+    )
     day = first
     while day <= today:
-        lo = datetime.combine(day, datetime.min.time(), timezone.utc).timestamp(); hi = lo + 86400
+        lo = datetime.combine(day, datetime.min.time(), PRODUCT_TZ).timestamp()
+        hi = datetime.combine(day + timedelta(days=1), datetime.min.time(), PRODUCT_TZ).timestamp()
         chunk = [r for r in rows if lo <= r["ts"] < hi]
         result.append({
             "label": day.strftime("%d.%m"),
@@ -293,29 +317,33 @@ def _series(rows: list[dict[str, Any]], days: float, now: float, available_start
 
 
 def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any]:
-    window_days = max(0.04, min(float(days), 365.0)); now = time.time(); since = now - window_days * 86400
+    now = time.time()
+    window_days, period_starts = _period_starts(now, days)
+    since = period_starts["selected"]
     source_mode = "observed" if str(source).lower() == "observed" else "mixed"
     all_rows = _event_rows()
     rows = ([r for r in all_rows if r["provenance"] == "observed"]
             if source_mode == "observed" else all_rows)
-    selected = [r for r in rows if r["ts"] >= since]
+    selected = [r for r in rows if since <= r["ts"] <= now]
     data_start = min((r["ts"] for r in rows), default=None)
     available_start = max(since, data_start) if data_start is not None else None
     requested_days = max(1, int(math.ceil(window_days)))
     available_days = (min(requested_days,
-                          (datetime.fromtimestamp(now, timezone.utc).date() -
-                           datetime.fromtimestamp(available_start, timezone.utc).date()).days + 1)
+                          (datetime.fromtimestamp(now, PRODUCT_TZ).date() -
+                           datetime.fromtimestamp(available_start, PRODUCT_TZ).date()).days + 1)
                       if available_start is not None else 0)
     active_selected = [r for r in selected if _is_active(r["name"])]
     ever_ids = {r["device_id"] for r in rows if _is_active(r["name"])}
     selected_ids = {r["device_id"] for r in active_selected}
-    dau_ids = _active_ids(rows, now - 86400); wau_ids = _active_ids(rows, now - 7 * 86400); mau_ids = _active_ids(rows, now - 30 * 86400)
+    dau_ids = _active_ids(rows, period_starts["dau"], now)
+    wau_ids = _active_ids(rows, period_starts["wau"], now)
+    mau_ids = _active_ids(rows, period_starts["mau"], now)
 
     daily_users: dict[str, set[str]] = defaultdict(set)
     for row in active_selected:
-        daily_users[datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()].add(row["device_id"])
+        daily_users[_product_day(row["ts"])].add(row["device_id"])
     active_user_days = sum(len(v) for v in daily_users.values())
-    sessions, session_lengths, session_events = _sessions(rows, since)
+    sessions, session_lengths, session_events = _sessions(rows, since, now)
     messages = sum(r["name"] == "user_message_sent" for r in selected)
     responses = sum(_is_delivered_answer(r) for r in selected)
 
@@ -649,8 +677,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     active_days_by_user: dict[str, set[str]] = defaultdict(set)
     feature_set_by_user: dict[str, set[str]] = defaultdict(set)
     for row in active_selected:
-        active_days_by_user[row["device_id"]].add(
-            datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat())
+        active_days_by_user[row["device_id"]].add(_product_day(row["ts"]))
         feature = _feature(row)
         if feature: feature_set_by_user[row["device_id"]].add(feature)
     returning_users = sum(len(days_set) >= 2 for days_set in active_days_by_user.values())
@@ -712,7 +739,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     avg_dau = (len(dau_ids) if window_days <= 1.1 else
                (sum(point["active"] for point in series_data) / len(series_data)
                 if series_data else 0))
-    avg_dau_note = ("rolling 24 часа" if window_days <= 1.1 else
+    avg_dau_note = ("с 00:00 текущей московской даты" if window_days <= 1.1 else
                     f"по {len(series_data)} календарным дням с данными")
     per_active_day = lambda n: round(n / active_user_days, 2) if active_user_days else 0
     per_active_day_or_none = lambda n: round(n / active_user_days, 2) if active_user_days else None
@@ -729,7 +756,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     exact_active_days: dict[str, set[str]] = defaultdict(set)
     for row in active_selected:
         if row["provenance"] == "observed":
-            day = datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()
+            day = _product_day(row["ts"])
             exact_active_days[day].add(row["device_id"])
     exact_active_user_days = sum(len(users) for users in exact_active_days.values())
     per_exact_active_day = lambda n: (round(n / exact_active_user_days, 2)
@@ -738,7 +765,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     exact_request_ready = bool(exact_ai_rows) and exact_request_coverage >= 80
     product_actions = sum(r["name"] in PRODUCT_ACTION_NAMES for r in selected)
     response_user_days = {
-        (r["device_id"], datetime.fromtimestamp(r["ts"], timezone.utc).date().isoformat())
+        (r["device_id"], _product_day(r["ts"]))
         for r in selected if _is_delivered_answer(r)
     }
     value_actions = len(response_user_days)
@@ -746,35 +773,42 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     for row in active_selected:
         feature = _feature(row)
         if feature:
-            day = datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()
+            day = _product_day(row["ts"])
             feature_days[(row["device_id"], day)].add(feature)
     distinct_feature_uses = sum(len(feature_set) for feature_set in feature_days.values())
 
-    trailing_cutoff = now - 86400
-    trailing_sessions, _, _ = _sessions(rows, trailing_cutoff)
-    trailing_ai_attempts = sum(r["name"] == "ai_call" and r["ts"] >= trailing_cutoff and
-                               r["provenance"] == "observed" for r in rows)
+    calendar_day_start = period_starts["dau"]
+    day_sessions, _, _ = _sessions(rows, calendar_day_start, now)
+    day_ai_attempts = sum(
+        r["name"] == "ai_call"
+        and calendar_day_start <= r["ts"] <= now
+        and r["provenance"] == "observed"
+        for r in rows
+    )
     per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
-    overview_tools_per_dau = per_dau(trailing_ai_attempts)
-    overview_tool_denominator = ("rolling DAU всей доступной истории" if source_mode == "mixed"
-                                 else "rolling DAU точного v2-слоя")
+    overview_tools_per_dau = per_dau(day_ai_attempts)
+    overview_tool_denominator = (
+        "DAU текущей московской даты всей доступной истории"
+        if source_mode == "mixed"
+        else "DAU текущей московской даты точного v2-слоя"
+    )
     overview_tool_help = (
-        "Текущая legacy-compatible формула общей страницы: точно записанные AI-попытки "
-        "за 24 часа делятся на общий rolling DAU, включая восстановленных пользователей. "
+        "Формула общей страницы: точно записанные AI-попытки с 00:00 МСК "
+        "делятся на DAU той же московской даты, включая восстановленных пользователей. "
         "Она сохраняет непрерывность метрики, но может занижать техническую интенсивность, "
         "потому что старые AI-вызовы восстановлены неполно."
         if source_mode == "mixed" else
-        "Та же формула рассчитана только на точном v2-слое: точно записанные AI-попытки "
-        "за 24 часа делятся на rolling DAU без восстановленных пользователей. Поэтому "
+        "Та же формула рассчитана только на точном v2-слое: AI-попытки с 00:00 МСК "
+        "делятся на DAU той же даты без восстановленных пользователей. Поэтому "
         "значение может отличаться от общей страницы, которая по умолчанию показывает всю историю."
     )
 
     tool_definitions = [
         {"id": "overview_ai_attempts_mixed_dau", "label": "Overview: AI-попытки / DAU",
-         "value": overview_tools_per_dau, "numerator": trailing_ai_attempts,
-         "numerator_label": "точных AI-попыток за 24 часа",
+         "value": overview_tools_per_dau, "numerator": day_ai_attempts,
+         "numerator_label": "точных AI-попыток с 00:00 МСК",
          "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
-         "status": ("no_data" if not trailing_ai_attempts else
+         "status": ("no_data" if not day_ai_attempts else
                     "no_active_users" if not dau_ids else "ok"),
          "selected_for_overview": True,
          "help": overview_tool_help},
@@ -819,24 +853,24 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
 
     overview = {
         "ever_used": len(ever_ids), "dau": len(dau_ids), "wau": len(wau_ids), "mau": len(mau_ids),
-        "sessions_per_dau": per_dau(trailing_sessions),
+        "sessions_per_dau": per_dau(day_sessions),
     }
     if overview_tools_per_dau is not None:
         overview["tools_per_dau"] = overview_tools_per_dau
     primary = [
         {"label": "Ever used", "value": len(ever_ids), "note": "уникальные пользователи · всё время",
          "help": "Уникальные псевдонимные пользователи, у которых было хотя бы одно продуктовое действие за всю доступную историю."},
-        {"label": "DAU", "value": len(dau_ids), "note": "активные за последние 24 часа",
-         "help": "Уникальные пользователи с продуктовой активностью за последние 24 часа. Технические AI-попытки и push-отправки не считаются активностью."},
-        {"label": "WAU", "value": len(wau_ids), "note": "активные за последние 7 дней",
-         "help": "Уникальные пользователи с продуктовой активностью за последние 7 суток. Это скользящее окно, а не календарная неделя."},
-        {"label": "MAU", "value": len(mau_ids), "note": "активные за последние 30 дней",
-         "help": "Уникальные пользователи с продуктовой активностью за последние 30 суток. Системные AI-попытки и push-отправки не считаются активностью."},
+        {"label": "DAU", "value": len(dau_ids), "note": "с 00:00 текущей даты МСК",
+         "help": "Уникальные пользователи с продуктовой активностью в текущую московскую календарную дату. Технические AI-попытки и push-отправки не считаются активностью."},
+        {"label": "WAU", "value": len(wau_ids), "note": "текущая ISO-неделя МСК",
+         "help": "Уникальные пользователи с продуктовой активностью с понедельника 00:00 МСК."},
+        {"label": "MAU", "value": len(mau_ids), "note": "текущий месяц МСК",
+         "help": "Уникальные пользователи с продуктовой активностью с первого числа текущего московского месяца."},
         {"label": "Sessions / DAU", "value": overview["sessions_per_dau"],
-         "note": "сессии за 24 ч / rolling DAU",
-         "help": "Та же формула, что в общей сводке: сессии за последние 24 часа, делённые на уникальных активных пользователей за эти же 24 часа. Новая сессия начинается после 30 минут без продуктовых событий."},
+         "note": "сессии сегодня МСК / DAU сегодня",
+         "help": "Сессии с 00:00 МСК, делённые на уникальных активных пользователей той же календарной даты. Новая сессия начинается после 30 минут без продуктовых событий."},
         {"label": "Tools / DAU", "value": overview_tools_per_dau,
-         "note": f"точные AI-попытки за 24 ч / {'общий' if source_mode == 'mixed' else 'точный'} DAU",
+         "note": f"точные AI-попытки сегодня МСК / {'общий' if source_mode == 'mixed' else 'точный'} DAU",
          "help": overview_tool_help + " Точная и продуктовые альтернативы показаны ниже."},
     ]
 
@@ -848,7 +882,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     diagnostics = [
         {"label": "Avg DAU", "value": round(avg_dau, 1), "unit": "number",
          "note": avg_dau_note,
-         "help": "Для окна 1 день это rolling DAU за последние 24 часа. Для 7/30 дней — среднее число активных пользователей по доступным календарным дням; дни до начала сбора не входят в знаменатель."},
+         "help": "Для окна 1 день это DAU текущей московской даты. Для 7/30 дней — среднее число активных пользователей по доступным московским календарным датам; дни до начала сбора не входят в знаменатель."},
         {"label": "Сессии / user-day", "value": per_active_day_or_none(sessions), "unit": "number",
          "note": f"{sessions} сессий / {active_user_days} user-days",
          "help": "Периодная глубина использования. В отличие от верхнего Sessions / DAU, учитывает каждый активный user-day выбранного окна."},
