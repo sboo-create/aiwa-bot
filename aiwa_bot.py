@@ -583,11 +583,118 @@ def meals_of(cid, d=None):
              "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9], "slot": (x[10] or "snack"),
              "fclass": x[11] or None} for x in r]
 
+def meal_get(cid, mid):
+    """Read back one owned meal. Mutation confirmations must use this DB receipt."""
+    try:
+        wanted = int(mid)
+    except (TypeError, ValueError):
+        return None
+    c = db()
+    x = c.execute(
+        """SELECT id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass
+           FROM meals WHERE chat_id=? AND id=?""",
+        (cid, wanted),
+    ).fetchone()
+    c.close()
+    if not x:
+        return None
+    return {
+        "id": x[0], "date": x[1], "ts": x[2], "title": x[3], "kcal": x[4],
+        "protein": x[5], "fat": x[6], "carbs": x[7], "grams": x[8],
+        "items": json.loads(x[9] or "[]"), "source": x[10],
+        "slot": x[11] or "snack", "fclass": x[12] or None,
+    }
+
+def meal_update(cid, mid, rec, *, user_generation=None, mutation_key=None,
+                args_hash=None, return_status=False):
+    """Atomically replace one owned meal and persist an idempotent verified receipt."""
+    try:
+        wanted = int(mid)
+    except (TypeError, ValueError):
+        return None
+    c = db()
+    c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close()
+        return None
+    if mutation_key:
+        prior = c.execute(
+            """SELECT kind,record_id,args_hash,result_json,reversed_at
+               FROM chat_mutations WHERE chat_id=? AND mutation_key=?""",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            status = "mismatch" if (
+                prior[0] != "food_update"
+                or str(prior[1] or "") != str(wanted)
+                or (prior[2] or "") != (args_hash or "")
+            ) else ("reversed" if prior[4] else "duplicate")
+            try:
+                saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError):
+                saved_data = {}
+            result = {"id": wanted, "updated": False, "status": status, "data": saved_data}
+            return result if return_status else (wanted if status == "duplicate" else None)
+    current = c.execute(
+        "SELECT d,slot FROM meals WHERE chat_id=? AND id=?",
+        (cid, wanted),
+    ).fetchone()
+    if not current:
+        c.rollback(); c.close()
+        result = {"id": None, "updated": False, "status": "missing", "data": {}}
+        return result if return_status else None
+    slot = rec.get("slot") or current[1] or "snack"
+    c.execute(
+        """UPDATE meals
+           SET title=?,kcal=?,protein=?,fat=?,carbs=?,grams=?,items=?,source=?,slot=?,fclass=?,ts=?
+           WHERE chat_id=? AND id=?""",
+        (
+            rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
+            float(rec["carbs"]), int(rec["grams"]) if rec.get("grams") else None,
+            json.dumps(rec.get("items") or [], ensure_ascii=False),
+            rec.get("source") or "text", slot, rec.get("fclass") or None,
+            datetime.now(TZ).isoformat(), cid, wanted,
+        ),
+    )
+    x = c.execute(
+        """SELECT id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass
+           FROM meals WHERE chat_id=? AND id=?""",
+        (cid, wanted),
+    ).fetchone()
+    if not x:
+        c.rollback(); c.close()
+        result = {"id": None, "updated": False, "status": "verify_failed", "data": {}}
+        return result if return_status else None
+    verified = {
+        "id": x[0], "date": x[1], "ts": x[2], "title": x[3], "kcal": x[4],
+        "protein": x[5], "fat": x[6], "carbs": x[7], "grams": x[8],
+        "items": json.loads(x[9] or "[]"), "source": x[10],
+        "slot": x[11] or "snack", "fclass": x[12] or None,
+    }
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                cid, mutation_key,
+                int(user_generation if user_generation is not None else A2.lifecycle_generation(c, cid)),
+                "food_update", str(wanted), args_hash or "",
+                json.dumps(verified, ensure_ascii=False, sort_keys=True),
+                datetime.now(TZ).isoformat(),
+            ),
+        )
+    c.commit(); c.close()
+    result = {"id": wanted, "updated": True, "status": "updated", "data": verified}
+    return result if return_status else wanted
+
 def meal_del(cid, mid):
     c = db()
     c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, int(mid)))
     c.execute(
-        "UPDATE chat_mutations SET reversed_at=?,result_json=NULL WHERE chat_id=? AND kind='food' AND record_id=?",
+        """UPDATE chat_mutations SET reversed_at=?,result_json=NULL
+           WHERE chat_id=? AND kind IN ('food','food_update') AND record_id=?""",
         (datetime.now(TZ).isoformat(), cid, str(int(mid))),
     )
     c.commit(); c.close()
@@ -655,6 +762,110 @@ def workout_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_
     c.commit(); c.close()
     result = {"id": wid, "created": True, "status": "created", "data": dict(rec, date=d)}
     return result if return_status else wid
+
+def workout_get(cid, wid):
+    """Read back one owned workout for verified mutation receipts."""
+    try:
+        wanted = int(wid)
+    except (TypeError, ValueError):
+        return None
+    c = db()
+    x = c.execute(
+        """SELECT id,d,ts,type,items,duration,rpe,note,review,kcal,muscles
+           FROM workouts WHERE chat_id=? AND id=?""",
+        (cid, wanted),
+    ).fetchone()
+    c.close()
+    if not x:
+        return None
+    return {
+        "id": x[0], "date": x[1], "ts": x[2], "type": x[3],
+        "items": json.loads(x[4] or "[]"), "duration": x[5] or "",
+        "rpe": x[6] or "", "note": x[7] or "", "review": x[8] or "",
+        "kcal": int(x[9] or 0), "muscles": x[10] or "",
+    }
+
+def workout_update(cid, wid, rec, *, user_generation=None, mutation_key=None,
+                   args_hash=None, return_status=False):
+    """Atomically replace one owned workout and verify it before acknowledging."""
+    try:
+        wanted = int(wid)
+    except (TypeError, ValueError):
+        return None
+    c = db()
+    c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close()
+        return None
+    if mutation_key:
+        prior = c.execute(
+            """SELECT kind,record_id,args_hash,result_json,reversed_at
+               FROM chat_mutations WHERE chat_id=? AND mutation_key=?""",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            status = "mismatch" if (
+                prior[0] != "workout_update"
+                or str(prior[1] or "") != str(wanted)
+                or (prior[2] or "") != (args_hash or "")
+            ) else ("reversed" if prior[4] else "duplicate")
+            try:
+                saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError):
+                saved_data = {}
+            result = {"id": wanted, "updated": False, "status": status, "data": saved_data}
+            return result if return_status else (wanted if status == "duplicate" else None)
+    current = c.execute(
+        "SELECT d FROM workouts WHERE chat_id=? AND id=?",
+        (cid, wanted),
+    ).fetchone()
+    if not current:
+        c.rollback(); c.close()
+        result = {"id": None, "updated": False, "status": "missing", "data": {}}
+        return result if return_status else None
+    c.execute(
+        """UPDATE workouts
+           SET type=?,items=?,duration=?,rpe=?,note=?,review=?,kcal=?,muscles=?,ts=?
+           WHERE chat_id=? AND id=?""",
+        (
+            rec.get("type", ""), json.dumps(rec.get("items") or [], ensure_ascii=False),
+            rec.get("duration", ""), rec.get("rpe", ""), rec.get("note", ""),
+            rec.get("review", ""), int(rec.get("kcal") or 0), rec.get("muscles", ""),
+            datetime.now(TZ).isoformat(), cid, wanted,
+        ),
+    )
+    x = c.execute(
+        """SELECT id,d,ts,type,items,duration,rpe,note,review,kcal,muscles
+           FROM workouts WHERE chat_id=? AND id=?""",
+        (cid, wanted),
+    ).fetchone()
+    if not x:
+        c.rollback(); c.close()
+        result = {"id": None, "updated": False, "status": "verify_failed", "data": {}}
+        return result if return_status else None
+    verified = {
+        "id": x[0], "date": x[1], "ts": x[2], "type": x[3],
+        "items": json.loads(x[4] or "[]"), "duration": x[5] or "",
+        "rpe": x[6] or "", "note": x[7] or "", "review": x[8] or "",
+        "kcal": int(x[9] or 0), "muscles": x[10] or "",
+    }
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                cid, mutation_key,
+                int(user_generation if user_generation is not None else A2.lifecycle_generation(c, cid)),
+                "workout_update", str(wanted), args_hash or "",
+                json.dumps(verified, ensure_ascii=False, sort_keys=True),
+                datetime.now(TZ).isoformat(),
+            ),
+        )
+    c.commit(); c.close()
+    result = {"id": wanted, "updated": True, "status": "updated", "data": verified}
+    return result if return_status else wanted
 
 _WORKOUT_TYPES = {
     "бассейн": "Плавание", "плав": "Плавание", "силов": "Силовая", "кардио": "Кардио",
@@ -761,7 +972,8 @@ def workout_del(cid, wid):
     c = db()
     c.execute("DELETE FROM workouts WHERE chat_id=? AND id=?", (cid, int(wid)))
     c.execute(
-        "UPDATE chat_mutations SET reversed_at=?,result_json=NULL WHERE chat_id=? AND kind='workout' AND record_id=?",
+        """UPDATE chat_mutations SET reversed_at=?,result_json=NULL
+           WHERE chat_id=? AND kind IN ('workout','workout_update') AND record_id=?""",
         (datetime.now(TZ).isoformat(), cid, str(int(wid))),
     )
     c.commit(); c.close()
@@ -1012,12 +1224,31 @@ def llm_profile_of(u):
     if name:
         profile["first_name"] = name
     return profile or None
-def guard_aiwa_reply(cid, text):
-    """Final identity invariant before model text reaches history or Telegram."""
+_UNVERIFIED_MUTATION_CLAIM_RE = re.compile(
+    r"(?<!бы\s)\b(?:я\s+)?(?:записал[аи]?|сохранил[аи]?|внесл[аи]?|"
+    r"скорректировал[аи]?)\b(?!\s+бы\b)|"
+    r"\b(?:добавил[аи]?|исправил[аи]?|обновил[аи]?|отметил[аи]?)\b"
+    r".{0,60}\b(?:дневник\w*|запис\w*|трениров\w*|месячн\w*|"
+    r"календар\w*|профил\w*|данн\w*)\b|"
+    r"\b(?:вс[её]\s+)?(?:сохранено|записано|добавлено|обновлено)\b|"
+    r"\bзапись\s+уже\s+(?:видна|в\s+дневнике)\b",
+    re.I,
+)
+
+def guard_aiwa_reply(cid, text, verified_mutation=False):
+    """Final identity and write-truth invariants before model text reaches the user."""
     try:
-        return L.guard_user_address(text, llm_profile_of(row(cid)))
+        guarded = L.guard_user_address(text, llm_profile_of(row(cid)))
     except Exception:
-        return text
+        guarded = text
+    if not verified_mutation and _UNVERIFIED_MUTATION_CLAIM_RE.search(str(guarded or "")):
+        ev(cid, "journal_claim_blocked", meta="unverified_model_claim")
+        return (
+            "В этом сообщении сервер не подтвердил изменение дневника, поэтому я не буду "
+            "говорить, что запись сохранена. Напиши, что именно нужно добавить или исправить, "
+            "и я подтвержу результат только после проверки в приложении."
+        )
+    return guarded
 def diet_human(code_csv):
     if not code_csv: return "без ограничений"
     return ", ".join(DIETD.get(x, x) for x in code_csv.split(",") if x) or "без ограничений"
@@ -1095,6 +1326,7 @@ _JOURNAL_THIRD_PARTY_EVENT_RE = (
 )
 _JOURNAL_NON_NAME_STARTERS = (
     r"Сегодня|Вчера|Позавчера|Пожалуйста|Айва|После|Перед|Только|На|"
+    r"Ну|А|И|Ещё|Еще|Кстати|Короче|Вообще|Ладно|Нет|Да|"
     r"Как|Можешь|Запиши|Записать|Добавь|Добавить|Внеси|Внести|"
     r"Отметь|Отметить|Зафиксируй|Зафиксировать|"
     r"Месячные|Менструация|Тренировка|Тренировку|Тренировки|Кардио|"
@@ -1254,7 +1486,9 @@ def match_intent(t):
     if re.search(r"(месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн|сегодня начал\w* месячн|снова месячн|опять месячн)", t): return "period"
     return None
 
-_JOURNAL_MUTATION_INTENTS = frozenset({"logmeal", "logworkout", "logperiod", "period_end"})
+_JOURNAL_MUTATION_INTENTS = frozenset({
+    "logmeal", "updatemeal", "logworkout", "updateworkout", "logperiod", "period_end",
+})
 _JOURNAL_SEMANTIC_CANDIDATE_RE = re.compile(
     r"\b(?:"
     r"съел\w*|поел\w*|ел[аи]?\b|кушал\w*|скушал\w*|покушал\w*|выпил\w*|"
@@ -1290,7 +1524,9 @@ _JOURNAL_FOOD_COMPLETED_RE = re.compile(
 )
 _JOURNAL_WORKOUT_COMPLETED_RE = re.compile(
     r"\b(?:потренир\w*|тренировал\w*|занимал\w*|бегал\w*|пробежал\w*|"
-    r"ходил\w*|сходил\w*|гулял\w*|плавал\w*|качал\w*|танцевал\w*)\b|"
+    r"ходил\w*|сходил\w*|гулял\w*|плавал\w*|качал\w*|танцевал\w*|"
+    r"приседал\w*|поприседал\w*|отжимал\w*|подтягивал\w*|"
+    r"делал\w*\s+(?:планк\w*|выпад\w*|присед\w*|упражнен\w*))\b|"
     r"\b(?:был[аи]?|сходил\w*)\s+(?:сегодня\s+|вчера\s+|позавчера\s+)?"
     r"(?:на|в)\s+(?:трениров\w*|йог\w*|пилатес\w*|фитнес\w*|бокс\w*|"
     r"танц\w*|бассейн\w*|зал\w*)\b|"
@@ -1306,8 +1542,74 @@ _JOURNAL_PERIOD_START_RE = re.compile(
 _JOURNAL_PERIOD_END_RE = re.compile(
     r"\b(?:законч\w*|кончил\w*|завершил\w*|прошл\w*|перестал\w*|отошл\w*)\b", re.I,
 )
+_JOURNAL_CONTEXT_OPEN_RE = re.compile(
+    r"^\s*(?:а\s+)?(?:и\s+)?(?:ещ[её]|также|плюс)\b|"
+    r"^\s*(?:ну|нет|неа|точнее|вернее|на\s+самом\s+деле)\b|"
+    r"\b(?:исправ\w*|скорректир\w*|измени\w*|поменя\w*|"
+    r"было\s+не|не\s+\d+|меньше|больше|всего)\b",
+    re.I,
+)
+_JOURNAL_CORRECTION_RE = re.compile(
+    r"\b(?:исправ\w*|скорректир\w*|измени\w*|поменя\w*|"
+    r"точнее|вернее|на\s+самом\s+деле|меньше|больше|"
+    r"\d+(?:[.,]\d+)?\s*(?:г|гр|грамм\w*|кг|ккал|мин\w*|час\w*|"
+    r"подход\w*|повтор\w*))\b",
+    re.I,
+)
 
-def _semantic_journal_candidate(text):
+def _journal_recent_context(cid, limit=5):
+    """Small DB-backed context for ellipsis and corrections; IDs stay server-owned."""
+    c = db()
+    meals = c.execute(
+        """SELECT id,d,ts,title,grams,kcal,slot FROM meals
+           WHERE chat_id=? ORDER BY ts DESC,id DESC LIMIT ?""",
+        (cid, int(limit)),
+    ).fetchall()
+    workouts = c.execute(
+        """SELECT id,d,ts,type,duration,rpe,note FROM workouts
+           WHERE chat_id=? ORDER BY ts DESC,id DESC LIMIT ?""",
+        (cid, int(limit)),
+    ).fetchall()
+    last_mutation = c.execute(
+        """SELECT kind,record_id,created_at FROM chat_mutations
+           WHERE chat_id=? AND reversed_at IS NULL
+             AND kind IN ('food','food_update','workout','workout_update')
+           ORDER BY created_at DESC LIMIT 1""",
+        (cid,),
+    ).fetchone()
+    c.close()
+    return {
+        "meals": [
+            {"id": x[0], "date": x[1], "ts": x[2], "title": x[3],
+             "grams": x[4], "kcal": x[5], "slot": x[6] or "snack"}
+            for x in meals
+        ],
+        "workouts": [
+            {"id": x[0], "date": x[1], "ts": x[2], "type": x[3],
+             "duration": x[4] or "", "rpe": x[5] or "", "note": x[6] or ""}
+            for x in workouts
+        ],
+        "last_mutation": (
+            {"kind": last_mutation[0], "record_id": int(last_mutation[1]),
+             "created_at": last_mutation[2]}
+            if last_mutation and str(last_mutation[1] or "").isdigit() else None
+        ),
+    }
+
+def _journal_has_recent_mutation(context, max_minutes=180):
+    last = (context or {}).get("last_mutation") or {}
+    raw = last.get("created_at")
+    if not raw:
+        return False
+    try:
+        stamp = datetime.fromisoformat(raw)
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=TZ)
+        return timedelta(0) <= datetime.now(TZ) - stamp <= timedelta(minutes=max_minutes)
+    except (TypeError, ValueError):
+        return False
+
+def _semantic_journal_candidate(text, context=None):
     """Дешёвый prefilter; решение принимает модель, а не набор фраз/порядок слов."""
     raw = str(text or "").strip()
     if not raw:
@@ -1327,12 +1629,17 @@ def _semantic_journal_candidate(text):
         re.search(r"^\s*(?:(?:ну|а|кстати|короче)[,\s]+)*(?:я|сегодня|вчера|позавчера)\b", raw, re.I)
         or (len(raw) <= 220 and re.search(r"\b[а-яё-]{3,}(?:ла|лась)\b", raw, re.I))
     )
-    return domain_hint or personal_report_shape
+    contextual_followup = bool(
+        _journal_has_recent_mutation(context)
+        and len(raw) <= 300
+        and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
+    )
+    return domain_hint or personal_report_shape or contextual_followup
 
 def _semantic_source_subject_safe(text):
     return not _journal_third_party_source(text)
 
-def _semantic_action_matches_source(action, text):
+def _semantic_action_matches_source(action, text, context=None, payload=None):
     """Модель выбирает смысл, код независимо подтверждает разрешённый домен события."""
     raw = str(text or "").strip()
     if not raw or "\n" in raw or "\r" in raw or _JOURNAL_META_INSTRUCTION_RE.search(raw):
@@ -1340,22 +1647,41 @@ def _semantic_action_matches_source(action, text):
     if not _semantic_source_subject_safe(raw):
         return False
     if action == "food":
-        return bool(_JOURNAL_FOOD_COMPLETED_RE.search(raw))
+        return bool(
+            _JOURNAL_FOOD_COMPLETED_RE.search(raw)
+            or (
+                _journal_has_recent_mutation(context)
+                and bool((context or {}).get("meals"))
+                and str(((context or {}).get("last_mutation") or {}).get("kind") or "").startswith("food")
+                and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
+                and str((payload or {}).get("food_text") or "").strip()
+            )
+        )
+    if action == "food_update":
+        target = str((payload or {}).get("target_id") or "")
+        owned = {str(x.get("id")) for x in ((context or {}).get("meals") or [])}
+        return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
     if action == "workout":
         return bool(_JOURNAL_WORKOUT_COMPLETED_RE.search(raw))
+    if action == "workout_update":
+        target = str((payload or {}).get("target_id") or "")
+        owned = {str(x.get("id")) for x in ((context or {}).get("workouts") or [])}
+        return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
     if action == "period_start":
         return bool(_JOURNAL_PERIOD_SOURCE_RE.search(raw) and _JOURNAL_PERIOD_START_RE.search(raw))
     if action == "period_end":
         return bool(_JOURNAL_PERIOD_SOURCE_RE.search(raw) and _JOURNAL_PERIOD_END_RE.search(raw))
     return False
 
-def _normalize_semantic_journal(data, source_text=""):
+def _normalize_semantic_journal(data, source_text="", context=None):
     """Fail-closed валидация решения модели перед любой записью в БД."""
     if not isinstance(data, dict):
         return None
     action_to_intent = {
         "food": "logmeal",
+        "food_update": "updatemeal",
         "workout": "logworkout",
+        "workout_update": "updateworkout",
         "period_start": "logperiod",
         "period_end": "period_end",
     }
@@ -1370,7 +1696,7 @@ def _normalize_semantic_journal(data, source_text=""):
         action not in action_to_intent
         or not math.isfinite(confidence)
         or not 0.85 <= confidence <= 1.0
-        or not _semantic_action_matches_source(action, source_text)
+        or not _semantic_action_matches_source(action, source_text, context, data)
         or str(data.get("subject") or "").lower() != "self"
         or str(data.get("status") or "").lower() != "completed"
         or str(data.get("polarity") or "").lower() != "positive"
@@ -1381,20 +1707,49 @@ def _normalize_semantic_journal(data, source_text=""):
     out = {"intent": action_to_intent[action], "confidence": confidence}
     if action == "food":
         out["food_text"] = str(data.get("food_text") or "").strip()[:500]
+    elif action == "food_update":
+        out["target_id"] = int(data.get("target_id"))
+        out["food_text"] = str(data.get("food_text") or "").strip()[:500]
     elif action == "workout":
+        workout = data.get("workout")
+        out["workout"] = workout if isinstance(workout, dict) else {}
+    elif action == "workout_update":
+        out["target_id"] = int(data.get("target_id"))
         workout = data.get("workout")
         out["workout"] = workout if isinstance(workout, dict) else {}
     return out
 
+def _semantic_update_clarification(data, source_text):
+    """Recognize a safe correction whose target is ambiguous instead of guessing an ID."""
+    if not isinstance(data, dict):
+        return None
+    action = str(data.get("action") or "").strip().lower()
+    confidence = data.get("confidence")
+    if (
+        action not in {"food_update", "workout_update"}
+        or not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
+        or not math.isfinite(float(confidence)) or float(confidence) < 0.85
+        or str(data.get("subject") or "").lower() != "self"
+        or str(data.get("status") or "").lower() != "completed"
+        or str(data.get("polarity") or "").lower() != "positive"
+        or str(data.get("certainty") or "").lower() != "certain"
+        or str(data.get("primary_purpose") or "").lower() != "journal"
+        or not _semantic_source_subject_safe(source_text)
+        or not _JOURNAL_CORRECTION_RE.search(str(source_text or ""))
+    ):
+        return None
+    return "clarifymeal" if action == "food_update" else "clarifyworkout"
+
 async def resolve_semantic_journal_action(cid, text, user_generation=None):
     """Распознаёт естественное журналирование без привязки к порядку конкретных слов."""
-    if not _semantic_journal_candidate(text):
+    context = _journal_recent_context(cid)
+    if not _semantic_journal_candidate(text, context):
         return None
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     usage = []
     try:
         classified = await llm_to_thread(
-            cid, "journal_route", L.classify_journal_event, text, usage,
+            cid, "journal_route", L.classify_journal_event, text, usage, context,
             user_generation=generation,
         )
     except Exception as exc:
@@ -1405,7 +1760,14 @@ async def resolve_semantic_journal_action(cid, text, user_generation=None):
     if usage:
         ev(cid, "tokens", sum(usage), meta="journal_route", calls=len(usage), usage=usage,
            user_generation=generation)
-    return _normalize_semantic_journal(classified, text)
+    plan = _normalize_semantic_journal(classified, text, context)
+    if not plan:
+        clarification = _semantic_update_clarification(classified, text)
+        if clarification:
+            return {"intent": clarification}
+    if plan:
+        ev(cid, "journal_action_planned", meta=plan["intent"], user_generation=generation)
+    return plan
 
 def is_question_like(txt):
     t = (txt or "").strip().lower()
@@ -2885,6 +3247,21 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             if wu:
                 rows.append([InlineKeyboardButton("Открыть нагрузку", web_app=WebAppInfo(url=wu))])
         return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
+    if intent == "updateworkout":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await log_workout_update_action(
+            cid, u, txt, (journal or {}).get("target_id"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_workout=((journal or {}).get("workout")),
+        )
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать тренировку", f"wdel:{result['record_id']}")])
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть нагрузку", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
     if intent == "training":
         if general: return await send_general(context, cid, "training")
         _, st = status_of(cid); return await send_section(context, cid, st, "training")
@@ -2903,6 +3280,31 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             if wu:
                 rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
         return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
+    if intent == "updatemeal":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await log_food_update_action(
+            cid, u, txt, (journal or {}).get("target_id"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_food_text=((journal or {}).get("food_text")),
+        )
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
+    if intent == "clarifymeal":
+        return await msg.reply_text(
+            "Не уверена, какую именно запись еды изменить, поэтому ничего не меняла. "
+            "Напиши название и новое количество, например: «чипсы — 100 г»."
+        )
+    if intent == "clarifyworkout":
+        return await msg.reply_text(
+            "Не уверена, какую именно тренировку изменить, поэтому ничего не меняла. "
+            "Напиши её название и исправление, например: «приседания — 3 подхода по 12»."
+        )
     if intent == "diary":
         await context.bot.send_chat_action(cid, "typing"); usage = []
         t = await answer_diary(cid, usage); ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage), usage=usage)
@@ -4665,6 +5067,7 @@ async def handle_text(update, context, txt):
         t0 = time.monotonic(); usage = []
         ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
         ev(cid, "answered", meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
+        ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, None, txt, usage=usage, quote=txt)
     if is_onboarded(u):
@@ -4675,6 +5078,7 @@ async def handle_text(update, context, txt):
         t0 = time.monotonic(); usage = []
         ans = await think_llm(context, cid, L.answer_question, st, txt, llm_profile_of(u), hist_get(cid), usage=usage)
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
+        ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt)
     if is_question_like(txt):
@@ -5539,9 +5943,19 @@ def _agent_exec(cid, name, args):
             return {"logs": out[-12:]}
         if name == "today_diary":
             dp = diary_payload(cid)
-            return {"totals": dp.get("totals"), "target": dp.get("target"), "meals_logged": len(dp.get("meals") or [])}
+            meals = dp.get("meals") or []
+            return {
+                "totals": dp.get("totals"), "target": dp.get("target"),
+                "meals_logged": len(meals),
+                "meals": [
+                    {"id": m.get("id"), "title": m.get("title"), "grams": m.get("grams"),
+                     "kcal": m.get("kcal"), "slot": m.get("slot")}
+                    for m in meals[-12:]
+                ],
+            }
         if name == "recent_workouts":
-            return {"recent": _recent_workouts_text(cid) or "нет записей"}
+            context = _journal_recent_context(cid, limit=8)
+            return {"recent": context.get("workouts") or []}
         if name == "user_profile":
             u = row(cid) or {}; p = profile_of(u) or {}
             return {"height": p.get("height"), "weight": p.get("weight"), "age": p.get("age"),
@@ -5563,6 +5977,8 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None, ch
     Возвращает текст или None (тогда вызывающий откатывается к обычному ответу)."""
     plan_sys = ("Ты — планировщик ассистента по женскому здоровью. Реши, какие инструменты нужны, чтобы ответить "
                 "на вопрос пользовательницы по её РЕАЛЬНЫМ данным (цикл, симптомы, дневник еды, тренировки, профиль), и вызови их. "
+                "Если она спрашивает, сохранилась ли еда или что именно есть в дневнике, обязательно вызови today_diary. "
+                "Если спрашивает о сохранённой тренировке, обязательно вызови recent_workouts. "
                 "Если это приветствие, благодарность, болтовня или общий вопрос не про её здоровье и данные (фильмы, быт, отношения, работа) — НЕ вызывай НИКАКИЕ инструменты, включая cycle_status. "
                 "Если вопрос общий и данные не нужны — не вызывай инструменты. Сам развёрнутый ответ не пиши, только выбери инструменты.")
     messages = [{"role": "system", "content": plan_sys}, {"role": "user", "content": msg}]
@@ -5715,6 +6131,19 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
         if result.get("mutation"):
             out["mutation"] = result["mutation"]
         return out
+    if intent == "updateworkout":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала исправлять без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть нагрузку"]}
+        result = await log_workout_update_action(
+            cid, u, msg, (journal or {}).get("target_id"),
+            user_generation=generation, mutation_key=mutation_key,
+            preparsed_workout=((journal or {}).get("workout")),
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть нагрузку", "Что делать завтра?"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
     if intent == "logmeal":
         if require_mutation_key and not mutation_key:
             return {"answer": "Не стала записывать без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
@@ -5727,6 +6156,35 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
         if result.get("mutation"):
             out["mutation"] = result["mutation"]
         return out
+    if intent == "updatemeal":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала исправлять без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть питание"]}
+        result = await log_food_update_action(
+            cid, u, msg, (journal or {}).get("target_id"),
+            user_generation=generation, mutation_key=mutation_key,
+            preparsed_food_text=((journal or {}).get("food_text")),
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "clarifymeal":
+        return {
+            "answer": (
+                "Не уверена, какую именно запись еды изменить, поэтому ничего не меняла. "
+                "Напиши название и новое количество, например: «чипсы — 100 г»."
+            ),
+            "suggestions": ["Открыть питание"],
+        }
+    if intent == "clarifyworkout":
+        return {
+            "answer": (
+                "Не уверена, какую именно тренировку изменить, поэтому ничего не меняла. "
+                "Напиши её название и исправление, например: «приседания — 3 подхода по 12»."
+            ),
+            "suggestions": ["Открыть нагрузку"],
+        }
     if intent == "diary":
         usage = []; txt = await answer_diary(cid, usage)
         if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage), usage=usage)
@@ -5760,9 +6218,10 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
             ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid), usage=usage,
                                       request_id=request_id, user_generation=generation)
     current = _user_write_allowed(cid, generation)
-    if current:
-        hist_push(cid, msg, ans)
     clean, sugg = L.split_followups(ans)
+    clean = guard_aiwa_reply(cid, clean)
+    if current:
+        hist_push(cid, msg, clean)
     try:
         topical = L.followups(st, msg, clean)
         if topical:
@@ -5876,7 +6335,9 @@ def chat_mutation_route_preflight(cid, mutation_key):
         return None
     intent = {
         "food": "logmeal",
+        "food_update": "updatemeal",
         "workout": "logworkout",
+        "workout_update": "updateworkout",
         "period_start": "logperiod",
         "period_end": "period_end",
     }.get(prior[0])
@@ -5918,6 +6379,19 @@ def _food_action_success(rec, mid, event_date):
     return {"ok": True, "text": text_out, "record_id": mid, "rec": rec,
             "mutation": {"kind": "food", "date": event_date.isoformat()}}
 
+def _food_update_success(rec, mid, event_date):
+    grams = f", примерно {rec['grams']} г" if rec.get("grams") else ""
+    when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
+    text_out = (
+        f"Исправила запись{when}: {rec['title']}{grams} — около {rec['kcal']} ккал "
+        f"(Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). "
+        "Проверила сохранение — обновлённая запись уже в разделе «Питание»."
+    )
+    return {
+        "ok": True, "text": text_out, "record_id": mid, "rec": rec,
+        "mutation": {"kind": "food_update", "date": event_date.isoformat()},
+    }
+
 def _workout_action_success(rec, wid, event_date):
     details = []
     if rec.get("duration"):
@@ -5933,6 +6407,25 @@ def _workout_action_success(rec, wid, event_date):
         "record_id": wid,
         "rec": rec,
         "mutation": {"kind": "workout", "date": event_date.isoformat()},
+    }
+
+def _workout_update_success(rec, wid, event_date):
+    details = []
+    if rec.get("duration"):
+        details.append(rec["duration"])
+    if rec.get("rpe"):
+        details.append(rec["rpe"] + " нагрузка")
+    suffix = " · " + ", ".join(details) if details else ""
+    when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
+    return {
+        "ok": True,
+        "text": (
+            f"Исправила тренировку{when}: {rec['type']}{suffix}. "
+            "Проверила сохранение — обновление уже в разделе «Нагрузка»."
+        ),
+        "record_id": wid,
+        "rec": rec,
+        "mutation": {"kind": "workout_update", "date": event_date.isoformat()},
     }
 
 _CHAT_DATE_RE = re.compile(
@@ -6050,17 +6543,94 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
     mid = saved.get("id")
     if not mid:
         return {"ok": False, "text": "Не получилось сохранить запись. Попробуй ещё раз."}
-    rec = saved.get("data") or rec
+    verified = meal_get(cid, mid)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="food|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Запись отправилась на сохранение, но я не смогла проверить её в дневнике. Попробуй ещё раз."}
+    rec = verified
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     if saved.get("created"):
         ev(cid, "goal", meta="food_log", user_generation=generation)
         ev(cid, "manual", meta="food_log", user_generation=generation)
+        ev(cid, "journal_mutation_executed", meta="create|food", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|create_meal|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="create|food", user_generation=generation)
     return _food_action_success(rec, mid, date.fromisoformat(rec.get("date") or event_date.isoformat()))
 
 async def log_food_from_text(cid, u, text, user_generation=None, mutation_key=None):
     result = await log_food_action(cid, u, text, user_generation=user_generation, mutation_key=mutation_key)
     return result["text"]
+
+async def log_food_update_action(cid, u, text, target_id, user_generation=None,
+                                 mutation_key=None, preparsed_food_text=None):
+    """Update one explicit owned meal, then acknowledge only the verified DB row."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("food_update", f"{target_id}\n{text}")
+    prior = chat_mutation_preflight(cid, mutation_key, "food_update", args_hash)
+    if prior:
+        if prior["status"] == "duplicate" and prior.get("data"):
+            saved_date = date.fromisoformat(prior["data"].get("date") or dtoday().isoformat())
+            return _food_update_success(prior["data"], prior.get("id"), saved_date)
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+        return {"ok": False, "text": "Не стала повторять исправление: идентификатор запроса уже использован."}
+    current = meal_get(cid, target_id)
+    if not current:
+        return {"ok": False, "text": "Не нашла запись, которую нужно исправить. Открой дневник и уточни приём пищи."}
+    ev(cid, "journal_action_planned", meta="update|food", user_generation=generation)
+    correction = str(preparsed_food_text or "").strip()[:500]
+    grams_match = re.search(r"\b(\d{1,4})\s*(?:г|гр|грамм\w*)\b", text or "", re.I)
+    if not correction:
+        correction = (
+            f"{current['title']}, {grams_match.group(1)} г"
+            if grams_match else f"{current['title']}. Уточнение пользовательницы: {text}"
+        )
+    usage = []
+    parsed = await llm_to_thread(
+        cid, "food_update", L.analyze_food_text, correction, profile_of(u), usage,
+        user_generation=generation,
+    )
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="food_update", calls=len(usage), usage=usage,
+           user_generation=generation)
+    rec = normalize_food(parsed, "text") if parsed else None
+    if not rec and grams_match and current.get("grams"):
+        new_grams = int(grams_match.group(1))
+        ratio = new_grams / float(current["grams"])
+        rec = dict(current)
+        rec.update({
+            "grams": new_grams,
+            "kcal": int(round(current["kcal"] * ratio)),
+            "protein": round(current["protein"] * ratio, 1),
+            "fat": round(current["fat"] * ratio, 1),
+            "carbs": round(current["carbs"] * ratio, 1),
+            "source": "text",
+        })
+    if not rec:
+        return {"ok": False, "text": "Не поняла исправление. Уточни продукт и новое количество, например «чипсов было 100 г»."}
+    rec["slot"] = current.get("slot") or slot_for_now()
+    saved = meal_update(
+        cid, target_id, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    if not saved or saved.get("status") not in {"updated", "duplicate"}:
+        ev(cid, "journal_mutation_failed", meta=f"food_update|{(saved or {}).get('status', 'failed')}",
+           user_generation=generation)
+        return {"ok": False, "text": "Не получилось исправить запись. Ничего не меняла — попробуй ещё раз."}
+    verified = meal_get(cid, target_id)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="food_update|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить исправление в дневнике. Попробуй ещё раз."}
+    if saved.get("updated"):
+        ev(cid, "journal_mutation_executed", meta="update|food", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|update_meal|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="update|food", user_generation=generation)
+    return _food_update_success(
+        verified, target_id, date.fromisoformat(verified.get("date") or dtoday().isoformat()),
+    )
 
 async def log_workout_action(cid, u, text, user_generation=None, mutation_key=None, preparsed_workout=None):
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
@@ -6113,13 +6683,81 @@ async def log_workout_action(cid, u, text, user_generation=None, mutation_key=No
     wid = saved.get("id")
     if not wid:
         return {"ok": False, "text": "Не получилось сохранить тренировку. Попробуй ещё раз."}
-    rec = saved.get("data") or rec
+    verified = workout_get(cid, wid)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="workout|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Тренировка отправилась на сохранение, но я не смогла проверить её в дневнике. Попробуй ещё раз."}
+    rec = verified
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     if saved.get("created"):
         ev(cid, "goal", meta="workout", user_generation=generation)
         ev(cid, "manual", meta="workout", user_generation=generation)
+        ev(cid, "journal_mutation_executed", meta="create|workout", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|create_workout|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="create|workout", user_generation=generation)
     return _workout_action_success(rec, wid, date.fromisoformat(rec.get("date") or event_date.isoformat()))
+
+async def log_workout_update_action(cid, u, text, target_id, user_generation=None,
+                                    mutation_key=None, preparsed_workout=None):
+    """Update one explicit owned workout and confirm only its verified DB state."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("workout_update", f"{target_id}\n{text}")
+    prior = chat_mutation_preflight(cid, mutation_key, "workout_update", args_hash)
+    if prior:
+        if prior["status"] == "duplicate" and prior.get("data"):
+            saved_date = date.fromisoformat(prior["data"].get("date") or dtoday().isoformat())
+            return _workout_update_success(prior["data"], prior.get("id"), saved_date)
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+        return {"ok": False, "text": "Не стала повторять исправление: идентификатор запроса уже использован."}
+    current = workout_get(cid, target_id)
+    if not current:
+        return {"ok": False, "text": "Не нашла тренировку, которую нужно исправить. Открой раздел «Нагрузка» и уточни запись."}
+    ev(cid, "journal_action_planned", meta="update|workout", user_generation=generation)
+    usage = []
+    parsed = preparsed_workout if isinstance(preparsed_workout, dict) else None
+    if parsed is None:
+        parsed = await llm_to_thread(
+            cid, "workout_update", L.analyze_workout_text,
+            f"{current['type']} {current.get('note') or ''}. Уточнение: {text}", usage,
+            user_generation=generation,
+        )
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="workout_update", calls=len(usage), usage=usage,
+           user_generation=generation)
+    rec = normalize_workout(parsed, text) if parsed else None
+    if not rec:
+        return {"ok": False, "text": "Не поняла исправление тренировки. Уточни длительность, упражнение или количество повторов."}
+    for field in ("type", "duration", "rpe", "note", "review", "muscles"):
+        if not rec.get(field) and current.get(field):
+            rec[field] = current[field]
+    if not rec.get("items") and current.get("items"):
+        rec["items"] = current["items"]
+    prof = profile_of(u) or {}
+    if rec.get("duration"):
+        rec["kcal"] = workout_calories(rec["type"], rec["duration"], rec.get("rpe"), prof.get("weight"))
+    saved = workout_update(
+        cid, target_id, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    if not saved or saved.get("status") not in {"updated", "duplicate"}:
+        ev(cid, "journal_mutation_failed", meta=f"workout_update|{(saved or {}).get('status', 'failed')}",
+           user_generation=generation)
+        return {"ok": False, "text": "Не получилось исправить тренировку. Ничего не меняла — попробуй ещё раз."}
+    verified = workout_get(cid, target_id)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="workout_update|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить исправление тренировки. Попробуй ещё раз."}
+    if saved.get("updated"):
+        ev(cid, "journal_mutation_executed", meta="update|workout", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|update_workout|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="update|workout", user_generation=generation)
+    return _workout_update_success(
+        verified, target_id, date.fromisoformat(verified.get("date") or dtoday().isoformat()),
+    )
 
 async def log_period_action(cid, u, text, context=None, user_generation=None, mutation_key=None):
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
