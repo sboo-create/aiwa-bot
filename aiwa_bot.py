@@ -12,7 +12,7 @@ except ImportError:
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import (Application, CommandHandler, MessageHandler,
-                          CallbackQueryHandler, ContextTypes, filters)
+                          CallbackQueryHandler, ContextTypes, TypeHandler, filters)
 from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter, Forbidden
 from aiohttp import web
 import requests
@@ -22,6 +22,8 @@ from urllib.parse import parse_qsl as _pqsl, urlsplit as _urlsplit, quote as _ur
 import cycle as C
 import llm as L
 import analytics_v2 as A2
+import tracing as TR
+import startup as STARTUP
 
 class KBS:
     PRIMARY = "primary"
@@ -76,7 +78,8 @@ def hist_push(cid, q, a):
     except Exception: pass
     return True
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+TR.install_log_record_factory()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s trace=%(trace_id)s %(message)s")
 # httpx логирует полный URL с токеном бота на уровне INFO — глушим, чтобы токен не утекал в логи
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("aiwa")
@@ -352,6 +355,7 @@ def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None):
     """Dual-write legacy counters and privacy-preserving analytics v2."""
+    request_id = request_id or TR.current_trace_id(create=False) or None
     tin = tout = 0; model = None
     if usage:
         try: tin, tout, model = L.usage_split(usage)
@@ -373,7 +377,7 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
 
 async def llm_to_thread(cid, purpose, func, *args, request_id=None, user_generation=None, **kwargs):
     """Run a provider call with a shared trace id and pseudonymous user key."""
-    request_id = request_id or ("r_" + secrets.token_hex(16))
+    request_id = request_id or TR.current_trace_id()
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     def run():
         with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose,
@@ -2015,7 +2019,7 @@ def mark_period(context, cid, iso):
     schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
-    request_id = kwargs.pop("_request_id", None) or ("r_" + secrets.token_hex(16))
+    request_id = kwargs.pop("_request_id", None) or TR.current_trace_id()
     purpose = kwargs.pop("_purpose", None) or getattr(fn, "__name__", "llm_call").lstrip("_")
     def run():
         with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose):
@@ -3412,6 +3416,15 @@ async def on_error(update, context):
             f"⚠️ Ошибка обработчика: {type(err).__name__}\nПроверь Railway logs.")
     except Exception: pass
 
+
+async def bind_update_trace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Seed one trace for the complete Telegram update handling task."""
+    trace_id = TR.bind_trace_id()
+    if context.chat_data is not None:
+        context.chat_data["_trace_id"] = trace_id
+    log.info("telegram update accepted update_id=%s", getattr(update, "update_id", None))
+
+
 async def admin_alert(app, key, text, cooldown=900):
     if not AIWA_ADMIN:
         return
@@ -4140,7 +4153,7 @@ async def _chat_reply(cid, u, msg, user_generation=None):
         if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage), usage=usage)
         return {"answer": txt, "suggestions": ["Открыть питание", "Что купить?"]}
     _, st = status_of(cid); usage = []; prof = profile_of(u)
-    request_id = "r_" + secrets.token_hex(16)
+    request_id = TR.current_trace_id()
     ans = None
     try:
         ans = await _agent_answer(cid, u, msg, usage, request_id, user_generation=generation)
@@ -5154,6 +5167,18 @@ async def _admin_login(request):
     return _set_admin_session(resp)
 
 @web.middleware
+async def _trace_request(request, handler):
+    incoming = request.headers.get(TR.TRACE_HEADER)
+    with TR.trace_context(incoming) as trace_id:
+        log.info("http request started method=%s path=%s", request.method, request.path)
+        response = await handler(request)
+        response.headers[TR.TRACE_HEADER] = trace_id
+        log.info("http request completed method=%s path=%s status=%s",
+                 request.method, request.path, response.status)
+        return response
+
+
+@web.middleware
 async def _security_headers(request, handler):
     response = await handler(request)
     if request.path == "/admin" or request.path.startswith("/api/admin_"):
@@ -5177,7 +5202,8 @@ async def _health(request):
     return web.json_response({"status": "ok" if APP_READY else "starting", "version": AIWA_VERSION}, status=status)
 
 def build_web():
-    aio = web.Application(client_max_size=20 * 1024 * 1024, middlewares=[_security_headers])  # фото до ~20 МБ
+    aio = web.Application(client_max_size=20 * 1024 * 1024,
+                          middlewares=[_trace_request, _security_headers])  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
     aio.router.add_get("/health", _health)
     aio.router.add_get("/admin", _admin_page)
@@ -5217,9 +5243,9 @@ def build_web():
     aio.router.add_get("/{tail:.*}", _serve_index)
     return aio
 
-async def run_all():
+def build_telegram_application():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).concurrent_updates(True).build()
-    global BOT_APP; BOT_APP = app
+    app.add_handler(TypeHandler(Update, bind_update_trace), group=-1)
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
                     ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd), ("voicetest", voicetest_cmd)):
@@ -5229,14 +5255,72 @@ async def run_all():
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    return app
+
+
+async def _start_web_runner():
     runner = web.AppRunner(build_web()); await runner.setup()
     port = int(os.environ.get("PORT", "8080"))
     # Binding to all interfaces is required inside the Railway container.
     site = web.TCPSite(runner, "0.0.0.0", port); await site.start()  # nosec B104
+    log.info("AIWA web API on :%s", port)
+    return runner
+
+
+async def run_api():
+    """Public HTTP role. It never starts Telegram polling or scheduled jobs."""
+    await STARTUP.wait_for_role("api")
+    app = build_telegram_application()
+    global BOT_APP, APP_READY
+    BOT_APP = app
+    await app.initialize()  # initializes Bot for API actions such as report delivery
+    runner = await _start_web_runner()
+    APP_READY = True
+    log.info("AIWA API role ready")
+    try:
+        await asyncio.Event().wait()
+    finally:
+        APP_READY = False
+        await runner.cleanup()
+        await app.shutdown()
+
+
+async def run_telegram():
+    """Singleton Telegram long-polling role; it exposes no public HTTP port."""
+    await STARTUP.wait_for_role("telegram")
+    app = build_telegram_application()
+    global BOT_APP
+    BOT_APP = app
     await app.initialize(); await on_startup(app); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    global APP_READY; APP_READY = True
-    log.info("AIWA bot + web on :%s", port)
-    await asyncio.Event().wait()
+    log.info("AIWA Telegram polling role ready")
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+
+
+async def run_all():
+    """Legacy local mode: API and Telegram polling in one process."""
+    app = build_telegram_application()
+    global BOT_APP, APP_READY
+    BOT_APP = app
+    runner = await _start_web_runner()
+    await app.initialize()
+    await on_startup(app)
+    await app.start()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    APP_READY = True
+    log.info("AIWA legacy combined role ready")
+    try:
+        await asyncio.Event().wait()
+    finally:
+        APP_READY = False
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        await runner.cleanup()
 
 def main():
     asyncio.run(run_all())
