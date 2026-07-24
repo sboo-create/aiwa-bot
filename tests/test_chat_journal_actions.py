@@ -376,6 +376,114 @@ class ChatJournalActionTests(unittest.TestCase):
         self.assertEqual(result["mutation"]["kind"], "food")
         self.assertEqual(len(bot.meals_of(self.cid)), 1)
 
+    def test_multiturn_food_followup_and_correction_update_the_verified_record(self):
+        blueberry_route = {
+            "action": "food", "target_id": None, "subject": "self",
+            "status": "completed", "polarity": "positive", "certainty": "certain",
+            "primary_purpose": "journal", "confidence": 0.98,
+            "food_text": "голубика 100 г", "workout": {},
+        }
+        chips_route = {
+            "action": "food", "target_id": None, "subject": "self",
+            "status": "completed", "polarity": "positive", "certainty": "certain",
+            "primary_purpose": "journal", "confidence": 0.97,
+            "food_text": "чипсы Pringles со сметаной и зеленью, вся пачка", "workout": {},
+        }
+        foods = [
+            {"title": "Голубика", "grams": 100, "kcal": 57, "protein": 1, "fat": 0, "carbs": 14},
+            {"title": "Pringles сметана и зелень", "grams": 150, "kcal": 795,
+             "protein": 6, "fat": 50, "carbs": 80},
+            {"title": "Pringles сметана и зелень", "grams": 100, "kcal": 530,
+             "protein": 4, "fat": 33, "carbs": 53},
+        ]
+        with (
+            mock.patch.object(bot.L, "classify_journal_event", side_effect=[blueberry_route, chips_route]),
+            mock.patch.object(bot.L, "analyze_food_text", side_effect=foods[:2]),
+        ):
+            first = asyncio.run(bot._chat_reply(
+                self.cid, bot.row(self.cid), "Я съела голубику",
+                mutation_key=bot.chat_mutation_key("webchat", "berries"),
+                require_mutation_key=True,
+            ))
+            second = asyncio.run(bot._chat_reply(
+                self.cid, bot.row(self.cid),
+                "И еще чипсы Pringles всю пачку со сметаной и зеленью",
+                mutation_key=bot.chat_mutation_key("webchat", "chips"),
+                require_mutation_key=True,
+            ))
+        self.assertEqual(first["mutation"]["kind"], "food")
+        self.assertEqual(second["mutation"]["kind"], "food")
+        meals = bot.meals_of(self.cid)
+        self.assertEqual([m["title"] for m in meals], ["Голубика", "Pringles сметана и зелень"])
+        chips_id = meals[-1]["id"]
+
+        correction_route = {
+            "action": "food_update", "target_id": chips_id, "subject": "self",
+            "status": "completed", "polarity": "positive", "certainty": "certain",
+            "primary_purpose": "journal", "confidence": 0.99,
+            "food_text": "чипсы Pringles со сметаной и зеленью 100 г", "workout": {},
+        }
+        with (
+            mock.patch.object(bot.L, "classify_journal_event", return_value=correction_route),
+            mock.patch.object(bot.L, "analyze_food_text", return_value=foods[2]),
+        ):
+            corrected = asyncio.run(bot._chat_reply(
+                self.cid, bot.row(self.cid), "Ну я меньше съела, грамм 100",
+                mutation_key=bot.chat_mutation_key("webchat", "chips-correction"),
+                require_mutation_key=True,
+            ))
+        self.assertEqual(corrected["mutation"]["kind"], "food_update")
+        self.assertIn("Проверила сохранение", corrected["answer"])
+        after = bot.diary_payload(self.cid)["meals"]
+        self.assertEqual(len(after), 2)
+        self.assertEqual(after[-1]["id"], chips_id)
+        self.assertEqual(after[-1]["grams"], 100)
+        self.assertEqual(after[-1]["kcal"], 530)
+
+    def test_squats_are_logged_as_a_partial_workout(self):
+        route = {
+            "action": "workout", "target_id": None, "subject": "self",
+            "status": "completed", "polarity": "positive", "certainty": "certain",
+            "primary_purpose": "journal", "confidence": 0.98, "food_text": "",
+            "workout": {
+                "type": "Силовая", "duration_minutes": None, "rpe": "",
+                "items": [{"name": "приседания", "sets": None, "reps": None,
+                           "weight": None, "group": "ноги"}],
+                "note": "",
+            },
+        }
+        with (
+            mock.patch.object(bot.L, "classify_journal_event", return_value=route),
+            mock.patch.object(bot.L, "analyze_workout_text", side_effect=AssertionError("second model call")),
+        ):
+            result = asyncio.run(bot._chat_reply(
+                self.cid, bot.row(self.cid), "Я поприседала",
+                mutation_key=bot.chat_mutation_key("webchat", "squats"),
+                require_mutation_key=True,
+            ))
+        self.assertEqual(result["mutation"]["kind"], "workout")
+        saved = bot.workouts_of(self.cid)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["type"], "Силовая")
+        self.assertEqual(saved[0]["duration"], "")
+
+    def test_unverified_model_write_claim_is_blocked_and_not_stored_in_history(self):
+        with (
+            mock.patch.object(bot, "_agent_answer", new=mock.AsyncMock(
+                return_value="Да, я записала чипсы и скорректировала порцию."
+            )),
+            mock.patch.object(bot.L, "followups", return_value=[]),
+        ):
+            result = asyncio.run(bot._chat_reply(
+                self.cid, bot.row(self.cid), "А почему ты не записала чипсы?",
+                mutation_key=bot.chat_mutation_key("webchat", "verify-question"),
+                require_mutation_key=True,
+            ))
+        self.assertIn("сервер не подтвердил", result["answer"])
+        self.assertNotIn("я записала чипсы", result["answer"].lower())
+        self.assertEqual(bot.meals_of(self.cid), [])
+        self.assertNotIn("я записала чипсы", " ".join(x["content"].lower() for x in bot.hist_get(self.cid)))
+
     def test_food_phrase_is_cleaned_saved_and_visible_to_app(self):
         parsed = {
             "title": "Творог 5%",
@@ -414,6 +522,40 @@ class ChatJournalActionTests(unittest.TestCase):
         self.assertEqual(first["record_id"], second["record_id"])
         self.assertEqual(len(bot.meals_of(self.cid)), 1)
         analyze.assert_called_once()
+
+    def test_food_update_is_owned_idempotent_and_reversed_with_the_record(self):
+        original = bot.normalize_food({
+            "title": "Чипсы", "grams": 150, "kcal": 795,
+            "protein": 6, "fat": 50, "carbs": 80,
+        }, "text")
+        mid = bot.meal_add(self.cid, original)
+        key = bot.chat_mutation_key("telegram", "same-update-correction")
+        corrected = {
+            "title": "Чипсы", "grams": 100, "kcal": 530,
+            "protein": 4, "fat": 33, "carbs": 53,
+        }
+        with mock.patch.object(bot.L, "analyze_food_text", return_value=corrected) as analyze:
+            first = asyncio.run(bot.log_food_update_action(
+                self.cid, bot.row(self.cid), "Нет, было 100 г", mid,
+                mutation_key=key,
+            ))
+            replay = asyncio.run(bot.log_food_update_action(
+                self.cid, bot.row(self.cid), "Нет, было 100 г", mid,
+                mutation_key=key,
+            ))
+        self.assertTrue(first["ok"])
+        self.assertTrue(replay["ok"])
+        self.assertEqual(first["record_id"], replay["record_id"])
+        self.assertEqual(bot.meal_get(self.cid, mid)["grams"], 100)
+        analyze.assert_called_once()
+
+        bot.meal_del(self.cid, mid)
+        after_delete = asyncio.run(bot.log_food_update_action(
+            self.cid, bot.row(self.cid), "Нет, было 100 г", mid,
+            mutation_key=key,
+        ))
+        self.assertFalse(after_delete["ok"])
+        self.assertIsNone(bot.meal_get(self.cid, mid))
 
     def test_mutation_replay_uses_canonical_payload_and_respects_undo(self):
         key = bot.chat_mutation_key("webchat", "same-request")
