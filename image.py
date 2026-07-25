@@ -400,3 +400,100 @@ if __name__=="__main__":
     with tempfile.NamedTemporaryFile(prefix="aiwa-cycle-", suffix=".png", delete=False) as fh:
         fh.write(render_cycle(date(2026,5,25),29,date(2026,6,17)))
         print("wrote", fh.name)
+
+
+# ================= Карточка сводки v2: белый фон + маскот + персональные строки =================
+WHITE=(255,255,255); CARD_INK=(31,41,55); CARD_SOFT=(120,113,108)
+ORANGE=(249,115,22); PEACH=(255,237,213); PEACH_SOFT=(255,247,237)
+MASCOT=os.path.join(HERE,"assets","mascot.png")
+
+def _mascot(img, cx, top, h):
+    """Маскот из PNG как есть; если файла нет — карточка рисуется без него."""
+    if not os.path.exists(MASCOT): return top
+    try:
+        m=Image.open(MASCOT).convert("RGBA")
+        w=int(h*m.width/m.height)
+        m=m.resize((w,h), Image.LANCZOS)
+        img.paste(m,(cx-w//2,top),m)
+        return top+h
+    except Exception:
+        return top
+
+def _chip(d, cx, y, text, font, pad_x, pad_y, bg, fg, S_):
+    tw=d.textlength(text,font=font)
+    x0=cx-tw/2-pad_x; x1=cx+tw/2+pad_x
+    d.rounded_rectangle([x0,y,x1,y+font.size+pad_y*2], radius=(font.size+pad_y*2)//2, fill=bg)
+    d.text((cx,y+pad_y),text,font=font,fill=fg,anchor="ma")
+    return y+font.size+pad_y*2
+
+def _wrap(d, text, font, maxw):
+    words=(text or "").split(); lines=[]; cur=""
+    for w in words:
+        t=(cur+" "+w).strip()
+        if d.textlength(t,font=font)<=maxw: cur=t
+        else:
+            if cur: lines.append(cur)
+            cur=w
+    if cur: lines.append(cur)
+    return lines[:2]
+
+def _icon_row(d, x, y, w, label, text, f_lab, f_txt, S_):
+    """Ряд-чип: слева капс-лейбл в персиковой пилюле, справа текст (эмодзи в PIL нецветные, поэтому лейблы)."""
+    row_h=int(76*S_)
+    d.rounded_rectangle([x,y,x+w,y+row_h], radius=int(20*S_), fill=PEACH_SOFT)
+    lw=d.textlength(label,font=f_lab)
+    px=int(14*S_); py=int(10*S_)
+    d.rounded_rectangle([x+px,y+row_h//2-f_lab.size//2-py//2, x+px+lw+px*2, y+row_h//2+f_lab.size//2+py//2],
+                        radius=int(12*S_), fill=PEACH)
+    d.text((x+px*2,y+row_h//2),label,font=f_lab,fill=ORANGE,anchor="lm")
+    tx=x+px*3+lw+int(6*S_)
+    lines=_wrap(d,text,f_txt,w-(tx-x)-px)
+    if len(lines)==1:
+        d.text((tx,y+row_h//2),lines[0],font=f_txt,fill=CARD_INK,anchor="lm")
+    else:
+        d.text((tx,y+row_h//2-f_txt.size//2-int(2*S_)),lines[0],font=f_txt,fill=CARD_INK,anchor="lm")
+        d.text((tx,y+row_h//2+f_txt.size//2+int(2*S_)),lines[1],font=f_txt,fill=CARD_INK,anchor="lm")
+    return y+row_h+int(14*S_)
+
+def render_daily_card(mode, data):
+    """Карточка сводки: белый фон, маскот, крупные данные + персональные строки от модели.
+    data: cycle: day,total,to_period,phase_ru,feature,food,activity
+          preg:  week,trimester,days_left,fruit,feature,food,activity
+          meno:  focus,theme,feature,food,activity,sleep"""
+    W,H=720,960
+    img=Image.new("RGB",(W*S,H*S),WHITE); d=ImageDraw.Draw(img)
+    def X(v): return int(v*S)
+    f_big=_f("DejaVuSans-Bold.ttf",64); f_chip=_f("DejaVuSans-Bold.ttf",22)
+    f_acc=_f("DejaVuSans-Bold.ttf",26); f_feat=_f("DejaVuSans.ttf",22)
+    f_lab=_f("DejaVuSans-Bold.ttf",15); f_row=_f("DejaVuSans.ttf",20)
+    cx=X(W//2); pad=X(48); cw=X(W)-pad*2
+    y=_mascot(img,cx,X(36),X(150)) + X(20)
+    if mode=="preg":
+        d.text((cx,y),f"{data.get('week','')} неделя",font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
+        y=_chip(d,cx,y,f"{data.get('trimester','')} триместр",f_chip,X(18),X(9),PEACH,ORANGE,S)+X(12)
+        d.text((cx,y),f"До встречи ~{data.get('days_left','')} дней",font=f_acc,fill=ORANGE,anchor="ma"); y+=f_acc.size+X(12)
+        if data.get("fruit"):
+            d.text((cx,y),f"Малыш размером с {data['fruit']}",font=f_feat,fill=CARD_SOFT,anchor="ma"); y+=f_feat.size+X(10)
+        rows=[("ПИТАНИЕ",data.get("food")),("АКТИВНОСТЬ",data.get("activity"))]
+    elif mode=="meno":
+        d.text((cx,y),data.get("focus","Твой день"),font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
+        if data.get("theme"):
+            y=_chip(d,cx,y,data["theme"],f_chip,X(18),X(9),PEACH,ORANGE,S)+X(12)
+        rows=[("ПИТАНИЕ",data.get("food")),("ДВИЖЕНИЕ",data.get("activity")),("СОН",data.get("sleep"))]
+    else:
+        d.text((cx,y),f"День {data.get('day','')} из {data.get('total','')}",font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
+        y=_chip(d,cx,y,f"{data.get('phase_ru','')} фаза",f_chip,X(18),X(9),PEACH,ORANGE,S)+X(12)
+        d.text((cx,y),f"До месячных ~{data.get('to_period','')} дней",font=f_acc,fill=ORANGE,anchor="ma"); y+=f_acc.size+X(12)
+        rows=[("ПИТАНИЕ",data.get("food")),("НАГРУЗКА",data.get("activity"))]
+    if data.get("feature"):
+        for ln in _wrap(d,data["feature"],f_feat,cw):
+            d.text((cx,y),ln,font=f_feat,fill=CARD_SOFT,anchor="ma"); y+=f_feat.size+X(6)
+        y+=X(14)
+    else:
+        y+=X(10)
+    for label,text in rows:
+        if text: y=_icon_row(d,pad,y,cw,label,text,f_lab,f_row,S)
+    # высота по контенту: без пустой нижней трети
+    bottom=min(H*S, y+X(28))
+    img=img.crop((0,0,W*S,bottom)).resize((W,bottom//S),Image.LANCZOS)
+    buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()

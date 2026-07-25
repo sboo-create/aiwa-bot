@@ -91,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-24-v112-transactional-journal"
+AIWA_VERSION = "2026-07-25-v108-personal-cards"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2209,12 +2209,60 @@ async def begin_onboard(cid, msg, force=False):
     upsert(cid, state=None, pending_date=None)
     await msg.reply_text(START_TEXT, reply_markup=ONB_KB)
 
+_CARD_CACHE = {}
+
+def _card_ctx(cid, u, st=None, preg=None):
+    """Контекст для персональных строк карточки: состояние + чек-ин + дневник + память."""
+    bits = []
+    if st: bits.append(f"День цикла {st['day']} из {st['cycle_len']}, {st['subphase']} {st['phase_ru'].lower()} фаза, до месячных ~{st['days_to_next']} дн")
+    if preg: bits.append(f"Беременность: {preg.get('week')} нед, {preg.get('trimester')} триместр")
+    if u and u.get("mode") == "meno": bits.append("Режим: менопауза")
+    h = last_hint(cid)
+    if h: bits.append("Вчерашний чек-ин: " + h)
+    try:
+        from datetime import timedelta as _td
+        _y = (dtoday() - _td(days=1)).isoformat()
+        _tot = diary_totals(cid, _y)
+        if _tot and _tot.get("kcal"): bits.append(f"Еда вчера: {round(_tot['kcal'])} ккал, белок {round(_tot.get('protein',0))} г")
+    except Exception: pass
+    try:
+        _rw = _recent_workouts_text(cid)
+        if _rw: bits.append("Недавние тренировки: " + _rw)
+    except Exception: pass
+    try:
+        _mm = mem_text(cid, 8)
+        if _mm: bits.append("Память: " + _mm)
+    except Exception: pass
+    p = profile_of(u)
+    if p and p.get("age"): bits.append(f"Возраст {p['age']}")
+    return ". ".join(bits)
+
+async def _card_captions(cid, mode, ctx):
+    key = (cid, dtoday().isoformat(), AIWA_VERSION, mode)
+    hit = _CARD_CACHE.get(key)
+    if hit is not None: return hit
+    _cu = []
+    caps = {}
+    try:
+        caps = await llm_to_thread(cid, "card_captions", L.card_captions, mode, ctx, _cu) or {}
+    except Exception as e:
+        log.warning("card_captions %s: %s", cid, e)
+    if _cu: ev(cid, "tokens", sum(_cu), meta="summary", calls=len(_cu), usage=_cu)
+    _CARD_CACHE[key] = caps; _prune_day(_CARD_CACHE)
+    return caps
+
 async def send_infographic(bot, cid):
     if not IMG: return
     u, st = status_of(cid)
     if not st: return
     try:
-        png = await asyncio.to_thread(IMG.render_cycle, date.fromisoformat(u["last_period"]), u["cycle_len"], dtoday())
+        caps = await _card_captions(cid, "cycle", _card_ctx(cid, u, st=st))
+        if caps.get("food") and hasattr(IMG, "render_daily_card"):
+            data = {"day": st["day"], "total": st["cycle_len"], "to_period": st["days_to_next"],
+                    "phase_ru": st["phase_ru"], **caps}
+            png = await asyncio.to_thread(IMG.render_daily_card, "cycle", data)
+        else:
+            png = await asyncio.to_thread(IMG.render_cycle, date.fromisoformat(u["last_period"]), u["cycle_len"], dtoday())
         bio = io.BytesIO(png); bio.name = "cycle.png"
         await bot.send_photo(cid, photo=bio, caption=f"AIWA · {st['subphase']} {st['phase_ru'].lower()}, день {st['day']}. Месячные через ~{st['days_to_next']} дн.")
         return True
@@ -2234,7 +2282,20 @@ async def send_general_infographic(bot, cid, u=None):
         except Exception:
             pregnancy = None
     try:
-        png = await asyncio.to_thread(IMG.render_general_summary, mode, dtoday(), pregnancy)
+        _m = "preg" if (mode == "preg" and pregnancy) else ("meno" if mode == "meno" else None)
+        png = None
+        if _m and hasattr(IMG, "render_daily_card"):
+            caps = await _card_captions(cid, _m, _card_ctx(cid, u, preg=pregnancy))
+            if caps.get("food"):
+                if _m == "preg":
+                    data = {"week": pregnancy.get("week"), "trimester": pregnancy.get("trimester"),
+                            "days_left": max(0, pregnancy.get("days_left", 0)),
+                            "fruit": (preg_fruit(pregnancy.get("week")) if "preg_fruit" in globals() else None), **caps}
+                else:
+                    data = dict(caps)
+                png = await asyncio.to_thread(IMG.render_daily_card, _m, data)
+        if png is None:
+            png = await asyncio.to_thread(IMG.render_general_summary, mode, dtoday(), pregnancy)
         bio = io.BytesIO(png); bio.name = "summary.png"
         await bot.send_photo(cid, photo=bio)
         return True
@@ -3862,6 +3923,22 @@ async def summary_prepare_job(context: ContextTypes.DEFAULT_TYPE):
             if ph * 60 + pm > ah * 60 + am:
                 target += timedelta(days=1)
         await prepare_daily_summary(cid, target.isoformat())
+        try:
+            _u = row(cid)
+            if is_onboarded(_u):
+                if not is_cycle(_u):
+                    _pg = None
+                    if _u.get("mode") == "preg" and _u.get("last_period"):
+                        try: _pg = C.preg_status(_u["last_period"])
+                        except Exception: _pg = None
+                    _m = "preg" if _pg else ("meno" if _u.get("mode") == "meno" else None)
+                    if _m: await _card_captions(cid, _m, _card_ctx(cid, _u, preg=_pg))
+                else:
+                    _u2, _st = status_of(cid)
+                    if _st and _st["status"] == "normal":
+                        await _card_captions(cid, "cycle", _card_ctx(cid, _u2, st=_st))
+        except Exception as _ce:
+            log.warning("card prewarm %s: %s", cid, _ce)
     except Exception as exc:
         # Delivery still runs at the selected time and can generate on demand or
         # fall back, so preparation failure must never cancel the send job.
