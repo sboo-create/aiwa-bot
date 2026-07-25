@@ -91,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-25-v111-card-overflow-guards"
+AIWA_VERSION = "2026-07-25-v112-card-consistency"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2242,17 +2242,19 @@ def _card_ctx(cid, u, st=None, preg=None):
     if p and p.get("age"): bits.append(f"Возраст {p['age']}")
     return ". ".join(bits)
 
-async def _card_captions(cid, mode, ctx):
-    key = (cid, dtoday().isoformat(), AIWA_VERSION, mode)
+async def _card_captions(cid, mode, ctx, summary=None):
+    key = (cid, dtoday().isoformat(), AIWA_VERSION, mode, bool(summary))
     hit = _CARD_CACHE.get(key)
     if hit is not None: return hit
+    if summary:
+        ctx = (ctx or "") + " || Текст сегодняшней сводки — строки карточки ОБЯЗАНЫ быть согласованы с ним, не противоречь продуктам и советам: " + str(summary)[:900]
     _cu = []
     caps = {}
     try:
         caps = await llm_to_thread(cid, "card_captions", L.card_captions, mode, ctx, _cu) or {}
     except Exception as e:
         log.warning("card_captions %s: %s", cid, e)
-    if _cu: ev(cid, "tokens", sum(_cu), meta="summary", calls=len(_cu), usage=_cu)
+    if _cu: ev(cid, "tokens", sum(_cu), meta="card", calls=len(_cu), usage=_cu)
     def _cut(v, lim=80):
         v = str(v).strip()
         if len(v) <= lim: return v
@@ -2263,11 +2265,11 @@ async def _card_captions(cid, mode, ctx):
     _CARD_CACHE[key] = caps; _prune_day(_CARD_CACHE)
     return caps
 
-async def _cycle_card_png(cid, u, st):
+async def _cycle_card_png(cid, u, st, summary=None):
     """Белая персональная карточка цикла; None, если выключено/не собралось."""
     if not (IMG and new_cards_on(cid) and hasattr(IMG, "render_daily_card")): return None
     try:
-        caps = await _card_captions(cid, "cycle", _card_ctx(cid, u, st=st))
+        caps = await _card_captions(cid, "cycle", _card_ctx(cid, u, st=st), summary=summary)
         if not caps.get("food"): return None
         data = {"day": st["day"], "total": st["cycle_len"], "to_period": st["days_to_next"],
                 "phase_ru": st["phase_ru"], **caps}
@@ -2275,7 +2277,7 @@ async def _cycle_card_png(cid, u, st):
     except Exception as e:
         log.warning("cycle card %s: %s", cid, e); return None
 
-async def _general_card_png(cid, u):
+async def _general_card_png(cid, u, summary=None):
     """Белая карточка для беременности/менопаузы; None, если выключено/не собралось."""
     if not (IMG and new_cards_on(cid) and hasattr(IMG, "render_daily_card")): return None
     mode = (u or {}).get("mode") or "none"
@@ -2286,7 +2288,7 @@ async def _general_card_png(cid, u):
     _m = "preg" if pregnancy else ("meno" if mode == "meno" else None)
     if not _m: return None
     try:
-        caps = await _card_captions(cid, _m, _card_ctx(cid, u, preg=pregnancy))
+        caps = await _card_captions(cid, _m, _card_ctx(cid, u, preg=pregnancy), summary=summary)
         if not caps.get("food"): return None
         if _m == "preg":
             data = {"week": pregnancy.get("week"), "trimester": pregnancy.get("trimester"),
@@ -3231,7 +3233,7 @@ async def push_general(context, cid, with_image=True, campaign=None):
         clean, extra = L.split_followups(body)
         kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u,
                      app_label=APP_BUTTON_TEXT, campaign=campaign)
-        _png = (await _general_card_png(cid, u)) if (with_image and new_cards_on(cid)) else None
+        _png = (await _general_card_png(cid, u, summary=clean)) if (with_image and new_cards_on(cid)) else None
         if _png is not None:
             try:
                 await send_rich_with_photo(context.bot, cid, guard_aiwa_reply(cid, clean), _png, reply_markup=kb)
@@ -3498,7 +3500,7 @@ async def push_summary(context, cid, with_image=True, campaign=None):
         clean, extra = L.split_followups(body)
         kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u,
                      app_label=APP_BUTTON_TEXT, campaign=campaign)
-        _png = (await _cycle_card_png(cid, u, st)) if (with_image and new_cards_on(cid)) else None
+        _png = (await _cycle_card_png(cid, u, st, summary=clean)) if (with_image and new_cards_on(cid)) else None
         if _png is not None:
             try:
                 await send_rich_with_photo(context.bot, cid, guard_aiwa_reply(cid, clean), _png, reply_markup=kb)
@@ -4003,22 +4005,6 @@ async def summary_prepare_job(context: ContextTypes.DEFAULT_TYPE):
             if ph * 60 + pm > ah * 60 + am:
                 target += timedelta(days=1)
         await prepare_daily_summary(cid, target.isoformat())
-        try:
-            _u = row(cid)
-            if new_cards_on(cid) and is_onboarded(_u):
-                if not is_cycle(_u):
-                    _pg = None
-                    if _u.get("mode") == "preg" and _u.get("last_period"):
-                        try: _pg = C.preg_status(_u["last_period"])
-                        except Exception: _pg = None
-                    _m = "preg" if _pg else ("meno" if _u.get("mode") == "meno" else None)
-                    if _m: await _card_captions(cid, _m, _card_ctx(cid, _u, preg=_pg))
-                else:
-                    _u2, _st = status_of(cid)
-                    if _st and _st["status"] == "normal":
-                        await _card_captions(cid, "cycle", _card_ctx(cid, _u2, st=_st))
-        except Exception as _ce:
-            log.warning("card prewarm %s: %s", cid, _ce)
     except Exception as exc:
         # Delivery still runs at the selected time and can generate on demand or
         # fall back, so preparation failure must never cancel the send job.
@@ -7347,7 +7333,7 @@ _TC_LBL = {"summary": "Сводки (утро)", "answer": "Ответы в ча
            "food_text": "Еда текстом", "meal": "Замена блюда", "workout": "Разбор тренировки", "diary_reco": "Совет по дневнику",
            "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру",
            "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "proactive_compose": "Проактив-сообщение", "memory_learn": "Память: запись (ИИ)", "menu": "Меню питания",
-           "partner_brief": "Партнёрский пуш (ИИ)", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
+           "partner_brief": "Партнёрский пуш (ИИ)", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон", "card": "Карточка сводки (ИИ)",
            "auto": "Память: запись (ИИ)",
            "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа", "tts:audio": "Озвучка (файлом)"}
 def _tc_lbl(m): return _TC_LBL.get(m, m or "прочее")
@@ -7357,7 +7343,7 @@ def _tc_src(m):
     if m and (str(m).startswith("stt:") or str(m).startswith("tts:")): return "stt"
     if m in _TC_APP: return "app"
     if m in _TC_CHAT: return "chat"
-    if m in ("summary", "proactive_compose", "proactive_preview", "today_note", "memory_learn", "auto", "partner_brief"): return "auto"
+    if m in ("summary", "proactive_compose", "proactive_preview", "today_note", "memory_learn", "auto", "partner_brief", "card"): return "auto"
     return "other"
 
 def _feat_of(action, meta):
