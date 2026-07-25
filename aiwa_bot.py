@@ -91,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-25-v108-personal-cards"
+AIWA_VERSION = "2026-07-25-v109-cards-behind-flag"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2210,6 +2210,7 @@ async def begin_onboard(cid, msg, force=False):
     await msg.reply_text(START_TEXT, reply_markup=ONB_KB)
 
 _CARD_CACHE = {}
+NEW_CARDS = os.environ.get("AIWA_NEW_CARDS", "0") in ("1", "true", "True", "on")   # выключено, пока дизайн не согласован
 
 def _card_ctx(cid, u, st=None, preg=None):
     """Контекст для персональных строк карточки: состояние + чек-ин + дневник + память."""
@@ -2256,7 +2257,7 @@ async def send_infographic(bot, cid):
     u, st = status_of(cid)
     if not st: return
     try:
-        caps = await _card_captions(cid, "cycle", _card_ctx(cid, u, st=st))
+        caps = (await _card_captions(cid, "cycle", _card_ctx(cid, u, st=st))) if NEW_CARDS else {}
         if caps.get("food") and hasattr(IMG, "render_daily_card"):
             data = {"day": st["day"], "total": st["cycle_len"], "to_period": st["days_to_next"],
                     "phase_ru": st["phase_ru"], **caps}
@@ -2282,7 +2283,7 @@ async def send_general_infographic(bot, cid, u=None):
         except Exception:
             pregnancy = None
     try:
-        _m = "preg" if (mode == "preg" and pregnancy) else ("meno" if mode == "meno" else None)
+        _m = ("preg" if (mode == "preg" and pregnancy) else ("meno" if mode == "meno" else None)) if NEW_CARDS else None
         png = None
         if _m and hasattr(IMG, "render_daily_card"):
             caps = await _card_captions(cid, _m, _card_ctx(cid, u, preg=pregnancy))
@@ -3925,7 +3926,7 @@ async def summary_prepare_job(context: ContextTypes.DEFAULT_TYPE):
         await prepare_daily_summary(cid, target.isoformat())
         try:
             _u = row(cid)
-            if is_onboarded(_u):
+            if NEW_CARDS and is_onboarded(_u):
                 if not is_cycle(_u):
                     _pg = None
                     if _u.get("mode") == "preg" and _u.get("last_period"):
