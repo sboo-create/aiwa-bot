@@ -428,6 +428,14 @@ def _chip(d, cx, y, text, font, pad_x, pad_y, bg, fg, S_):
 
 def _wrap(d, text, font, maxw):
     words=(text or "").split(); lines=[]; cur=""
+    fixed=[]
+    for w in words:                        # мегаслово без пробелов режем по ширине
+        while d.textlength(w,font=font) > maxw and len(w) > 2:
+            k=len(w)
+            while k>1 and d.textlength(w[:k],font=font) > maxw: k-=1
+            fixed.append(w[:k]); w=w[k:]
+        fixed.append(w)
+    words=fixed
     for w in words:
         t=(cur+" "+w).strip()
         if d.textlength(t,font=font)<=maxw: cur=t
@@ -435,7 +443,12 @@ def _wrap(d, text, font, maxw):
             if cur: lines.append(cur)
             cur=w
     if cur: lines.append(cur)
-    return lines[:2]
+    if len(lines) > 2:                     # не влезло в две строки — честное многоточие
+        lines = lines[:2]
+        while lines[1] and d.textlength(lines[1] + "…", font=font) > maxw:
+            lines[1] = lines[1][:-1].rstrip()
+        lines[1] += "…"
+    return lines
 
 def _icon_row(d, x, y, w, label, text, f_lab, f_txt, S_):
     """Ряд-чип: слева капс-лейбл в персиковой пилюле, справа текст (эмодзи в PIL нецветные, поэтому лейблы)."""
@@ -455,6 +468,22 @@ def _icon_row(d, x, y, w, label, text, f_lab, f_txt, S_):
         d.text((tx,y+row_h//2+f_txt.size//2+int(2*S_)),lines[1],font=f_txt,fill=CARD_INK,anchor="lm")
     return y+row_h+int(14*S_)
 
+def _fit_big(d, text, maxw, start=64, floor=34):
+    """Крупный заголовок: уменьшаем кегль, пока не влезет по ширине."""
+    size=start
+    while size > floor:
+        f=_f("DejaVuSans-Bold.ttf", size)
+        if d.textlength(str(text), font=f) <= maxw: return f
+        size -= 4
+    return _f("DejaVuSans-Bold.ttf", floor)
+
+def _fit_big_text(d, text, maxw, start=64, floor=34):
+    f=_fit_big(d,text,maxw,start,floor)
+    t=str(text)
+    while t and d.textlength(t+"…",font=f) > maxw:
+        t=t[:-1]
+    return (t+"…" if t!=str(text) else t), f
+
 def render_daily_card(mode, data):
     """Карточка сводки: белый фон, маскот, крупные данные + персональные строки от модели.
     data: cycle: day,total,to_period,phase_ru,feature,food,activity
@@ -469,19 +498,22 @@ def render_daily_card(mode, data):
     cx=X(W//2); pad=X(48); cw=X(W)-pad*2
     y=_mascot(img,cx,X(36),X(150)) + X(20)
     if mode=="preg":
-        d.text((cx,y),f"{data.get('week','')} неделя",font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
+        _t=f"{data.get('week','')} неделя"; _t,f_big=_fit_big_text(d,_t,cw)
+        d.text((cx,y),_t,font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
         y=_chip(d,cx,y,f"{data.get('trimester','')} триместр",f_chip,X(18),X(9),PEACH,ORANGE,S)+X(12)
         d.text((cx,y),f"До встречи ~{data.get('days_left','')} дней",font=f_acc,fill=ORANGE,anchor="ma"); y+=f_acc.size+X(12)
         if data.get("fruit"):
             d.text((cx,y),f"Малыш размером с {data['fruit']}",font=f_feat,fill=CARD_SOFT,anchor="ma"); y+=f_feat.size+X(10)
         rows=[("ПИТАНИЕ",data.get("food")),("АКТИВНОСТЬ",data.get("activity"))]
     elif mode=="meno":
-        d.text((cx,y),data.get("focus","Твой день"),font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
+        _t=str(data.get("focus","Твой день")); _t,f_big=_fit_big_text(d,_t,cw)
+        d.text((cx,y),_t,font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
         if data.get("theme"):
             y=_chip(d,cx,y,data["theme"],f_chip,X(18),X(9),PEACH,ORANGE,S)+X(12)
         rows=[("ПИТАНИЕ",data.get("food")),("ДВИЖЕНИЕ",data.get("activity")),("СОН",data.get("sleep"))]
     else:
-        d.text((cx,y),f"День {data.get('day','')} из {data.get('total','')}",font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
+        _t=f"День {data.get('day','')} из {data.get('total','')}"; _t,f_big=_fit_big_text(d,_t,cw)
+        d.text((cx,y),_t,font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
         y=_chip(d,cx,y,f"{data.get('phase_ru','')} фаза",f_chip,X(18),X(9),PEACH,ORANGE,S)+X(12)
         d.text((cx,y),f"До месячных ~{data.get('to_period','')} дней",font=f_acc,fill=ORANGE,anchor="ma"); y+=f_acc.size+X(12)
         rows=[("ПИТАНИЕ",data.get("food")),("НАГРУЗКА",data.get("activity"))]
