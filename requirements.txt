@@ -7,3 +7,4 @@ reportlab==5.0.0
 matplotlib==3.9.4
 asyncpg>=0.30,<1
 redis[hiredis]>=6,<7
+psycopg[binary,pool]>=3.2,<4

@@ -1,0 +1,109 @@
+name: aiwa
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: aiwa-bot:${IMAGE_TAG:-local}
+  env_file:
+    - path: .env
+      required: false
+  environment: &app-env
+    DATABASE_URL: postgresql://aiwa:${AIWA_POSTGRES_PASSWORD:-aiwa_local}@postgres:5432/aiwa
+    REDIS_URL: redis://redis:6379/0
+    AIWA_ENABLE_DISTRIBUTED_ROLES: "1"
+    AIWA_PG_POOL_MAX: ${AIWA_PG_POOL_MAX:-10}
+    AIWA_STARTUP_TIMEOUT_SECONDS: ${AIWA_STARTUP_TIMEOUT_SECONDS:-120}
+  restart: unless-stopped
+  init: true
+  networks:
+    - aiwa
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: aiwa
+      POSTGRES_USER: aiwa
+      POSTGRES_PASSWORD: ${AIWA_POSTGRES_PASSWORD:-aiwa_local}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${AIWA_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiwa -d aiwa"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - aiwa
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:${AIWA_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - aiwa
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "aiwa_service", "worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    <<: *app
+    command: ["python", "-m", "aiwa_service", "scheduler"]
+    depends_on:
+      worker:
+        condition: service_started
+
+  api:
+    <<: *app
+    command: ["python", "-m", "aiwa_service", "api"]
+    environment:
+      <<: *app-env
+      PORT: "8080"
+    ports:
+      - "${AIWA_API_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 10s
+    depends_on:
+      worker:
+        condition: service_started
+
+  telegram:
+    <<: *app
+    command: ["python", "-m", "aiwa_service", "telegram"]
+    depends_on:
+      worker:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  aiwa:
+    driver: bridge

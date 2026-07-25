@@ -55,17 +55,13 @@ def run_telegram() -> None:
 
 
 def run_worker() -> None:
-    """Worker process boundary.
-
-    ``AIWA_ENABLE_DISTRIBUTED_ROLES`` prevents accidentally deploying an idle
-    worker before queue consumers land in the next migration slice.
-    """
     if os.environ.get("AIWA_ENABLE_DISTRIBUTED_ROLES") != "1":
         raise SystemExit(
             "worker role is staged but disabled; set AIWA_ENABLE_DISTRIBUTED_ROLES=1 "
-            "only after queue consumers are configured"
+            "only when PostgreSQL and Redis are configured"
         )
-    asyncio.run(_await_shutdown("worker", heartbeat=True))
+    from distributed_runtime import run_worker as worker_main
+    asyncio.run(worker_main())
 
 
 def run_scheduler() -> None:
@@ -74,7 +70,8 @@ def run_scheduler() -> None:
             "scheduler role is staged but disabled; set AIWA_ENABLE_DISTRIBUTED_ROLES=1 "
             "only after persistent schedules are configured"
         )
-    asyncio.run(_await_shutdown("scheduler"))
+    from distributed_runtime import run_scheduler as scheduler_main
+    asyncio.run(scheduler_main())
 
 
 def main() -> None:

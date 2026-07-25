@@ -22,6 +22,7 @@ from urllib.parse import parse_qsl as _pqsl, urlsplit as _urlsplit, quote as _ur
 import cycle as C
 import llm as L
 import analytics_v2 as A2
+import database as database_backend
 import tracing as TR
 import startup as STARTUP
 
@@ -232,8 +233,9 @@ GUIDES = [{"id": "norm", "title": "Норма цикла: длина, фазы �
 
 # ---------- DB ----------
 def db():
-    c = sqlite3.connect(DB, timeout=30)
-    c.execute("PRAGMA journal_mode=WAL")
+    c = database_backend.connect(DB)
+    if database_backend.uses_postgres():
+        return c
     c.execute("""CREATE TABLE IF NOT EXISTS users(chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
         send_time TEXT DEFAULT '08:00', modules TEXT DEFAULT 'phase,general,food,training',
         state TEXT, pending_date TEXT, created TEXT)""")
@@ -350,7 +352,7 @@ def add_sugg(cid, q):
     c = db()
     if not _user_write_allowed(cid, conn=c):
         c.close(); return None
-    sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?)", (cid, q)).lastrowid; c.commit(); c.close(); return sid
+    sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?) RETURNING id", (cid, q)).fetchone()[0]; c.commit(); c.close(); return sid
 def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None):
@@ -434,11 +436,11 @@ def meal_add(cid, rec, d=None):
     if not _user_write_allowed(cid, conn=c):
         c.close(); return None
     mid = c.execute(
-        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
         (cid, d, datetime.now(TZ).isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
          float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
          json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo", slot,
-         rec.get("fclass") or None)).lastrowid
+         rec.get("fclass") or None)).fetchone()[0]
     c.commit(); c.close(); return mid
 
 def meal_set_slot(cid, mid, slot):
@@ -499,11 +501,11 @@ def workout_add(cid, rec, d=None):
     c = db()
     if not _user_write_allowed(cid, conn=c):
         c.close(); return None
-    cur = c.execute("INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note,review,kcal,muscles) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+    cur = c.execute("INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note,review,kcal,muscles) VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
         (cid, d, datetime.now(TZ).isoformat(), rec.get("type", ""), json.dumps(rec.get("items", []), ensure_ascii=False),
          rec.get("duration", ""), rec.get("rpe", ""), rec.get("note", ""), rec.get("review", ""),
          int(rec.get("kcal") or 0), rec.get("muscles", "")))
-    wid = cur.lastrowid; c.commit(); c.close(); return wid
+    wid = cur.fetchone()[0]; c.commit(); c.close(); return wid
 
 def workouts_of(cid, d=None):
     d = d or dtoday().isoformat()
@@ -545,7 +547,7 @@ def cyc_add(cid, d, end=None):
     c = db()
     if not _user_write_allowed(cid, conn=c):
         c.close(); return False
-    c.execute("INSERT OR IGNORE INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?)", (cid, d, end))
+    c.execute("INSERT INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?) ON CONFLICT DO NOTHING", (cid, d, end))
     if end: c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end, cid, d))
     c.commit(); c.close(); return True
 def cyc_set_end(cid, start_iso, end_iso):
@@ -560,7 +562,7 @@ def pa_toggle(cid, iso):
     if ex:
         c.execute("DELETE FROM intimacy WHERE chat_id=? AND d=?", (cid, iso)); marked = False
     else:
-        c.execute("INSERT OR IGNORE INTO intimacy(chat_id,d) VALUES(?,?)", (cid, iso)); marked = True
+        c.execute("INSERT INTO intimacy(chat_id,d) VALUES(?,?) ON CONFLICT DO NOTHING", (cid, iso)); marked = True
     c.commit(); c.close(); return marked
 def log_get(cid, d):
     c = db(); r = c.execute("SELECT energy,mood,symptoms FROM logs WHERE chat_id=? AND log_date=?", (cid, d)).fetchone(); c.close()
@@ -569,7 +571,7 @@ def log_ensure(cid, d):
     c = db()
     if not _user_write_allowed(cid, conn=c):
         c.close(); return False
-    c.execute("INSERT OR IGNORE INTO logs(chat_id,log_date,symptoms) VALUES(?,?,'')", (cid, d)); c.commit(); c.close(); return True
+    c.execute("INSERT INTO logs(chat_id,log_date,symptoms) VALUES(?,?,'') ON CONFLICT DO NOTHING", (cid, d)); c.commit(); c.close(); return True
 def log_set(cid, d, **kw):
     unknown = set(kw) - {"energy", "mood", "symptoms"}
     if unknown:
@@ -629,7 +631,9 @@ def link_partner(partner_id, woman_id):
     c = db()
     if not (_user_write_allowed(partner_id, conn=c) and _user_write_allowed(woman_id, conn=c)):
         c.close(); return False
-    c.execute("INSERT OR REPLACE INTO partners(partner_id,woman_id,created) VALUES(?,?,?)", (partner_id, woman_id, datetime.now().isoformat())); c.commit(); c.close(); return True
+    c.execute("""INSERT INTO partners(partner_id,woman_id,created) VALUES(?,?,?)
+        ON CONFLICT(partner_id) DO UPDATE SET woman_id=excluded.woman_id,created=excluded.created""",
+        (partner_id, woman_id, datetime.now().isoformat())); c.commit(); c.close(); return True
 def partner_of(woman_id):
     c = db(); r = c.execute("SELECT partner_id FROM partners WHERE woman_id=?", (woman_id,)).fetchone(); c.close(); return r[0] if r else None
 def woman_of_partner(pid):
@@ -988,7 +992,7 @@ def _claim_push_delivery(cid, campaign):
         return True
     c = db()
     try:
-        c.execute("BEGIN IMMEDIATE")
+        c.execute("BEGIN" if database_backend.uses_postgres() else "BEGIN IMMEDIATE")
         already_sent = c.execute(
             """SELECT 1 FROM events
                WHERE chat_id=? AND action='broadcast' AND meta=?
@@ -997,17 +1001,17 @@ def _claim_push_delivery(cid, campaign):
         ).fetchone()
         if already_sent:
             c.execute(
-                """INSERT OR IGNORE INTO push_deliveries
+                """INSERT INTO push_deliveries
                    (chat_id,campaign_id,status,claimed_at,sent_at)
-                   VALUES(?,?,'sent',?,?)""",
+                   VALUES(?,?,'sent',?,?) ON CONFLICT DO NOTHING""",
                 (cid, campaign, datetime.now(TZ).isoformat(), datetime.now(TZ).isoformat()),
             )
             c.commit()
             return False
         claimed = c.execute(
-            """INSERT OR IGNORE INTO push_deliveries
+            """INSERT INTO push_deliveries
                (chat_id,campaign_id,status,claimed_at)
-               VALUES(?,?,'claimed',?)""",
+               VALUES(?,?,'claimed',?) ON CONFLICT DO NOTHING""",
             (cid, campaign, datetime.now(TZ).isoformat()),
         ).rowcount == 1
         c.commit()
@@ -1063,6 +1067,16 @@ async def enqueue_broadcast(cid, meta="queued"):
         return False
     BCAST_PENDING.add(cid)
     ev(cid, "broadcast", meta=f"queued|{campaign_id('daily_summary')}")
+    if os.environ.get("AIWA_ENABLE_DISTRIBUTED_ROLES") == "1":
+        try:
+            from distributed_runtime import enqueue_one
+            queued = await enqueue_one(
+                "daily_summary", {"chat_id": cid},
+                f"daily_summary:{dtoday().isoformat()}:{cid}",
+            )
+            return queued
+        finally:
+            BCAST_PENDING.discard(cid)
     if BCAST_Q is not None:
         await BCAST_Q.put(cid)
         return True
@@ -1749,8 +1763,9 @@ def _pa_mark(cid, key):
         c = db()
         if not _user_write_allowed(cid, conn=c):
             c.close(); return False
-        c.execute("INSERT OR REPLACE INTO proactive_state(chat_id,signal,last_ts) VALUES(?,?,?)",
-                            (cid, key, datetime.now(TZ).isoformat())); c.commit(); c.close()
+        c.execute("""INSERT INTO proactive_state(chat_id,signal,last_ts) VALUES(?,?,?)
+                   ON CONFLICT(chat_id,signal) DO UPDATE SET last_ts=excluded.last_ts""",
+                  (cid, key, datetime.now(TZ).isoformat())); c.commit(); c.close()
         return True
     except Exception as e:
         log.warning("pa_mark: %s", e)
@@ -1788,7 +1803,8 @@ def mem_set(cid, key, val):
         c = db()
         if not _user_write_allowed(cid, conn=c):
             c.close(); return False
-        c.execute("INSERT OR REPLACE INTO memory(chat_id, mkey, mval, updated) VALUES(?,?,?,?)",
+        c.execute("""INSERT INTO memory(chat_id,mkey,mval,updated) VALUES(?,?,?,?)
+                   ON CONFLICT(chat_id,mkey) DO UPDATE SET mval=excluded.mval,updated=excluded.updated""",
                   (cid, key, val, datetime.now(TZ).isoformat()))
         c.execute("DELETE FROM memory WHERE chat_id=? AND mkey NOT IN (SELECT mkey FROM memory WHERE chat_id=? ORDER BY updated DESC LIMIT ?)",
                   (cid, cid, MEM_MAX))
@@ -1817,7 +1833,7 @@ def _ref_touch(cid, src):
         c = db()
         if not _user_write_allowed(cid, conn=c):
             c.close(); return False
-        c.execute("INSERT OR IGNORE INTO referrals(chat_id, source, ts) VALUES(?,?,?)",
+        c.execute("INSERT INTO referrals(chat_id,source,ts) VALUES(?,?,?) ON CONFLICT DO NOTHING",
                             (cid, src, datetime.now(TZ).isoformat())); c.commit(); c.close()
         return True
     except Exception as e:
@@ -2003,6 +2019,8 @@ async def proactive_cmd(update, context):
             pass
 
 def schedule_daily(app, cid, hhmm):
+    if os.environ.get("AIWA_ENABLE_DISTRIBUTED_ROLES") == "1":
+        return
     for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
     actual, _, _ = scheduled_hhmm(cid, hhmm)
     h, m = map(int, actual.split(":"))
@@ -3543,6 +3561,9 @@ async def on_startup(app):
         BOT_USERNAME = getattr(me, "username", None)
     except Exception:
         BOT_USERNAME = None
+    if os.environ.get("AIWA_ENABLE_DISTRIBUTED_ROLES") == "1":
+        log.info("distributed roles enabled: Telegram background scheduling is disabled")
+        return
     BCAST_Q = asyncio.Queue()
     _bw = max(1, min(20, int(os.environ.get("AIWA_BROADCAST_WORKERS", "6"))))
     for _ in range(_bw):

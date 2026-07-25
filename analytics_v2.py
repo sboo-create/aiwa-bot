@@ -13,6 +13,7 @@ import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
+import database as database_backend
 
 
 log = logging.getLogger("aiwa.analytics")
@@ -86,6 +87,9 @@ SCHEMA = (
 
 
 def init_schema(conn):
+    if database_backend.uses_postgres():
+        database_backend.ensure_postgres_schema(conn)
+        return
     for statement in SCHEMA:
         conn.execute(statement)
     for column in ("reported_cost REAL", "cost_unit TEXT"):
@@ -175,7 +179,7 @@ def write_allowed(conn, chat_id=None, key=None, generation=None):
 
 
 def write_allowed_path(db_path, chat_id, generation=None):
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = database_backend.connect(db_path)
     try:
         init_schema(conn)
         return write_allowed(conn, chat_id=chat_id, generation=generation)
@@ -372,7 +376,7 @@ def persist_llm_call(db_path, record):
     """Usage sink registered by llm.py; failures never break a user response."""
     conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=30)
+        conn = database_backend.connect(db_path)
         init_schema(conn)
         if not write_allowed(conn, key=record.get("user_key"),
                              generation=record.get("user_generation")):
@@ -424,7 +428,7 @@ def persist_llm_call(db_path, record):
 
 def seed_traction_outbox(db_path):
     """Queue existing v2 history once; acknowledged ids are never re-queued."""
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = database_backend.connect(db_path)
     try:
         init_schema(conn)
         for event_id, occurred_at, key, name, screen, props_json in conn.execute(
@@ -461,7 +465,7 @@ def seed_traction_outbox(db_path):
 
 
 def traction_batch(db_path, limit=200):
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = database_backend.connect(db_path)
     try:
         init_schema(conn)
         rows = conn.execute(
@@ -484,7 +488,7 @@ def traction_batch(db_path, limit=200):
 def traction_ack(db_path, event_ids):
     ids = [str(x) for x in event_ids if x]
     if not ids: return
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = database_backend.connect(db_path)
     try:
         init_schema(conn); now = datetime.now(timezone.utc).timestamp()
         versions = {}
@@ -496,7 +500,8 @@ def traction_ack(db_path, event_ids):
         conn.executemany(
             """INSERT INTO traction_sent(event_id,sent_at,payload_version) VALUES(?,?,?)
                ON CONFLICT(event_id) DO UPDATE SET sent_at=excluded.sent_at,
-                 payload_version=MAX(traction_sent.payload_version,excluded.payload_version)""",
+                 payload_version=CASE WHEN traction_sent.payload_version > excluded.payload_version
+                   THEN traction_sent.payload_version ELSE excluded.payload_version END""",
             [(event_id, now, int(versions.get(event_id, 1) or 1)) for event_id in ids])
         conn.executemany("DELETE FROM traction_outbox WHERE event_id=?", [(event_id,) for event_id in ids])
         conn.commit()
