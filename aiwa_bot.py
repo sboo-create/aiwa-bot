@@ -91,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-25-v113-card-activity-fix"
+AIWA_VERSION = "2026-07-25-v114-fruit-label"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2293,7 +2293,7 @@ async def _general_card_png(cid, u, summary=None):
         if _m == "preg":
             data = {"week": pregnancy.get("week"), "trimester": pregnancy.get("trimester"),
                     "days_left": max(0, pregnancy.get("days_left", 0)),
-                    "fruit": (preg_fruit(pregnancy.get("week")) if "preg_fruit" in globals() else None), **caps}
+                    "fruit": _fruit_label(pregnancy.get("week")), **caps}
         else:
             data = dict(caps)
         return await asyncio.to_thread(IMG.render_daily_card, _m, data)
@@ -2335,7 +2335,7 @@ async def send_general_infographic(bot, cid, u=None):
                 if _m == "preg":
                     data = {"week": pregnancy.get("week"), "trimester": pregnancy.get("trimester"),
                             "days_left": max(0, pregnancy.get("days_left", 0)),
-                            "fruit": (preg_fruit(pregnancy.get("week")) if "preg_fruit" in globals() else None), **caps}
+                            "fruit": _fruit_label(pregnancy.get("week")), **caps}
                 else:
                     data = dict(caps)
                 png = await asyncio.to_thread(IMG.render_daily_card, _m, data)
@@ -4400,6 +4400,15 @@ def preg_fruit(w):
     while w > 4 and w not in PREG_FRUIT:
         w -= 1
     return PREG_FRUIT.get(w, ("малыш", "растёт", "🌸"))
+
+def _fruit_label(week):
+    """Человеческая строка для карточки: «маковое зёрнышко (~2 мм)», а не сырой кортеж."""
+    try:
+        f = preg_fruit(week)
+        name, size = str(f[0]), (str(f[1]) if len(f) > 1 else "")
+        return f"{name} ({size})" if size and any(ch.isdigit() for ch in size) else name
+    except Exception:
+        return None
 
 def partner_preg_text(preg, hint):
     week = int(preg.get("week") or 0)
