@@ -270,6 +270,147 @@ class SoniaJournalV2Tests(unittest.TestCase):
         self.assertEqual(result["mutation"]["kind"], "food")
         self.assertEqual([x["name"] for x in bot.meals_of(self.cid)[0]["items"]], ["Творог"])
 
+    def test_disjoint_completed_fragments_are_saved_and_other_statuses_are_excluded(self):
+        cases = [
+            {
+                "text": (
+                    "До встречи я выпила кофе. Вечером планирую заказать пиццу. "
+                    "После прогулки попробовала йогурт, а торт не ела."
+                ),
+                "spans": [
+                    "До встречи я выпила кофе.",
+                    "После прогулки попробовала йогурт",
+                ],
+                "items": [("Кофе", "кофе"), ("Йогурт", "йогурт")],
+                "excluded": ("пицц", "торт"),
+            },
+            {
+                "text": (
+                    "Если останусь дома, съем суп. Сейчас я перекусил яблоком; "
+                    "сестра выпила сок. Ещё куснул хлеба."
+                ),
+                "spans": [
+                    "Сейчас я перекусил яблоком",
+                    "Ещё куснул хлеба",
+                ],
+                "items": [("Яблоко", "яблоком"), ("Хлеб", "хлеба")],
+                "excluded": ("суп", "сок"),
+            },
+            {
+                "text": (
+                    "Не пил газировку, зато выпил воду; позже хочу съесть пасту, "
+                    "а утром доел кашу."
+                ),
+                "spans": ["выпил воду", "утром доел кашу"],
+                "items": [("Вода", "воду"), ("Каша", "кашу")],
+                "excluded": ("газиров", "паст"),
+            },
+        ]
+        for index, case in enumerate(cases):
+            with self.subTest(text=case["text"]):
+                record = {
+                    "title": "Модельный заголовок не считается источником истины",
+                    "fclass": "смешанное",
+                    "items": [
+                        {
+                            "name": name,
+                            "grams": 100,
+                            "kcal": 100,
+                            "protein": 2,
+                            "fat": 2,
+                            "carbs": 18,
+                            "evidence_span": evidence,
+                        }
+                        for name, evidence in case["items"]
+                    ],
+                    "unparsed": [case["excluded"][0]],
+                }
+                classified = route(
+                    "food",
+                    case["spans"][0],
+                    evidence_spans=case["spans"],
+                    food_text=case["text"],
+                    food_record=record,
+                )
+                before_ids = {meal["id"] for meal in bot.meals_of(self.cid)}
+                result = self._reply(case["text"], f"multi-status-{index}", classified)
+                self.assertEqual(result["mutation"]["kind"], "food")
+                created = [
+                    meal for meal in bot.meals_of(self.cid)
+                    if meal["id"] not in before_ids
+                ]
+                self.assertEqual(len(created), 1)
+                saved = created[0]
+                self.assertEqual(
+                    [item["name"] for item in saved["items"]],
+                    [name for name, _ in case["items"]],
+                )
+                serialized = str(saved).casefold()
+                self.assertFalse(any(term in serialized for term in case["excluded"]))
+
+    def test_multi_evidence_contract_rejects_bridging_reordering_and_unbound_items(self):
+        text = (
+            "Я выпила чай. Позже собираюсь съесть десерт. "
+            "После обеда попробовала сыр."
+        )
+        valid = route(
+            "food",
+            "Я выпила чай.",
+            evidence_spans=["Я выпила чай.", "После обеда попробовала сыр."],
+            food_text="чай, сыр",
+            food_record={
+                "title": "Чай и сыр",
+                "items": [
+                    {"name": "Чай", "grams": 200, "kcal": 0, "protein": 0,
+                     "fat": 0, "carbs": 0, "evidence_span": "чай"},
+                    {"name": "Сыр", "grams": 20, "kcal": 70, "protein": 5,
+                     "fat": 6, "carbs": 0, "evidence_span": "сыр"},
+                ],
+                "unparsed": [],
+            },
+        )
+        normalized = bot._normalize_semantic_journal(
+            valid, text, {"meals": [], "workouts": []}, enable_v2=True,
+        )
+        self.assertEqual([x["name"] for x in normalized["food_record"]["items"]], ["Чай", "Сыр"])
+
+        bridged = dict(valid, evidence_spans=[
+            "Я выпила чай. Позже собираюсь съесть десерт.",
+            "После обеда попробовала сыр.",
+        ])
+        self.assertIsNone(bot._normalize_semantic_journal(
+            bridged, text, {"meals": [], "workouts": []}, enable_v2=True,
+        ))
+
+        reordered = dict(valid, evidence_spans=[
+            "После обеда попробовала сыр.", "Я выпила чай.",
+        ])
+        self.assertIsNone(bot._normalize_semantic_journal(
+            reordered, text, {"meals": [], "workouts": []}, enable_v2=True,
+        ))
+
+        unbound = dict(valid, food_record={
+            **valid["food_record"],
+            "items": [{
+                "name": "Десерт", "grams": 100, "kcal": 300, "protein": 3,
+                "fat": 10, "carbs": 45, "evidence_span": "десерт",
+            }],
+        })
+        self.assertIsNone(bot._normalize_semantic_journal(
+            unbound, text, {"meals": [], "workouts": []}, enable_v2=True,
+        ))
+
+        mislabeled = dict(valid, food_record={
+            **valid["food_record"],
+            "items": [{
+                "name": "Десерт", "grams": 100, "kcal": 300, "protein": 3,
+                "fat": 10, "carbs": 45, "evidence_span": "Я выпила чай",
+            }],
+        })
+        self.assertIsNone(bot._normalize_semantic_journal(
+            mislabeled, text, {"meals": [], "workouts": []}, enable_v2=True,
+        ))
+
     def test_masculine_first_person_is_still_the_current_account(self):
         text = (
             "На обед съел бутерброд с красной рыбой немного голубики "
