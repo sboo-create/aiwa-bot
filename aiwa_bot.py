@@ -91,7 +91,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-25-v114-fruit-label"
+AIWA_VERSION = "2026-07-26-v115-card-fallback-visibility"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2212,6 +2212,9 @@ async def begin_onboard(cid, msg, force=False):
 _CARD_CACHE = {}
 _NEW_CARDS_ALL = os.environ.get("AIWA_NEW_CARDS", "0") in ("1", "true", "True", "on")
 _NEW_CARDS_IDS = set(x.strip() for x in (os.environ.get("AIWA_NEW_CARDS_IDS", "") or "").split(",") if x.strip())
+for _bad in [x for x in _NEW_CARDS_IDS if len(x) < 6]:
+    print(f"ВНИМАНИЕ: AIWA_NEW_CARDS_IDS содержит «{_bad}» — это не похоже на chat_id (нужен полный id, напр. 625405535). "
+          f"Для включения всем используйте AIWA_NEW_CARDS=1.")
 def new_cards_on(cid):
     """Новые карточки: всем через AIWA_NEW_CARDS=1 или точечно через AIWA_NEW_CARDS_IDS=123,456."""
     return _NEW_CARDS_ALL or str(cid) in _NEW_CARDS_IDS
@@ -2270,7 +2273,8 @@ async def _cycle_card_png(cid, u, st, summary=None):
     if not (IMG and new_cards_on(cid) and hasattr(IMG, "render_daily_card")): return None
     try:
         caps = await _card_captions(cid, "cycle", _card_ctx(cid, u, st=st), summary=summary)
-        if not caps.get("food"): return None
+        if not caps.get("food"):
+            ev(cid, "fallback", meta="static:card_caps_empty"); return None
         data = {"day": st["day"], "total": st["cycle_len"], "to_period": st["days_to_next"],
                 "phase_ru": st["phase_ru"], **caps}
         return await asyncio.to_thread(IMG.render_daily_card, "cycle", data)
@@ -2289,7 +2293,8 @@ async def _general_card_png(cid, u, summary=None):
     if not _m: return None
     try:
         caps = await _card_captions(cid, _m, _card_ctx(cid, u, preg=pregnancy), summary=summary)
-        if not caps.get("food"): return None
+        if not caps.get("food"):
+            ev(cid, "fallback", meta="static:card_caps_empty"); return None
         if _m == "preg":
             data = {"week": pregnancy.get("week"), "trimester": pregnancy.get("trimester"),
                     "days_left": max(0, pregnancy.get("days_left", 0)),
@@ -2718,12 +2723,18 @@ async def send_rich_with_photo(bot, cid, md_text, png_bytes, reply_markup=None):
         data = {"chat_id": str(cid), "rich_message": json.dumps(rich, ensure_ascii=False)}
         if reply_markup is not None:
             data["reply_markup"] = reply_markup.to_json()
-        r = _rq.post(f"https://api.telegram.org/bot{bot.token}/sendRichMessage",
-                     data=data, files={"cardpng": ("card.png", png_bytes, "image/png")}, timeout=60)
-        j = r.json()
-        if not j.get("ok"):
-            raise RuntimeError(f"sendRichMessage(photo): {j.get('description')}")
-        return j
+        last = None
+        for _att in (1, 2):
+            try:
+                r = _rq.post(f"https://api.telegram.org/bot{bot.token}/sendRichMessage",
+                             data=data, files={"cardpng": ("card.png", png_bytes, "image/png")}, timeout=60)
+                j = r.json()
+                if j.get("ok"): return j
+                last = RuntimeError(f"sendRichMessage(photo): {j.get('description')}")
+                if "retry" not in str(j.get("description", "")).lower(): break
+            except Exception as e:
+                last = e
+        raise last
     _LAST_SPOKEN[cid] = md_plain(md_text)
     return await asyncio.to_thread(_do)
 
@@ -3239,6 +3250,7 @@ async def push_general(context, cid, with_image=True, campaign=None):
                 await send_rich_with_photo(context.bot, cid, guard_aiwa_reply(cid, clean), _png, reply_markup=kb)
             except Exception as _ce:
                 log.info("combined card fallback: %s", str(_ce)[:120])
+                ev(cid, "fallback", meta="static:combined_send_fail")
                 await send_daily_infographic(context.bot, cid, u, facts)
                 await _send_summary_text(context, cid, clean, kb)
         else:
@@ -3506,6 +3518,7 @@ async def push_summary(context, cid, with_image=True, campaign=None):
                 await send_rich_with_photo(context.bot, cid, guard_aiwa_reply(cid, clean), _png, reply_markup=kb)
             except Exception as _ce:
                 log.info("combined card fallback: %s", str(_ce)[:120])
+                ev(cid, "fallback", meta="static:combined_send_fail")
                 await send_daily_infographic(context.bot, cid, u, facts, st)
                 await _send_summary_text(context, cid, clean, kb)
         else:
@@ -7318,7 +7331,7 @@ _EV_LBL = {
     "web_diary_edit": "Правка в дневнике", "web_diary_scale": "Граммовка в дневнике", "web_diary_slot": "Перенос приёма",
     "web_today": "Открыла «Сегодня»", "food_suggest": "Идеи по питанию", "training_today": "Разбор нагрузки", "today_note": "Сводка дня",
     "proactive_compose": "Проактив-сообщение", "partner_brief": "Партнёрский пуш", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
-    "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа", "tts:audio": "Озвучка (файлом)", "static:menu_pool": "Фолбэк: меню из пула", "static:training_plan": "Фолбэк: план нагрузки", "static:phases": "Фолбэк: текст фаз",
+    "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа", "tts:audio": "Озвучка (файлом)", "static:menu_pool": "Фолбэк: меню из пула", "static:training_plan": "Фолбэк: план нагрузки", "static:phases": "Фолбэк: текст фаз", "static:card_caps_empty": "Карточка: строки не собрались", "static:combined_send_fail": "Карточка: сбой объединённой отправки",
     "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
     "answer": "Вопрос в чате", "general": "Вопрос в чате", "webapp": "Вопрос в приложении", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
     "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",
