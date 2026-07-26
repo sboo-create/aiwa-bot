@@ -87,11 +87,11 @@ def _adversarial_args(tool, meal_id):
     """Аргументы, которые дал бы сломанный или переубеждённый инъекцией классификатор:
     субъект не назван (самый разрешающий вариант), цель — реальная своя запись."""
     return {
-        "log_meal": {"food_text": "творог 100 г", "subject_span": ""},
+        "log_meal": {"food_text": "творог 100 г", "subject_span": "", "status_span": ""},
         "move_meal_slot": {"meal_id": meal_id, "slot": "breakfast", "subject_span": ""},
         "append_meal_item": {"meal_id": meal_id, "food_text": "лепёшка 90 г", "subject_span": ""},
         "update_meal": {"meal_id": meal_id, "food_text": "творог 100 г", "subject_span": ""},
-        "log_workout": {"workout_text": "бег 30 минут", "subject_span": ""},
+        "log_workout": {"workout_text": "бег 30 минут", "subject_span": "", "status_span": ""},
         "log_period_start": {"subject_span": ""},
         "log_period_end": {"subject_span": ""},
     }[tool]
@@ -280,3 +280,74 @@ def test_executor_refuses_third_party_write(cid):
         ))
     assert result["ok"] is False
     assert len(bot.meals_of(cid)) == 1, "новая запись создаваться не должна"
+
+
+# --------------------------------------------------------------------------
+# 5. Смешанные времена в одной фразе — то, на чём v117 отказал в проде.
+# --------------------------------------------------------------------------
+MIXED = ("Я съел этих мягких французских булочек, выпил чаю, кокосовых печенек "
+         "несколько, собираюсь вот съесть лечь астраханское немного, малиновое и "
+         "облепиховое варенье попробовал, кусал сыра, не буду есть кекс и пока "
+         "вафель не буду и мед.")
+
+
+def test_mixed_tense_message_still_logs_what_was_eaten(cid):
+    """Одно «собираюсь» не должно отменять запись реально съеденного."""
+    with mock.patch.object(bot.L, "analyze_food_text", return_value=PARSED_FOOD):
+        res = asyncio.run(bot._agent_exec_write(
+            cid, bot.row(cid), "log_meal",
+            {"food_text": "французские булочки, чай, кокосовые печенья, варенье, сыр",
+             "subject_span": "я", "status_span": "съел этих мягких французских булочек"},
+            MIXED,
+            user_generation=bot._user_generation(cid),
+            mutation_key=bot.chat_mutation_key("test", "mixed-tense"),
+        ))
+    assert res["ok"] is True, res.get("text")
+
+
+def test_pure_plan_is_still_refused(cid):
+    """Без доказательства завершённости запись по-прежнему не создаётся."""
+    for span in ("", "собираюсь съесть торт"):
+        with mock.patch.object(bot.L, "analyze_food_text", return_value=PARSED_FOOD):
+            res = asyncio.run(bot._agent_exec_write(
+                cid, bot.row(cid), "log_meal",
+                {"food_text": "торт", "subject_span": "я", "status_span": span},
+                "Собираюсь съесть торт",
+                user_generation=bot._user_generation(cid),
+                mutation_key=bot.chat_mutation_key("test", f"plan-{len(span)}"),
+            ))
+        assert res["ok"] is False, f"span={span!r}"
+
+
+def test_invented_status_span_does_not_unlock_a_plan(cid):
+    """Выдуманная цитата не считается доказательством — падаем на проверку по тексту."""
+    with mock.patch.object(bot.L, "analyze_food_text", return_value=PARSED_FOOD):
+        res = asyncio.run(bot._agent_exec_write(
+            cid, bot.row(cid), "log_meal",
+            {"food_text": "торт", "subject_span": "я", "status_span": "я съел торт"},
+            "Собираюсь съесть торт",
+            user_generation=bot._user_generation(cid),
+            mutation_key=bot.chat_mutation_key("test", "plan-invented"),
+        ))
+    assert res["ok"] is False
+
+
+def test_refusal_reason_reaches_the_user(cid):
+    """Отказ исполнителя должен дойти до пользователя вместо шаблона guard."""
+    plan = [
+        {"content": "", "tool_calls": [{"id": "c0", "function": {
+            "name": "log_meal",
+            "arguments": '{"food_text":"торт","subject_span":"я","status_span":""}'}}]},
+        {"content": "", "tool_calls": None},
+    ]
+    with (
+        mock.patch.object(bot.L, "call_tools", side_effect=plan),
+        mock.patch.object(bot.L, "analyze_food_text", return_value=PARSED_FOOD),
+        mock.patch.object(bot.L, "followups", return_value=[]),
+    ):
+        out = asyncio.run(bot._chat_reply(
+            cid, bot.row(cid), "Собираюсь съесть торт",
+            mutation_key=bot.chat_mutation_key("test", "refusal-visible"),
+        ))
+    assert "уже случилось" in out["answer"], out["answer"]
+    assert out["answer"] != bot._GUARD_LAST.get(cid)
