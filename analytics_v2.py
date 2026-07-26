@@ -236,6 +236,14 @@ def _legacy_event_name(action, meta):
         return "tool_execution_completed", None
     if action == "tool_outcome":
         return "tool_outcome_completed", None
+    # Отказ исполнителя записи. Каждое такое событие — либо сработавшая защита,
+    # либо операция, которой не хватает в словаре инструментов.
+    if action == "journal_write_rejected":
+        return "journal_write_rejected", None
+    if action == "journal_slot_corrected":
+        return "journal_slot_corrected", None
+    if action == "journal_food_unparsed":
+        return "journal_food_unparsed", None
     if action in {"manual", "suggest"}:
         return "legacy_message_interaction", None
     if action == "tokens":
@@ -354,6 +362,14 @@ def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_vers
             props["status"] = status
         if tool_name:
             props["tool_name"] = tool_name
+    elif action == "journal_write_rejected":
+        reason = safe_id(parts[0] if parts else "", 24)
+        tool_name = safe_id(parts[1] if len(parts) > 1 else "", 48)
+        if reason: props["reason"] = reason
+        if tool_name: props["tool_name"] = tool_name
+    elif action == "journal_slot_corrected":
+        slot = safe_id(parts[0] if parts else "", 16)
+        if slot in {"breakfast", "lunch", "snack", "dinner"}: props["slot"] = slot
     elif action == "tool_outcome":
         status = safe_id(parts[0] if parts else "", 20)
         outcome_type = safe_id(parts[1] if len(parts) > 1 else "", 48)
