@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-26-v122-miniapp-fast-tabs"
+AIWA_VERSION = "2026-07-26-v123-journal-mixed-status"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -1357,7 +1357,8 @@ ADDCYCLES_TEXT = ("\U0001F4C5 История цикла вручную.\n\n"
     "Этот список ПОЛНОСТЬЮ заменит твою историю циклов в календаре, поэтому пришли все нужные даты разом. Если ошиблась в дате раньше, просто пришли правильный список, и старые даты заменятся.")
 
 _JOURNAL_THIRD_PARTY_EVENT_RE = (
-    r"(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|выпил\w*|"
+    r"(?:съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|кушал\w*|"
+    r"выпил\w*|попробовал\w*|кусал\w*|куснул\w*|"
     r"тренировал\w*|потренир\w*|занимал\w*|сделал\w*|бегал\w*|"
     r"ходил\w*|плавал\w*|начал\w*|пришл\w*|законч\w*|завершил\w*)"
 )
@@ -1395,6 +1396,19 @@ def _journal_third_party_source(text):
         r"[А-ЯЁ][а-яё-]{1,30}\b.{0,55}" + _JOURNAL_THIRD_PARTY_EVENT_RE,
         raw,
     ))
+
+def _journal_explicit_first_person_event(text):
+    """True when a fragment explicitly attributes an event to this account owner."""
+    raw = str(text or "")
+    return bool(
+        re.search(r"\bя\b.{0,90}" + _JOURNAL_THIRD_PARTY_EVENT_RE, raw, re.I)
+        and not re.search(
+            r"\b(?:по\s+словам|как\s+рассказал\w*|как\s+сообщил\w*|"
+            r"цитир\w*|сказал\w*\s*,?\s+что)\b",
+            raw,
+            re.I,
+        )
+    )
 
 def match_intent(t):
     raw_t = str(t or "")
@@ -1530,7 +1544,8 @@ _JOURNAL_MUTATION_INTENTS = frozenset({
 })
 _JOURNAL_SEMANTIC_CANDIDATE_RE = re.compile(
     r"\b(?:"
-    r"съел\w*|поел\w*|ел[аи]?\b|кушал\w*|скушал\w*|покушал\w*|выпил\w*|"
+    r"съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|кушал\w*|скушал\w*|"
+    r"покушал\w*|пил[аи]?\b|выпил\w*|попробовал\w*|кусал\w*|куснул\w*|"
     r"завтрак\w*|обед\w*|ужин\w*|перекус\w*|"
     r"тренир\w*|потренир\w*|занимал\w*|спорт\w*|зал\w*|упражнен\w*|"
     r"бегал\w*|пробеж\w*|ходил\w*|гулял\w*|плавал\w*|бассейн\w*|"
@@ -1556,9 +1571,17 @@ _JOURNAL_META_INSTRUCTION_RE = re.compile(
 )
 _JOURNAL_PERIOD_SOURCE_RE = re.compile(r"\b(?:месячн\w*|менструац\w*|критическ\w*\s+дн\w*)\b", re.I)
 _JOURNAL_FOOD_COMPLETED_RE = re.compile(
-    r"\b(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|скушал\w*|покушал\w*|выпил\w*)\b|"
+    r"\b(?:съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|кушал\w*|"
+    r"скушал\w*|покушал\w*|пил[аи]?\b|выпил\w*|попробовал\w*|"
+    r"кусал\w*|куснул\w*)\b|"
     r"\b(?:на\s+)?(?:завтрак\w*|обед\w*|ужин\w*|перекус\w*)\b"
     r"(?:\s+у\s+меня)?\s+(?:был[аи]?|были|съел\w*|поел\w*|:|-)",
+    re.I,
+)
+_JOURNAL_FOOD_NEGATED_RE = re.compile(
+    r"\bне\s+(?:съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|"
+    r"кушал\w*|скушал\w*|покушал\w*|пил[аи]?\b|выпил\w*|"
+    r"попробовал\w*|кусал\w*|куснул\w*)\b",
     re.I,
 )
 _JOURNAL_WORKOUT_COMPLETED_RE = re.compile(
@@ -1677,7 +1700,9 @@ def _semantic_journal_candidate(text, context=None, enable_v2=False):
     # broader model-owned routing is canaried behind AIWA_JOURNAL_V2.
     if not enable_v2 and _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(raw):
         return False
-    if _journal_third_party_source(raw):
+    # V2 validates the model-selected evidence fragments independently below.
+    # Whole-message rejection would incorrectly drop mixed self/other reports.
+    if _journal_third_party_source(raw) and not enable_v2:
         return False
     domain_hint = bool(_JOURNAL_SEMANTIC_CANDIDATE_RE.search(raw))
     contextual_repair = bool(
@@ -1713,16 +1738,132 @@ def _semantic_journal_candidate(text, context=None, enable_v2=False):
     )
     return domain_hint or personal_report_shape or contextual_followup or contextual_repair
 
-def _semantic_evidence_span(source_text, payload):
-    """Return an exact model-selected quote; never trust invented evidence."""
+def _semantic_evidence_spans(source_text, payload):
+    """Return ordered, non-overlapping exact quotes selected by the model."""
     raw = str(source_text or "")
-    span = str((payload or {}).get("evidence_span") or "").strip()
-    if not span or len(span) > 300:
+    data = payload or {}
+    if "evidence_spans" in data:
+        values = data.get("evidence_spans")
+        if not isinstance(values, list) or not values or len(values) > 8:
+            return []
+    else:
+        values = [data.get("evidence_span")]
+    folded = raw.casefold()
+    cursor = 0
+    total = 0
+    spans = []
+    for value in values:
+        span = str(value or "").strip()
+        if not span or len(span) > 300 or total + len(span) > 900:
+            return []
+        start = folded.find(span.casefold(), cursor)
+        if start < 0:
+            return []
+        exact = raw[start:start + len(span)]
+        spans.append(exact)
+        cursor = start + len(span)
+        total += len(span)
+    return spans
+
+def _semantic_evidence_span(source_text, payload):
+    """Backward-compatible access to the first verified evidence quote."""
+    spans = _semantic_evidence_spans(source_text, payload)
+    return spans[0] if spans else None
+
+def _semantic_food_evidence_safe(source_text, payload):
+    """Every selected food fragment must prove a completed, positive event."""
+    spans = _semantic_evidence_spans(source_text, payload)
+    return bool(
+        spans
+        and all(
+            _JOURNAL_FOOD_COMPLETED_RE.search(span)
+            and not _JOURNAL_FOOD_NEGATED_RE.search(span)
+            and _semantic_source_subject_safe(span)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(span)
+            for span in spans
+        )
+    )
+
+def _semantic_filter_food_record(source_text, payload):
+    """Bind every item from the multi-span contract to allowed source evidence."""
+    record = (payload or {}).get("food_record")
+    if not isinstance(record, dict):
         return None
-    start = raw.casefold().find(span.casefold())
-    if start < 0:
+    if "evidence_spans" not in (payload or {}):
+        return record
+    allowed = _semantic_evidence_spans(source_text, payload)
+    if not allowed:
         return None
-    return raw[start:start + len(span)]
+
+    def inside_allowed(fragment):
+        quote = str(fragment or "").strip()
+        return bool(
+            quote
+            and len(quote) <= 300
+            and any(quote.casefold() in span.casefold() for span in allowed)
+        )
+
+    def item_supported_by_allowed_evidence(item):
+        name_tokens = re.findall(
+            r"[а-яёa-z0-9]{3,}",
+            str(item.get("name") or "").casefold().replace("ё", "е"),
+        )
+        source_tokens = re.findall(
+            r"[а-яёa-z0-9]{3,}",
+            " ".join(allowed).casefold().replace("ё", "е"),
+        )
+        ignored = {
+            "один", "одна", "одно", "несколько", "примерно", "домашний",
+            "грамм", "грамма", "граммов", "порция",
+        }
+        name_tokens = [token for token in name_tokens if token not in ignored]
+
+        def related(left, right):
+            common = 0
+            for a, b in zip(left, right):
+                if a != b:
+                    break
+                common += 1
+            return (
+                left == right
+                or SequenceMatcher(None, left, right).ratio() >= 0.72
+                or (
+                    common >= 2
+                    and common / min(len(left), len(right)) >= 0.65
+                )
+            )
+
+        matched = sum(
+            any(related(name_token, source_token) for source_token in source_tokens)
+            for name_token in name_tokens
+        )
+        return bool(name_tokens and matched >= math.ceil(len(name_tokens) * 0.6))
+
+    items = []
+    for item in (record.get("items") or [])[:24]:
+        if not isinstance(item, dict) or not item_supported_by_allowed_evidence(item):
+            continue
+        clean = dict(item)
+        clean.pop("evidence_span", None)
+        if str(clean.get("name") or "").strip():
+            items.append(clean)
+    unparsed = [
+        str(fragment).strip()
+        for fragment in (record.get("unparsed") or [])[:8]
+        if inside_allowed(fragment)
+    ]
+    if not items and not unparsed:
+        return None
+    clean_record = dict(record)
+    clean_record["items"] = items
+    clean_record["unparsed"] = unparsed
+    clean_record["title"] = (
+        ", ".join(str(item.get("name") or "").strip() for item in items[:4])
+        or "Приём пищи"
+    )[:80]
+    for aggregate in ("total", "grams", "kcal", "protein", "fat", "carbs"):
+        clean_record.pop(aggregate, None)
+    return clean_record
 
 def _semantic_owned_recent_target(context, domain, target):
     """Only the sole row or the last verified mutation is safe to edit."""
@@ -1740,7 +1881,10 @@ def _semantic_owned_recent_target(context, domain, target):
     )
 
 def _semantic_source_subject_safe(text):
-    return not _journal_third_party_source(text)
+    return (
+        not _journal_third_party_source(text)
+        or _journal_explicit_first_person_event(text)
+    )
 
 def _semantic_action_matches_source(
     action, text, context=None, payload=None, require_evidence=False,
@@ -1749,7 +1893,15 @@ def _semantic_action_matches_source(
     raw = str(text or "").strip()
     if not raw or "\n" in raw or "\r" in raw or _JOURNAL_META_INSTRUCTION_RE.search(raw):
         return False
-    if not _semantic_source_subject_safe(raw):
+    if require_evidence:
+        evidence_spans = _semantic_evidence_spans(raw, payload)
+        if not evidence_spans or any(
+            not _semantic_source_subject_safe(span)
+            or _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(span)
+            for span in evidence_spans
+        ):
+            return False
+    elif not _semantic_source_subject_safe(raw):
         return False
     if not require_evidence:
         if action == "food":
@@ -1789,12 +1941,9 @@ def _semantic_action_matches_source(
             )
         return False
     if action == "food":
-        evidence = _semantic_evidence_span(raw, payload)
         return bool(
             (
-                evidence
-                and _JOURNAL_FOOD_COMPLETED_RE.search(evidence)
-                and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+                _semantic_food_evidence_safe(raw, payload)
             )
             or (
                 _journal_has_recent_mutation(context)
@@ -1802,8 +1951,7 @@ def _semantic_action_matches_source(
                 and str(((context or {}).get("last_mutation") or {}).get("kind") or "").startswith("food")
                 and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
                 and str((payload or {}).get("food_text") or "").strip()
-                and evidence
-                and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+                and _semantic_food_evidence_safe(raw, payload)
             )
         )
     if action == "food_update":
@@ -1911,9 +2059,23 @@ def _normalize_semantic_journal(data, source_text="", context=None, enable_v2=Fa
         return None
     out = {"intent": action_to_intent[action], "confidence": confidence}
     if action == "food":
-        out["food_text"] = str(data.get("food_text") or "").strip()[:500]
-        if enable_v2 and isinstance(data.get("food_record"), dict):
-            out["food_record"] = data["food_record"]
+        food_record = (
+            _semantic_filter_food_record(source_text, data)
+            if enable_v2 else None
+        )
+        if enable_v2 and "evidence_spans" in data:
+            if not food_record:
+                return None
+            parts = [
+                str(item.get("name") or "").strip()
+                for item in (food_record.get("items") or [])
+                if str(item.get("name") or "").strip()
+            ] + list(food_record.get("unparsed") or [])
+            out["food_text"] = ", ".join(parts)[:500]
+        else:
+            out["food_text"] = str(data.get("food_text") or "").strip()[:500]
+        if enable_v2 and food_record:
+            out["food_record"] = food_record
         slot = str(data.get("slot") or "")
         if slot in {"breakfast", "lunch", "snack", "dinner"}:
             out["slot"] = slot

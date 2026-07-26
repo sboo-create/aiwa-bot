@@ -133,6 +133,29 @@ async def main():
     )
     masculine_meals = bot.meals_of(masculine_cid)
 
+    mixed_cid = cid + 3
+    bot._activate_user(mixed_cid)
+    bot.upsert(
+        mixed_cid,
+        mode="cycle",
+        cycle_len=28,
+        last_period=(bot.dtoday() - timedelta(days=12)).isoformat(),
+        height=168,
+        weight=60,
+        age=30,
+        activity=2,
+    )
+    mixed, mixed_ms = await turn(
+        mixed_cid,
+        (
+            "Я выпил чай и съел пару сушек, вечером хочу заказать суп, "
+            "после прогулки попробовал йогурт, а шоколад не ел"
+        ),
+        "mixed-status",
+    )
+    mixed_meals = bot.meals_of(mixed_cid)
+    mixed_saved = json.dumps(mixed_meals, ensure_ascii=False).casefold()
+
     checks = {
         "create_mutation": (created.get("mutation") or {}).get("kind") == "food",
         "create_coverage": create_coverage,
@@ -156,9 +179,15 @@ async def main():
             and masculine_meals[0].get("slot") == "lunch"
             and len(masculine_meals[0].get("items") or []) == 3
         ),
+        "mixed_status_saves_only_completed": (
+            (mixed.get("mutation") or {}).get("kind") == "food"
+            and len(mixed_meals) == 1
+            and all(term in mixed_saved for term in ("чай", "суш", "йогурт"))
+            and all(term not in mixed_saved for term in ("суп", "шоколад"))
+        ),
         "no_guard_loop": all(
             "сервер не подтвердил" not in x.get("answer", "")
-            for x in (created, moved, appended, replayed)
+            for x in (created, moved, appended, replayed, mixed)
         ),
     }
     result = {
@@ -170,6 +199,7 @@ async def main():
             "append_item": append_ms,
             "append_retry": replay_ms,
             "masculine_first_person": masculine_ms,
+            "mixed_status": mixed_ms,
         },
         "answers": {
             "create": created.get("answer"),
@@ -177,6 +207,7 @@ async def main():
             "append": appended.get("answer"),
             "append_retry": replayed.get("answer"),
             "masculine_first_person": masculine.get("answer"),
+            "mixed_status": mixed.get("answer"),
         },
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))

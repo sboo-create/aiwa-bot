@@ -71,8 +71,43 @@ CASES = [
         EMPTY_CONTEXT,
         "food",
     ),
+    (
+        "mixed-status-disjoint",
+        (
+            "Я выпил чай и съел пару сушек, вечером хочу заказать суп, "
+            "после прогулки попробовал йогурт, а шоколад не ел"
+        ),
+        EMPTY_CONTEXT,
+        "food",
+    ),
+    (
+        "mixed-status-third-party",
+        (
+            "Если задержусь, съем пасту. Сейчас перекусил яблоком, "
+            "сестра выпила сок, а потом я куснул хлеба"
+        ),
+        EMPTY_CONTEXT,
+        "food",
+    ),
     ("third-party", "Соня съела творог, запиши", EMPTY_CONTEXT, "none"),
 ]
+
+
+def evidence_spans(result, source):
+    values = result.get("evidence_spans")
+    if not isinstance(values, list):
+        values = [result.get("evidence_span")]
+    spans = [str(value or "").strip() for value in values]
+    if not spans or any(not span for span in spans):
+        return []
+    cursor = 0
+    folded = source.casefold()
+    for span in spans:
+        start = folded.find(span.casefold(), cursor)
+        if start < 0:
+            return []
+        cursor = start + len(span)
+    return spans
 
 
 def main():
@@ -91,8 +126,8 @@ def main():
         actual = str(result.get("action") or "none")
         ok = actual == expected
         if expected not in {"none"}:
-            span = str(result.get("evidence_span") or "")
-            ok = ok and bool(span) and span.casefold() in text.casefold()
+            spans = evidence_spans(result, text)
+            ok = ok and bool(spans)
         if expected in {"move_meal_slot", "append_meal_item"}:
             ok = ok and result.get("target_id") == 101
         if expected == "move_meal_slot":
@@ -101,8 +136,33 @@ def main():
             # Kept for readability if the case name is ever used as expectation.
             pass
         if name == "mixed-status" and actual == "food":
-            span = str(result.get("evidence_span") or "")
-            ok = ok and "собираюсь" not in span.casefold()
+            spans = evidence_spans(result, text)
+            ok = ok and all("собираюсь" not in span.casefold() for span in spans)
+        if name in {"mixed-status-disjoint", "mixed-status-third-party"} and actual == "food":
+            spans = evidence_spans(result, text)
+            forbidden = (
+                ("хочу", "суп", "шоколад", "не ел")
+                if name == "mixed-status-disjoint"
+                else ("если", "паста", "сестра", "сок")
+            )
+            evidence_text = " ".join(spans).casefold()
+            record_text = json.dumps(
+                result.get("food_record") or {}, ensure_ascii=False,
+            ).casefold()
+            ok = (
+                ok
+                and len(spans) >= 2
+                and not any(term in evidence_text for term in forbidden)
+                and not any(term in record_text for term in forbidden)
+            )
+            items = (result.get("food_record") or {}).get("items") or []
+            ok = ok and bool(items) and all(
+                any(
+                    str(item.get("evidence_span") or "").casefold() in span.casefold()
+                    for span in spans
+                )
+                for item in items
+            )
         if name == "voice-create":
             voice_record = result.get("food_record") if isinstance(result.get("food_record"), dict) else {}
             items = voice_record.get("items") if isinstance(voice_record.get("items"), list) else []
