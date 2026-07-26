@@ -44,7 +44,7 @@ SAFE_PROPERTIES = {
     "payload_version", "app_version", "migration_batch", "token_precision",
     "answer_id", "rating", "safety_level", "campaign_id", "campaign_type",
     "delivery_status", "failure_class", "retryable", "platform", "tool_name",
-    "outcome_type", "reason", "slot",
+    "outcome_type",
 }
 NUMERIC_PROPERTIES = {
     "calls", "retry_index", "latency_ms", "input_tokens", "output_tokens",
@@ -61,7 +61,6 @@ SYSTEM_NAMES = {
     "push_failed", "push_opened", "answer_feedback_prompted",
     "answer_feedback_submitted", "safety_guidance_shown", "summary_delivered",
     "tool_execution_completed", "tool_outcome_completed",
-    "journal_write_rejected", "journal_slot_corrected", "journal_food_unparsed",
 }
 SUCCESS = {"success", "ok", "completed"}
 RESPONSE_NAMES = {"assistant_message_sent", "assistant_response_received"}
@@ -1005,12 +1004,6 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         and r["provenance"] == "observed"
         for r in rows
     )
-    day_journal_rejections = sum(
-        r["name"] == "journal_write_rejected"
-        and calendar_day_start <= r["ts"] <= now
-        and r["provenance"] == "observed"
-        for r in rows
-    )
     day_successful_tool_executions = sum(
         r["name"] == "tool_execution_completed"
         and str(r["properties"].get("status") or "") in SUCCESS
@@ -1075,14 +1068,6 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "status": ("no_active_users" if not dau_ids else "ok"),
          "selected_for_overview": False,
          "help": "Только успешно завершённые структурированные function calls с 00:00 МСК. Это диагностическая подметрика, а не общий Tools / DAU: неуспешный вызов всё равно является фактической попыткой использования инструмента."},
-        {"id": "journal_write_rejections", "label": "Journal write rejections / DAU",
-         "value": per_dau(day_journal_rejections),
-         "numerator": day_journal_rejections,
-         "numerator_label": "отказов исполнителя записи с 00:00 МСК",
-         "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
-         "status": ("no_active_users" if not dau_ids else "ok"),
-         "selected_for_overview": False,
-         "help": "Модель вызвала инструмент записи, а исполнитель отказал. Причина в свойстве reason: subject — чужое событие, negated — событие отрицается, denied — просьба не записывать, question — вопрос вместо отчёта, quoted — цитата, not_completed — план или гипотеза. Рост по одной причине означает либо атаку, либо что модель систематически неправильно понимает этот класс фраз."},
         {"id": "useful_tool_outcomes", "label": "Useful outcomes after tool / DAU",
          "value": per_exact_active_day(len(exact_tool_outcomes)),
          "numerator": len(exact_tool_outcomes),

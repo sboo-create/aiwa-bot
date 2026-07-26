@@ -139,9 +139,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual((overview_tool["value"], overview_tool["numerator"],
                           overview_tool["denominator"]), (1.0, 2, 2))
         self.assertEqual(tools["logical_ai_requests"]["value"], 1.0)
-        # + journal_write_rejections: отказы исполнителя записи (v113)
-        self.assertIn("journal_write_rejections", tools)
-        self.assertEqual(len(tools), 6)
+        self.assertEqual(len(tools), 5)
         self.assertEqual(tools["actual_tool_executions"]["value"], 2.0)
         self.assertEqual(tools["successful_tool_executions"]["value"], 0.5)
         self.assertFalse(tools["successful_tool_executions"]["selected_for_overview"])
