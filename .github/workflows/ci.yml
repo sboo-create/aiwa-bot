@@ -19,7 +19,10 @@ jobs:
       - run: pip install -r requirements.txt
       - run: pip install -r stats/requirements.txt
       - run: python -m py_compile aiwa_bot.py llm.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py
-      - run: python -m unittest discover -s tests -v
+      # pytest, а не unittest discover: корпус журналирования использует
+      # parametrize/fixtures, и unittest молча собирал бы 132 теста вместо 204.
+      - run: pip install pytest
+      - run: python -m pytest tests -q
       - run: pip install pip-audit bandit
       - run: pip-audit -r requirements.txt
       - run: pip-audit -r stats/requirements.txt
