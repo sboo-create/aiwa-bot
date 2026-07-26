@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-26-v123-journal-mixed-status"
+AIWA_VERSION = "2026-07-26-v124-telegram-webapp-frame"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -8544,7 +8544,18 @@ async def _security_headers(request, handler):
     response = await handler(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
-    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    if request.path == "/":
+        # Telegram Web renders Mini Apps in an iframe owned by web.telegram.org.
+        # X-Frame-Options cannot express that allow-list, so use CSP for the
+        # only embeddable HTML route and keep every API/admin route same-origin.
+        response.headers.pop("X-Frame-Options", None)
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "frame-ancestors 'self' https://web.telegram.org "
+            "https://telegram.org https://*.telegram.org",
+        )
+    else:
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     origin = request.headers.get("Origin")
     configured = {x.strip().rstrip("/") for x in os.environ.get("AIWA_ALLOWED_ORIGINS", "").split(",") if x.strip()}
     if AIWA_WEBAPP_URL:

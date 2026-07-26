@@ -127,6 +127,31 @@ class SecurityAnalyticsTests(unittest.TestCase):
         finally:
             bot.AIWA_WEBAPP_URL = old
 
+    def test_webapp_root_allows_telegram_frame_but_api_routes_do_not(self):
+        async def handler(_request):
+            return bot.web.Response(
+                text="ok",
+                headers={"X-Frame-Options": "SAMEORIGIN"},
+            )
+
+        root = asyncio.run(bot._security_headers(
+            types.SimpleNamespace(path="/", headers={}),
+            handler,
+        ))
+        self.assertNotIn("X-Frame-Options", root.headers)
+        frame_policy = root.headers.get("Content-Security-Policy", "")
+        self.assertIn("frame-ancestors 'self'", frame_policy)
+        self.assertIn("https://web.telegram.org", frame_policy)
+        self.assertIn("https://*.telegram.org", frame_policy)
+        self.assertNotIn("frame-ancestors *", frame_policy)
+
+        api = asyncio.run(bot._security_headers(
+            types.SimpleNamespace(path="/api/data", headers={}),
+            handler,
+        ))
+        self.assertEqual(api.headers.get("X-Frame-Options"), "SAMEORIGIN")
+        self.assertNotIn("Content-Security-Policy", api.headers)
+
     def test_feedback_must_match_prompt_shown_to_same_user(self):
         answer_id = "a1b2c3d4e5f60708"
         bot.ev(101, "feedback_prompt", meta=f"{answer_id}|webapp")
