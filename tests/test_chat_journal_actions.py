@@ -758,8 +758,8 @@ class ChatJournalActionTests(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             with self.subTest(path=path):
                 self.assertIn("async function applyChatMutation", source)
-                self.assertIn("loadedFood=false;DIARY=null", source)
-                self.assertIn("loadedTrain=false", source)
+                self.assertIn("invalidateFoodSection();DIARY=null", source)
+                self.assertIn("invalidateTrainSection()", source)
                 self.assertIn("request_id:chatRequestId()", source)
                 self.assertIn("visibilitychange", source)
 
