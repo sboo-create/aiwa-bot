@@ -96,7 +96,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-26-v118-mixed-tense-and-visible-refusal"
+AIWA_VERSION = "2026-07-26-v117-fix-handle-text-nameerror"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -5922,27 +5922,6 @@ def _write_subject_allowed(message, span):
         return True                       # субъект не назван — по умолчанию она сама
     return bool(_SELF_SUBJECT_RE.match(span))
 
-def _write_status_allowed(message, span):
-    """Событие уже случилось? Модель цитирует фрагмент-доказательство, код его проверяет.
-
-    Блокировать по всему сообщению нельзя: живая речь мешает времена в одной
-    фразе — «съел булочек… собираюсь съесть… не буду есть кекс». Одно «собираюсь»
-    не должно отменять запись пяти реально съеденных блюд. Но если доказательства
-    нет или в нём самом стоит план — работает прежний запрет по всему тексту.
-    """
-    raw = str(message or "")
-    span = str(span or "").strip().strip("«»\"'.,!?;:")
-    if span and span.lower() in raw.lower():
-        return not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(span)
-    return not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(raw)
-
-_STATUS_ARG = {
-    "type": "string",
-    "description": ("дословная подстрока сообщения, доказывающая, что событие УЖЕ "
-                    "случилось: «съел булочек», «выпил чаю». Если в сообщении есть и "
-                    "планы («собираюсь»), процитируй только завершённую часть. "
-                    "Если завершённого события нет — инструмент вызывать нельзя."),
-}
 _SUBJECT_ARG = {
     "type": "string",
     "description": ("дословная подстрока сообщения, называющая, С КЕМ произошло событие. "
@@ -5966,9 +5945,8 @@ def _agent_write_tools_spec():
                             "рецептов, вопросов и чужой еды."),
             "parameters": {"type": "object", "properties": {
                 "food_text": {"type": "string", "description": "что именно съедено, с количествами, дословно по смыслу сообщения"},
-                "slot": _SLOT_ARG, "event_date": _DATE_ARG, "subject_span": _SUBJECT_ARG,
-                "status_span": _STATUS_ARG},
-                "required": ["food_text", "subject_span", "status_span"]}}},
+                "slot": _SLOT_ARG, "event_date": _DATE_ARG, "subject_span": _SUBJECT_ARG},
+                "required": ["food_text", "subject_span"]}}},
         {"type": "function", "function": {"name": "move_meal_slot",
             "description": ("Перенести уже существующую запись еды в другой приём пищи. Вызывай, когда "
                             "она поправляет: «это был завтрак, а не обед». meal_id возьми из today_diary."),
@@ -5999,9 +5977,8 @@ def _agent_write_tools_spec():
                             "Рекомендация тренировки выполненной тренировкой не является."),
             "parameters": {"type": "object", "properties": {
                 "workout_text": {"type": "string", "description": "что за тренировка, дословно по смыслу"},
-                "event_date": _DATE_ARG, "subject_span": _SUBJECT_ARG,
-                "status_span": _STATUS_ARG},
-                "required": ["workout_text", "subject_span", "status_span"]}}},
+                "event_date": _DATE_ARG, "subject_span": _SUBJECT_ARG},
+                "required": ["workout_text", "subject_span"]}}},
         {"type": "function", "function": {"name": "log_period_start",
             "description": "Отметить в календаре начало месячных у самой пользовательницы.",
             "parameters": {"type": "object", "properties": {
@@ -6066,7 +6043,7 @@ async def _agent_exec_write(cid, u, name, args, message, user_generation=None, m
     if _JOURNAL_NEGATED_EVENT_RE.search(str(message or "")):
         ev(cid, "journal_write_rejected", meta=f"negated|{name}", user_generation=user_generation)
         return {"ok": False, "text": "Поняла это как «события не было», поэтому в дневник ничего не внесла."}
-    if name in _CREATE_TOOLS and not _write_status_allowed(message, args.get("status_span")):
+    if name in _CREATE_TOOLS and _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(str(message or "")):
         ev(cid, "journal_write_rejected", meta=f"not_completed|{name}", user_generation=user_generation)
         return {"ok": False, "text": "Записываю только то, что уже случилось — планы и предположения в дневник не вношу."}
     # Новую запись по вопросу не создаём. Правку существующей — можно: «а ты не
@@ -6202,18 +6179,12 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None, ch
     gathered = []
     successful_tools = 0
     writes = writes_out if writes_out is not None else []
-    refusals = []
 
     async def finish():
         # Если что-то записали — ответ собирает КОД из проверенных строк БД.
         # Свободному тексту модели нечего добавить к факту записи, и соврать он не может.
         if writes:
             return " ".join(w["text"] for w in writes if w.get("text"))
-        # Модель пыталась записать, исполнитель отказал. Раньше отказ терялся:
-        # отвечал свободный чат, обещал запись, guard затирал его шаблоном — и
-        # пользователь не узнавал ПРИЧИНУ. Отдаём причину как есть.
-        if refusals:
-            return refusals[0]
         answer = await _agent_final(
             cid, u, msg, gathered, usage, request_id, user_generation,
         )
@@ -6255,8 +6226,6 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None, ch
                 )
                 if isinstance(res, dict) and res.get("ok"):
                     writes.append(res)
-                elif isinstance(res, dict) and res.get("text"):
-                    refusals.append(res["text"])
             else:
                 res = _agent_exec(cid, nm, a)
             tool_status = "error" if isinstance(res, dict) and (res.get("error") or res.get("ok") is False) else "success"
