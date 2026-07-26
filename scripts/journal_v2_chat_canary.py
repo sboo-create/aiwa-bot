@@ -114,6 +114,25 @@ async def main():
     )
     after_replay = bot.meal_get(repair_cid, seed_id)
 
+    masculine_cid = cid + 2
+    bot._activate_user(masculine_cid)
+    bot.upsert(
+        masculine_cid,
+        mode="cycle",
+        cycle_len=28,
+        last_period=(bot.dtoday() - timedelta(days=12)).isoformat(),
+        height=168,
+        weight=60,
+        age=30,
+        activity=2,
+    )
+    masculine, masculine_ms = await turn(
+        masculine_cid,
+        "На обед съел бутерброд с красной рыбой немного голубики один домашний наггетс",
+        "masculine-self",
+    )
+    masculine_meals = bot.meals_of(masculine_cid)
+
     checks = {
         "create_mutation": (created.get("mutation") or {}).get("kind") == "food",
         "create_coverage": create_coverage,
@@ -131,6 +150,12 @@ async def main():
             and len(after_replay.get("items") or []) == 4
             and "запрос уже применён" in replayed.get("answer", "")
         ),
+        "masculine_first_person_saved": (
+            (masculine.get("mutation") or {}).get("kind") == "food"
+            and len(masculine_meals) == 1
+            and masculine_meals[0].get("slot") == "lunch"
+            and len(masculine_meals[0].get("items") or []) == 3
+        ),
         "no_guard_loop": all(
             "сервер не подтвердил" not in x.get("answer", "")
             for x in (created, moved, appended, replayed)
@@ -144,12 +169,14 @@ async def main():
             "move_slot": move_ms,
             "append_item": append_ms,
             "append_retry": replay_ms,
+            "masculine_first_person": masculine_ms,
         },
         "answers": {
             "create": created.get("answer"),
             "move": moved.get("answer"),
             "append": appended.get("answer"),
             "append_retry": replayed.get("answer"),
+            "masculine_first_person": masculine.get("answer"),
         },
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))

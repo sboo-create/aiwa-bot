@@ -270,6 +270,33 @@ class SoniaJournalV2Tests(unittest.TestCase):
         self.assertEqual(result["mutation"]["kind"], "food")
         self.assertEqual([x["name"] for x in bot.meals_of(self.cid)[0]["items"]], ["Творог"])
 
+    def test_masculine_first_person_is_still_the_current_account(self):
+        text = (
+            "На обед съел бутерброд с красной рыбой немного голубики "
+            "один домашний наггетс"
+        )
+        parsed = {
+            "title": "Бутерброд, голубика и наггетс",
+            "fclass": "смешанное",
+            "items": [
+                {"name": "Бутерброд с красной рыбой", "grams": 120, "kcal": 300,
+                 "protein": 15, "fat": 14, "carbs": 28},
+                {"name": "Голубика", "grams": 40, "kcal": 23,
+                 "protein": 0.3, "fat": 0.1, "carbs": 5},
+                {"name": "Домашний наггетс", "grams": 30, "kcal": 90,
+                 "protein": 5, "fat": 5, "carbs": 5},
+            ],
+            "unparsed": [],
+        }
+        classified = route(
+            "food", "На обед съел бутерброд с красной рыбой",
+            slot="lunch", food_text=text, food_record=parsed,
+        )
+        result = self._reply(text, "masculine-self", classified)
+        self.assertEqual(result["mutation"]["kind"], "food")
+        self.assertIn("в обед", result["answer"])
+        self.assertEqual(len(bot.meals_of(self.cid)[0]["items"]), 3)
+
     def test_question_without_recent_journal_does_not_pay_router_latency(self):
         with mock.patch.object(bot.L, "classify_journal_event") as classify:
             self.assertIsNone(asyncio.run(
