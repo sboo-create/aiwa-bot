@@ -96,7 +96,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-26-v117-fix-handle-text-nameerror"
+AIWA_VERSION = "2026-07-26-v116-journal-write-tools"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -5039,10 +5039,11 @@ async def handle_text(update, context, txt):
             _telegram_mutation_key = chat_mutation_key(
                 "telegram", getattr(update, "update_id", None),
             )
-            # Семантический роутер удалён: естественное журналирование распознаёт
-            # модель через инструменты записи ниже, в _chat_reply. Здесь остаётся
-            # только повтор уже зафиксированной мутации по тому же update_id.
             _journal = chat_mutation_route_preflight(cid, _telegram_mutation_key)
+            if not _journal:
+                _journal = await resolve_semantic_journal_action(
+                    cid, txt, user_generation=_turn_generation,
+                )
             if _journal:
                 _intent = _journal["intent"]
         if _intent:

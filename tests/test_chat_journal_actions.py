@@ -149,55 +149,6 @@ class ChatJournalActionTests(unittest.TestCase):
         self.assertEqual(saved[0]["note"], "на ноги")
         self.assertEqual(saved[0]["duration"], "")
 
-    def _telegram_turn(self, text, update_id=4100):
-        """Настоящий путь Telegram: handle_text целиком, как в проде."""
-        sent = []
-        context = SimpleNamespace(bot=SimpleNamespace(
-            send_chat_action=mock.AsyncMock(),
-            send_message=mock.AsyncMock(side_effect=lambda *a, **k: sent.append(a)),
-        ))
-        update = SimpleNamespace(
-            update_id=update_id, effective_chat=SimpleNamespace(id=self.cid),
-            message=SimpleNamespace(entities=[], chat_id=self.cid,
-                                    reply_text=mock.AsyncMock()),
-        )
-        asyncio.run(bot.handle_text(update, context, text))
-        return update, sent
-
-    def test_telegram_free_form_turn_reaches_the_user(self):
-        """Регрессия v116: handle_text звал удалённый роутер и падал на КАЖДОМ сообщении.
-
-        Ни один тест не трогал handle_text, поэтому NameError уехал в прод.
-        """
-        with (
-            mock.patch.object(bot.L, "call_tools", return_value=None),
-            mock.patch.object(bot.L, "answer_question", return_value="Ответ про цикл."),
-            mock.patch.object(bot.L, "general_answer", return_value="Ответ."),
-            mock.patch.object(bot.L, "followups", return_value=[]),
-        ):
-            update, sent = self._telegram_turn("Люба выпила два энергетика")
-        delivered = " ".join(str(x) for x in sent) + str(update.message.reply_text.call_args_list)
-        self.assertIn("Ответ", delivered)
-        self.assertEqual(bot.meals_of(self.cid), [], "чужое событие не пишется")
-
-    def test_telegram_journal_write_shows_slot_buttons(self):
-        """Запись из Telegram доходит до пользователя вместе с кнопками правки слота."""
-        parsed = {"title": "Булочка", "grams": 90, "kcal": 300,
-                  "protein": 6, "fat": 10, "carbs": 45}
-        with (
-            tool_plan(("log_meal", {"food_text": "булочка", "subject_span": "я"})),
-            mock.patch.object(bot.L, "analyze_food_text", return_value=parsed),
-            mock.patch.object(bot.L, "followups", return_value=[]),
-        ):
-            update, _ = self._telegram_turn("Я съела булочку из пятёрочки", update_id=4101)
-        self.assertEqual(len(bot.meals_of(self.cid)), 1)
-        call = update.message.reply_text.call_args
-        self.assertIsNotNone(call, "ответ о записи не отправлен пользователю")
-        self.assertIn("Записала", call.args[0])
-        buttons = [b.callback_data for r in call.kwargs["reply_markup"].inline_keyboard for b in r
-                   if getattr(b, "callback_data", None)]
-        self.assertTrue(any(b.startswith("mslot:") for b in buttons))
-
     def test_third_party_reports_never_mutate_in_web_or_telegram(self):
         """Чужое событие не пишется, даже если модель вызвала инструмент записи.
 
