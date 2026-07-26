@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-26-v121-staging-chat-fix"
+AIWA_VERSION = "2026-07-26-v122-miniapp-fast-tabs"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -1119,6 +1119,7 @@ def del_user(cid):
     c.commit(); c.close()
     CHAT_HIST.pop(cid, None)
     menu_cache_clear(cid)
+    section_cache_clear(cid)
     for key in [key for key in list(_SUM_CACHE) if key and key[0] == cid]:
         _SUM_CACHE.pop(key, None)
     BCAST_PENDING.discard(cid)
@@ -6267,51 +6268,178 @@ def _recent_syms_text(cid):
     if n: out.append(f"симптомов отмечено: {n}")
     return ", ".join(out)
 
+_SECTION_CACHE = {}
+_SECTION_TASKS = {}
+_SECTION_FAST_WAIT_SECONDS = 0.75
+
+def section_cache_clear(cid):
+    for key in [key for key in list(_SECTION_CACHE) if key and key[0] == cid]:
+        _SECTION_CACHE.pop(key, None)
+    for key in [key for key in list(_SECTION_TASKS) if key and key[0] == cid]:
+        task = _SECTION_TASKS.pop(key, None)
+        if task and not task.done():
+            task.cancel()
+
+def _section_key(cid, kind, u, st):
+    """Cache generated Mini App sections by the data that can change their answer."""
+    profile = profile_of(u) or {}
+    snapshot = {
+        "mode": u.get("mode"),
+        "profile": {k: profile.get(k) for k in (
+            "height", "weight", "age", "activity", "diet", "diet_note", "kcal_goal"
+        )},
+        "cycle": ({k: st.get(k) for k in (
+            "day", "cycle_len", "phase", "subphase", "days_to_next", "status"
+        )} if st else None),
+    }
+    if kind == "training":
+        snapshot["recent"] = _recent_workouts_text(cid)
+        snapshot["checkin"] = log_get(cid, dtoday().isoformat()) or {}
+    raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)
+    return (cid, dtoday().isoformat(), kind, _hashlib.sha256(raw.encode("utf-8")).hexdigest())
+
+def _section_fallback(cid, kind, u, st):
+    """Fast deterministic response shown while the personal model result is prepared."""
+    prof = profile_of(u)
+    if kind == "training":
+        pregnancy = None
+        if u.get("mode") == "preg" and u.get("last_period"):
+            try:
+                pregnancy = C.preg_status(u["last_period"])
+            except Exception:
+                pregnancy = None
+        plan = (L.training_plan(st, prof) if st is not None
+                else L.general_training(prof, u.get("mode")))
+        # The pregnancy safety override is deterministic and must also apply
+        # before the background model call has completed.
+        if u.get("mode") == "preg":
+            checkin = log_get(cid, dtoday().isoformat()) or {}
+            symptoms = set(checkin.get("symptoms") or [])
+            if checkin.get("energy") == 1 or symptoms.intersection({"preg_cramp", "preg_swelling"}):
+                plan = L.training_today(
+                    None, prof, None, "preg", pregnancy=pregnancy, checkin=checkin
+                )
+        return {"text": plan.get("summary", ""), "training": plan}
+
+    target = profile_kcal(prof) if prof else None
+    if st is not None:
+        text = st["content"]["food"]
+        phase_key = st.get("phase") or "follicular"
+    else:
+        text = {
+            "meno": "В менопаузе важны белок, кальций, витамин D, омега-3 и стабильный сахар.",
+            "preg": "В беременности важны белок, фолаты, железо, кальций и безопасные продукты.",
+            "irregular": "Без чёткой фазы опирайся на белок, клетчатку, сложные углеводы и регулярность.",
+            "none": "Сбалансированная база на день: белок, овощи, сложные углеводы и вода.",
+        }.get(u.get("mode"), "Сбалансированная база на день: белок, овощи, сложные углеводы и вода.")
+        phase_key = "follicular"
+    restrictions = bool(prof and ((prof.get("diet") or "").strip() or (prof.get("diet_note") or "").strip()))
+    out = {"kcal": (target[0] if target else None), "text": text,
+           "suggestions": ["Что выбрать на завтрак?", "Как добрать белок?", "Что есть вечером?"]}
+    # A generic menu must never override explicit allergies/restrictions.
+    if not restrictions:
+        menu = json.loads(json.dumps(L.CURATED_MENU.get(
+            phase_key, L.CURATED_MENU["follicular"]
+        ), ensure_ascii=False))
+        out["menu"] = L._scale_menu(menu, target)
+    return out
+
+async def _generate_section(cid, kind, u, st, key):
+    """Generate one section once, then make it instantly reusable."""
+    generation = _user_generation(cid)
+    try:
+        prof = profile_of(u)
+        if kind == "food":
+            target = profile_kcal(prof) if prof else None
+            usage = []
+            menu = await llm_to_thread(
+                cid, "menu_generation", menu_cached, cid, st, prof, target,
+                (u.get("mode") if st is None else None), usage,
+                user_generation=generation,
+            )
+            if usage:
+                ev(cid, "tokens", sum(usage), meta="menu", calls=len(usage), usage=usage)
+            if target:
+                menu["macros"] = {
+                    "protein": f"{target[1]} г", "fat": f"{target[2]} г",
+                    "carbs": f"{target[3]} г",
+                }
+            text = (st["content"]["food"] if st is not None
+                    else _section_fallback(cid, "food", u, st)["text"])
+            sugg_usage = []
+            suggestions = await llm_to_thread(
+                cid, "food_suggestions", L.food_suggestions,
+                [m.get("dish", "") for m in (menu.get("meals") or [])],
+                _food_ctx(u, st), sugg_usage,
+                user_generation=generation,
+            )
+            if sugg_usage:
+                ev(cid, "tokens", sum(sugg_usage), meta="food_suggest",
+                   calls=len(sugg_usage), usage=sugg_usage)
+            payload = {"menu": menu, "kcal": (target[0] if target else None),
+                       "text": text, "suggestions": suggestions}
+        else:
+            pregnancy = None
+            if u.get("mode") == "preg" and u.get("last_period"):
+                try:
+                    pregnancy = C.preg_status(u["last_period"])
+                except Exception:
+                    pregnancy = None
+            usage = []
+            plan = await llm_to_thread(
+                cid, "training_recommendation", L.training_today,
+                st, prof, _recent_workouts_text(cid), u.get("mode"), usage,
+                pregnancy=pregnancy, checkin=log_get(cid, dtoday().isoformat()),
+                user_generation=generation,
+            )
+            if isinstance(plan, dict) and plan.pop("_fallback", None):
+                ev(cid, "fallback", meta="static:training_plan")
+            if usage:
+                ev(cid, "tokens", sum(usage), meta="training_today",
+                   calls=len(usage), usage=usage)
+            payload = {"text": plan.get("summary", ""), "training": plan}
+        if not _user_write_allowed(cid, generation=generation):
+            return _section_fallback(cid, kind, u, st)
+        _SECTION_CACHE[key] = payload
+        _prune_day(_SECTION_CACHE)
+        return payload
+    except Exception:
+        log.exception("miniapp section generation failed: cid=%s kind=%s", cid, kind)
+        return _section_fallback(cid, kind, u, st)
+    finally:
+        if _SECTION_TASKS.get(key) is asyncio.current_task():
+            _SECTION_TASKS.pop(key, None)
+
 async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    u = row(cid); _, st = status_of(cid); kind = body.get("kind", "food"); ev(cid, "button", meta="web_" + kind)
+    u = row(cid); _, st = status_of(cid); kind = body.get("kind", "food")
+    if kind not in ("food", "training"):
+        return _cors(web.json_response({"error": "bad_kind"}, status=400))
+    if not body.get("refresh"):
+        ev(cid, "button", meta="web_" + kind)
     if not is_onboarded(u):
         return _cors(web.json_response({"error": "onboard", "text": "Сначала настрой Айву в боте."}, status=403))
-    if st is None:
-        prof = profile_of(u); target = profile_kcal(prof) if prof else None
-        if kind == "food":
-            _usage = []; menu = await llm_to_thread(cid, "menu_generation", menu_cached, cid, None, prof, target, u.get("mode"), _usage)
-            if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage), usage=_usage)
-            if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
-            txt = {"meno": "В менопаузе на первый план выходят кости, сон и сердце. Делай упор на белок (рыба, яйца, творог, курица) и кальций с витамином D (молочное, сардины, зелень), добавляй магний и B6 (гречка, орехи, тёмный шоколад) для сна и приливов, и омега-3 из жирной рыбы. Меньше быстрых сахаров, кофеина и алкоголя — они усиливают приливы.",
-                   "preg": "В беременности важно закрыть потребность в фолиевой кислоте, железе, кальции и белке. Ешь зелень и бобовые (фолаты), красное мясо и гречку (железо), молочное (кальций), рыбу с омега-3 и белок в каждый приём. Избегай сырого мяса и рыбы, непастеризованного, печени в избытке, алкоголя и лишнего кофеина.",
-                   "irregular": "Без чёткого цикла опирайся на стабильный сахар и сытость. Белок в каждый приём (яйца, рыба, птица, творог), сложные углеводы (гречка, рис, овощи), магний и железо — это держит энергию и настроение ровными в течение дня.",
-                   "none": "Сбалансированно и просто: белок в каждый приём, овощи и зелень, сложные углеводы, полезные жиры (рыба, орехи) и достаточно воды. Меньше резких скачков сахара — стабильнее энергия и меньше тяги к перекусам."}.get(u.get("mode"), "Сбалансированное питание на день: белок, овощи, сложные углеводы и вода.")
-            _su = []; sugg = await llm_to_thread(cid, "food_suggestions", L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, None), _su)
-            if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
-            return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt, "suggestions": sugg}))
-        pregnancy = None
-        if u.get("mode") == "preg" and u.get("last_period"):
-            try: pregnancy = C.preg_status(u["last_period"])
-            except Exception: pregnancy = None
-        _su = []; plan = await llm_to_thread(
-            cid, "training_recommendation", L.training_today,
-            None, prof, _recent_workouts_text(cid), u.get("mode"), _su,
-            pregnancy=pregnancy, checkin=log_get(cid, dtoday().isoformat()),
-        )
-        if isinstance(plan, dict) and plan.pop("_fallback", None):
-            ev(cid, "fallback", meta="static:training_plan")
-        if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
-        return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
-    if kind == "food":
-        prof = profile_of(u); target = profile_kcal(prof) if prof else None
-        _usage = []; menu = await llm_to_thread(cid, "menu_generation", menu_cached, cid, st, prof, target, None, _usage)
-        if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage), usage=_usage)
-        if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
-        text = st["content"]["food"]
-        _su = []; sugg = await llm_to_thread(cid, "food_suggestions", L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, st), _su)
-        if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
-        return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text, "suggestions": sugg}))
-    _su = []; plan = await llm_to_thread(cid, "training_recommendation", L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
-    if isinstance(plan, dict) and plan.pop("_fallback", None): ev(cid, "fallback", meta="static:training_plan")
-    if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
-    return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
+    key = _section_key(cid, kind, u, st)
+    cached = _SECTION_CACHE.get(key)
+    if cached is not None:
+        return _cors(web.json_response(dict(cached, cached=True, refreshing=False)))
+    task = _SECTION_TASKS.get(key)
+    if task is None:
+        task = asyncio.create_task(_generate_section(cid, kind, u, st, key))
+        _SECTION_TASKS[key] = task
+    # A tab must never inherit the provider's 30-60 second timeout. Give a warm
+    # provider a short chance, otherwise return useful deterministic content
+    # while the single shared task keeps preparing the personal result.
+    try:
+        payload = await asyncio.wait_for(asyncio.shield(task), timeout=_SECTION_FAST_WAIT_SECONDS)
+        return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
+    except asyncio.TimeoutError:
+        payload = _section_fallback(cid, kind, u, st)
+        return _cors(web.json_response(dict(payload, cached=False, refreshing=True)))
+    except Exception:
+        payload = _section_fallback(cid, kind, u, st)
+        return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
 async def _api_today(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
