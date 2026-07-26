@@ -58,10 +58,52 @@ class SecurityAnalyticsTests(unittest.TestCase):
         bot.DB = os.path.join(self.tmp.name, "test.db")
         bot._SUM_CACHE.clear()
         bot._MENU_CACHE.clear()
+        bot._SECTION_CACHE.clear()
+        bot._SECTION_TASKS.clear()
 
     def tearDown(self):
+        bot._SECTION_CACHE.clear()
+        bot._SECTION_TASKS.clear()
         bot.DB = self.old_db
         self.tmp.cleanup()
+
+    def test_miniapp_section_is_fast_singleflight_and_then_cached(self):
+        cid = 909
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        init_data = signed_init_data(cid)
+        gate = asyncio.Event()
+        calls = []
+
+        async def slow_llm(_cid, _purpose, _func, *args, **kwargs):
+            calls.append(_purpose)
+            await gate.wait()
+            return llm.general_training(None, "irregular")
+
+        async def scenario():
+            req = lambda refresh=False: FakeJsonRequest({
+                "initData": init_data, "kind": "training", "refresh": refresh,
+            })
+            with (
+                mock.patch.object(bot, "_SECTION_FAST_WAIT_SECONDS", 0.01),
+                mock.patch.object(bot, "llm_to_thread", side_effect=slow_llm),
+            ):
+                first, second = await asyncio.gather(
+                    bot._api_section(req()), bot._api_section(req())
+                )
+                first_data = json.loads(first.text)
+                second_data = json.loads(second.text)
+                self.assertTrue(first_data["refreshing"])
+                self.assertTrue(second_data["refreshing"])
+                self.assertEqual(calls, ["training_recommendation"])
+                gate.set()
+                await asyncio.gather(*list(bot._SECTION_TASKS.values()))
+                cached = json.loads((await bot._api_section(req(True))).text)
+                self.assertTrue(cached["cached"])
+                self.assertFalse(cached["refreshing"])
+                self.assertEqual(calls, ["training_recommendation"])
+
+        asyncio.run(scenario())
 
     def test_webapp_url_never_contains_health_data(self):
         old = bot.AIWA_WEBAPP_URL

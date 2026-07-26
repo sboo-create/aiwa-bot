@@ -3,6 +3,7 @@
 import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
+from difflib import SequenceMatcher
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -91,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-26-v119-revert-to-v115"
+AIWA_VERSION = "2026-07-26-v122-miniapp-fast-tabs"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -299,6 +300,9 @@ def db():
     except sqlite3.OperationalError: pass
     try: c.execute("ALTER TABLE meals ADD COLUMN fclass TEXT")
     except sqlite3.OperationalError: pass
+    # True only when the slot came from server time rather than user meaning.
+    try: c.execute("ALTER TABLE meals ADD COLUMN slot_guessed INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
     for _wcol in ("kcal INTEGER DEFAULT 0", "muscles TEXT"):
         try: c.execute(f"ALTER TABLE workouts ADD COLUMN {_wcol}")
         except sqlite3.OperationalError: pass
@@ -495,9 +499,28 @@ def normalize_food(data, source="photo"):
     if not (kcal or items or has_title):
         return None
     fclass = L.food_class_norm(data.get("fclass") or data.get("class") or data.get("category"), protein, fat, carbs)
+    unparsed = [
+        str(x).strip()[:120]
+        for x in (data.get("unparsed") or [])[:8]
+        if str(x or "").strip()
+    ]
+    item_names = [str(x.get("name") or "").strip().casefold() for x in items]
+    unparsed = [
+        fragment for fragment in unparsed
+        if not any(
+            SequenceMatcher(
+                None,
+                re.sub(r"[^а-яёa-z0-9]+", "", fragment.casefold())[:48],
+                re.sub(r"[^а-яёa-z0-9]+", "", name)[:48],
+            ).ratio() >= 0.72
+            for name in item_names
+            if name
+        )
+    ]
     return {"title": title, "kind": data.get("kind") or "dish", "items": items, "fclass": fclass,
             "kcal": kcal, "protein": protein, "fat": fat, "carbs": carbs, "grams": grams,
-            "confidence": data.get("confidence") or "medium", "note": str(data.get("note") or "")[:160], "source": source}
+            "unparsed": unparsed, "confidence": data.get("confidence") or "medium",
+            "note": str(data.get("note") or "")[:160], "source": source}
 
 def slot_for_now():
     try: h = datetime.now(TZ).hour
@@ -533,11 +556,11 @@ def meal_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_has
             result = {"id": prior_id, "created": False, "status": status, "data": saved_data}
             return result if return_status else prior_id
     mid = c.execute(
-        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (cid, d, datetime.now(TZ).isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
          float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
          json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo", slot,
-         rec.get("fclass") or None)).lastrowid
+         rec.get("fclass") or None, int(bool(rec.get("slot_guessed"))))).lastrowid
     if mutation_key:
         c.execute(
             """INSERT INTO chat_mutations
@@ -555,7 +578,13 @@ def meal_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_has
 
 def meal_set_slot(cid, mid, slot):
     if slot not in ("breakfast", "lunch", "snack", "dinner"): return False
-    c = db(); c.execute("UPDATE meals SET slot=? WHERE chat_id=? AND id=?", (slot, cid, int(mid))); c.commit(); c.close(); return True
+    c = db()
+    changed = c.execute(
+        "UPDATE meals SET slot=?,slot_guessed=0 WHERE chat_id=? AND id=?",
+        (slot, cid, int(mid)),
+    ).rowcount
+    c.commit(); c.close()
+    return bool(changed)
 
 def slot_from_text(t):
     t = (t or "").lower()
@@ -571,6 +600,8 @@ def meal_edit(cid, mid, **kw):
     for k, col in cols.items():
         if kw.get(k) is not None:
             sets.append(col + "=?"); vals.append(kw[k])
+            if k == "slot":
+                sets.append("slot_guessed=0")
     if not sets: return False
     vals += [cid, int(mid)]
     # SET identifiers come exclusively from the fixed cols mapping above.
@@ -578,10 +609,10 @@ def meal_edit(cid, mid, **kw):
 
 def meals_of(cid, d=None):
     d = d or dtoday().isoformat()
-    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
+    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
     return [{"id": x[0], "ts": x[1], "title": x[2], "kcal": x[3], "protein": x[4], "fat": x[5], "carbs": x[6],
              "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9], "slot": (x[10] or "snack"),
-             "fclass": x[11] or None} for x in r]
+             "fclass": x[11] or None, "slot_guessed": bool(x[12])} for x in r]
 
 def meal_get(cid, mid):
     """Read back one owned meal. Mutation confirmations must use this DB receipt."""
@@ -591,7 +622,7 @@ def meal_get(cid, mid):
         return None
     c = db()
     x = c.execute(
-        """SELECT id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass
+        """SELECT id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed
            FROM meals WHERE chat_id=? AND id=?""",
         (cid, wanted),
     ).fetchone()
@@ -602,11 +633,11 @@ def meal_get(cid, mid):
         "id": x[0], "date": x[1], "ts": x[2], "title": x[3], "kcal": x[4],
         "protein": x[5], "fat": x[6], "carbs": x[7], "grams": x[8],
         "items": json.loads(x[9] or "[]"), "source": x[10],
-        "slot": x[11] or "snack", "fclass": x[12] or None,
+        "slot": x[11] or "snack", "fclass": x[12] or None, "slot_guessed": bool(x[13]),
     }
 
 def meal_update(cid, mid, rec, *, user_generation=None, mutation_key=None,
-                args_hash=None, return_status=False):
+                args_hash=None, mutation_kind="food_update", return_status=False):
     """Atomically replace one owned meal and persist an idempotent verified receipt."""
     try:
         wanted = int(mid)
@@ -626,7 +657,7 @@ def meal_update(cid, mid, rec, *, user_generation=None, mutation_key=None,
         if prior:
             c.commit(); c.close()
             status = "mismatch" if (
-                prior[0] != "food_update"
+                prior[0] != mutation_kind
                 or str(prior[1] or "") != str(wanted)
                 or (prior[2] or "") != (args_hash or "")
             ) else ("reversed" if prior[4] else "duplicate")
@@ -637,7 +668,7 @@ def meal_update(cid, mid, rec, *, user_generation=None, mutation_key=None,
             result = {"id": wanted, "updated": False, "status": status, "data": saved_data}
             return result if return_status else (wanted if status == "duplicate" else None)
     current = c.execute(
-        "SELECT d,slot FROM meals WHERE chat_id=? AND id=?",
+        "SELECT d,slot,slot_guessed FROM meals WHERE chat_id=? AND id=?",
         (cid, wanted),
     ).fetchone()
     if not current:
@@ -645,20 +676,25 @@ def meal_update(cid, mid, rec, *, user_generation=None, mutation_key=None,
         result = {"id": None, "updated": False, "status": "missing", "data": {}}
         return result if return_status else None
     slot = rec.get("slot") or current[1] or "snack"
+    slot_guessed = (
+        bool(rec["slot_guessed"])
+        if "slot_guessed" in rec
+        else bool(current[2])
+    )
     c.execute(
         """UPDATE meals
-           SET title=?,kcal=?,protein=?,fat=?,carbs=?,grams=?,items=?,source=?,slot=?,fclass=?,ts=?
+           SET title=?,kcal=?,protein=?,fat=?,carbs=?,grams=?,items=?,source=?,slot=?,fclass=?,ts=?,slot_guessed=?
            WHERE chat_id=? AND id=?""",
         (
             rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
             float(rec["carbs"]), int(rec["grams"]) if rec.get("grams") else None,
             json.dumps(rec.get("items") or [], ensure_ascii=False),
             rec.get("source") or "text", slot, rec.get("fclass") or None,
-            datetime.now(TZ).isoformat(), cid, wanted,
+            datetime.now(TZ).isoformat(), int(slot_guessed), cid, wanted,
         ),
     )
     x = c.execute(
-        """SELECT id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass
+        """SELECT id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed
            FROM meals WHERE chat_id=? AND id=?""",
         (cid, wanted),
     ).fetchone()
@@ -670,7 +706,7 @@ def meal_update(cid, mid, rec, *, user_generation=None, mutation_key=None,
         "id": x[0], "date": x[1], "ts": x[2], "title": x[3], "kcal": x[4],
         "protein": x[5], "fat": x[6], "carbs": x[7], "grams": x[8],
         "items": json.loads(x[9] or "[]"), "source": x[10],
-        "slot": x[11] or "snack", "fclass": x[12] or None,
+        "slot": x[11] or "snack", "fclass": x[12] or None, "slot_guessed": bool(x[13]),
     }
     if mutation_key:
         c.execute(
@@ -680,7 +716,7 @@ def meal_update(cid, mid, rec, *, user_generation=None, mutation_key=None,
             (
                 cid, mutation_key,
                 int(user_generation if user_generation is not None else A2.lifecycle_generation(c, cid)),
-                "food_update", str(wanted), args_hash or "",
+                mutation_kind, str(wanted), args_hash or "",
                 json.dumps(verified, ensure_ascii=False, sort_keys=True),
                 datetime.now(TZ).isoformat(),
             ),
@@ -694,7 +730,7 @@ def meal_del(cid, mid):
     c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, int(mid)))
     c.execute(
         """UPDATE chat_mutations SET reversed_at=?,result_json=NULL
-           WHERE chat_id=? AND kind IN ('food','food_update') AND record_id=?""",
+           WHERE chat_id=? AND kind IN ('food','food_update','food_move_slot','food_append') AND record_id=?""",
         (datetime.now(TZ).isoformat(), cid, str(int(mid))),
     )
     c.commit(); c.close()
@@ -1083,6 +1119,7 @@ def del_user(cid):
     c.commit(); c.close()
     CHAT_HIST.pop(cid, None)
     menu_cache_clear(cid)
+    section_cache_clear(cid)
     for key in [key for key in list(_SUM_CACHE) if key and key[0] == cid]:
         _SUM_CACHE.pop(key, None)
     BCAST_PENDING.discard(cid)
@@ -1487,7 +1524,9 @@ def match_intent(t):
     return None
 
 _JOURNAL_MUTATION_INTENTS = frozenset({
-    "logmeal", "updatemeal", "logworkout", "updateworkout", "logperiod", "period_end",
+    "logmeal", "updatemeal", "movemealslot", "appendmealitem",
+    "logworkout", "updateworkout", "logperiod", "period_end",
+    "journalunavailable", "journalreplay",
 })
 _JOURNAL_SEMANTIC_CANDIDATE_RE = re.compile(
     r"\b(?:"
@@ -1561,7 +1600,7 @@ def _journal_recent_context(cid, limit=5):
     """Small DB-backed context for ellipsis and corrections; IDs stay server-owned."""
     c = db()
     meals = c.execute(
-        """SELECT id,d,ts,title,grams,kcal,slot FROM meals
+        """SELECT id,d,ts,title,grams,kcal,slot,items,slot_guessed FROM meals
            WHERE chat_id=? ORDER BY ts DESC,id DESC LIMIT ?""",
         (cid, int(limit)),
     ).fetchall()
@@ -1573,7 +1612,10 @@ def _journal_recent_context(cid, limit=5):
     last_mutation = c.execute(
         """SELECT kind,record_id,created_at FROM chat_mutations
            WHERE chat_id=? AND reversed_at IS NULL
-             AND kind IN ('food','food_update','workout','workout_update')
+             AND kind IN (
+               'food','food_update','food_move_slot','food_append',
+               'workout','workout_update'
+             )
            ORDER BY created_at DESC LIMIT 1""",
         (cid,),
     ).fetchone()
@@ -1581,7 +1623,8 @@ def _journal_recent_context(cid, limit=5):
     return {
         "meals": [
             {"id": x[0], "date": x[1], "ts": x[2], "title": x[3],
-             "grams": x[4], "kcal": x[5], "slot": x[6] or "snack"}
+             "grams": x[4], "kcal": x[5], "slot": x[6] or "snack",
+             "items": json.loads(x[7] or "[]"), "slot_guessed": bool(x[8])}
             for x in meals
         ],
         "workouts": [
@@ -1609,22 +1652,56 @@ def _journal_has_recent_mutation(context, max_minutes=180):
     except (TypeError, ValueError):
         return False
 
-def _semantic_journal_candidate(text, context=None):
+def journal_v2_enabled(cid=None):
+    if str(os.environ.get("AIWA_JOURNAL_V2") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        return True
+    allowed = {
+        x.strip()
+        for x in str(os.environ.get("AIWA_JOURNAL_V2_IDS") or "").split(",")
+        if x.strip()
+    }
+    return cid is not None and str(cid) in allowed
+
+def _semantic_journal_candidate(text, context=None, enable_v2=False):
     """Дешёвый prefilter; решение принимает модель, а не набор фраз/порядок слов."""
     raw = str(text or "").strip()
     if not raw:
         return False
-    if "?" in raw or "\n" in raw or "\r" in raw or re.search(r"[«»\"]", raw):
+    if "\n" in raw or "\r" in raw or re.search(r"[«»\"]", raw):
         return False
     if _JOURNAL_META_INSTRUCTION_RE.search(raw):
         return False
-    if _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(raw):
+    # Keep the production-v1 prefilter byte-for-byte conservative while the
+    # broader model-owned routing is canaried behind AIWA_JOURNAL_V2.
+    if not enable_v2 and _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(raw):
         return False
     if _journal_third_party_source(raw):
         return False
-    if re.search(r"^\s*(?:айва[,\s]*)?(?:что|как|какая|какую|какие|почему|зачем|когда|сколько|можно\s+ли|нужно\s+ли)\b", raw, re.I):
-        return False
     domain_hint = bool(_JOURNAL_SEMANTIC_CANDIDATE_RE.search(raw))
+    contextual_repair = bool(
+        enable_v2
+        and _journal_has_recent_mutation(context)
+        and (context or {}).get("meals")
+        and len(raw) <= 300
+        and (
+            domain_hint
+            or re.search(r"\b(?:дневник\w*|запис\w*|добав\w*|пропуст\w*)\b", raw, re.I)
+        )
+    )
+    if (
+        re.search(
+            r"^\s*(?:айва[,\s]*)?(?:что|как|какая|какую|какие|почему|зачем|"
+            r"когда|сколько|можно\s+ли|нужно\s+ли)\b",
+            raw,
+            re.I,
+        )
+        and not contextual_repair
+    ):
+        return False
+    if "?" in raw and not contextual_repair:
+        return False
     personal_report_shape = bool(
         re.search(r"^\s*(?:(?:ну|а|кстати|короче)[,\s]+)*(?:я|сегодня|вчера|позавчера)\b", raw, re.I)
         or (len(raw) <= 220 and re.search(r"\b[а-яё-]{3,}(?:ла|лась)\b", raw, re.I))
@@ -1634,58 +1711,180 @@ def _semantic_journal_candidate(text, context=None):
         and len(raw) <= 300
         and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
     )
-    return domain_hint or personal_report_shape or contextual_followup
+    return domain_hint or personal_report_shape or contextual_followup or contextual_repair
+
+def _semantic_evidence_span(source_text, payload):
+    """Return an exact model-selected quote; never trust invented evidence."""
+    raw = str(source_text or "")
+    span = str((payload or {}).get("evidence_span") or "").strip()
+    if not span or len(span) > 300:
+        return None
+    start = raw.casefold().find(span.casefold())
+    if start < 0:
+        return None
+    return raw[start:start + len(span)]
+
+def _semantic_owned_recent_target(context, domain, target):
+    """Only the sole row or the last verified mutation is safe to edit."""
+    rows = list((context or {}).get(domain) or [])
+    wanted = str(target or "")
+    if wanted not in {str(x.get("id")) for x in rows}:
+        return False
+    if len(rows) == 1:
+        return True
+    last = (context or {}).get("last_mutation") or {}
+    expected_kind = "food" if domain == "meals" else "workout"
+    return (
+        str(last.get("kind") or "").startswith(expected_kind)
+        and str(last.get("record_id") or "") == wanted
+    )
 
 def _semantic_source_subject_safe(text):
     return not _journal_third_party_source(text)
 
-def _semantic_action_matches_source(action, text, context=None, payload=None):
+def _semantic_action_matches_source(
+    action, text, context=None, payload=None, require_evidence=False,
+):
     """Модель выбирает смысл, код независимо подтверждает разрешённый домен события."""
     raw = str(text or "").strip()
     if not raw or "\n" in raw or "\r" in raw or _JOURNAL_META_INSTRUCTION_RE.search(raw):
         return False
     if not _semantic_source_subject_safe(raw):
         return False
+    if not require_evidence:
+        if action == "food":
+            return bool(
+                _JOURNAL_FOOD_COMPLETED_RE.search(raw)
+                or (
+                    _journal_has_recent_mutation(context)
+                    and bool((context or {}).get("meals"))
+                    and str(
+                        ((context or {}).get("last_mutation") or {}).get("kind") or ""
+                    ).startswith("food")
+                    and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
+                    and str((payload or {}).get("food_text") or "").strip()
+                )
+            )
+        if action == "food_update":
+            target = str((payload or {}).get("target_id") or "")
+            owned = {str(x.get("id")) for x in ((context or {}).get("meals") or [])}
+            return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
+        if action == "workout":
+            return bool(_JOURNAL_WORKOUT_COMPLETED_RE.search(raw))
+        if action == "workout_update":
+            target = str((payload or {}).get("target_id") or "")
+            owned = {
+                str(x.get("id")) for x in ((context or {}).get("workouts") or [])
+            }
+            return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
+        if action == "period_start":
+            return bool(
+                _JOURNAL_PERIOD_SOURCE_RE.search(raw)
+                and _JOURNAL_PERIOD_START_RE.search(raw)
+            )
+        if action == "period_end":
+            return bool(
+                _JOURNAL_PERIOD_SOURCE_RE.search(raw)
+                and _JOURNAL_PERIOD_END_RE.search(raw)
+            )
+        return False
     if action == "food":
+        evidence = _semantic_evidence_span(raw, payload)
         return bool(
-            _JOURNAL_FOOD_COMPLETED_RE.search(raw)
+            (
+                evidence
+                and _JOURNAL_FOOD_COMPLETED_RE.search(evidence)
+                and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+            )
             or (
                 _journal_has_recent_mutation(context)
                 and bool((context or {}).get("meals"))
                 and str(((context or {}).get("last_mutation") or {}).get("kind") or "").startswith("food")
                 and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
                 and str((payload or {}).get("food_text") or "").strip()
+                and evidence
+                and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
             )
         )
     if action == "food_update":
         target = str((payload or {}).get("target_id") or "")
-        owned = {str(x.get("id")) for x in ((context or {}).get("meals") or [])}
-        return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            _semantic_owned_recent_target(context, "meals", target)
+            and evidence
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
+    if action == "move_meal_slot":
+        target = str((payload or {}).get("target_id") or "")
+        slot = str((payload or {}).get("slot") or "")
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            _semantic_owned_recent_target(context, "meals", target)
+            and slot in {"breakfast", "lunch", "snack", "dinner"}
+            and evidence
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
+    if action == "append_meal_item":
+        target = str((payload or {}).get("target_id") or "")
+        food_text = str((payload or {}).get("food_text") or "").strip()
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            _semantic_owned_recent_target(context, "meals", target)
+            and food_text
+            and evidence
+            and _JOURNAL_FOOD_COMPLETED_RE.search(evidence)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
     if action == "workout":
-        return bool(_JOURNAL_WORKOUT_COMPLETED_RE.search(raw))
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            evidence
+            and _JOURNAL_WORKOUT_COMPLETED_RE.search(evidence)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
     if action == "workout_update":
         target = str((payload or {}).get("target_id") or "")
-        owned = {str(x.get("id")) for x in ((context or {}).get("workouts") or [])}
-        return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            _semantic_owned_recent_target(context, "workouts", target)
+            and evidence
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
     if action == "period_start":
-        return bool(_JOURNAL_PERIOD_SOURCE_RE.search(raw) and _JOURNAL_PERIOD_START_RE.search(raw))
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            evidence
+            and _JOURNAL_PERIOD_SOURCE_RE.search(evidence)
+            and _JOURNAL_PERIOD_START_RE.search(evidence)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
     if action == "period_end":
-        return bool(_JOURNAL_PERIOD_SOURCE_RE.search(raw) and _JOURNAL_PERIOD_END_RE.search(raw))
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            evidence
+            and _JOURNAL_PERIOD_SOURCE_RE.search(evidence)
+            and _JOURNAL_PERIOD_END_RE.search(evidence)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
     return False
 
-def _normalize_semantic_journal(data, source_text="", context=None):
+def _normalize_semantic_journal(data, source_text="", context=None, enable_v2=False):
     """Fail-closed валидация решения модели перед любой записью в БД."""
     if not isinstance(data, dict):
         return None
     action_to_intent = {
         "food": "logmeal",
         "food_update": "updatemeal",
+        "move_meal_slot": "movemealslot",
+        "append_meal_item": "appendmealitem",
         "workout": "logworkout",
         "workout_update": "updateworkout",
         "period_start": "logperiod",
         "period_end": "period_end",
     }
     action = str(data.get("action") or "").strip().lower()
+    if action in {"move_meal_slot", "append_meal_item"} and not enable_v2:
+        return None
     confidence_raw = data.get("confidence")
     confidence = (
         float(confidence_raw)
@@ -1696,20 +1895,41 @@ def _normalize_semantic_journal(data, source_text="", context=None):
         action not in action_to_intent
         or not math.isfinite(confidence)
         or not 0.85 <= confidence <= 1.0
-        or not _semantic_action_matches_source(action, source_text, context, data)
+        or not _semantic_action_matches_source(
+            action, source_text, context, data, require_evidence=enable_v2,
+        )
         or str(data.get("subject") or "").lower() != "self"
         or str(data.get("status") or "").lower() != "completed"
         or str(data.get("polarity") or "").lower() != "positive"
         or str(data.get("certainty") or "").lower() != "certain"
-        or str(data.get("primary_purpose") or "").lower() != "journal"
+        or str(data.get("primary_purpose") or "").lower() not in (
+            {"journal", "repair"}
+            if action in {"move_meal_slot", "append_meal_item"}
+            else {"journal"}
+        )
     ):
         return None
     out = {"intent": action_to_intent[action], "confidence": confidence}
     if action == "food":
         out["food_text"] = str(data.get("food_text") or "").strip()[:500]
+        if enable_v2 and isinstance(data.get("food_record"), dict):
+            out["food_record"] = data["food_record"]
+        slot = str(data.get("slot") or "")
+        if slot in {"breakfast", "lunch", "snack", "dinner"}:
+            out["slot"] = slot
     elif action == "food_update":
         out["target_id"] = int(data.get("target_id"))
         out["food_text"] = str(data.get("food_text") or "").strip()[:500]
+        if enable_v2 and isinstance(data.get("food_record"), dict):
+            out["food_record"] = data["food_record"]
+    elif action == "move_meal_slot":
+        out["target_id"] = int(data.get("target_id"))
+        out["slot"] = str(data.get("slot") or "")
+    elif action == "append_meal_item":
+        out["target_id"] = int(data.get("target_id"))
+        out["food_text"] = str(data.get("food_text") or "").strip()[:500]
+        if enable_v2 and isinstance(data.get("food_record"), dict):
+            out["food_record"] = data["food_record"]
     elif action == "workout":
         workout = data.get("workout")
         out["workout"] = workout if isinstance(workout, dict) else {}
@@ -1719,12 +1939,42 @@ def _normalize_semantic_journal(data, source_text="", context=None):
         out["workout"] = workout if isinstance(workout, dict) else {}
     return out
 
-def _semantic_update_clarification(data, source_text):
+def _semantic_update_clarification(
+    data, source_text, context=None, enable_v2=False,
+):
     """Recognize a safe correction whose target is ambiguous instead of guessing an ID."""
     if not isinstance(data, dict):
         return None
     action = str(data.get("action") or "").strip().lower()
     confidence = data.get("confidence")
+    if enable_v2 and action in {"move_meal_slot", "append_meal_item"}:
+        evidence = _semantic_evidence_span(source_text, data)
+        action_shape_ok = (
+            str(data.get("slot") or "") in SLOT_RU
+            if action == "move_meal_slot"
+            else (
+                bool(str(data.get("food_text") or "").strip())
+                and evidence
+                and bool(_JOURNAL_FOOD_COMPLETED_RE.search(evidence))
+            )
+        )
+        if (
+            isinstance(confidence, (int, float))
+            and not isinstance(confidence, bool)
+            and math.isfinite(float(confidence))
+            and float(confidence) >= 0.85
+            and evidence
+            and action_shape_ok
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+            and str(data.get("subject") or "").lower() == "self"
+            and str(data.get("status") or "").lower() == "completed"
+            and str(data.get("polarity") or "").lower() == "positive"
+            and str(data.get("certainty") or "").lower() == "certain"
+            and str(data.get("primary_purpose") or "").lower() == "repair"
+            and not _journal_third_party_source(source_text)
+        ):
+            return "clarifymeal"
+        return None
     if (
         action not in {"food_update", "workout_update"}
         or not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
@@ -1743,26 +1993,44 @@ def _semantic_update_clarification(data, source_text):
 async def resolve_semantic_journal_action(cid, text, user_generation=None):
     """Распознаёт естественное журналирование без привязки к порядку конкретных слов."""
     context = _journal_recent_context(cid)
-    if not _semantic_journal_candidate(text, context):
+    v2 = journal_v2_enabled(cid)
+    if not _semantic_journal_candidate(text, context, enable_v2=v2):
         return None
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     usage = []
     try:
-        classified = await llm_to_thread(
-            cid, "journal_route", L.classify_journal_event, text, usage, context,
-            user_generation=generation,
+        timeout_s = max(
+            3.0,
+            min(30.0, float(os.environ.get("AIWA_JOURNAL_ROUTE_TIMEOUT_SECONDS") or "15")),
         )
+        classified = await asyncio.wait_for(
+            llm_to_thread(
+                cid, "journal_route", L.classify_journal_event, text, usage, context,
+                v2,
+                user_generation=generation,
+            ),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        ev(cid, "journal_route_failed", meta="timeout", user_generation=generation)
+        return {"intent": "journalunavailable", "reason": "timeout"}
     except Exception as exc:
         log.warning("journal route %s: %s", cid, exc)
-        return None
+        ev(cid, "journal_route_failed", meta="error", user_generation=generation)
+        return {"intent": "journalunavailable", "reason": "error"}
     if not _user_write_allowed(cid, generation):
         return None
     if usage:
         ev(cid, "tokens", sum(usage), meta="journal_route", calls=len(usage), usage=usage,
            user_generation=generation)
-    plan = _normalize_semantic_journal(classified, text, context)
+    if classified is None:
+        ev(cid, "journal_route_failed", meta="empty", user_generation=generation)
+        return {"intent": "journalunavailable", "reason": "empty"}
+    plan = _normalize_semantic_journal(classified, text, context, enable_v2=v2)
     if not plan:
-        clarification = _semantic_update_clarification(classified, text)
+        clarification = _semantic_update_clarification(
+            classified, text, context, enable_v2=v2,
+        )
         if clarification:
             return {"intent": clarification}
     if plan:
@@ -3418,6 +3686,8 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             cid, u, txt, user_generation=generation,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
             preparsed_food_text=((journal or {}).get("food_text")),
+            preparsed_slot=((journal or {}).get("slot")),
+            preparsed_food_record=((journal or {}).get("food_record")),
         )
         rows = []
         if result.get("ok") and result.get("record_id"):
@@ -3433,6 +3703,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             user_generation=turn_generation,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
             preparsed_food_text=((journal or {}).get("food_text")),
+            preparsed_food_record=((journal or {}).get("food_record")),
         )
         rows = []
         if result.get("ok") and result.get("record_id"):
@@ -3441,6 +3712,31 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             if wu:
                 rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
         return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
+    if intent == "movemealslot":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await move_meal_slot_action(
+            cid, (journal or {}).get("target_id"), (journal or {}).get("slot"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+        )
+        return await msg.reply_text(result["text"])
+    if intent == "appendmealitem":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await append_meal_item_action(
+            cid, u, (journal or {}).get("target_id"), (journal or {}).get("food_text"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_food_record=((journal or {}).get("food_record")),
+        )
+        return await msg.reply_text(result["text"])
+    if intent == "journalreplay":
+        result = journal_replay_result(cid, journal)
+        return await msg.reply_text(result["text"])
+    if intent == "journalunavailable":
+        return await msg.reply_text(
+            "Сейчас не получилось достаточно быстро и надёжно разобрать изменение дневника, "
+            "поэтому я ничего не меняла. Попробуй повторить одной фразой через минуту."
+        )
     if intent == "clarifymeal":
         return await msg.reply_text(
             "Не уверена, какую именно запись еды изменить, поэтому ничего не меняла. "
@@ -5972,51 +6268,178 @@ def _recent_syms_text(cid):
     if n: out.append(f"симптомов отмечено: {n}")
     return ", ".join(out)
 
+_SECTION_CACHE = {}
+_SECTION_TASKS = {}
+_SECTION_FAST_WAIT_SECONDS = 0.75
+
+def section_cache_clear(cid):
+    for key in [key for key in list(_SECTION_CACHE) if key and key[0] == cid]:
+        _SECTION_CACHE.pop(key, None)
+    for key in [key for key in list(_SECTION_TASKS) if key and key[0] == cid]:
+        task = _SECTION_TASKS.pop(key, None)
+        if task and not task.done():
+            task.cancel()
+
+def _section_key(cid, kind, u, st):
+    """Cache generated Mini App sections by the data that can change their answer."""
+    profile = profile_of(u) or {}
+    snapshot = {
+        "mode": u.get("mode"),
+        "profile": {k: profile.get(k) for k in (
+            "height", "weight", "age", "activity", "diet", "diet_note", "kcal_goal"
+        )},
+        "cycle": ({k: st.get(k) for k in (
+            "day", "cycle_len", "phase", "subphase", "days_to_next", "status"
+        )} if st else None),
+    }
+    if kind == "training":
+        snapshot["recent"] = _recent_workouts_text(cid)
+        snapshot["checkin"] = log_get(cid, dtoday().isoformat()) or {}
+    raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)
+    return (cid, dtoday().isoformat(), kind, _hashlib.sha256(raw.encode("utf-8")).hexdigest())
+
+def _section_fallback(cid, kind, u, st):
+    """Fast deterministic response shown while the personal model result is prepared."""
+    prof = profile_of(u)
+    if kind == "training":
+        pregnancy = None
+        if u.get("mode") == "preg" and u.get("last_period"):
+            try:
+                pregnancy = C.preg_status(u["last_period"])
+            except Exception:
+                pregnancy = None
+        plan = (L.training_plan(st, prof) if st is not None
+                else L.general_training(prof, u.get("mode")))
+        # The pregnancy safety override is deterministic and must also apply
+        # before the background model call has completed.
+        if u.get("mode") == "preg":
+            checkin = log_get(cid, dtoday().isoformat()) or {}
+            symptoms = set(checkin.get("symptoms") or [])
+            if checkin.get("energy") == 1 or symptoms.intersection({"preg_cramp", "preg_swelling"}):
+                plan = L.training_today(
+                    None, prof, None, "preg", pregnancy=pregnancy, checkin=checkin
+                )
+        return {"text": plan.get("summary", ""), "training": plan}
+
+    target = profile_kcal(prof) if prof else None
+    if st is not None:
+        text = st["content"]["food"]
+        phase_key = st.get("phase") or "follicular"
+    else:
+        text = {
+            "meno": "В менопаузе важны белок, кальций, витамин D, омега-3 и стабильный сахар.",
+            "preg": "В беременности важны белок, фолаты, железо, кальций и безопасные продукты.",
+            "irregular": "Без чёткой фазы опирайся на белок, клетчатку, сложные углеводы и регулярность.",
+            "none": "Сбалансированная база на день: белок, овощи, сложные углеводы и вода.",
+        }.get(u.get("mode"), "Сбалансированная база на день: белок, овощи, сложные углеводы и вода.")
+        phase_key = "follicular"
+    restrictions = bool(prof and ((prof.get("diet") or "").strip() or (prof.get("diet_note") or "").strip()))
+    out = {"kcal": (target[0] if target else None), "text": text,
+           "suggestions": ["Что выбрать на завтрак?", "Как добрать белок?", "Что есть вечером?"]}
+    # A generic menu must never override explicit allergies/restrictions.
+    if not restrictions:
+        menu = json.loads(json.dumps(L.CURATED_MENU.get(
+            phase_key, L.CURATED_MENU["follicular"]
+        ), ensure_ascii=False))
+        out["menu"] = L._scale_menu(menu, target)
+    return out
+
+async def _generate_section(cid, kind, u, st, key):
+    """Generate one section once, then make it instantly reusable."""
+    generation = _user_generation(cid)
+    try:
+        prof = profile_of(u)
+        if kind == "food":
+            target = profile_kcal(prof) if prof else None
+            usage = []
+            menu = await llm_to_thread(
+                cid, "menu_generation", menu_cached, cid, st, prof, target,
+                (u.get("mode") if st is None else None), usage,
+                user_generation=generation,
+            )
+            if usage:
+                ev(cid, "tokens", sum(usage), meta="menu", calls=len(usage), usage=usage)
+            if target:
+                menu["macros"] = {
+                    "protein": f"{target[1]} г", "fat": f"{target[2]} г",
+                    "carbs": f"{target[3]} г",
+                }
+            text = (st["content"]["food"] if st is not None
+                    else _section_fallback(cid, "food", u, st)["text"])
+            sugg_usage = []
+            suggestions = await llm_to_thread(
+                cid, "food_suggestions", L.food_suggestions,
+                [m.get("dish", "") for m in (menu.get("meals") or [])],
+                _food_ctx(u, st), sugg_usage,
+                user_generation=generation,
+            )
+            if sugg_usage:
+                ev(cid, "tokens", sum(sugg_usage), meta="food_suggest",
+                   calls=len(sugg_usage), usage=sugg_usage)
+            payload = {"menu": menu, "kcal": (target[0] if target else None),
+                       "text": text, "suggestions": suggestions}
+        else:
+            pregnancy = None
+            if u.get("mode") == "preg" and u.get("last_period"):
+                try:
+                    pregnancy = C.preg_status(u["last_period"])
+                except Exception:
+                    pregnancy = None
+            usage = []
+            plan = await llm_to_thread(
+                cid, "training_recommendation", L.training_today,
+                st, prof, _recent_workouts_text(cid), u.get("mode"), usage,
+                pregnancy=pregnancy, checkin=log_get(cid, dtoday().isoformat()),
+                user_generation=generation,
+            )
+            if isinstance(plan, dict) and plan.pop("_fallback", None):
+                ev(cid, "fallback", meta="static:training_plan")
+            if usage:
+                ev(cid, "tokens", sum(usage), meta="training_today",
+                   calls=len(usage), usage=usage)
+            payload = {"text": plan.get("summary", ""), "training": plan}
+        if not _user_write_allowed(cid, generation=generation):
+            return _section_fallback(cid, kind, u, st)
+        _SECTION_CACHE[key] = payload
+        _prune_day(_SECTION_CACHE)
+        return payload
+    except Exception:
+        log.exception("miniapp section generation failed: cid=%s kind=%s", cid, kind)
+        return _section_fallback(cid, kind, u, st)
+    finally:
+        if _SECTION_TASKS.get(key) is asyncio.current_task():
+            _SECTION_TASKS.pop(key, None)
+
 async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    u = row(cid); _, st = status_of(cid); kind = body.get("kind", "food"); ev(cid, "button", meta="web_" + kind)
+    u = row(cid); _, st = status_of(cid); kind = body.get("kind", "food")
+    if kind not in ("food", "training"):
+        return _cors(web.json_response({"error": "bad_kind"}, status=400))
+    if not body.get("refresh"):
+        ev(cid, "button", meta="web_" + kind)
     if not is_onboarded(u):
         return _cors(web.json_response({"error": "onboard", "text": "Сначала настрой Айву в боте."}, status=403))
-    if st is None:
-        prof = profile_of(u); target = profile_kcal(prof) if prof else None
-        if kind == "food":
-            _usage = []; menu = await llm_to_thread(cid, "menu_generation", menu_cached, cid, None, prof, target, u.get("mode"), _usage)
-            if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage), usage=_usage)
-            if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
-            txt = {"meno": "В менопаузе на первый план выходят кости, сон и сердце. Делай упор на белок (рыба, яйца, творог, курица) и кальций с витамином D (молочное, сардины, зелень), добавляй магний и B6 (гречка, орехи, тёмный шоколад) для сна и приливов, и омега-3 из жирной рыбы. Меньше быстрых сахаров, кофеина и алкоголя — они усиливают приливы.",
-                   "preg": "В беременности важно закрыть потребность в фолиевой кислоте, железе, кальции и белке. Ешь зелень и бобовые (фолаты), красное мясо и гречку (железо), молочное (кальций), рыбу с омега-3 и белок в каждый приём. Избегай сырого мяса и рыбы, непастеризованного, печени в избытке, алкоголя и лишнего кофеина.",
-                   "irregular": "Без чёткого цикла опирайся на стабильный сахар и сытость. Белок в каждый приём (яйца, рыба, птица, творог), сложные углеводы (гречка, рис, овощи), магний и железо — это держит энергию и настроение ровными в течение дня.",
-                   "none": "Сбалансированно и просто: белок в каждый приём, овощи и зелень, сложные углеводы, полезные жиры (рыба, орехи) и достаточно воды. Меньше резких скачков сахара — стабильнее энергия и меньше тяги к перекусам."}.get(u.get("mode"), "Сбалансированное питание на день: белок, овощи, сложные углеводы и вода.")
-            _su = []; sugg = await llm_to_thread(cid, "food_suggestions", L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, None), _su)
-            if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
-            return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt, "suggestions": sugg}))
-        pregnancy = None
-        if u.get("mode") == "preg" and u.get("last_period"):
-            try: pregnancy = C.preg_status(u["last_period"])
-            except Exception: pregnancy = None
-        _su = []; plan = await llm_to_thread(
-            cid, "training_recommendation", L.training_today,
-            None, prof, _recent_workouts_text(cid), u.get("mode"), _su,
-            pregnancy=pregnancy, checkin=log_get(cid, dtoday().isoformat()),
-        )
-        if isinstance(plan, dict) and plan.pop("_fallback", None):
-            ev(cid, "fallback", meta="static:training_plan")
-        if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
-        return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
-    if kind == "food":
-        prof = profile_of(u); target = profile_kcal(prof) if prof else None
-        _usage = []; menu = await llm_to_thread(cid, "menu_generation", menu_cached, cid, st, prof, target, None, _usage)
-        if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage), usage=_usage)
-        if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
-        text = st["content"]["food"]
-        _su = []; sugg = await llm_to_thread(cid, "food_suggestions", L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, st), _su)
-        if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
-        return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text, "suggestions": sugg}))
-    _su = []; plan = await llm_to_thread(cid, "training_recommendation", L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
-    if isinstance(plan, dict) and plan.pop("_fallback", None): ev(cid, "fallback", meta="static:training_plan")
-    if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
-    return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
+    key = _section_key(cid, kind, u, st)
+    cached = _SECTION_CACHE.get(key)
+    if cached is not None:
+        return _cors(web.json_response(dict(cached, cached=True, refreshing=False)))
+    task = _SECTION_TASKS.get(key)
+    if task is None:
+        task = asyncio.create_task(_generate_section(cid, kind, u, st, key))
+        _SECTION_TASKS[key] = task
+    # A tab must never inherit the provider's 30-60 second timeout. Give a warm
+    # provider a short chance, otherwise return useful deterministic content
+    # while the single shared task keeps preparing the personal result.
+    try:
+        payload = await asyncio.wait_for(asyncio.shield(task), timeout=_SECTION_FAST_WAIT_SECONDS)
+        return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
+    except asyncio.TimeoutError:
+        payload = _section_fallback(cid, kind, u, st)
+        return _cors(web.json_response(dict(payload, cached=False, refreshing=True)))
+    except Exception:
+        payload = _section_fallback(cid, kind, u, st)
+        return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
 async def _api_today(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -6316,6 +6739,8 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
         result = await log_food_action(
             cid, u, msg, user_generation=generation, mutation_key=mutation_key,
             preparsed_food_text=((journal or {}).get("food_text")),
+            preparsed_slot=((journal or {}).get("slot")),
+            preparsed_food_record=((journal or {}).get("food_record")),
         )
         out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
         if result.get("mutation"):
@@ -6329,11 +6754,51 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
             cid, u, msg, (journal or {}).get("target_id"),
             user_generation=generation, mutation_key=mutation_key,
             preparsed_food_text=((journal or {}).get("food_text")),
+            preparsed_food_record=((journal or {}).get("food_record")),
         )
         out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
         if result.get("mutation"):
             out["mutation"] = result["mutation"]
         return out
+    if intent == "movemealslot":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала переносить запись без идентификатора запроса.",
+                    "suggestions": ["Открыть питание"]}
+        result = await move_meal_slot_action(
+            cid, (journal or {}).get("target_id"), (journal or {}).get("slot"),
+            user_generation=generation, mutation_key=mutation_key,
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "appendmealitem":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала дополнять запись без идентификатора запроса.",
+                    "suggestions": ["Открыть питание"]}
+        result = await append_meal_item_action(
+            cid, u, (journal or {}).get("target_id"), (journal or {}).get("food_text"),
+            user_generation=generation, mutation_key=mutation_key,
+            preparsed_food_record=((journal or {}).get("food_record")),
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "journalreplay":
+        result = journal_replay_result(cid, journal)
+        out = {"answer": result["text"], "suggestions": ["Открыть питание"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "journalunavailable":
+        return {
+            "answer": (
+                "Сейчас не получилось достаточно быстро и надёжно разобрать изменение дневника, "
+                "поэтому я ничего не меняла. Попробуй повторить одной фразой через минуту."
+            ),
+            "suggestions": ["Открыть питание"],
+        }
     if intent == "clarifymeal":
         return {
             "answer": (
@@ -6492,21 +6957,81 @@ def chat_mutation_route_preflight(cid, mutation_key):
         return None
     c = db()
     prior = c.execute(
-        "SELECT kind FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+        """SELECT kind,record_id,result_json,reversed_at
+           FROM chat_mutations WHERE chat_id=? AND mutation_key=?""",
         (cid, mutation_key),
     ).fetchone()
     c.close()
     if not prior:
         return None
+    # An append retry no longer contains the model-produced item payload. Return
+    # the already verified result directly instead of calling the model again or
+    # trying to reconstruct mutation arguments from aggregate totals.
+    if prior[0] == "food_append":
+        try:
+            target_id = int(prior[1])
+        except (TypeError, ValueError):
+            target_id = None
+        return {
+            "intent": "journalreplay",
+            "mutation_kind": "food_append",
+            "target_id": target_id,
+            "reversed": bool(prior[3]),
+        }
     intent = {
         "food": "logmeal",
         "food_update": "updatemeal",
+        "food_move_slot": "movemealslot",
+        "food_append": "appendmealitem",
         "workout": "logworkout",
         "workout_update": "updateworkout",
         "period_start": "logperiod",
         "period_end": "period_end",
     }.get(prior[0])
-    return {"intent": intent, "replay": True} if intent else None
+    if not intent:
+        return None
+    route = {"intent": intent, "replay": True}
+    try:
+        route["target_id"] = int(prior[1])
+    except (TypeError, ValueError):
+        pass
+    try:
+        saved = json.loads(prior[2] or "{}")
+    except (TypeError, ValueError):
+        saved = {}
+    if intent == "movemealslot" and saved.get("slot") in SLOT_RU:
+        route["slot"] = saved["slot"]
+    return route
+
+def journal_replay_result(cid, journal):
+    """Describe an idempotent semantic retry from current verified storage."""
+    target_id = (journal or {}).get("target_id")
+    if (journal or {}).get("reversed"):
+        return {
+            "ok": False,
+            "text": "Этот запрос уже применялся, но запись после этого удалили. Повторно её не создавала.",
+        }
+    if (journal or {}).get("mutation_kind") == "food_append":
+        verified = meal_get(cid, target_id)
+        if verified:
+            return {
+                "ok": True,
+                "text": (
+                    "Этот запрос уже применён. Проверила дневник: в "
+                    f"{SLOT_RU.get(verified.get('slot'), 'приёме пищи')} сейчас "
+                    f"{_meal_items_line(verified)}."
+                ),
+                "record_id": target_id,
+                "rec": verified,
+                "mutation": {
+                    "kind": "food_update",
+                    "date": verified.get("date") or dtoday().isoformat(),
+                },
+            }
+    return {
+        "ok": False,
+        "text": "Этот запрос уже обрабатывался, но сейчас не удалось подтвердить запись в дневнике.",
+    }
 
 def chat_mutation_preflight(cid, mutation_key, kind, args_hash):
     if not mutation_key:
@@ -6533,14 +7058,26 @@ def chat_mutation_preflight(cid, mutation_key, kind, args_hash):
 
 def _food_action_success(rec, mid, event_date):
     slot = rec.get("slot") or slot_for_now()
-    sm = {"breakfast": "завтрак", "lunch": "обед", "snack": "перекус", "dinner": "ужин"}.get(slot, "приём")
+    sm = SLOT_RU.get(slot, "приём")
     grams = f", примерно {rec['grams']} г" if rec.get("grams") else ""
     when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
+    title = _meal_items_line(rec) if rec.get("items") else rec["title"]
     text_out = (
-        f"Записала{when} в {sm}: {rec['title']}{grams} — около {rec['kcal']} ккал "
+        f"Записала{when} в {sm}: {title}{grams} — около {rec['kcal']} ккал "
         f"(Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). "
         "Порция и КБЖУ оценочные, запись уже видна в разделе «Питание»."
     )
+    if rec.get("slot_guessed"):
+        text_out += (
+            f" Приём пищи определила по времени как «{sm}»; если это не так, "
+            "просто напиши, например «это был завтрак, а не обед»."
+        )
+    unparsed = [str(x).strip() for x in (rec.get("unparsed") or []) if str(x).strip()]
+    if unparsed:
+        text_out += (
+            " Не разобрала: «" + "», «".join(unparsed[:3])
+            + "». Напиши, что это было, и я дополню запись."
+        )
     return {"ok": True, "text": text_out, "record_id": mid, "rec": rec,
             "mutation": {"kind": "food", "date": event_date.isoformat()}}
 
@@ -6663,7 +7200,9 @@ def extract_food_log_text(text):
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.:;—-\t")
     return cleaned
 
-async def log_food_action(cid, u, text, user_generation=None, mutation_key=None, preparsed_food_text=None):
+async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
+                          preparsed_food_text=None, preparsed_slot=None,
+                          preparsed_food_record=None):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     args_hash = chat_mutation_args_hash("food", text)
@@ -6679,7 +7218,11 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         if prior["status"] == "stale":
             return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     ev(cid, "flow_start", meta="food")
-    slot = slot_from_text(text)
+    slot = (
+        preparsed_slot
+        if preparsed_slot in {"breakfast", "lunch", "snack", "dinner"}
+        else slot_from_text(text)
+    )
     event_date, date_error = chat_event_date(text, max_past_days=31)
     if date_error:
         return {"ok": False, "text": "Не стала записывать: укажи сегодняшнюю дату или один из последних 31 дней."}
@@ -6687,8 +7230,13 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
     if not food:
         return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «съела 200 г творога, запиши»."}
     usage = []
-    parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, food, profile_of(u), usage,
-                                 user_generation=generation)
+    parsed = preparsed_food_record if isinstance(preparsed_food_record, dict) else None
+    if parsed is None:
+        parsed = await llm_to_thread(
+            cid, "food_text", L.analyze_food_text, food, profile_of(u), usage,
+            journal_v2_enabled(cid),
+            user_generation=generation,
+        )
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage,
@@ -6697,6 +7245,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
     if not rec:
         return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «съела 200 г творога 5%, запиши»."}
     rec["slot"] = slot or slot_for_now()
+    rec["slot_guessed"] = not bool(slot)
     saved = meal_add(
         cid, rec, d=event_date.isoformat(), user_generation=generation, mutation_key=mutation_key,
         args_hash=args_hash, return_status=True,
@@ -6712,7 +7261,9 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
     if not verified:
         ev(cid, "journal_mutation_failed", meta="food|verify_failed", user_generation=generation)
         return {"ok": False, "text": "Запись отправилась на сохранение, но я не смогла проверить её в дневнике. Попробуй ещё раз."}
-    rec = verified
+    # Parsing diagnostics do not belong to the meal row, but must survive the
+    # verify-after-write boundary so silent omissions become visible.
+    rec = dict(verified, unparsed=rec.get("unparsed") or [])
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     if saved.get("created"):
@@ -6727,8 +7278,193 @@ async def log_food_from_text(cid, u, text, user_generation=None, mutation_key=No
     result = await log_food_action(cid, u, text, user_generation=user_generation, mutation_key=mutation_key)
     return result["text"]
 
+SLOT_RU = {
+    "breakfast": "завтрак",
+    "lunch": "обед",
+    "snack": "перекус",
+    "dinner": "ужин",
+}
+
+def _items_or_synthetic(rec):
+    """Legacy aggregate rows become one item when an item-level edit is needed."""
+    items = [dict(x) for x in (rec.get("items") or []) if isinstance(x, dict)]
+    if items:
+        return items
+    return [{
+        "name": rec.get("title") or "Приём пищи",
+        "grams": rec.get("grams") or 0,
+        "kcal": rec.get("kcal") or 0,
+        "protein": rec.get("protein") or 0,
+        "fat": rec.get("fat") or 0,
+        "carbs": rec.get("carbs") or 0,
+    }]
+
+def _meal_items_line(rec):
+    names = [str(x.get("name") or "").strip() for x in (rec.get("items") or [])]
+    names = [x for x in names if x]
+    return ", ".join(names[:5]) or rec.get("title") or "приём пищи"
+
+def _same_food_item(left, right):
+    def canonical(value):
+        return re.sub(r"[^а-яёa-z0-9]+", "", str(value or "").casefold())[:80]
+    a, b = canonical(left), canonical(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    contained = min(len(a), len(b)) >= 5 and (a in b or b in a)
+    return contained or SequenceMatcher(None, a, b).ratio() >= 0.78
+
+async def move_meal_slot_action(cid, meal_id, slot, user_generation=None, mutation_key=None):
+    """Move an owned meal and acknowledge only the verified DB state."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    if slot not in SLOT_RU:
+        return {"ok": False, "text": "Не поняла, куда перенести запись: в завтрак, обед, перекус или ужин."}
+    current = meal_get(cid, meal_id)
+    if not current:
+        return {"ok": False, "text": "Не нашла эту запись в дневнике. Уточни, какой приём пищи нужно исправить."}
+    if current.get("slot") == slot and not current.get("slot_guessed"):
+        return {
+            "ok": True,
+            "text": f"Эта запись уже находится в разделе «{SLOT_RU[slot]}» — ничего не меняла.",
+            "record_id": current["id"],
+            "rec": current,
+            "mutation": {"kind": "food_update", "date": current.get("date") or dtoday().isoformat()},
+        }
+    args_hash = chat_mutation_args_hash("food_update", f"{meal_id}\nslot={slot}")
+    rec = dict(current, slot=slot, slot_guessed=False)
+    saved = meal_update(
+        cid, meal_id, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, mutation_kind="food_move_slot", return_status=True,
+    )
+    if not saved or saved.get("status") not in {"updated", "duplicate"}:
+        ev(cid, "journal_mutation_failed", meta=f"move_slot|{(saved or {}).get('status', 'failed')}",
+           user_generation=generation)
+        return {"ok": False, "text": "Не получилось перенести запись. Дневник не меняла — попробуй ещё раз."}
+    verified = meal_get(cid, meal_id)
+    if not verified or verified.get("slot") != slot or verified.get("slot_guessed"):
+        ev(cid, "journal_mutation_failed", meta="move_slot|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить перенос в дневнике. Попробуй ещё раз."}
+    if saved.get("updated"):
+        ev(cid, "journal_mutation_executed", meta="move_slot|food", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|move_meal_slot|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="move_slot|food", user_generation=generation)
+    return {
+        "ok": True,
+        "text": (
+            f"Перенесла в {SLOT_RU[slot]}: {_meal_items_line(verified)}. "
+            "Проверила — запись уже обновлена в разделе «Питание»."
+        ),
+        "record_id": meal_id,
+        "rec": verified,
+        "mutation": {"kind": "food_update", "date": verified.get("date") or dtoday().isoformat()},
+    }
+
+async def append_meal_item_action(cid, u, meal_id, food_text, user_generation=None,
+                                  mutation_key=None, preparsed_food_record=None):
+    """Append one omitted item, recompute totals in code, and verify the update."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    current = meal_get(cid, meal_id)
+    if not current:
+        return {"ok": False, "text": "Не нашла запись, куда добавить продукт. Уточни нужный приём пищи."}
+    addition = str(food_text or "").strip()[:500]
+    if not addition:
+        return {"ok": False, "text": "Не поняла, какой продукт пропущен. Напиши название и количество."}
+    args_hash = chat_mutation_args_hash("food_update", f"{meal_id}\nappend={addition}")
+    prior = chat_mutation_preflight(cid, mutation_key, "food_append", args_hash)
+    if prior:
+        if prior["status"] == "duplicate" and prior.get("data"):
+            verified = meal_get(cid, meal_id) or prior["data"]
+            return {
+                "ok": True,
+                "text": (
+                    f"Эта позиция уже добавлена в {SLOT_RU.get(verified.get('slot'), 'приём пищи')}: "
+                    f"{_meal_items_line(verified)}."
+                ),
+                "record_id": meal_id,
+                "rec": verified,
+                "mutation": {"kind": "food_update", "date": verified.get("date") or dtoday().isoformat()},
+            }
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+        return {"ok": False, "text": "Не стала повторять дополнение: идентификатор запроса уже использован."}
+    usage = []
+    parsed = preparsed_food_record if isinstance(preparsed_food_record, dict) else None
+    if parsed is None:
+        parsed = await llm_to_thread(
+            cid, "food_text", L.analyze_food_text, addition, profile_of(u), usage,
+            journal_v2_enabled(cid),
+            user_generation=generation,
+        )
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage,
+           user_generation=generation)
+    extra = normalize_food(parsed, "text") if parsed else None
+    if not extra or not _items_or_synthetic(extra):
+        return {"ok": False, "text": "Не смогла разобрать пропущенный продукт. Уточни название и количество."}
+    current_items = _items_or_synthetic(current)
+    extra_items = _items_or_synthetic(extra)
+    if all(
+        any(_same_food_item(add.get("name"), old.get("name")) for old in current_items)
+        for add in extra_items
+    ):
+        return {
+            "ok": True,
+            "text": (
+                f"Проверила дневник: {_meal_items_line(extra)} уже есть в "
+                f"{SLOT_RU.get(current.get('slot'), 'этом приёме пищи')}. Ничего не дублировала."
+            ),
+            "record_id": meal_id,
+            "rec": current,
+            "mutation": {"kind": "food_update", "date": current.get("date") or dtoday().isoformat()},
+        }
+    merged = current_items + extra_items
+    rec = {
+        "title": ", ".join(str(x.get("name") or "") for x in merged[:4])[:80] or current["title"],
+        "items": merged,
+        "source": "text",
+        "slot": current.get("slot"),
+        "slot_guessed": bool(current.get("slot_guessed")),
+        "fclass": current.get("fclass"),
+        "kcal": sum(int(x.get("kcal") or 0) for x in merged),
+        "protein": round(sum(float(x.get("protein") or 0) for x in merged), 1),
+        "fat": round(sum(float(x.get("fat") or 0) for x in merged), 1),
+        "carbs": round(sum(float(x.get("carbs") or 0) for x in merged), 1),
+        "grams": sum(int(x.get("grams") or 0) for x in merged) or None,
+    }
+    saved = meal_update(
+        cid, meal_id, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, mutation_kind="food_append", return_status=True,
+    )
+    if not saved or saved.get("status") not in {"updated", "duplicate"}:
+        ev(cid, "journal_mutation_failed", meta=f"append|{(saved or {}).get('status', 'failed')}",
+           user_generation=generation)
+        return {"ok": False, "text": "Не получилось дополнить запись. Дневник не меняла — попробуй ещё раз."}
+    verified = meal_get(cid, meal_id)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="append|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить дополнение в дневнике. Попробуй ещё раз."}
+    if saved.get("updated"):
+        ev(cid, "journal_mutation_executed", meta="append|food", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|append_meal_item|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="append|food", user_generation=generation)
+    return {
+        "ok": True,
+        "text": (
+            f"Проверила: этой позиции не было. Добавила в {SLOT_RU.get(verified.get('slot'), 'приём пищи')}: "
+            f"{_meal_items_line(extra)}. Итог записи — около {verified['kcal']} ккал "
+            f"(Б{round(verified['protein'])} Ж{round(verified['fat'])} У{round(verified['carbs'])})."
+        ),
+        "record_id": meal_id,
+        "rec": verified,
+        "mutation": {"kind": "food_update", "date": verified.get("date") or dtoday().isoformat()},
+    }
+
 async def log_food_update_action(cid, u, text, target_id, user_generation=None,
-                                 mutation_key=None, preparsed_food_text=None):
+                                 mutation_key=None, preparsed_food_text=None,
+                                 preparsed_food_record=None):
     """Update one explicit owned meal, then acknowledge only the verified DB row."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     args_hash = chat_mutation_args_hash("food_update", f"{target_id}\n{text}")
@@ -6752,10 +7488,13 @@ async def log_food_update_action(cid, u, text, target_id, user_generation=None,
             if grams_match else f"{current['title']}. Уточнение пользовательницы: {text}"
         )
     usage = []
-    parsed = await llm_to_thread(
-        cid, "food_update", L.analyze_food_text, correction, profile_of(u), usage,
-        user_generation=generation,
-    )
+    parsed = preparsed_food_record if isinstance(preparsed_food_record, dict) else None
+    if parsed is None:
+        parsed = await llm_to_thread(
+            cid, "food_update", L.analyze_food_text, correction, profile_of(u), usage,
+            journal_v2_enabled(cid),
+            user_generation=generation,
+        )
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     if usage:
@@ -7056,7 +7795,9 @@ async def _api_food_text(request):
     ev(cid, "flow_start", meta="food")
     prof = profile_of(u); usage = []
     try:
-        parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, txt, prof, usage,
+        parsed = await llm_to_thread(
+            cid, "food_text", L.analyze_food_text, txt, prof, usage,
+            journal_v2_enabled(cid),
                                      user_generation=generation)
     except Exception as e:
         log.warning("food_text analyze %s: %s", cid, e); parsed = None

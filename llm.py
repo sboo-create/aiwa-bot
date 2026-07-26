@@ -186,6 +186,17 @@ def _env_bool(name, default):
         return default
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
+def _env_float(name, default, low=None, high=None):
+    try:
+        value = float(os.environ.get(name) or default)
+    except (TypeError, ValueError):
+        value = float(default)
+    if low is not None:
+        value = max(float(low), value)
+    if high is not None:
+        value = min(float(high), value)
+    return value
+
 def _stand_verify():
     raw = os.environ.get("GIGACHAT_STAND_SSL_VERIFY") or os.environ.get("GIGACHAT_SSL_VERIFY") or "true"
     raw = raw.strip()
@@ -710,7 +721,7 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
             r = _HTTP.post(cfg["url"], headers=headers,
                 json=_proxy_payload(messages, max_tokens, temperature, cfg["url"], cfg.get("model"),
                                     cfg.get("provider")),
-                timeout=(6, 30), verify=_proxy_verify())
+                timeout=(6, float(cfg.get("read_timeout") or 30)), verify=_proxy_verify())
             if r.status_code == 429:
                 _capture_failure(cfg.get("name") or "litellm", cfg.get("model"), started, "http_429", i)
                 if _route_record_failure(cfg, "http_429", r.headers.get("Retry-After")):
@@ -897,6 +908,48 @@ def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2):
         _LLM_SEM.release()
         STATS["ms"] += int((_tt.time() - t1) * 1000)
         if not out: STATS["err"] += 1
+
+def _call_model(messages, model, max_tokens=1100, temperature=0.45, usage=None, attempts=1):
+    """Call one explicitly selected proxy model without changing AIWA's main model."""
+    selected = str(model or "").strip()
+    if not selected:
+        return _call(messages, max_tokens=max_tokens, temperature=temperature,
+                     usage=usage, attempts=attempts)
+    cfgs = _proxy_configs()
+    if not cfgs:
+        return _call(messages, max_tokens=max_tokens, temperature=temperature,
+                     usage=usage, attempts=attempts)
+    import time as _tt
+    STATS["calls"] += 1
+    if not _LLM_SEM.acquire(blocking=False):
+        STATS["queued"] += 1
+        wait_started = _tt.time()
+        _LLM_SEM.acquire()
+        STATS["wait_ms"] += int((_tt.time() - wait_started) * 1000)
+    started = _tt.time()
+    out = None
+    try:
+        for index, original in enumerate(cfgs):
+            cfg = dict(
+                original,
+                model=selected,
+                read_timeout=_env_float(
+                    "AIWA_JOURNAL_HTTP_TIMEOUT_SECONDS", 12, low=3, high=25,
+                ),
+            )
+            out = _call_proxy_one(
+                cfg, messages, max_tokens, temperature, usage,
+                attempts=(attempts if index == 0 else 1),
+            )
+            if out:
+                return out
+        return None
+    finally:
+        _LLM_SEM.release()
+        STATS["ms"] += int((_tt.time() - started) * 1000)
+        if not out:
+            STATS["err"] += 1
+
 def probe_once():
     """Один минимальный вызов к модели В ОБХОД семафора — для замера реальной параллельности тарифа."""
     import time as _t
@@ -2135,7 +2188,8 @@ def _call_giga_vision(file_id, prompt, max_tokens=900, temperature=0.2, usage=No
 
 FOOD_CLASSES = ("белковое", "углеводное", "овощи и фрукты", "молочное", "жиры и орехи", "сладкое", "напиток", "смешанное")
 
-_FOOD_FORMAT = ("Ответь СТРОГО этими строками, каждая с новой строки, без вступления и без пояснений, только эти поля:\n"
+_FOOD_FORMAT_LEGACY = (
+    "Ответь СТРОГО этими строками, каждая с новой строки, без вступления и без пояснений, только эти поля:\n"
     "НАЗВАНИЕ: короткое название\n"
     "КЛАСС: одно значение из списка: белковое / углеводное / овощи и фрукты / молочное / жиры и орехи / сладкое / напиток / смешанное\n"
     "ГРАММЫ: число (примерный вес порции)\n"
@@ -2143,7 +2197,24 @@ _FOOD_FORMAT = ("Ответь СТРОГО этими строками, кажд
     "БЕЛКИ: число\n"
     "ЖИРЫ: число\n"
     "УГЛЕВОДЫ: число\n"
-    "Числа целые, без единиц измерения. Если точно не знаешь — поставь реалистичную оценку.")
+    "Числа целые, без единиц измерения. Если точно не знаешь — поставь реалистичную оценку."
+)
+
+_FOOD_FORMAT_STRUCTURED = (
+    "Ответь СТРОГО одним JSON-объектом без markdown и без пояснений:\n"
+    '{"title":"короткое общее название",'
+    '"fclass":"белковое|углеводное|овощи и фрукты|молочное|жиры и орехи|сладкое|напиток|смешанное",'
+    '"items":[{"name":"отдельный продукт или блюдо","grams":число,"kcal":число,'
+    '"protein":число,"fat":число,"carbs":число}],'
+    '"unparsed":["фрагменты описания, которые не удалось уверенно отнести к продукту"]}\n'
+    "Каждый названный продукт или блюдо должен быть отдельным элементом items. "
+    "Не объединяй позиции и не пропускай их молча. Если фрагмент похож на ошибку "
+    "распознавания речи, содержит незнакомое слово или продукт нельзя уверенно назвать, "
+    "НЕ исправляй его догадкой и НЕ создавай для него item: перенеси весь относящийся "
+    "к нему дословный фрагмент в unparsed. "
+    "Если съедена часть порции, например половина, уменьши граммы и КБЖУ этой позиции. "
+    "Числа без единиц измерения; при неизвестном весе используй реалистичную оценку."
+)
 
 def food_class_norm(v, protein=0, fat=0, carbs=0):
     """Приводит класс продукта к канону; если модель класс не дала — оцениваем по БЖУ."""
@@ -2217,7 +2288,8 @@ def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
     _FOOD_ERR["msg"] = ""
     prompt = ("На фото готовая еда/тарелка ИЛИ упаковка или этикетка продукта. "
         "Если это этикетка — прочитай название и пищевую ценность (КБЖУ) с упаковки. "
-        "Если это готовое блюдо — определи, что это, и оцени вес порции на глаз. Посчитай калории и БЖУ. " + _FOOD_FORMAT)
+        "Если это готовое блюдо — определи, что это, и оцени вес порции на глаз. Посчитай калории и БЖУ. "
+        + _FOOD_FORMAT_LEGACY)
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "jpg").lower()
     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
     # 1) Separate OpenRouter vision model, generic LiteLLM vision model, or text channel.
@@ -2262,12 +2334,26 @@ def analyze_food(image_bytes, filename="food.jpg", profile=None, usage=None):
         _FOOD_ERR["msg"] = "провайдер не распознал фото (нужна модель с поддержкой картинок)"
     return None
 
-def analyze_food_text(text, profile=None, usage=None):
+def analyze_food_text(text, profile=None, usage=None, structured=False):
     """Текст ('200 г творога и банан') -> оценка КБЖУ через GigaChat."""
     prompt = ("Пользователь съел: «" + (text or "").strip() + "». Оцени калорийность и БЖУ. "
-        "Если вес не указан — прими типичную порцию. " + _FOOD_FORMAT)
-    out = _call([{"role": "system", "content": "Ты нутрициолог, оцениваешь КБЖУ еды по описанию."},
-                 {"role": "user", "content": prompt}], max_tokens=300, temperature=0.2, usage=usage)
+        "Если вес не указан — прими типичную порцию. "
+        + (_FOOD_FORMAT_STRUCTURED if structured else _FOOD_FORMAT_LEGACY))
+    messages = [
+        {"role": "system", "content": "Ты нутрициолог, оцениваешь КБЖУ еды по описанию."},
+        {"role": "user", "content": prompt},
+    ]
+    if structured:
+        out = _call_model(
+            messages, os.environ.get("AIWA_JOURNAL_MODEL"),
+            max_tokens=900, temperature=0.2, usage=usage, attempts=1,
+        )
+    else:
+        # Feature flag off means the existing production contract and retry
+        # behavior remain unchanged.
+        out = _call(
+            messages, max_tokens=300, temperature=0.2, usage=usage,
+        )
     try:
         print("FOOD text raw:", repr(out)[:400])
     except Exception:
@@ -2305,18 +2391,70 @@ def analyze_workout_text(text, usage=None):
     except Exception:
         return None
 
-def classify_journal_event(text, usage=None, context=None):
+def classify_journal_event(text, usage=None, context=None, enable_v2=False):
     """Свободная фраза -> намерение записать уже произошедшее событие.
 
     Это семантический роутер, а не генератор ответа: вызывающий код дополнительно
     валидирует субъект, время, полярность, уверенность и тип действия.
     """
+    v2_actions = (
+        "- move_meal_slot: она исправляет приём пищи существующей записи, например сообщает, "
+        "что это был завтрак, а не обед;\n"
+        "- append_meal_item: она сообщает, что конкретный уже съеденный продукт пропущен "
+        "в недавней записи; жалоба может быть сформулирована вопросом «ты не записала...?»;\n"
+        if enable_v2 else ""
+    )
+    target_rule = (
+        "Для food_update, move_meal_slot и append_meal_item обязательно верни target_id "
+        "строго из JOURNAL_CONTEXT; если цель неоднозначна, выбери none. "
+        "Для move_meal_slot верни slot. Для append_meal_item в food_text верни только "
+        "пропущенную позицию с количеством. "
+        if enable_v2 else
+        "Для food_update и workout_update обязательно верни target_id строго из "
+        "JOURNAL_CONTEXT; если цель неоднозначна, выбери none. "
+    )
+    v2_rules = (
+        "В evidence_span верни дословную непрерывную цитату исходного message, которая "
+        "доказывает выбранную операцию. Не придумывай цитату. "
+        "Для food, food_update и append_meal_item сразу заполни food_record: отдельный "
+        "элемент items для каждого продукта, реалистичная оценка граммов и КБЖУ, а "
+        "непонятные фрагменты дословно в unparsed. Если название содержит незнакомое слово "
+        "или похоже на ошибку распознавания речи, не исправляй его догадкой и не создавай "
+        "item: перенеси весь фрагмент этого блюда в unparsed. "
+        "Для остальных действий food_record=null. "
+        "Жалоба «ты не записала, что я съела X?» — это append_meal_item со status completed "
+        "и primary_purpose repair, если X действительно уже съеден и недавняя цель однозначна. "
+        if enable_v2 else ""
+    )
+    action_values = (
+        "none|food|food_update|move_meal_slot|append_meal_item|workout|workout_update|period_start|period_end"
+        if enable_v2 else
+        "none|food|food_update|workout|workout_update|period_start|period_end"
+    )
+    v2_schema = (
+        '"slot":"breakfast|lunch|snack|dinner|",'
+        '"evidence_span":"дословная непрерывная цитата из message или пустая строка",'
+        if enable_v2 else ""
+    )
+    food_record_schema = (
+        '"food_record":{"title":"короткое общее название",'
+        '"fclass":"белковое|углеводное|овощи и фрукты|молочное|жиры и орехи|сладкое|напиток|смешанное",'
+        '"items":[{"name":"отдельный продукт","grams":число,"kcal":число,'
+        '"protein":число,"fat":число,"carbs":число}],'
+        '"unparsed":["непонятный фрагмент"]}|null,'
+        if enable_v2 else ""
+    )
     prompt = (
         "Определи, является ли сообщение самостоятельным сообщением пользовательницы "
         "о событии, которое нужно занести в её трекер здоровья.\n\n"
+        "Сообщение всегда написано владельцем текущего аккаунта. Любое явное первое лицо "
+        "(например «я съела», «я съел», «я сделал», «я сделала») означает subject=self "
+        "независимо от грамматического рода, имени и режима профиля. subject=other выбирай "
+        "только при явном третьем лице: «он», «она», имя другого человека и т.п.\n\n"
         "Разрешённые действия:\n"
         "- food: она сообщает, что уже съела или выпила;\n"
         "- food_update: она исправляет количество или состав одной из недавних записей еды;\n"
+        + v2_actions +
         "- workout: она сообщает об уже завершённой тренировке или физической активности;\n"
         "- workout_update: она исправляет детали одной из недавних тренировок;\n"
         "- period_start: у неё начались месячные;\n"
@@ -2327,21 +2465,24 @@ def classify_journal_event(text, usage=None, context=None):
         "Фразы-продолжения вроде «и ещё чипсы» могут означать НОВУЮ запись food, если перед ними "
         "есть недавняя запись еды. Фразы вроде «нет, было 100 г» означают food_update только когда "
         "можно однозначно выбрать конкретную недавнюю запись. Аналогично для workout_update. "
-        "Для update обязательно верни target_id строго из JOURNAL_CONTEXT; если цель неоднозначна, выбери none. "
+        + target_rule
+        + v2_rules +
         "Всегда выбирай none, если событие: относится к другому человеку; отрицается; "
         "только планируется; условное или гипотетическое; пересказывается или цитируется; "
         "неуверенное; упомянуто лишь как контекст вопроса, симптома или просьбы о совете. "
         "Не считай рекомендацию тренировки выполненной тренировкой.\n\n"
-        "Верни строго один JSON без markdown:\n"
-        '{"action":"none|food|food_update|workout|workout_update|period_start|period_end",'
+        "Верни строго один компактный JSON без markdown, отступов и пояснений:\n"
+        '{"action":"' + action_values + '",'
         '"target_id":целое_число_из_контекста_или_null,'
+        + v2_schema +
         '"subject":"self|other|unknown",'
         '"status":"completed|planned|hypothetical|question|unknown",'
         '"polarity":"positive|negative|unknown",'
         '"certainty":"certain|uncertain",'
-        '"primary_purpose":"journal|context|advice|question|other",'
+        '"primary_purpose":"' + ("journal|repair|context|advice|question|other" if enable_v2 else "journal|context|advice|question|other") + '",'
         '"confidence":0.0,'
         '"food_text":"только съеденные продукты, количество и приём пищи или пустая строка",'
+        + food_record_schema +
         '"workout":{"type":"Силовая|Кардио|Йога|Ходьба|Плавание|Пилатес|Растяжка|Другая|",'
         '"duration_minutes":число_или_null,"rpe":"лёгкая|средняя|тяжёлая|",'
         '"items":[{"name":"упражнение","sets":число_или_null,"reps":число_или_null,'
@@ -2362,10 +2503,12 @@ def classify_journal_event(text, usage=None, context=None):
         )
         + "\nEND_INPUT_JSON"
     )
-    out = _call(
+    out = _call_model(
         [{"role": "system", "content": "Ты консервативный классификатор событий для персонального трекера."},
          {"role": "user", "content": prompt}],
-        max_tokens=520, temperature=0.0, usage=usage,
+        (os.environ.get("AIWA_JOURNAL_MODEL") if enable_v2 else None),
+        max_tokens=(900 if enable_v2 else 520), temperature=0.0, usage=usage,
+        attempts=(1 if enable_v2 else 2),
     )
     if not out:
         return None

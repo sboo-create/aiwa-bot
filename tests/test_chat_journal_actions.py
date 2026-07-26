@@ -116,6 +116,7 @@ class ChatJournalActionTests(unittest.TestCase):
             "certainty": "certain",
             "primary_purpose": "journal",
             "confidence": 0.98,
+            "evidence_span": text,
             "food_text": "",
             "workout": {
                 "type": "Силовая",
@@ -170,6 +171,7 @@ class ChatJournalActionTests(unittest.TestCase):
             "certainty": "certain",
             "primary_purpose": "journal",
             "confidence": 0.97,
+            "evidence_span": "Я сегодня тренировку сделала на ноги",
             "workout": {"type": "Силовая", "items": []},
         }
         self.assertEqual(
@@ -348,6 +350,7 @@ class ChatJournalActionTests(unittest.TestCase):
             "certainty": "certain",
             "primary_purpose": "journal",
             "confidence": 0.96,
+            "evidence_span": text,
             "food_text": "творог и банан",
             "workout": {},
         }
@@ -381,12 +384,14 @@ class ChatJournalActionTests(unittest.TestCase):
             "action": "food", "target_id": None, "subject": "self",
             "status": "completed", "polarity": "positive", "certainty": "certain",
             "primary_purpose": "journal", "confidence": 0.98,
+            "evidence_span": "Я съела голубику",
             "food_text": "голубика 100 г", "workout": {},
         }
         chips_route = {
             "action": "food", "target_id": None, "subject": "self",
             "status": "completed", "polarity": "positive", "certainty": "certain",
             "primary_purpose": "journal", "confidence": 0.97,
+            "evidence_span": "И еще чипсы Pringles всю пачку со сметаной и зеленью",
             "food_text": "чипсы Pringles со сметаной и зеленью, вся пачка", "workout": {},
         }
         foods = [
@@ -421,6 +426,7 @@ class ChatJournalActionTests(unittest.TestCase):
             "action": "food_update", "target_id": chips_id, "subject": "self",
             "status": "completed", "polarity": "positive", "certainty": "certain",
             "primary_purpose": "journal", "confidence": 0.99,
+            "evidence_span": "Ну я меньше съела, грамм 100",
             "food_text": "чипсы Pringles со сметаной и зеленью 100 г", "workout": {},
         }
         with (
@@ -445,6 +451,7 @@ class ChatJournalActionTests(unittest.TestCase):
             "action": "workout", "target_id": None, "subject": "self",
             "status": "completed", "polarity": "positive", "certainty": "certain",
             "primary_purpose": "journal", "confidence": 0.98, "food_text": "",
+            "evidence_span": "Я поприседала",
             "workout": {
                 "type": "Силовая", "duration_minutes": None, "rpe": "",
                 "items": [{"name": "приседания", "sets": None, "reps": None,
@@ -751,8 +758,8 @@ class ChatJournalActionTests(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             with self.subTest(path=path):
                 self.assertIn("async function applyChatMutation", source)
-                self.assertIn("loadedFood=false;DIARY=null", source)
-                self.assertIn("loadedTrain=false", source)
+                self.assertIn("invalidateFoodSection();DIARY=null", source)
+                self.assertIn("invalidateTrainSection()", source)
                 self.assertIn("request_id:chatRequestId()", source)
                 self.assertIn("visibilitychange", source)
 
