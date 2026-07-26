@@ -49,6 +49,12 @@ VOICE = (
 
 CASES = [
     ("voice-create", VOICE, EMPTY_CONTEXT, "food"),
+    (
+        "masculine-first-person",
+        "На обед съел бутерброд с красной рыбой немного голубики один домашний наггетс",
+        EMPTY_CONTEXT,
+        "food",
+    ),
     ("move-slot", "Это был мой завтрак а не обед", MEAL_CONTEXT, "move_meal_slot"),
     (
         "append-missed",
