@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v136-wellness-male"
+AIWA_VERSION = "2026-07-27-v137-gender-onb-diskcache"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -168,16 +168,17 @@ def symptom_label(code):
 def symptoms_labels(items):
     return [symptom_label(x) for x in (items or []) if symptom_label(x)]
 
-START_TEXT = ("Привет, я Айва — ИИ wellness-ассистент: самочувствие, питание и нагрузка каждый день.\n\n"
- "Что я умею:\n"
- "• присылать утреннюю сводку под твоё состояние\n"
- "• подбирать питание и тренировки\n"
- "• отвечать на вопросы о здоровье — текстом или голосом\n"
- "• вести дневник еды, можно просто по фото\n"
- "• для женщин — считать цикл и вести календарь\n"
- "• собирать выписку для врача\n"
- "• подсказывать партнёру, как поддержать\n\n"
- "Настройка займёт около минуты. Выбери, что ближе:")
+START_TEXT = ("Привет, я Айва — ИИ wellness-ассистент.\n\n"
+ "Каждый день помогаю с самочувствием, питанием и нагрузкой:\n"
+ "• утренняя сводка под твоё состояние\n"
+ "• персональное меню и тренировки\n"
+ "• ответы на вопросы о здоровье — текстом или голосом\n"
+ "• дневник еды, можно просто по фото\n"
+ "• для женщин — календарь цикла и поддержка на каждую фазу\n"
+ "• выписка для врача\n\n"
+ "Настройка займёт около минуты. Для начала подскажи, кто ты:")
+
+FEMALE_START_TEXT = ("Отлично. Теперь выбери, что ближе:")
 ABOUT_TEXT = ("Я Айва — ИИ wellness-ассистент: самочувствие, питание, нагрузка; для женщин — цикл и календарь.\n\n"
  "Что я умею:\n"
  "• веду календарь цикла и присылаю утреннюю сводку под фазу\n"
@@ -249,6 +250,8 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
         ts TEXT, action TEXT, tokens INTEGER DEFAULT 0)""")
     c.execute("CREATE TABLE IF NOT EXISTS partners(partner_id INTEGER PRIMARY KEY, woman_id INTEGER, created TEXT)")
+    # Дневной кэш генераций (меню, сводка, рецепты, недельный разбор) — переживает рестарты процесса.
+    c.execute("CREATE TABLE IF NOT EXISTS day_cache(chat_id INTEGER, d TEXT, kind TEXT, k TEXT, js TEXT, PRIMARY KEY(chat_id,d,kind,k))")
     c.execute("""CREATE TABLE IF NOT EXISTS meals(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, d TEXT, ts TEXT,
         title TEXT, kcal INTEGER DEFAULT 0, protein REAL DEFAULT 0, fat REAL DEFAULT 0, carbs REAL DEFAULT 0,
         grams INTEGER, items TEXT, source TEXT)""")
@@ -2264,9 +2267,12 @@ MENU_KB = InlineKeyboardMarkup([
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Я женщина", callback_data="onb_female")],
+    [InlineKeyboardButton("Я мужчина", callback_data="mode:male")],
+])
+FEMALE_ONB_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
     [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
-    [InlineKeyboardButton("Я мужчина", callback_data="mode:male")],
 ])
 NOCYCLE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Нерегулярный цикл", callback_data="mode:irregular")],
@@ -2831,12 +2837,45 @@ def _menu_key(cid, st, prof, mode):
     diet = ((prof.get("diet") if prof else "") or "", (prof.get("diet_note") if prof else "") or "")
     phase = (st.get("phase") if st else ("mode:" + str(mode)))
     return (cid, dtoday().isoformat(), phase, diet)
+def dc_get(cid, kind, key=""):
+    """Дневной кэш в SQLite: чтобы деплой/рестарт не заставлял модель генерить всё заново."""
+    c = db(); r = c.execute("SELECT js FROM day_cache WHERE chat_id=? AND d=? AND kind=? AND k=?",
+                            (cid, dtoday().isoformat(), kind, str(key)[:120])).fetchone(); c.close()
+    if not r: return None
+    try:
+        return json.loads(r[0])
+    except Exception:
+        return None
+
+def dc_put(cid, kind, payload, key=""):
+    try:
+        c = db()
+        c.execute("INSERT OR REPLACE INTO day_cache(chat_id,d,kind,k,js) VALUES(?,?,?,?,?)",
+                  (cid, dtoday().isoformat(), kind, str(key)[:120], json.dumps(payload, ensure_ascii=False)))
+        c.execute("DELETE FROM day_cache WHERE d<?", ((dtoday() - timedelta(days=2)).isoformat(),))
+        c.commit(); c.close()
+    except Exception as e:
+        log.info("day_cache put %s/%s: %s", cid, kind, e)
+
+def dc_del(cid, kind=None):
+    try:
+        c = db()
+        if kind: c.execute("DELETE FROM day_cache WHERE chat_id=? AND kind=?", (cid, kind))
+        else: c.execute("DELETE FROM day_cache WHERE chat_id=?", (cid,))
+        c.commit(); c.close()
+    except Exception:
+        pass
+
 def menu_cached(cid, st, prof, target, mode=None, usage=None):
     """Дневной кэш меню: обращаемся к модели максимум раз в день на юзера, дальше — мгновенно."""
     key = _menu_key(cid, st, prof, mode)
     hit = _MENU_CACHE.get(key)
     if hit is not None:
         return hit
+    disk = dc_get(cid, "menu", key[2:])
+    if disk is not None:
+        _MENU_CACHE[key] = disk
+        return disk
     if st is not None:
         m = L.menu_today(st, profile=prof, target=target, usage=usage)
     else:
@@ -2844,11 +2883,13 @@ def menu_cached(cid, st, prof, target, mode=None, usage=None):
     if isinstance(m, dict) and m.pop("_fallback", None):
         ev(cid, "fallback", meta="static:menu_pool")
     _MENU_CACHE[key] = m
+    dc_put(cid, "menu", m, key[2:])
     _prune_day(_MENU_CACHE)
     return m
 def menu_cache_clear(cid):
     for k in [k for k in list(_MENU_CACHE) if k[0] == cid]:
         _MENU_CACHE.pop(k, None)
+    dc_del(cid, "menu")
 
 _SUM_CACHE = {}
 def _prune_day(cache):
@@ -5799,6 +5840,8 @@ async def on_cb(update, context):
     if data == "keep":
         u_keep = row(cid)
         return await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u_keep, not is_cycle(u_keep)))
+    if data == "onb_female":
+        return await q.message.reply_text(FEMALE_START_TEXT, reply_markup=FEMALE_ONB_KB)
     if data == "onb_cycle":
         upsert(cid, state="await_date", pending_date=None)
         return await q.message.reply_text(
@@ -6215,7 +6258,7 @@ async def _prewarm_today(cid):
         u = row(cid)
         if not is_onboarded(u): return
         ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
-        if _TODAY_CACHE.get(ck): return
+        if _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or ""): return
         _, st = status_of(cid)
         usage = []
         note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), usage)
@@ -6225,6 +6268,7 @@ async def _prewarm_today(cid):
                 note.setdefault("day", st.get("day"))
                 note.setdefault("phase", (st.get("phase_ru") or ""))
             _TODAY_CACHE[ck] = note
+            dc_put(cid, "today", note, u.get("mode") or "")
     except Exception as e:
         log.info("today prewarm %s: %s", cid, e)
 
@@ -6250,10 +6294,12 @@ def _evict_today_cache(cid):
     """Сводка дня зависит от чек-ина, циклов и профиля — сбрасываем при их изменении."""
     for k in [k for k in _TODAY_CACHE if k[0] == cid]:
         _TODAY_CACHE.pop(k, None)
+    dc_del(cid, "today")
 
 def _evict_week_food_cache(cid):
     for k in [k for k in _WEEK_FOOD_CACHE if k[0] == cid]:
         _WEEK_FOOD_CACHE.pop(k, None)
+    dc_del(cid, "week_food")
 
 async def _api_week_food_review(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -6261,8 +6307,10 @@ async def _api_week_food_review(request):
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
     ck = (cid, dtoday().isoformat(), "v2")
-    hit = _WEEK_FOOD_CACHE.get(ck)
-    if hit: return _cors(web.json_response({"ok": True, "review": hit}))
+    hit = _WEEK_FOOD_CACHE.get(ck) or dc_get(cid, "week_food")
+    if hit:
+        _WEEK_FOOD_CACHE[ck] = hit
+        return _cors(web.json_response({"ok": True, "review": hit}))
     lines = []
     for off in range(6, -1, -1):
         d = (dtoday() - timedelta(days=off)).isoformat()
@@ -6280,6 +6328,7 @@ async def _api_week_food_review(request):
         if usage: ev(cid, "tokens", sum(usage), meta="week_food", calls=len(usage), usage=usage)
         if len(_WEEK_FOOD_CACHE) > 1000: _WEEK_FOOD_CACHE.clear()
         _WEEK_FOOD_CACHE[ck] = review
+        dc_put(cid, "week_food", review)
         return _cors(web.json_response({"ok": True, "review": review}))
     except Exception as e:
         log.warning("week food review %s: %s", cid, e)
@@ -6295,13 +6344,14 @@ async def _prewarm_recipes(cid, dishes):
         dish = str(dish or "").strip()[:80]
         if not dish: continue
         ck = (dish.lower(), dtoday().isoformat(), "v2")
-        if _RECIPE_CACHE.get(ck): continue
+        if _RECIPE_CACHE.get(ck) or dc_get(cid, "recipe", dish.lower()): continue
         try:
             usage = []
             rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage)
             if usage: ev(cid, "tokens", sum(usage), meta="recipe", calls=len(usage), usage=usage)
             if len(_RECIPE_CACHE) > 300: _RECIPE_CACHE.clear()
             _RECIPE_CACHE[ck] = rec
+            dc_put(cid, "recipe", rec, dish.lower())
         except Exception as e:
             log.info("recipe prewarm «%s»: %s", dish, e)
 
@@ -6311,14 +6361,17 @@ async def _api_recipe(request):
     dish = str(body.get("dish") or "").strip()[:80]
     if not dish: return _cors(web.json_response({"error": "no dish"}, status=400))
     ck = (dish.lower(), dtoday().isoformat(), "v2")
-    hit = _RECIPE_CACHE.get(ck)
-    if hit: return _cors(web.json_response(hit))
+    hit = _RECIPE_CACHE.get(ck) or dc_get(cid, "recipe", dish.lower())
+    if hit:
+        _RECIPE_CACHE[ck] = hit
+        return _cors(web.json_response(hit))
     try:
         usage = []
         rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage)
         if usage: ev(cid, "tokens", sum(usage), meta="recipe", calls=len(usage), usage=usage)
         if len(_RECIPE_CACHE) > 300: _RECIPE_CACHE.clear()
         _RECIPE_CACHE[ck] = rec
+        dc_put(cid, "recipe", rec, dish.lower())
         return _cors(web.json_response(rec))
     except Exception as e:
         log.warning("recipe %s «%s»: %s", cid, dish, e)
@@ -6836,8 +6889,10 @@ async def _api_today(request):
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
     _, st = status_of(cid); ev(cid, "button", meta="web_today")
     ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
-    hit = _TODAY_CACHE.get(ck)
-    if hit: return _cors(web.json_response(hit))
+    hit = _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or "")
+    if hit:
+        _TODAY_CACHE[ck] = hit
+        return _cors(web.json_response(hit))
     _su = []
     note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), _su)
     if _su: ev(cid, "tokens", sum(_su), meta="today_note", calls=len(_su), usage=_su)
@@ -6848,6 +6903,7 @@ async def _api_today(request):
         if (note.get("summary") or "").strip():
             if len(_TODAY_CACHE) > 2000: _TODAY_CACHE.clear()
             _TODAY_CACHE[ck] = note
+            dc_put(cid, "today", note, u.get("mode") or "")
     return _cors(web.json_response(note))
 
 async def _api_chat(request):
