@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v138-onb-copy"
+AIWA_VERSION = "2026-07-27-v139-onb-flow"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2337,10 +2337,7 @@ def summary_prepare_hhmm(cid, hhmm):
 
 def schedule_text(cid, hhmm):
     actual, _, _ = scheduled_hhmm(cid, hhmm)
-    return (
-        f"Время сводки: {actual} по Москве — подготовлю заранее и начну отправку в это время. "
-        "При высокой нагрузке доставка может занять несколько минут."
-    )
+    return f"Утренняя сводка будет приходить в {actual} по Москве."
 
 def today_start_iso():
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
@@ -4778,9 +4775,19 @@ def finish_onboarding(context, cid, last_period_iso, n):
     cyc_add(cid, last_period_iso); schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 
 async def welcome_finish(context, cid, msg):
-    ev(cid, "onboarding_completed", meta=(row(cid).get("mode") or "cycle"))
-    await msg.reply_text("Готово. " + schedule_text(cid, "08:00") + "\n\nИсторию прошлых циклов можно добавить позже командой /addcycles.",
-        reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
+    u = row(cid)
+    male = (u.get("mode") == "male")
+    ev(cid, "onboarding_completed", meta=(u.get("mode") or "cycle"))
+    text = ("Готово. " + schedule_text(cid, "08:00") +
+            ("" if male else "\n\nИсторию прошлых циклов можно добавить позже командой /addcycles.") +
+            "\n\nКалендарь, питание и тренировки — в приложении по кнопке ниже. "
+            "А здесь, в чате, задай любой вопрос или опиши блюдо или тренировку — текстом или голосом, разберу и запишу. "
+            + ("Например: «яичница и кофе на завтрак» или «пожал 60 кг, запиши тренировку»." if male
+               else "Например: «овсянка с ягодами на завтрак» или «пробежала 5 км, запиши»."))
+    kb_rows = []
+    if AIWA_WEBAPP_URL:
+        kb_rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
+    await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(kb_rows) if kb_rows else None)
     await push_summary(context, cid)
 
 async def send_report(context, cid, period):
@@ -5605,9 +5612,12 @@ async def handle_text(update, context, txt):
             "Напиши через пробел рост, вес и возраст — например: 168 60 30.\nПо ним я рассчитаю калории и подберу питание.", reply_markup=SKIP_KB)
 
     if state == "await_diet":
-        upsert(cid, diet_note=txt[:200])
-        sel = set((row(cid).get("diet") or "").split(",")) - {""}
-        return await update.message.reply_text("Записала: " + txt[:200] + ". Можно отметить ещё кнопками или нажать Готово.", reply_markup=diet_kb(sel))
+        _clean = txt.strip().lower()
+        if _clean in ("нет", "нету", "не", "no", "ограничений нет", "нет ограничений", "-", "пропустить"):
+            upsert(cid, diet="", diet_note="", state=None)
+        else:
+            upsert(cid, diet="", diet_note=txt[:200], state=None)
+        return await welcome_finish(context, cid, update.message)
 
     if state == "await_profile_edit":
         nums = [p for p in re.split(r"[ ,;/]+", txt) if p]
@@ -5852,7 +5862,7 @@ async def on_cb(update, context):
     if data.startswith("act:"):
         upsert(cid, activity=int(data.split(":")[1]), state="await_diet")
         upsert(cid, state="await_diet")
-        return await q.message.reply_text("Есть ограничения в еде? Отметь варианты или напиши своё текстом, например «без свинины, без сахара». Если ограничений нет, нажми «Ограничений нет».", reply_markup=diet_kb(set()))
+        return await q.message.reply_text("Есть ограничения или предпочтения в еде? Напиши свободным текстом — например «без свинины, аллергия на орехи, не ем молочку». Если ограничений нет, напиши «нет».")
     if data.startswith("diet:s:"):
         code = data.split(":")[2]; cur = set((row(cid).get("diet") or "").split(",")) - {""}
         cur.symmetric_difference_update({code}); upsert(cid, diet=",".join(sorted(cur)))
@@ -5875,8 +5885,7 @@ async def on_cb(update, context):
         upsert(cid, state="await_profile")
         if m == "male":
             return await q.message.reply_text(
-                "Принято. Настрою всё под мужской режим: питание, тренировки и утренние сводки по общим медицинским рекомендациям, без тем цикла.\n\n"
-                "Чтобы советы были точнее, напиши рост, вес и возраст через пробел. Например: 180 80 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
+                "Принято. Напиши рост, вес и возраст через пробел — так рекомендации по питанию и нагрузке будут точнее. Например: 180 80 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
         return await q.message.reply_text(
             "Поняла. Айва не будет считать стандартные фазы цикла, но всё равно сможет давать персональные рекомендации по самочувствию, питанию и движению.\n\n"
             "Чтобы советы были точнее, напиши рост, вес и возраст через пробел. Например: 168 60 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
@@ -5886,7 +5895,12 @@ async def on_cb(update, context):
     general = st is None
     today_s = dtoday().isoformat()
     if data == "menu":
-        await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u, general))
+        _rows = []
+        if AIWA_WEBAPP_URL:
+            _rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
+        await q.message.reply_text(
+            "Всё управление — в приложении по кнопке ниже. А здесь просто напиши или скажи, что нужно: вопрос, блюдо или тренировку.",
+            reply_markup=InlineKeyboardMarkup(_rows) if _rows else None)
     elif data == "today":
         await push_summary(context, cid)
     elif data == "more":
