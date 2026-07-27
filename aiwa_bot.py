@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v125-redesign-assets"
+AIWA_VERSION = "2026-07-27-v126-redesign-menu-button"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -6027,6 +6027,14 @@ async def on_startup(app):
             await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT, web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
         except Exception as e:
             log.warning("menu button: %s", e)
+        # у тестовой группы редизайна кнопка меню персональная — ведёт на новый фронт
+        for _rid in _REDESIGN_IDS:
+            try:
+                await app.bot.set_chat_menu_button(chat_id=int(_rid),
+                    menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT,
+                        web_app=WebAppInfo(url=AIWA_WEBAPP_URL.rstrip("/") + "/?ui=2")))
+            except Exception as e:
+                log.warning("redesign menu button %s: %s", _rid, e)
     try:
         await app.bot.set_my_commands([
             BotCommand("start", "Старт"),
@@ -6144,7 +6152,7 @@ def _cors(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
     return resp
-_REDESIGN_IDS = set(x.strip() for x in (os.environ.get("AIWA_REDESIGN_IDS", "") or "").split(",") if x.strip())
+_REDESIGN_IDS = set(x.strip().strip('"').strip("'") for x in (os.environ.get("AIWA_REDESIGN_IDS", "") or "").split(",") if x.strip())
 def redesign_on(cid):
     """Новый мини-апп: точечно по AIWA_REDESIGN_IDS=91428638,625405535 или всем через AIWA_REDESIGN=1."""
     if os.environ.get("AIWA_REDESIGN", "0") in ("1", "true", "True", "on"): return True
