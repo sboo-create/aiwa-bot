@@ -745,7 +745,7 @@ async function renderFood(){
   loadDiary();
 }
 var DIARY=null;
-async function loadDiary(){try{var r=await api('/api/diary',{});if(r&&!r.error){DIARY=r;}}catch(e){}renderDiaryBox();}
+async function loadDiary(){try{var r=await api('/api/diary',{});if(r&&!r.error){DIARY=r;}}catch(e){}renderDiaryBox();resumeFoodPhotoJob();}
 function _applyDiary(r){if(r&&r.ok!==false&&!r.error){DIARY={meals:r.meals||[],totals:r.totals||{},target:r.target||null};renderDiaryBox();return true;}return false;}
 function suggChips(list){
   var a=(list||[]).filter(function(s){return s&&(''+s).trim();}).slice(0,3);
@@ -811,8 +811,14 @@ async function uploadFoodPhoto(file){toast('Сжимаю и разбираю ф�
   var resp=await fetch('/api/food_photo',{method:'POST',body:fd});
   if(!resp.ok){hideFoodLoading();toast(resp.status===413?'Фото слишком большое':'Сервер не принял фото ('+resp.status+')');return;}
   hideFoodLoading();var r=await resp.json();
-  if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.title)||'приём')+' · '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}
+  if(resp.status===202&&r&&r.job_id){rememberFoodPhotoJob(r.job_id);showFoodLoading();toast('Фото принято, Айва распознаёт блюдо…');pollFoodPhotoJob(r.job_id);}
+  else if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.title)||'приём')+' · '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}
   else{toast((r&&r.message)||'Не разобрала фото');}}catch(e){hideFoodLoading();toast('Не удалось отправить фото, попробуй ещё раз');}}
+var FOOD_JOB_KEY='aiwa.foodPhotoJob',FOOD_JOB_POLLING=false;
+function rememberFoodPhotoJob(id){try{localStorage.setItem(FOOD_JOB_KEY,JSON.stringify({id:id,at:Date.now()}));}catch(e){}}
+function forgetFoodPhotoJob(){try{localStorage.removeItem(FOOD_JOB_KEY);}catch(e){}}
+function resumeFoodPhotoJob(){if(FOOD_JOB_POLLING)return;try{var x=JSON.parse(localStorage.getItem(FOOD_JOB_KEY)||'null');if(x&&x.id&&Date.now()-x.at<15*60*1000){showFoodLoading();pollFoodPhotoJob(x.id);}else forgetFoodPhotoJob();}catch(e){forgetFoodPhotoJob();}}
+async function pollFoodPhotoJob(id){if(FOOD_JOB_POLLING)return;FOOD_JOB_POLLING=true;var started=Date.now(),delay=1000;try{while(Date.now()-started<3*60*1000){await new Promise(function(ok){setTimeout(ok,delay);});var r=await api('/api/food_photo/status',{job_id:id});if(r&&r.status==='completed'&&r.result){forgetFoodPhotoJob();hideFoodLoading();_applyDiary(r.result);toast('Добавлено: '+((r.result.rec&&r.result.rec.title)||'приём')+' · '+((r.result.rec&&r.result.rec.kcal)||0)+' ккал');haptic('impact','light');return;}if(r&&r.status==='failed'){forgetFoodPhotoJob();hideFoodLoading();toast(r.message||'Не разобрала фото');return;}if(r&&r.error==='not_found'){forgetFoodPhotoJob();hideFoodLoading();toast('Задание распознавания не найдено');return;}delay=Math.min(5000,Math.round(delay*1.5));}hideFoodLoading();toast('Распознавание продолжается. Результат появится позже.');}finally{FOOD_JOB_POLLING=false;}}
 function toggleFoodText(){var b=document.getElementById('foodtextbox');if(!b)return;b.classList.toggle('hidden');var i=document.getElementById('foodtextin');if(!b.classList.contains('hidden')){trackFlow('food');if(i)setTimeout(function(){i.focus();},50);}}
 async function sendFoodText(){var i=document.getElementById('foodtextin');var t=(i&&i.value||'').trim();if(!t)return;i.value='';toast('Считаю…');showFoodLoading();var r=await api('/api/food_text',{text:t});hideFoodLoading();if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}else toast((r&&r.message)||'Не поняла блюдо');}
 async function delMeal(id){var r=await api('/api/diary_del',{id:id});if(_applyDiary(r))haptic('selection');}

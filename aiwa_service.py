@@ -73,16 +73,30 @@ def run_scheduler() -> None:
     from distributed_runtime import run_scheduler as scheduler_main
     asyncio.run(scheduler_main())
 
+def run_media_worker() -> None:
+    if os.environ.get("AIWA_ENABLE_DISTRIBUTED_ROLES") != "1":
+        raise SystemExit(
+            "media-worker role requires AIWA_ENABLE_DISTRIBUTED_ROLES=1"
+        )
+    from media_runtime import run_media_worker as media_worker_main
+    asyncio.run(media_worker_main())
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("role", choices=("api", "telegram", "worker", "scheduler"))
+    parser.add_argument(
+        "role",
+        nargs="?",
+        default=os.environ.get("AIWA_ROLE", "api"),
+        choices=("api", "telegram", "worker", "scheduler", "media-worker"),
+    )
     args = parser.parse_args()
     {
         "api": run_api,
         "telegram": run_telegram,
         "worker": run_worker,
         "scheduler": run_scheduler,
+        "media-worker": run_media_worker,
     }[args.role]()
 
 

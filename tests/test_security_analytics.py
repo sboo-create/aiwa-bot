@@ -617,6 +617,23 @@ class SecurityAnalyticsTests(unittest.TestCase):
             llm.OPENROUTER_VISION_MODEL = old_model
             llm.PROXY_URL = old_url
 
+    def test_media_job_lifecycle_clears_photo_after_completion(self):
+        job_id = bot._media_job_create(42, b"private-photo", "food.jpg")
+        queued = bot._media_job_get(job_id, 42)
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(bytes(queued["image_data"]), b"private-photo")
+        self.assertIsNone(bot._media_job_get(job_id, 43))
+
+        self.assertTrue(bot._media_job_claim(job_id))
+        self.assertFalse(bot._media_job_claim(job_id))
+        result = {"ok": True, "meal_id": 7, "rec": {"title": "Салат"}}
+        bot._media_job_update(job_id, "completed", result=result, clear_image=True)
+
+        completed = bot._media_job_get(job_id, 42)
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(json.loads(completed["result_json"]), result)
+        self.assertIsNone(completed["image_data"])
+
     def test_openrouter_payload_is_private_by_default(self):
         old_zdr = os.environ.get("OPENROUTER_ZDR")
         old_collection = os.environ.get("OPENROUTER_DATA_COLLECTION")

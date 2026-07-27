@@ -16,4 +16,4 @@ COPY . .
 
 USER aiwa
 
-CMD ["python", "-m", "aiwa_service", "api"]
+CMD ["python", "-m", "aiwa_service"]

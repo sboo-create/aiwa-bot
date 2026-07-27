@@ -115,6 +115,10 @@ POSTGRES_SCHEMA = (
        payload_version INTEGER NOT NULL DEFAULT 1)""",
     "CREATE TABLE IF NOT EXISTS traction_sent(event_id TEXT PRIMARY KEY, sent_at DOUBLE PRECISION NOT NULL, payload_version INTEGER NOT NULL DEFAULT 1)",
     "CREATE TABLE IF NOT EXISTS user_lifecycle(user_key TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1, active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)",
+    """CREATE TABLE IF NOT EXISTS media_jobs(
+       job_id TEXT PRIMARY KEY, chat_id BIGINT NOT NULL, status TEXT NOT NULL,
+       filename TEXT NOT NULL, image_data BYTEA, result_json TEXT, error TEXT,
+       created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts)",
     "CREATE INDEX IF NOT EXISTS ix_events_cid_ts ON events(chat_id,ts)",
     "CREATE INDEX IF NOT EXISTS ix_meals_cid_d ON meals(chat_id,d)",
@@ -126,6 +130,7 @@ POSTGRES_SCHEMA = (
     "CREATE INDEX IF NOT EXISTS ix_llm_calls_request ON llm_calls(request_id)",
     "CREATE INDEX IF NOT EXISTS ix_llm_calls_user_time ON llm_calls(user_key,occurred_at)",
     "CREATE INDEX IF NOT EXISTS ix_traction_outbox_time ON traction_outbox(occurred_at)",
+    "CREATE INDEX IF NOT EXISTS ix_media_jobs_chat_created ON media_jobs(chat_id, created_at)",
 )
 
 

@@ -265,6 +265,10 @@ def db():
         claimed_at TEXT NOT NULL,
         sent_at TEXT,
         PRIMARY KEY(chat_id, campaign_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS media_jobs(
+        job_id TEXT PRIMARY KEY, chat_id INTEGER NOT NULL, status TEXT NOT NULL,
+        filename TEXT NOT NULL, image_data BLOB, result_json TEXT, error TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
                 "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
@@ -286,6 +290,8 @@ def db():
                 "CREATE INDEX IF NOT EXISTS ix_workouts_cid_d ON workouts(chat_id, d)"):
         try: c.execute(_ix)
         except sqlite3.OperationalError: pass
+    try: c.execute("CREATE INDEX IF NOT EXISTS ix_media_jobs_chat_created ON media_jobs(chat_id, created_at)")
+    except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
                 "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER",
@@ -4316,7 +4322,115 @@ def _read_upload(field):
         raw = field if isinstance(field, (bytes, bytearray)) else b""
     return bytes(raw), (getattr(field, "filename", "food.jpg") or "food.jpg")
 
+def _media_job_create(cid, raw, filename):
+    job_id = "media_" + secrets.token_hex(16)
+    now = datetime.now(TZ).isoformat()
+    c = db()
+    try:
+        c.execute(
+            """INSERT INTO media_jobs(job_id, chat_id, status, filename, image_data, created_at, updated_at)
+               VALUES(?, ?, 'queued', ?, ?, ?, ?)""",
+            (job_id, cid, filename, raw, now, now),
+        )
+        c.commit()
+        return job_id
+    finally:
+        c.close()
+
+def _media_job_get(job_id, cid=None):
+    c = db()
+    try:
+        if cid is None:
+            cur = c.execute(
+                """SELECT job_id, chat_id, status, filename, image_data, result_json, error,
+                          created_at, updated_at FROM media_jobs WHERE job_id=?""",
+                (job_id,),
+            )
+        else:
+            cur = c.execute(
+                """SELECT job_id, chat_id, status, filename, image_data, result_json, error,
+                          created_at, updated_at FROM media_jobs WHERE job_id=? AND chat_id=?""",
+                (job_id, cid),
+            )
+        row_value = cur.fetchone()
+        if not row_value:
+            return None
+        keys = ("job_id", "chat_id", "status", "filename", "image_data", "result_json",
+                "error", "created_at", "updated_at")
+        return dict(zip(keys, row_value))
+    finally:
+        c.close()
+
+def _media_job_update(job_id, status, *, result=None, error=None, clear_image=False):
+    now = datetime.now(TZ).isoformat()
+    c = db()
+    try:
+        c.execute(
+            """UPDATE media_jobs SET status=?, result_json=?, error=?, updated_at=?,
+               image_data=CASE WHEN ? THEN NULL ELSE image_data END WHERE job_id=?""",
+            (status, json.dumps(result, ensure_ascii=False) if result is not None else None,
+             (str(error)[:500] if error else None), now, bool(clear_image), job_id),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+def _media_job_claim(job_id):
+    now = datetime.now(TZ).isoformat()
+    c = db()
+    try:
+        cur = c.execute(
+            "UPDATE media_jobs SET status='processing', updated_at=? WHERE job_id=? AND status='queued'",
+            (now, job_id),
+        )
+        c.commit()
+        return bool(cur.rowcount)
+    finally:
+        c.close()
+
+async def process_food_photo_job(job_id):
+    claimed = await asyncio.to_thread(_media_job_claim, job_id)
+    if not claimed:
+        return
+    job = await asyncio.to_thread(_media_job_get, job_id)
+    if not job:
+        return
+    cid = int(job["chat_id"])
+    generation = await asyncio.to_thread(_user_generation, cid)
+    usage = []
+    try:
+        user = await asyncio.to_thread(row, cid)
+        prof = await asyncio.to_thread(profile_of, user)
+        parsed = await llm_to_thread(
+            cid, "food_vision", L.analyze_food, bytes(job["image_data"] or b""),
+            job["filename"], prof, usage, user_generation=generation,
+        )
+        if not await asyncio.to_thread(_user_write_allowed, cid, generation):
+            raise RuntimeError("user data was deleted while the job was running")
+        rec = normalize_food(parsed, "photo") if parsed else None
+        if not rec:
+            try:
+                detail = L.last_food_err()
+            except Exception:
+                detail = ""
+            raise RuntimeError(detail or "photo was not recognized")
+        meal_id = await asyncio.to_thread(meal_add, cid, rec)
+        ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage), usage=usage)
+        ev(cid, "goal", meta="food_log")
+        ev(cid, "manual", meta="food_log")
+        result = {"ok": True, "meal_id": meal_id, "rec": rec}
+        result.update(await asyncio.to_thread(diary_payload, cid, prof))
+        await asyncio.to_thread(
+            _media_job_update, job_id, "completed", result=result, clear_image=True,
+        )
+    except Exception as exc:
+        log.warning("food photo job %s failed: %s", job_id, exc)
+        await asyncio.to_thread(
+            _media_job_update, job_id, "failed", error=exc, clear_image=True,
+        )
+
 async def _api_food_photo(request):
+    job_id = None
     try:
         data = await request.post()
     except Exception:
@@ -4333,30 +4447,39 @@ async def _api_food_photo(request):
         return _cors(web.json_response({"ok": False, "message": "Пустое фото."}))
     if len(raw) > 12 * 1024 * 1024:
         return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
-    prof = profile_of(u); usage = []
     try:
-        parsed = await llm_to_thread(cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
-                                     user_generation=generation)
+        job_id = await asyncio.to_thread(_media_job_create, cid, raw, fn)
+        from media_runtime import enqueue_food_photo
+        await enqueue_food_photo(job_id, cid)
     except Exception as e:
-        log.warning("food_photo analyze %s: %s", cid, e); parsed = None
-    if not _user_write_allowed(cid, generation):
-        return _cors(web.json_response({"error": "deleted"}, status=409))
-    ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage), usage=usage)
-    rec = normalize_food(parsed, "photo") if parsed else None
-    if not rec:
-        _e = ""
-        try: _e = L.last_food_err()
-        except Exception: pass
-        msg = "Не разобрала фото. Сфоткай ближе и светлее, либо добавь текстом."
-        if _e: msg += " [" + _e + "]"
-        return _cors(web.json_response({"ok": False, "message": msg}))
-    try:
-        mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
-        out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
-        return _cors(web.json_response(out))
-    except Exception as e:
-        import traceback; log.warning("FOOD save FAIL %s: %s", cid, traceback.format_exc())
-        return _cors(web.json_response({"ok": False, "message": "Сбой сохранения: " + str(e)[:150]}))
+        log.warning("food photo enqueue %s: %s", cid, e)
+        if job_id:
+            await asyncio.to_thread(
+                _media_job_update, job_id, "failed", error=e, clear_image=True,
+            )
+        return _cors(web.json_response(
+            {"ok": False, "message": "Не удалось поставить фото в очередь."}, status=503,
+        ))
+    ev(cid, "flow_start", meta="food_photo_queued")
+    return _cors(web.json_response(
+        {"ok": True, "job_id": job_id, "status": "queued"}, status=202,
+    ))
+
+async def _api_food_photo_status(request):
+    body = await request.json()
+    cid = _verify_init(body.get("initData", ""))
+    if not cid:
+        return _cors(web.json_response({"error": "auth"}, status=401))
+    job_id = str(body.get("job_id") or "")
+    job = await asyncio.to_thread(_media_job_get, job_id, cid)
+    if not job:
+        return _cors(web.json_response({"error": "not_found"}, status=404))
+    out = {"ok": True, "job_id": job_id, "status": job["status"]}
+    if job["status"] == "completed" and job["result_json"]:
+        out["result"] = json.loads(job["result_json"])
+    elif job["status"] == "failed":
+        out["message"] = "Не разобрала фото. Сфоткай ближе и светлее, либо добавь текстом."
+    return _cors(web.json_response(out))
 
 async def _api_food_text(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -5237,6 +5360,7 @@ def build_web():
     aio.router.add_post("/api/feedback", _api_feedback)
     aio.router.add_post("/api/voice", _api_voice)
     aio.router.add_post("/api/food_photo", _api_food_photo)
+    aio.router.add_post("/api/food_photo/status", _api_food_photo_status)
     aio.router.add_post("/api/food_text", _api_food_text)
     aio.router.add_post("/api/track", _api_track)
     aio.router.add_post("/api/train", _api_train)
