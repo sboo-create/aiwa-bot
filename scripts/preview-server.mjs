@@ -53,6 +53,20 @@ const mock = {
     totals: { kcal: 370, protein: 25, fat: 21, carbs: 18 },
     target: { kcal: 1800, protein: 95, fat: 60, carbs: 210 },
   },
+  "/api/workout": {
+    ok: true,
+    calories: 210,
+    review: "Хорошая связка на низ тела: присед и мост нагружают ягодицы и бёдра. Завтра дай ногам отдых — верх тела или прогулка.",
+  },
+  "/api/log_history": {
+    items: [
+      { d: "2026-07-27", energy: 2, mood: 3, symptoms: ["bloat"] },
+      { d: "2026-07-26", energy: 3, mood: 3, symptoms: [] },
+      { d: "2026-07-25", energy: 1, mood: 2, symptoms: ["cramps", "headache"] },
+      { d: "2026-07-23", energy: 2, mood: 2, symptoms: ["fatigue"] },
+      { d: "2026-07-21", energy: 3, mood: 3, symptoms: [] },
+    ],
+  },
   "/api/recipe": {
     dish: "Омлет с овощами",
     ingredients: ["Яйца — 3 шт", "Помидор — 1 шт", "Шпинат — горсть", "Молоко — 50 мл", "Масло — 1 ч. л."],

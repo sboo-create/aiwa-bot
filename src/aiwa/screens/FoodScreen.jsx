@@ -116,11 +116,14 @@ export function FoodScreen({ mode, revision = 0 }) {
   const shownMeals = viewingPast
     ? (historyDiary?.meals || [])
     : (diary.meals || []).slice().reverse();
-  const historyTitle = viewingPast
-    ? `Приёмы за ${DAY_LABEL.format(new Date(`${historyIso}T12:00:00`))}`
-    : "Прошедшие приёмы";
+  let historyTitle = "Прошедшие приёмы";
+  if (viewingPast) {
+    const parsed = new Date(`${historyIso}T12:00:00`);
+    historyTitle = Number.isNaN(parsed.getTime()) ? "Приёмы за день" : `Приёмы за ${DAY_LABEL.format(parsed)}`;
+  }
 
-  const pickHistoryDay = async (iso) => {
+  const pickHistoryDay = async (day) => {
+    const iso = typeof day === "string" ? day : day?.iso || "";
     setHistoryIso(iso);
     if (!iso || iso === todayIso) {
       setHistoryDiary(null);
@@ -245,7 +248,9 @@ export function FoodScreen({ mode, revision = 0 }) {
             ) : null}
 
             <SectionList.Item header={historyTitle}>
-              <Week days={week} selectedIso={historyIso || todayIso} onSelect={pickHistoryDay} />
+              <div className="aiwa-food-history-week">
+                <Week days={week} selectedIso={historyIso || todayIso} onSelect={pickHistoryDay} />
+              </div>
               {uploading ? (
                 <PaperRow loading title="Разбираю фото…" description="Айва считает КБЖУ" />
               ) : null}

@@ -1655,6 +1655,44 @@ body.material .aiwa-mark-bar {
   fill: var(--aiwa-ink-muted);
 }
 
+/* Группы мышц в силовой и карточка разбора после сохранения. */
+.aiwa-exercise-group [data-variant="caption1"] {
+  color: var(--aiwa-accent, #e8792e);
+}
+.aiwa-workout-review {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+}
+
+/* Профиль: чипы режима одинаковой ширины сеткой, активный — оранжевый. */
+.aiwa-profile-modes .aiwa-choice-pills {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.aiwa-profile-modes .aiwa-choice-pill {
+  width: 100%;
+  justify-content: center;
+  text-align: center;
+}
+.aiwa-profile-modes .aiwa-choice-pill.is-active {
+  background: var(--aiwa-accent, #e8792e);
+}
+.aiwa-profile-modes .aiwa-choice-pill.is-active [data-variant] {
+  color: #fff;
+}
+
+/* Мини-календарь истории питания внутри белой карточки секции. */
+.aiwa-food-history-week {
+  padding: 10px 12px 2px;
+}
+.aiwa-food-history-week .aiwa-week {
+  background: transparent;
+  padding: 0;
+}
+
 /* Горизонтальный скролл графика динамики: одна точка на цикл, свежие справа. */
 .aiwa-chart-scroll {
   overflow-x: auto;

@@ -120,7 +120,6 @@ export function ProfilePanel({ isOpen, onClose }) {
                     </Tappable>
                   ))}
                 </div>
-                <Text className="aiwa-profile-note" variant="caption1" weight="regular">Для цикла и беременности нужна дата последних месячных.</Text>
               </div>
               <SectionList className="aiwa-tma-blocks">
                 <SectionList.Item>

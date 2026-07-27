@@ -9,6 +9,7 @@ import { DelaySection } from "../sections/DelaySection";
 import { StatsSection } from "../sections/StatsSection";
 import { ChartSection } from "../sections/ChartSection";
 import { HistorySection } from "../sections/HistorySection";
+import { SymptomHistorySection } from "../sections/SymptomHistorySection";
 import { HomePanels } from "../panels/HomePanels";
 import { ProfilePanel } from "../panels/ProfilePanel";
 
@@ -88,6 +89,7 @@ export function HomeScreen(props) {
               emptyTitle={props.historyEmptyTitle}
               emptyDescription={props.historyEmptyDescription}
             />
+            <SymptomHistorySection />
           </SectionList>
 
           <HomePanels

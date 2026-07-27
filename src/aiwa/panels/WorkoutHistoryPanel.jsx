@@ -3,7 +3,7 @@ import { AiwaCell } from "../components/AiwaCell";
 import { AiwaModalView } from "../components/AiwaModalView";
 import { PaperRow } from "../components/PaperRow";
 import { AiwaInsightCard } from "../components/AiwaInsightCard";
-import { actionProps, call } from "../lib/api";
+import { actionProps, call, openBotChat } from "../lib/api";
 
 export function WorkoutHistoryPanel({ isOpen, onClose, state, onAdd }) {
   const today = state?.today || [];
@@ -13,7 +13,7 @@ export function WorkoutHistoryPanel({ isOpen, onClose, state, onAdd }) {
         {state?.last_review ? (
           <AiwaInsightCard
             message={state.last_review.text || state.last_review}
-            onDiscuss={() => call("go", "chat")}
+            onDiscuss={() => openBotChat({ topic: "train" })}
           />
         ) : null}
         <SectionList.Item header="Неделя">
