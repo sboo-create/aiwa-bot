@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v128-summary-chip-nudge-topics"
+AIWA_VERSION = "2026-07-27-v129-food-endpoints"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -6196,6 +6196,21 @@ async def _serve_index(request):
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
 
+async def _api_food_prompt(request):
+    """Кнопка «Текстом» в питании: бот спрашивает в чате, что она ела — ответ запишется в дневник."""
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"ok": False}))
+    try:
+        if BOT_APP:
+            await BOT_APP.bot.send_message(cid, "Что ты скушала? Напиши обычным текстом — например «200 г творога и банан» — я посчитаю КБЖУ и запишу в дневник.")
+        ev(cid, "button", meta="web_food_prompt")
+        return _cors(web.json_response({"ok": True}))
+    except Exception as e:
+        log.warning("food_prompt %s: %s", cid, e)
+        return _cors(web.json_response({"ok": False}))
+
 async def _api_nudge(request):
     """Новый фронт: перед переключением в чат бот присылает туда сообщение, чтобы чат не был пустым."""
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -7142,10 +7157,10 @@ async def _api_voice(request):
     reply["transcript"] = txt.strip()
     return _cors(web.json_response(reply))
 
-def diary_payload(cid, prof=None):
+def diary_payload(cid, prof=None, d=None):
     prof = prof if prof is not None else profile_of(row(cid))
     tg = profile_kcal(prof) if prof else None
-    return {"meals": meals_of(cid), "totals": diary_totals(cid),
+    return {"meals": meals_of(cid, d), "totals": diary_totals(cid, d), "date": (d or dtoday().isoformat()),
             "target": ({"kcal": tg[0], "protein": tg[1], "fat": tg[2], "carbs": tg[3]} if tg else None)}
 
 def diary_reco_summary(cid):
@@ -8147,7 +8162,13 @@ async def _api_diary(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     ev(cid, "button", meta="web_diary")
-    return _cors(web.json_response(diary_payload(cid)))
+    _d = str(body.get("d") or "")[:10] or None
+    if _d:
+        try:
+            _dd = date.fromisoformat(_d)
+            if _dd > dtoday() or (dtoday() - _dd).days > 92: _d = None
+        except Exception: _d = None
+    return _cors(web.json_response(diary_payload(cid, d=_d)))
 
 async def _api_diary_del(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -8645,6 +8666,7 @@ def build_web():
     aio.router.add_get("/", _serve_index)
     aio.router.add_get("/app2", _serve_index2)
     aio.router.add_post("/api/nudge", _api_nudge)
+    aio.router.add_post("/api/food_prompt", _api_food_prompt)
     _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
         aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды
