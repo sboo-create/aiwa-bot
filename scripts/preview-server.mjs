@@ -26,7 +26,15 @@ const mock = {
     profile: { height: 168, weight: 62, age: 29, kcal_goal: 1800 },
     send_time: "08:00",
     proactive_enabled: true,
-    stats: { avg_cycle: 29, avg_period: 5, history: [] },
+    stats: { avg_cycle: 29, avg_period: 5, history: [
+      { start: "2026-01-04", end: "2026-02-01", len: 28, period_len: 5 },
+      { start: "2026-02-01", end: "2026-03-03", len: 30, period_len: 5 },
+      { start: "2026-03-03", end: "2026-03-31", len: 28, period_len: 4 },
+      { start: "2026-03-31", end: "2026-04-29", len: 29, period_len: 5 },
+      { start: "2026-04-29", end: "2026-05-28", len: 29, period_len: 5 },
+      { start: "2026-05-28", end: "2026-06-27", len: 30, period_len: 6 },
+      { start: "2026-06-27", end: null, len: null, period_len: 5 },
+    ] },
   },
   "/api/section": {
     text: "Сегодня держим ровную энергию: белок, овощи и спокойный ритм.",

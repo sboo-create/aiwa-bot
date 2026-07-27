@@ -27,11 +27,12 @@ const RECOMMENDATION_IMAGE = "/assets/paper-food-placeholder.png";
 // точное совпадение дополняем подбором по началам слов («куриная грудка» →
 // «Курица с рисом» не нужен, но «Омлет с зеленью» → «Омлет с овощами» да).
 const normDish = (value) => String(value || "").toLowerCase().replace(/ё/g, "е");
+const ICON_VERSION = "?v=2";
 const dishImageFrom = (icons, name) => {
   const n = normDish(name).trim();
   if (!icons || !n) return null;
   const exact = icons[String(name || "").trim()];
-  if (exact) return exact;
+  if (exact) return exact + ICON_VERSION;
   let best = null;
   let bestScore = 0;
   for (const [key, file] of Object.entries(icons)) {
@@ -42,7 +43,7 @@ const dishImageFrom = (icons, name) => {
     for (const w of words) if (n.includes(w.slice(0, 4))) score += w.length > 5 ? 2 : 1;
     if (score > bestScore) { bestScore = score; best = file; }
   }
-  return bestScore >= 2 ? best : null;
+  return bestScore >= 2 ? best + ICON_VERSION : null;
 };
 
 // Последние 7 дней для мини-календаря истории: сегодня справа.
@@ -79,8 +80,23 @@ export function FoodScreen({ mode, revision = 0 }) {
   const [uploading, setUploading] = useState(false);
   const photoInputRef = useRef(null);
 
+  // Меню генерится моделью и может приехать позже открытия экрана — пока его
+  // нет, перечитываем секцию с бэкофом, чтобы блюда появились сами.
+  const menuMissing = Boolean(data.foodSection) && !(data.foodSection.menu?.meals || []).length;
+  const menuRetry = useRef(0);
   useEffect(() => {
-    fetch("/assets/food/manifest.json")
+    if (!menuMissing) { menuRetry.current = 0; return undefined; }
+    if (menuRetry.current >= 5) return undefined;
+    const delay = [1500, 3000, 5000, 9000, 15000][menuRetry.current];
+    const timer = setTimeout(() => {
+      menuRetry.current += 1;
+      refresh("foodSection");
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [menuMissing, data.foodSection]);
+
+  useEffect(() => {
+    fetch("/assets/food/manifest.json?v=2")
       .then((r) => (r.ok ? r.json() : {}))
       .then((icons) => setFoodIcons(icons || {}))
       .catch(() => {});
@@ -233,6 +249,11 @@ export function FoodScreen({ mode, revision = 0 }) {
               message={section.text || "Выбираем простую еду с белком в каждом приёме."}
               onDiscuss={() => openBotChat({ topic: "food" })}
             />
+            {menuMissing ? (
+              <SectionList.Item header="Меню на сегодня">
+                <PaperRow loading title="Айва собирает меню…" description="Завтрак, обед и ужин под фазу" />
+              </SectionList.Item>
+            ) : null}
             {recommended.length ? (
               <SectionList.Item header="Меню на сегодня">
                 {recommended.map((item) => (

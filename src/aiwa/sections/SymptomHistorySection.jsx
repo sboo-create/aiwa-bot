@@ -11,13 +11,21 @@ const ENERGY = { 1: "низкая энергия", 2: "средняя энерг
 const MOOD = { 1: "плохое настроение", 2: "нормальное настроение", 3: "хорошее настроение" };
 const DAY_LABEL = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
 
+// Код симптома в человеческую подпись: словарь, затем «custom:боль» → «Боль»,
+// «meno:hot» → «Hot» (хвост после двоеточия), всегда с большой буквы.
+const humanize = (code) => {
+  const known = SYMPTOM_LABEL[code];
+  const raw = known || String(code).split(":").pop().replace(/_/g, " ").trim();
+  return raw ? raw[0].toUpperCase() + raw.slice(1) : "";
+};
+
 const describe = (item) => {
   const parts = [
-    ...(item.symptoms || []).map((code) => SYMPTOM_LABEL[code] || code),
+    ...(item.symptoms || []).map(humanize),
     ENERGY[item.energy],
     MOOD[item.mood],
-  ].filter(Boolean);
-  return parts.join(" · ") || "без деталей";
+  ].filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1));
+  return parts.join(" • ") || "Без деталей";
 };
 
 const dayName = (iso) => {
@@ -44,7 +52,7 @@ export function SymptomHistorySection() {
     if (busy) return;
     setBusy(true);
     try {
-      const result = await apiCall("/api/report", { period: "3" }).catch(() => null);
+      const result = await apiCall("/api/report", { period: "all" }).catch(() => null);
       if (result?.ok) showToast("Выписка отправлена в чат бота", { type: "success" });
       else showToast(result?.text || "Выписка временно недоступна", { type: "error" });
     } finally {
@@ -73,7 +81,7 @@ export function SymptomHistorySection() {
           onClick={() => setExpanded((value) => !value)}
           end={<AiwaCell.Part type="Chevron" />}
         >
-          <AiwaCell.Text type="Accent" title={expanded ? "Свернуть" : `Показать все (${items.length})`} />
+          <AiwaCell.Text type="Accent" title={expanded ? "Свернуть" : "Показать все"} />
         </AiwaCell>
       ) : null}
       <AiwaCell tappable={false}>

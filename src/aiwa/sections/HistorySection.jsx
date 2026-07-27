@@ -30,7 +30,7 @@ export function HistorySection({
           onClick={() => setExpanded((value) => !value)}
           end={<AiwaCell.Part type="Chevron" />}
         >
-          <AiwaCell.Text type="Accent" title={expanded ? "Свернуть" : `Показать все (${rows.length})`} />
+          <AiwaCell.Text type="Accent" title={expanded ? "Свернуть" : "Показать все"} />
         </AiwaCell>
       ) : null}
     </SectionList.Item>

@@ -719,7 +719,7 @@ function paperModeHomeConfig(stats){
       {label:"Средняя длина цикла",value:stats.avg_cycle?daysText(stats.avg_cycle):"—",ok:false},
       {label:"Отмечено циклов",value:((stats.history||[]).length||0)+" циклов",ok:true},
       {label:"Разброс длины цикла",value:stats.spread?daysText(stats.spread):"—",ok:false}
-    ],chartTitle:"Динамика цикла",chartData:paperHomeCycleChartData(stats.history||[]),chartSeries:[{key:"value",label:"Длина цикла",color:"var(--aiwa-accent)"}],historyTitle:"История циклов",history:(stats.history||[]).slice().reverse().slice(0,24).map(function(x,i){return{key:(x.start||"cycle")+":"+i,title:"с "+fmtD(x.start)+(x.end?(" по "+fmtD(x.end)):""),description:x.len?("цикл "+daysText(x.len)+(x.period_len?", месячные "+daysText(x.period_len):"")):"текущий цикл"};}),symptomGroups:SYMGROUPS};
+    ],chartTitle:"Динамика цикла",chartBand:[21,35],chartData:paperHomeCycleChartData(stats.history||[]),chartSeries:[{key:"value",label:"Длина цикла",color:"var(--aiwa-accent)"}],historyTitle:"История циклов",history:(stats.history||[]).slice().reverse().slice(0,24).map(function(x,i){return{key:(x.start||"cycle")+":"+i,title:"с "+fmtD(x.start)+(x.end?(" по "+fmtD(x.end)):""),description:x.len?("цикл "+daysText(x.len)+(x.period_len?", месячные "+daysText(x.period_len):"")):"текущий цикл"};}),symptomGroups:SYMGROUPS};
   }
   if(mode==="preg"&&D.preg){
     var p=D.preg,pregWeek=Math.max(1,Number(p.week)||0),due=new Date(p.due+"T00:00:00"),dueText=due.getDate()+" "+MONTHS[due.getMonth()];

@@ -4,6 +4,7 @@ import {
   AreaChart,
   CartesianGrid,
   LabelList,
+  ReferenceArea,
   XAxis,
   YAxis,
 } from "recharts";
@@ -32,6 +33,7 @@ export function AiwaWebUiChart({
   emptyText = "Пока недостаточно данных для графика.",
   loading = false,
   showLegend = series.length > 1,
+  band = null,
 }) {
   const gradientPrefix = useId().replaceAll(":", "");
   // Длинная история скроллится по горизонтали; открывается на свежих циклах.
@@ -60,8 +62,8 @@ export function AiwaWebUiChart({
   const valueSpan = valueMax - valueMin;
   const domainPadding = Math.max(1, valueSpan * 0.35, Math.abs(valueMax) * 0.04);
   const yDomain = [
-    valueMin >= 0 ? Math.max(0, Math.floor(valueMin - domainPadding)) : Math.floor(valueMin - domainPadding),
-    Math.ceil(valueMax + domainPadding),
+    Math.min(band ? band[0] - 1 : Infinity, valueMin >= 0 ? Math.max(0, Math.floor(valueMin - domainPadding)) : Math.floor(valueMin - domainPadding)),
+    Math.max(band ? band[1] + 1 : -Infinity, Math.ceil(valueMax + domainPadding)),
   ];
 
   if (loading) {
@@ -119,6 +121,15 @@ export function AiwaWebUiChart({
           ))}
         </defs>
         <CartesianGrid vertical={false} />
+        {band ? (
+          <ReferenceArea
+            y1={band[0]}
+            y2={band[1]}
+            fill="var(--aiwa-hint-color, #8e8e93)"
+            fillOpacity={0.12}
+            stroke="none"
+          />
+        ) : null}
         <XAxis
           dataKey={xKey}
           tickLine={false}

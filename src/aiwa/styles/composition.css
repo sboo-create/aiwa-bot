@@ -1669,13 +1669,17 @@ body.material .aiwa-mark-bar {
 /* Профиль: чипы режима одинаковой ширины сеткой, активный — оранжевый. */
 .aiwa-profile-modes .aiwa-choice-pills {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 .aiwa-profile-modes .aiwa-choice-pill {
   width: 100%;
   justify-content: center;
   text-align: center;
+  white-space: nowrap;
+}
+.aiwa-profile-modes .aiwa-choice-pill [data-variant] {
+  font-weight: 400;
 }
 .aiwa-profile-modes .aiwa-choice-pill.is-active {
   background: var(--aiwa-accent, #e8792e);
@@ -1686,11 +1690,13 @@ body.material .aiwa-mark-bar {
 
 /* Мини-календарь истории питания внутри белой карточки секции. */
 .aiwa-food-history-week {
+  display: flex;
+  justify-content: center;
   padding: 10px 12px 2px;
 }
 .aiwa-food-history-week .aiwa-week {
-  background: transparent;
-  padding: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 /* Горизонтальный скролл графика динамики: одна точка на цикл, свежие справа. */
@@ -1719,7 +1725,7 @@ body.material .aiwa-mark-bar {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: var(--aiwa-accent, #e8792e);
+  background: #e8792e;
   color: #fff;
   font-size: 16px;
   font-weight: 600;

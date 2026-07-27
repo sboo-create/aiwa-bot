@@ -17,6 +17,7 @@ export function ChartSection({
   data,
   series,
   xKey,
+  band = null,
   loading = false,
   title = "Динамика цикла",
   emptyText = "Добавь ещё один завершённый цикл — здесь появится график.",
@@ -28,6 +29,7 @@ export function ChartSection({
           data={data}
           series={series}
           xKey={xKey}
+          band={band}
           loading={loading}
           ariaLabel={title}
           emptyText={emptyText}

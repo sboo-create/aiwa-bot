@@ -81,6 +81,7 @@ export function HomeScreen(props) {
               data={props.chartData}
               series={props.chartSeries}
               title={props.chartTitle}
+              band={props.chartBand}
               emptyText={props.chartEmptyText}
             />
             <HistorySection

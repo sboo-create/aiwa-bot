@@ -31,7 +31,10 @@ export function RecipePanel({ isOpen, meal, slotLabel = "", onClose, onAdd, busy
     };
   }, [isOpen, dish]);
 
-  const metaLine = [slotLabel, meal?.kcal, recipe?.time].filter(Boolean).join(" · ");
+  const macros = recipe?.macros || {};
+  const macroLine = [macros.protein && `Б ${macros.protein}`, macros.fat && `Ж ${macros.fat}`, macros.carbs && `У ${macros.carbs}`]
+    .filter(Boolean).join(" · ");
+  const metaLine = [slotLabel, recipe?.kcal || meal?.kcal, macroLine, recipe?.time].filter(Boolean).join(" · ");
 
   return (
     <AiwaModalView isOpen={isOpen} onClose={onClose}>

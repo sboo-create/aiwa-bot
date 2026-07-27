@@ -94,8 +94,11 @@ export function ActivityScreen({ mode, revision = 0 }) {
                 {options.map((option, index) => (
                   <PaperRow
                     key={option.name || index}
-                    title={option.name || `Вариант ${index + 1}`}
-                    description={option.benefit || option.how || option.detail}
+                    title={[option.name || `Вариант ${index + 1}`, option.duration].filter(Boolean).join(" · ")}
+                    description={[
+                      (option.exercises || []).map((e) => [e.name, e.sets && e.reps ? `${e.sets}×${e.reps}` : ""].filter(Boolean).join(" ")).join(", "),
+                      option.tip || option.benefit || option.how || option.detail,
+                    ].filter(Boolean).join(" — ")}
                     onClick={() => openWorkout(option)}
                   />
                 ))}
@@ -107,7 +110,12 @@ export function ActivityScreen({ mode, revision = 0 }) {
                 <PaperRow
                   key={workout.id}
                   title={workout.type || "Тренировка"}
-                  description={`сегодня · ${workout.duration || "—"} · ${String(workout.rpe || "").toLowerCase()}`}
+                  description={[
+                    "сегодня",
+                    workout.duration,
+                    workout.kcal ? `${Math.round(workout.kcal)} ккал` : "",
+                    String(workout.rpe || "").toLowerCase(),
+                  ].filter(Boolean).join(" · ")}
                   onClick={() => setPanel("history")}
                 />
               )) : weekRows.length ? weekRows.map((day) => (

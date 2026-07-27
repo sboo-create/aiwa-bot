@@ -126,7 +126,7 @@ export function ProfilePanel({ isOpen, onClose }) {
                   <PaperRow title="Выписка для врача" description="PDF в чат бота" onClick={() => setView("report")} />
                   <PaperRow title="Предпочтения по питанию" description="ограничения и цель калорий" onClick={() => setView("data")} />
                   <PaperRow title="Мои данные" description="рост · вес · возраст · цикл" onClick={() => setView("data")} />
-                  <PaperRow title="Утренняя сводка" description={`${form.send_time || "08:00"} · МСК`} onClick={() => setView("data")} />
+                  <PaperRow title="Утренняя сводка" description={`${form.send_time || "08:00"} · МСК`} onClick={() => setView("summary")} />
                   <AiwaCell.Switch
                     value={form.proactive_enabled !== false}
                     onChange={setProactive}
@@ -160,8 +160,16 @@ export function ProfilePanel({ isOpen, onClose }) {
                 multiline
               />
               <Field label="Желаемые калории" value={form.kcal_goal || ""} onChange={(value) => setForm((current) => ({ ...current, kcal_goal: value }))} inputMode="numeric" />
-              <Field label="Время утренней сводки" type="time" value={form.send_time || "08:00"} onChange={(value) => setForm((current) => ({ ...current, send_time: value }))} />
               <RegularButton variant="filled" label="Сохранить" isFill {...actionProps("Сохранить данные", saveData)} />
+            </div>
+          ) : null}
+
+          {view === "summary" ? (
+            <div className="aiwa-form-stack">
+              <Text variant="title3" weight="semibold">Утренняя сводка</Text>
+              <Text variant="body" weight="regular">Каждое утро Айва присылает сводку дня в чат — выбери удобное время (МСК).</Text>
+              <Field label="Время утренней сводки" type="time" value={form.send_time || "08:00"} onChange={(value) => setForm((current) => ({ ...current, send_time: value }))} />
+              <RegularButton variant="filled" label="Сохранить" isFill {...actionProps("Сохранить время сводки", saveData)} />
             </div>
           ) : null}
 

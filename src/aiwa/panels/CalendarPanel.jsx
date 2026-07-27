@@ -40,8 +40,8 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
   // and marking a period is five taps in a row. One call at a time.
   const queue = useRef(Promise.resolve());
   const inflight = useRef(0);
-  // Полгода истории и восемь месяцев вперёд; открывается на текущем месяце.
-  const months = Array.from({ length: 14 }, (_, index) => read("getAiwaCalendarMonth", index - 6)).filter(Boolean);
+  // Год истории и восемь месяцев вперёд; открывается на текущем месяце.
+  const months = Array.from({ length: 20 }, (_, index) => read("getAiwaCalendarMonth", index - 12)).filter(Boolean);
   const canEditPeriods = mode !== "preg" && mode !== "meno";
   const markOptions = calendarMarkOptions(canEditPeriods ? ["period", "symptoms", "intimacy"] : ["symptoms", "intimacy"]);
   const activeMark = CALENDAR_MARK_MODES[markMode] || CALENDAR_MARK_MODES.symptoms;

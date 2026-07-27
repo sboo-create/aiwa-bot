@@ -27,12 +27,21 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
     if (!isOpen) return;
     trackFlow("workout");
     const hinted = suggested?.name || "";
-    const nextType = /ход/i.test(hinted) ? "Ходьба" : (/йог|мобил|релиз/i.test(hinted) ? "Йога" : (/кардио/i.test(hinted) ? "Кардио" : "Силовая"));
+    const fromPlan = (suggested?.exercises || []).filter((e) => e?.name);
+    const nextType = /ход|прогул/i.test(hinted) ? "Ходьба" : (/йог|мобил|релиз|растяж/i.test(hinted) ? "Йога" : (/кардио|бег|вело/i.test(hinted) ? "Кардио" : (/плав/i.test(hinted) ? "Плавание" : "Силовая")));
     setType(nextType);
-    setSelected(hinted ? [hinted] : []);
-    setDetails({});
+    if (fromPlan.length) {
+      // Вариант от Айвы с конкретными упражнениями: отмечаем их и переносим
+      // подходы/повторы прямо в форму.
+      setSelected(fromPlan.map((e) => e.name));
+      setDetails(Object.fromEntries(fromPlan.map((e) => [e.name, { sets: e.sets || "", reps: e.reps || "" }])));
+    } else {
+      setSelected(hinted ? [hinted] : []);
+      setDetails({});
+    }
     setCustom("");
-    setOpenGroup("");
+    const first = (suggested?.exercises || []).find((e) => e?.name)?.name;
+    setOpenGroup(first ? (Object.keys(WORKOUT_GROUPS).find((group) => WORKOUT_GROUPS[group].includes(first)) || "") : "");
     setReview(null);
     setDate(todayIso);
   }, [isOpen, suggested, todayIso]);
