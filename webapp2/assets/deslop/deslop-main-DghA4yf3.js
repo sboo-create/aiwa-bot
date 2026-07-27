@@ -19549,7 +19549,8 @@ const qr = [
   { value: "irregular", label: "Нерегулярный" },
   { value: "preg", label: "Беременность" },
   { value: "meno", label: "Менопауза" },
-  { value: "none", label: "Нет месячных" }
+  { value: "none", label: "Нет месячных" },
+  { value: "male", label: "Мужской режим" }
 ], Pg = "custom:";
 function mj(a) {
   const e = a?.length ? a.flatMap(([, l]) => l) : qr.flatMap(([, l]) => l.flat());
@@ -19694,7 +19695,7 @@ function Cj({ label: a, value: e, ok: l }) {
 function Ej({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Cj, { ...l }, l.label)) }) : null;
 }
-const jj = E.lazy(() => import("./AiwaWebUiChart-C78p7fNV.js").then((a) => ({
+const jj = E.lazy(() => import("./AiwaWebUiChart-CuBLjIfk.js").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Aj() {
@@ -20046,7 +20047,7 @@ function $j({ isOpen: a, onClose: e, checkin: l, symptomGroups: s, mode: r }) {
       children: [
         /* @__PURE__ */ m.jsx(Hh, { size: "large", title: "Занести в журнал" }),
         /* @__PURE__ */ m.jsx("div", { className: "aiwa-log-scroll", children: /* @__PURE__ */ m.jsxs(yt, { className: "aiwa-log-sections", children: [
-          r !== "preg" && r !== "meno" ? /* @__PURE__ */ m.jsx(yt.Item, { children: /* @__PURE__ */ m.jsx(Rd, { label: "Месячные", variant: "period", active: v, onChange: b }) }) : null,
+          r !== "preg" && r !== "meno" ? /* @__PURE__ */ m.jsx(yt.Item, { children: r === "male" ? null : /* @__PURE__ */ m.jsx(Rd, { label: "Месячные", variant: "period", active: v, onChange: b }) }) : null,
           /* @__PURE__ */ m.jsx(yt.Item, { children: /* @__PURE__ */ m.jsx(
             Rr,
             {
@@ -20067,7 +20068,7 @@ function $j({ isOpen: a, onClose: e, checkin: l, symptomGroups: s, mode: r }) {
           ) }),
           R.map(([V, _]) => /* @__PURE__ */ m.jsx(yt.Item, { children: /* @__PURE__ */ m.jsx(rx, { label: V, options: _, symptoms: c, onToggle: A }) }, V)),
           /* @__PURE__ */ m.jsx(yt.Item, { children: /* @__PURE__ */ m.jsx(ux, { value: w, onChange: j }) }),
-          /* @__PURE__ */ m.jsx(yt.Item, { children: /* @__PURE__ */ m.jsx(Rd, { label: "Близость", active: T, onChange: S }) })
+          /* @__PURE__ */ m.jsx(yt.Item, { children: r === "male" ? null : /* @__PURE__ */ m.jsx(Rd, { label: "Близость", active: T, onChange: S }) })
         ] }) }),
         /* @__PURE__ */ m.jsx("div", { className: "aiwa-log-footer", children: /* @__PURE__ */ m.jsx(
           Jt,
@@ -20270,7 +20271,7 @@ function Pj({ iso: a, label: e, open: l, onClose: s, symptomGroups: r, showIntim
   );
 }
 function Kj({ isOpen: a, onClose: e, mode: l, revision: s, symptomGroups: r }) {
-  const [c, f] = E.useState(!1), [h, y] = E.useState(null), [p, g] = E.useState(!1), [v, b] = E.useState("period"), [T, S] = E.useState({}), w = E.useRef(Promise.resolve()), j = E.useRef(0), M = Array.from({ length: 20 }, (Q, tt) => le("getAiwaCalendarMonth", tt - 12)).filter(Boolean), D = l !== "preg" && l !== "meno", A = oj(D ? ["period", "symptoms", "intimacy"] : ["symptoms", "intimacy"]), R = Dd[v] || Dd.symptoms, B = ij(), V = () => {
+  const [c, f] = E.useState(!1), [h, y] = E.useState(null), [p, g] = E.useState(!1), [v, b] = E.useState("period"), [T, S] = E.useState({}), w = E.useRef(Promise.resolve()), j = E.useRef(0), M = Array.from({ length: 20 }, (Q, tt) => le("getAiwaCalendarMonth", tt - 12)).filter(Boolean), D = l !== "preg" && l !== "meno" && l !== "male", A = oj(D ? ["period", "symptoms", "intimacy"] : ["symptoms", "intimacy"]), R = Dd[v] || Dd.symptoms, B = ij(), V = () => {
     g(!1), S({});
   }, _ = (Q) => {
     b(Q), f(!1), g(!0);

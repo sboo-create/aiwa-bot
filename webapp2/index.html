@@ -514,7 +514,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 
 /* The main screen is styled by the exact Deslop package and src/deslop-main.css. */
 </style>
-<link rel="stylesheet" href="/assets/deslop/main.css?v=r4-iconmatch">
+<link rel="stylesheet" href="/assets/deslop/main.css?v=r5-male">
 </head>
 <body class="apple">
 <div id="app" data-component="Page">
@@ -529,7 +529,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 <div id="hub" class="hubsheet hidden"></div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="cmic" aria-label="Голосом">🎤</button><button id="csend" aria-label="Отправить">→</button></div>
 <div id="tabs" aria-label="Разделы приложения"></div><input type="file" id="foodfile" accept="image/*" style="display:none">
-<script type="module" src="/assets/deslop/main.js?v=r4-iconmatch"></script>
+<script type="module" src="/assets/deslop/main.js?v=r5-male"></script>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp;
 const LOCAL_HOST=/^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/;
@@ -736,6 +736,15 @@ function paperModeHomeConfig(stats){
       {label:"Дней с плохим сном",value:daysText(sleep),ok:sleep<6},
       {label:"Симптомов сегодня",value:symptomsText(todaySymptoms.length),ok:todaySymptoms.length<3}
     ],chartTitle:"Динамика симптомов",chartData:paperHomeLogChartData(logs,"symptoms"),chartSeries:[{key:"value",label:"Симптомы",color:"var(--aiwa-accent)"}],chartEmptyText:"Отмечай приливы, сон и самочувствие — здесь появится динамика.",historyTitle:"История отметок",history:history,historyEmptyDescription:"Отмечай симптомы — история поможет увидеть изменения.",symptomGroups:[["Менопауза",MENO_SYMS]]};
+  }
+  if(mode==="male"){
+    var markedDaysM=logs.filter(function(l){return(l.symptoms&&l.symptoms.length)||l.energy||l.mood;}).length;
+    var weekKcalM=0;try{weekKcalM=Number((D.diary_week_kcal)||0);}catch(e){}
+    return{heroValue:"Твой день",countdownLabel:"питание · нагрузка · самочувствие",aiText:"Айва подберёт питание и тренировки под твои цели и самочувствие — по общим медицинским рекомендациям.",metrics:[
+      {label:"Отмечено дней",value:daysText(markedDaysM),ok:true},
+      {label:"Энергия сегодня",value:(todayLog.energy?["низкая","средняя","высокая"][todayLog.energy-1]:"—"),ok:!!todayLog.energy},
+      {label:"Настроение",value:(todayLog.mood?["плохое","нормальное","хорошее"][todayLog.mood-1]:"—"),ok:!!todayLog.mood}
+    ],chartTitle:"Динамика энергии",chartData:paperHomeLogChartData(logs,"energy"),chartSeries:[{key:"value",label:"Энергия",color:"var(--aiwa-accent)"}],chartEmptyText:"Отмечай энергию — здесь появится динамика.",historyTitle:"История отметок",history:history,historyEmptyDescription:"Отмечай самочувствие — здесь появится история.",symptomGroups:[["Самочувствие",[["tired","Усталость"],["stress","Стресс"],["insomnia","Плохой сон"],["soreness","Крепатура"],["head","Голова"]]]]};
   }
   if(mode==="none"){
     var last=D&&D.last_period?new Date(D.last_period+"T00:00:00"):null,daysWithout=last?Math.max(0,Math.floor((today-last)/86400000)):0,markedDays=logs.filter(function(l){return(l.symptoms&&l.symptoms.length)||l.energy||l.mood;}).length;

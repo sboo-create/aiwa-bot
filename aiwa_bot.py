@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v135-cache-evict"
+AIWA_VERSION = "2026-07-27-v136-wellness-male"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -168,16 +168,17 @@ def symptom_label(code):
 def symptoms_labels(items):
     return [symptom_label(x) for x in (items or []) if symptom_label(x)]
 
-START_TEXT = ("Привет, я Айва — ИИ-ассистент по циклу и женскому здоровью.\n\n"
+START_TEXT = ("Привет, я Айва — ИИ wellness-ассистент: самочувствие, питание и нагрузка каждый день.\n\n"
  "Что я умею:\n"
- "• считать цикл и присылать утреннюю сводку под твою фазу\n"
- "• подбирать питание и нагрузку\n"
+ "• присылать утреннюю сводку под твоё состояние\n"
+ "• подбирать питание и тренировки\n"
  "• отвечать на вопросы о здоровье — текстом или голосом\n"
  "• вести дневник еды, можно просто по фото\n"
+ "• для женщин — считать цикл и вести календарь\n"
  "• собирать выписку для врача\n"
  "• подсказывать партнёру, как поддержать\n\n"
  "Настройка займёт около минуты. Выбери, что ближе:")
-ABOUT_TEXT = ("Я Айва — ИИ-ассистент по женскому здоровью.\n\n"
+ABOUT_TEXT = ("Я Айва — ИИ wellness-ассистент: самочувствие, питание, нагрузка; для женщин — цикл и календарь.\n\n"
  "Что я умею:\n"
  "• веду календарь цикла и присылаю утреннюю сводку под фазу\n"
  "• подбираю питание и тренировки\n"
@@ -1243,8 +1244,9 @@ def parse_time(t):
     except Exception: pass
     return None
 
-def calc_calories(cm, kg, age, act):
-    bmr = 10 * kg + 6.25 * cm - 5 * age - 161
+def calc_calories(cm, kg, age, act, male=False):
+    # Миффлин-Сан Жеор: −161 для женщин, +5 для мужчин.
+    bmr = 10 * kg + 6.25 * cm - 5 * age + (5 if male else -161)
     tdee = bmr * {1: 1.2, 2: 1.375, 3: 1.55, 4: 1.725, 5: 1.9}.get(act, 1.375)
     p = round(1.6 * kg); fat = round(tdee * 0.3 / 9); carbs = round(max(0, tdee - p * 4 - fat * 9) / 4)
     return round(tdee), p, fat, carbs
@@ -1255,7 +1257,8 @@ DIETD = dict(DIET)
 def profile_of(u):
     if u and u.get("height") and u.get("weight") and u.get("age"):
         return {"height": u["height"], "weight": u["weight"], "age": u["age"], "activity": u.get("activity") or 2,
-                "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}
+                "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal"),
+                "male": (u.get("mode") == "male")}
     return None
 def llm_profile_of(u):
     """LLM context includes Telegram identity even when health profile was skipped."""
@@ -1293,7 +1296,7 @@ def diet_human(code_csv):
     if not code_csv: return "без ограничений"
     return ", ".join(DIETD.get(x, x) for x in code_csv.split(",") if x) or "без ограничений"
 def profile_kcal(p):
-    base = calc_calories(p["height"], p["weight"], p["age"], p["activity"])
+    base = calc_calories(p["height"], p["weight"], p["age"], p["activity"], male=bool(p.get("male")))
     try:
         goal = int(p.get("kcal_goal") or 0)
     except (TypeError, ValueError):
@@ -2263,6 +2266,7 @@ GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_d
 ONB_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
     [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
+    [InlineKeyboardButton("Я мужчина", callback_data="mode:male")],
 ])
 NOCYCLE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Нерегулярный цикл", callback_data="mode:irregular")],
@@ -5013,11 +5017,16 @@ async def start(update, context):
         if _src:
             _ref_touch(cid, _src); ev(cid, "ref", meta="src:" + _src)
     if is_partner(cid) and not is_onboarded(row(cid)):
-        return await update.message.reply_text(PARTNER_INFO)
+        # Партнёр может завести и собственный профиль (например, мужской режим) —
+        # партнёрские сводки при этом продолжают приходить.
+        await update.message.reply_text(PARTNER_INFO)
+        return await update.message.reply_text(
+            "Кстати, Айва может вести и твои питание, тренировки и сводки — параллельно с партнёрской сводкой.",
+            reply_markup=InlineKeyboardMarkup([[B("Настроить мой профиль", "go_start", KBS.PRIMARY)]]))
     ev(cid, "command", meta="start")
     if is_onboarded(row(cid)):
         return await update.message.reply_text(
-            "У тебя уже настроен цикл, данные на месте. Продолжить или начать настройку заново?",
+            "У тебя уже всё настроено, данные на месте. Продолжить или начать настройку заново?",
             reply_markup=InlineKeyboardMarkup([[B("Продолжить", "keep", KBS.PRIMARY)], [B("Начать заново", "go_start", KBS.DANGER)]]))
     await begin_onboard(cid, update.message)
 async def today(update, context):
@@ -5821,6 +5830,10 @@ async def on_cb(update, context):
             upsert(cid, state="await_preg_date")
             return await q.message.reply_text("Поздравляю! \U0001F930 Чтобы Айва считала срок, ПДР и неделю беременности, напиши дату начала последних месячных. Например: 25.05.2026. Если знаешь ПДР, напиши дату и добавь слово ПДР.")
         upsert(cid, state="await_profile")
+        if m == "male":
+            return await q.message.reply_text(
+                "Принято. Настрою всё под мужской режим: питание, тренировки и утренние сводки по общим медицинским рекомендациям, без тем цикла.\n\n"
+                "Чтобы советы были точнее, напиши рост, вес и возраст через пробел. Например: 180 80 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
         return await q.message.reply_text(
             "Поняла. Айва не будет считать стандартные фазы цикла, но всё равно сможет давать персональные рекомендации по самочувствию, питанию и движению.\n\n"
             "Чтобы советы были точнее, напиши рост, вес и возраст через пробел. Например: 168 60 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
