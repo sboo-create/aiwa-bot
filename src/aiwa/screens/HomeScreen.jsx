@@ -84,7 +84,7 @@ export function HomeScreen(props) {
           {/* ── All content cards: white TMA sections ── */}
           <SectionList className="aiwa-tma-blocks">
             <TodaySection title={props.dayTitle} checkin={props.dayCheckin ?? props.checkin} symptomGroups={props.symptomGroups} />
-            <AiSection aiText={props.aiText} aiChip={props.aiChip} />
+            <AiSection aiText={props.aiText} />
             <DelaySection delay={props.delay} />
             <StatsSection metrics={props.metrics} title={props.statsTitle} />
             {props.pregnancy ? (

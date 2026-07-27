@@ -37,16 +37,29 @@ const overviewStrip = (week) => {
 };
 
 // 3d-иконки инвентаря (assets/train): тип или группа → файл из манифеста.
+// Названия вариантов свободные («Лёгкая силовая», «Прогулка в парке»), поэтому
+// точное совпадение дополняем словарём корней.
+const TRAIN_SYNONYMS = [
+  ["силов", "Силовая"], ["ходь", "Ходьба"], ["прогул", "Прогулка"], ["шаг", "Ходьба"],
+  ["бег", "Бег"], ["кардио", "Кардио"], ["велос", "Велотренажёр"], ["велотрен", "Велотренажёр"],
+  ["эллипс", "Эллипс"], ["греб", "Гребля"], ["скакал", "Скакалка"],
+  ["йог", "Йога"], ["растяж", "Растяжка"], ["стретч", "Растяжка"], ["мобил", "Растяжка"], ["пилатес", "Йога"],
+  ["плава", "Плавание"], ["бассейн", "Плавание"], ["отдых", "Отдых"], ["восстанов", "Отдых"],
+];
 const trainIcon = (icons, ...keys) => {
+  if (!icons) return null;
   for (const key of keys) {
-    const hit = icons?.[String(key || "").trim()];
+    const hit = icons[String(key || "").trim()];
     if (hit) return hit + "?v=1";
   }
   const text = keys.filter(Boolean).join(" ").toLowerCase();
-  for (const [name, file] of Object.entries(icons || {})) {
+  for (const [name, file] of Object.entries(icons)) {
     if (text.includes(name.toLowerCase())) return file + "?v=1";
   }
-  return null;
+  for (const [root, name] of TRAIN_SYNONYMS) {
+    if (text.includes(root) && icons[name]) return icons[name] + "?v=1";
+  }
+  return icons["Силовая"] && /трениров/.test(text) ? icons["Силовая"] + "?v=1" : null;
 };
 
 /**
