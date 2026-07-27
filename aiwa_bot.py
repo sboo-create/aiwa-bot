@@ -6237,9 +6237,9 @@ async def _api_week_food_review(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
-    ck = (cid, dtoday().isoformat())
+    ck = (cid, dtoday().isoformat(), "v2")
     hit = _WEEK_FOOD_CACHE.get(ck)
-    if hit: return _cors(web.json_response({"ok": True, "text": hit}))
+    if hit: return _cors(web.json_response({"ok": True, "review": hit}))
     lines = []
     for off in range(6, -1, -1):
         d = (dtoday() - timedelta(days=off)).isoformat()
@@ -6253,12 +6253,11 @@ async def _api_week_food_review(request):
     profile_line = f"цель {prof.get('kcal_goal') or profile_kcal(prof) or '—'} ккал/день" if prof else ""
     try:
         usage = []
-        text = await llm_to_thread(cid, "week_food_review", L.week_food_review, "\n".join(lines), profile_line, usage)
+        review = await llm_to_thread(cid, "week_food_review", L.week_food_review, "\n".join(lines), profile_line, usage)
         if usage: ev(cid, "tokens", sum(usage), meta="week_food", calls=len(usage), usage=usage)
-        if not (text or "").strip(): raise ValueError("empty")
         if len(_WEEK_FOOD_CACHE) > 1000: _WEEK_FOOD_CACHE.clear()
-        _WEEK_FOOD_CACHE[ck] = text
-        return _cors(web.json_response({"ok": True, "text": text}))
+        _WEEK_FOOD_CACHE[ck] = review
+        return _cors(web.json_response({"ok": True, "review": review}))
     except Exception as e:
         log.warning("week food review %s: %s", cid, e)
         return _cors(web.json_response({"ok": False, "text": "Не получилось собрать разбор, попробуй чуть позже."}, status=502))
