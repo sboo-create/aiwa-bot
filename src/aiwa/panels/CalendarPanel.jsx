@@ -40,7 +40,8 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
   // and marking a period is five taps in a row. One call at a time.
   const queue = useRef(Promise.resolve());
   const inflight = useRef(0);
-  const months = Array.from({ length: 8 }, (_, offset) => read("getAiwaCalendarMonth", offset)).filter(Boolean);
+  // Полгода истории и восемь месяцев вперёд; открывается на текущем месяце.
+  const months = Array.from({ length: 14 }, (_, index) => read("getAiwaCalendarMonth", index - 6)).filter(Boolean);
   const canEditPeriods = mode !== "preg" && mode !== "meno";
   const markOptions = calendarMarkOptions(canEditPeriods ? ["period", "symptoms", "intimacy"] : ["symptoms", "intimacy"]);
   const activeMark = CALENDAR_MARK_MODES[markMode] || CALENDAR_MARK_MODES.symptoms;
@@ -69,6 +70,16 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
 
   useBackButton(isOpen, marking ? stopMarking : onClose);
 
+  // Прокрутка к текущему месяцу: без неё календарь открывается на январе
+  // полгода назад. Мгновенно, до отрисовки кадра.
+  const scrollRef = useRef(null);
+  useEffect(() => {
+    if (!isOpen) return;
+    const box = scrollRef.current;
+    const current = box?.querySelector("[data-current-month=\"true\"]");
+    if (box && current) box.scrollTop = Math.max(0, current.offsetTop - 8);
+  }, [isOpen]);
+
   useEffect(() => {
     if (!isOpen) {
       setShowLegend(false);
@@ -96,8 +107,18 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
     });
   };
 
+  const todayIso = (() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  })();
+
   const handleSelect = (day, monthName) => {
-    if (!marking) return;
+    if (!marking) {
+      // Вне режима отметок тап по прошедшему дню открывает его журнал —
+      // симптомы и самочувствие смотрятся прямо из календаря.
+      if (day.iso && day.iso <= todayIso) setDayLog({ iso: day.iso, label: `${day.date} ${monthName}` });
+      return;
+    }
     if (markMode === "symptoms") {
       setDayLog({ iso: day.iso, label: `${day.date} ${monthName}` });
       return;
@@ -170,11 +191,16 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
           </div>
         ) : null}
 
-        <div className="aiwa-calendar-scroll">
+        <div className="aiwa-calendar-scroll" ref={scrollRef}>
           <div className="aiwa-calendar-months">
             {months.map((month) => (
-              <section className="aiwa-calendar-month" aria-label={month.label} key={month.key || month.label}>
-                <Text className="aiwa-calendar-month-title" variant="body" weight="semibold">{month.name || month.label}</Text>
+              <section
+                className="aiwa-calendar-month"
+                aria-label={month.label}
+                data-current-month={month.days.some((day) => day.today) ? "true" : undefined}
+                key={month.key || month.label}
+              >
+                <Text className="aiwa-calendar-month-title" variant="body" weight="semibold">{month.label || month.name}</Text>
                 <div className="aiwa-calendar-grid">
                   {month.days.map((day) => (
                     day.empty
@@ -182,12 +208,11 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
                       : (
                         <DateCell
                           day={day}
-                          interactive={marking}
+                          interactive={marking || Boolean(day.iso && day.iso <= todayIso)}
                           marking={marking}
                           checked={marking && isChecked(day)}
                           markVariant={markMode === "intimacy" ? "heart" : "radio"}
                           monthLabel={month.label}
-                          showTodayLabel
                           onSelect={(selected) => handleSelect(selected, month.name || month.label)}
                           key={day.key}
                         />

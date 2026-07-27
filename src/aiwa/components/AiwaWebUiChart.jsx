@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useEffect, useId, useRef } from "react";
 import {
   Area,
   AreaChart,
@@ -34,6 +34,12 @@ export function AiwaWebUiChart({
   showLegend = series.length > 1,
 }) {
   const gradientPrefix = useId().replaceAll(":", "");
+  // Длинная история скроллится по горизонтали; открывается на свежих циклах.
+  const scrollRef = useRef(null);
+  useEffect(() => {
+    const box = scrollRef.current;
+    if (box) box.scrollLeft = box.scrollWidth;
+  }, [data.length]);
   const availableSeries = series.filter((item) => (
     item?.key && data.some((point) => point?.[item.key] != null)
   ));
@@ -74,13 +80,16 @@ export function AiwaWebUiChart({
     );
   }
 
+  const minWidth = Math.max(data.length * 56, 320);
   return (
-    <ChartContainer
-      config={config}
-      className="h-64 w-full"
-      role="img"
-      aria-label={ariaLabel}
-    >
+    <div className="aiwa-chart-scroll" ref={scrollRef}>
+      <div style={{ minWidth: `${minWidth}px` }}>
+        <ChartContainer
+          config={config}
+          className="h-64 w-full"
+          role="img"
+          aria-label={ariaLabel}
+        >
       <AreaChart
         accessibilityLayer
         data={data}
@@ -162,6 +171,8 @@ export function AiwaWebUiChart({
           </Area>
         ))}
       </AreaChart>
-    </ChartContainer>
+        </ChartContainer>
+      </div>
+    </div>
   );
 }

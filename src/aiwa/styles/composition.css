@@ -1655,6 +1655,24 @@ body.material .aiwa-mark-bar {
   fill: var(--aiwa-ink-muted);
 }
 
+/* Горизонтальный скролл графика динамики: одна точка на цикл, свежие справа. */
+.aiwa-chart-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.aiwa-chart-scroll::-webkit-scrollbar { display: none; }
+
+/* «Сегодня» в календаре: кружок-обводка вместо надписи, которая наезжала на число. */
+.aiwa-calendar-grid .aiwa-date-cell.is-today .aiwa-date-cell-ring {
+  border: 2px solid var(--aiwa-accent, #e8792e);
+  border-radius: 50%;
+  opacity: 1;
+}
+.aiwa-calendar-grid .aiwa-date-cell.is-today .aiwa-date-cell-number {
+  font-weight: 700;
+}
+
 /* Кружок-инициал вместо фото, когда Telegram не отдал photo_url. */
 .aiwa-avatar-initial {
   display: inline-flex;
