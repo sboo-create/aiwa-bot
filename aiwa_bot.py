@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v142-no-menu"
+AIWA_VERSION = "2026-07-27-v143-male-summary"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -3682,6 +3682,8 @@ async def push_general(context, cid, with_image=True, campaign=None):
     u = row(cid)
     if not u or not is_onboarded(u):
         return False
+    if u.get("mode") == "male":
+        with_image = False   # мужская сводка — только текст, без инфографики
     claimed = False; sent_any = False
     if campaign:
         claimed = _claim_push_delivery(cid, campaign)
@@ -5878,6 +5880,7 @@ async def on_cb(update, context):
             "Айва работает и без регулярного цикла: при нерегулярных месячных, беременности и менопаузе.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
         m = data.split(":")[1]; upsert(cid, mode=m)
+        _evict_today_cache(cid); _evict_week_food_cache(cid); menu_cache_clear(cid); dc_del(cid)
         if m == "male":
             # тестовые/старые аккаунты: дата цикла от прежнего профиля не должна
             # включать циклическую логику в ответах и сводках
