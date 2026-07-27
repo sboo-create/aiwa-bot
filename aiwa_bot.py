@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-26-v124-telegram-webapp-frame"
+AIWA_VERSION = "2026-07-27-v117-redesign-flagged"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -120,6 +120,9 @@ def webapp_url(u):
     # Health data must not travel in URLs: it leaks into browser history,
     # access logs and referrers. The authenticated /api/data response already
     # provides everything the mini app needs.
+    # ?ui=2 — не health-данные: выбор нового фронта для теста редизайна.
+    if u and redesign_on(u.get("chat_id")):
+        return AIWA_WEBAPP_URL.rstrip("/") + "/?ui=2"
     return AIWA_WEBAPP_URL
 def campaign_id(kind):
     """Stable, non-sensitive daily campaign id for push attribution."""
@@ -6141,7 +6144,24 @@ def _cors(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
     return resp
+_REDESIGN_IDS = set(x.strip() for x in (os.environ.get("AIWA_REDESIGN_IDS", "") or "").split(",") if x.strip())
+def redesign_on(cid):
+    """Новый мини-апп: точечно по AIWA_REDESIGN_IDS=91428638,625405535 или всем через AIWA_REDESIGN=1."""
+    if os.environ.get("AIWA_REDESIGN", "0") in ("1", "true", "True", "on"): return True
+    return str(cid) in _REDESIGN_IDS
+
+async def _serve_index2(request):
+    BD = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(BD, "webapp2", "index.html")
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as fh: html_text = fh.read()
+        return web.Response(text=html_text, content_type="text/html",
+                            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
+    return web.Response(text="redesign webapp not found", status=404)
+
 async def _serve_index(request):
+    if request.query.get("ui") == "2":
+        return await _serve_index2(request)
     BD = os.path.dirname(os.path.abspath(__file__))
     for p in (os.path.join(WEB_DIR, "index.html"), os.path.join(BD, "index.html"),
               os.path.join(BD, "webapp.html"), os.path.join(BD, "aiwa_webapp.html")):
@@ -6150,6 +6170,22 @@ async def _serve_index(request):
             return web.Response(text=html_text, content_type="text/html",
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
+
+async def _api_nudge(request):
+    """Новый фронт: перед переключением в чат бот присылает туда сообщение, чтобы чат не был пустым."""
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"ok": False}))
+    try:
+        if BOT_APP:
+            kb = sugg_kb(cid, ["Что по циклу сегодня?", "Что съесть сегодня?"], app_user=u)
+            await BOT_APP.bot.send_message(cid, "Я здесь. Спрашивай про цикл, самочувствие, питание или нагрузку — отвечу с учётом твоих данных.", reply_markup=kb)
+        ev(cid, "button", meta="web_nudge")
+        return _cors(web.json_response({"ok": True}))
+    except Exception as e:
+        log.warning("nudge %s: %s", cid, e)
+        return _cors(web.json_response({"ok": False}))
 
 async def _api_data(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -6165,6 +6201,7 @@ async def _api_data(request):
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
+           "bot_username": BOT_USERNAME,
            "partner_linked": bool(partner_of(cid)),
            "proactive_enabled": bool(u.get("proactive_enabled", True)),
            "today_log": log_get(cid, dtoday().isoformat()) or {"symptoms": []},
@@ -8574,6 +8611,11 @@ async def _health(request):
 def build_web():
     aio = web.Application(client_max_size=20 * 1024 * 1024, middlewares=[_security_headers])  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
+    aio.router.add_get("/app2", _serve_index2)
+    aio.router.add_post("/api/nudge", _api_nudge)
+    _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets", "deslop")
+    if os.path.isdir(_bd2):
+        aio.router.add_static("/assets/deslop/", path=_bd2)
     aio.router.add_get("/health", _health)
     aio.router.add_route("*", "/admin", _legacy_admin_removed)
     aio.router.add_route("*", "/admin/login", _legacy_admin_removed)
