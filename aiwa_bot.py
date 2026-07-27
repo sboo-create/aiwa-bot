@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v139-onb-flow"
+AIWA_VERSION = "2026-07-27-v140-male-fix"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2230,10 +2230,10 @@ def match_guide(text):
         if any(k in t for k in g["kw"]): return g
     return None
 
-def is_cycle(u): return not (u and u.get("mode") in ("irregular", "none", "meno", "preg"))
+def is_cycle(u): return not (u and u.get("mode") in ("irregular", "none", "meno", "preg", "male"))
 def is_onboarded(u):
     if not u: return False
-    if u.get("mode") in ("irregular", "none", "meno", "preg"): return True
+    if u.get("mode") in ("irregular", "none", "meno", "preg", "male"): return True
     return bool(u.get("last_period") and u.get("cycle_len"))
 def status_of(cid):
     u = row(cid)
@@ -4459,7 +4459,7 @@ def _save_period_end_atomic(cid, end_iso, user_generation=None, mutation_key=Non
             except (TypeError, ValueError): saved_data = {}
             return dict(saved_data, status=status)
     user = c.execute("SELECT last_period,mode FROM users WHERE chat_id=?", (cid,)).fetchone()
-    if not user or (user[1] or "cycle") in ("irregular", "none", "meno", "preg") or not user[0]:
+    if not user or (user[1] or "cycle") in ("irregular", "none", "meno", "preg", "male") or not user[0]:
         c.commit(); c.close(); return {"status": "missing"}
     start_iso = user[0]
     length = (event_date - date.fromisoformat(start_iso)).days + 1
@@ -5878,6 +5878,10 @@ async def on_cb(update, context):
             "Айва работает и без регулярного цикла: при нерегулярных месячных, беременности и менопаузе.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
         m = data.split(":")[1]; upsert(cid, mode=m)
+        if m == "male":
+            # тестовые/старые аккаунты: дата цикла от прежнего профиля не должна
+            # включать циклическую логику в ответах и сводках
+            upsert(cid, last_period=None)
         schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
         if m == "preg":
             upsert(cid, state="await_preg_date")
