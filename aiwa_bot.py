@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v145-redesign-ga"
+AIWA_VERSION = "2026-07-27-v146-summary-dedup"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -4800,7 +4800,10 @@ async def welcome_finish(context, cid, msg):
     if AIWA_WEBAPP_URL:
         kb_rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
     await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(kb_rows) if kb_rows else None)
-    await push_summary(context, cid)
+    # Первая сводка — сразу после настройки, но не дублируем при повторном
+    # прохождении онбординга в тот же день.
+    if not summary_sent_today(cid):
+        await push_summary(context, cid)
 
 async def send_report(context, cid, period):
     u = row(cid)
