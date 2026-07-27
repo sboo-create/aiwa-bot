@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v127-ui-diag"
+AIWA_VERSION = "2026-07-27-v128-summary-chip-nudge-topics"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -6202,10 +6202,17 @@ async def _api_nudge(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"ok": False}))
+    topic = str(body.get("topic") or "")[:20]
+    prompts = {"food": ("Обсудим питание: могу разобрать твой дневник за сегодня, собрать меню под фазу или ответить про конкретные продукты.",
+                        ["Разбери мой дневник", "Что съесть на ужин?"]),
+               "train": ("Обсудим нагрузку: подберу тренировку под фазу и твои последние занятия или отвечу про восстановление.",
+                         ["Собери тренировку", "Что с восстановлением?"])}
+    text, suggs = prompts.get(topic, ("Я здесь. Спрашивай про цикл, самочувствие, питание или нагрузку — отвечу с учётом твоих данных.",
+                                      ["Что по циклу сегодня?", "Что съесть сегодня?"]))
     try:
         if BOT_APP:
-            kb = sugg_kb(cid, ["Что по циклу сегодня?", "Что съесть сегодня?"], app_user=u)
-            await BOT_APP.bot.send_message(cid, "Я здесь. Спрашивай про цикл, самочувствие, питание или нагрузку — отвечу с учётом твоих данных.", reply_markup=kb)
+            kb = sugg_kb(cid, suggs, app_user=u)
+            await BOT_APP.bot.send_message(cid, text, reply_markup=kb)
         ev(cid, "button", meta="web_nudge")
         return _cors(web.json_response({"ok": True}))
     except Exception as e:
