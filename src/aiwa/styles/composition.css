@@ -1655,6 +1655,20 @@ body.material .aiwa-mark-bar {
   fill: var(--aiwa-ink-muted);
 }
 
+/* Кружок-инициал вместо фото, когда Telegram не отдал photo_url. */
+.aiwa-avatar-initial {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--aiwa-accent, #e8792e);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+}
+
 /* Детали силового упражнения: вес, подходы, повторы в одну строку. */
 .aiwa-exercise-nums {
   display: grid;

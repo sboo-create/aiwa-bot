@@ -17,6 +17,24 @@ import { ProfilePanel } from "../panels/ProfilePanel";
  * - HEADER (paper): PanelHeader + week + countdown + journal CTA
  * - BLOCKS (TMA white cards): AI, delay, stats, chart, history
  */
+/**
+ * Аватар пользователя: фото из Telegram, если клиент его отдал, иначе круг
+ * с первой буквой имени — дизайнерская фотография-заглушка на проде выглядела
+ * как чужой профиль.
+ */
+function ProfileAvatar() {
+  const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+  const photo = tgUser?.photo_url;
+  if (photo) return <ImageAvatar src={photo} size={36} />;
+  const data = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
+  const name = (data?.name || tgUser?.first_name || "").trim();
+  return (
+    <span className="aiwa-avatar-initial" aria-hidden="true">
+      {(name[0] || "•").toUpperCase()}
+    </span>
+  );
+}
+
 export function HomeScreen(props) {
   return (
     <TMAProvider>
@@ -25,7 +43,7 @@ export function HomeScreen(props) {
           {/* ── HEADER only ── */}
           <AiwaPanelHeader
             title={props.dateText}
-            left={<ImageAvatar src="/assets/paper-profile.jpg" size={36} />}
+            left={<ProfileAvatar />}
             onLeft={() => window.AiwaDeslop?.openProfile?.()}
             leftAriaLabel="Открыть профиль"
             right={<CalendarIcon />}
