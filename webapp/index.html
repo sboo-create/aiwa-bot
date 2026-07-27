@@ -514,7 +514,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 
 /* The main screen is styled by the exact Deslop package and src/deslop-main.css. */
 </style>
-<link rel="stylesheet" href="/assets/deslop/main.css?v=r2-2026-07-27">
+<link rel="stylesheet" href="/assets/deslop/main.css?v=r3-cycleday">
 </head>
 <body class="apple">
 <div id="app" data-component="Page">
@@ -529,7 +529,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 <div id="hub" class="hubsheet hidden"></div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="cmic" aria-label="Голосом">🎤</button><button id="csend" aria-label="Отправить">→</button></div>
 <div id="tabs" aria-label="Разделы приложения"></div><input type="file" id="foodfile" accept="image/*" style="display:none">
-<script type="module" src="/assets/deslop/main.js?v=r2-2026-07-27"></script>
+<script type="module" src="/assets/deslop/main.js?v=r3-cycleday"></script>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp;
 const LOCAL_HOST=/^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/;
@@ -1104,7 +1104,7 @@ function aiwaCalendarDateState(dd){
   var lg=dayLogFor(iso)||{};
   return{
     iso:iso,date:dd.getDate(),today:dd.getTime()===today.getTime(),disabled:dd.getTime()>today.getTime(),
-    phase:inf&&inf.ph?inf.ph:null,actualPeriod:actualPeriod,predictedPeriod:predictedPeriod,
+    phase:inf&&inf.ph?inf.ph:null,cycleDay:(inf&&inf.day&&inf.day<=60)?inf.day:null,actualPeriod:actualPeriod,predictedPeriod:predictedPeriod,
     muted:dd.getTime()>today.getTime()&&!actualPeriod&&!predictedPeriod,intimacy:!!PA_SET[iso],
     logged:!!((lg.symptoms&&lg.symptoms.length)||lg.energy||lg.mood)
   };

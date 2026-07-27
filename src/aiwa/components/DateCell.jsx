@@ -28,6 +28,9 @@ export function DateCell({
   const content = (
     <>
       {marking ? null : <span className="aiwa-date-cell-ring" aria-hidden="true" />}
+      {!marking && day.cycleDay ? (
+        <span className="aiwa-date-cell-cycleday" aria-hidden="true">{day.cycleDay}</span>
+      ) : null}
       <Text className="aiwa-date-cell-number" variant="body" weight="regular">{day.date}</Text>
       {marking ? (
         <span
