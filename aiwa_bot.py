@@ -6126,7 +6126,7 @@ async def on_startup(app):
         log.warning("executor: %s", e)
     if AIWA_WEBAPP_URL:
         try:
-            await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT, web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
+            await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(None) or AIWA_WEBAPP_URL)))
         except Exception as e:
             log.warning("menu button: %s", e)
         # редизайн раскатан: персональные кнопки тест-группы возвращаем на общий URL
