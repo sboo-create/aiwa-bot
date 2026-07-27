@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v126-redesign-menu-button"
+AIWA_VERSION = "2026-07-27-v127-ui-diag"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -5168,6 +5168,23 @@ def aggregate_stats():
     L.append("Токены " + str(qd["tokens"]) + ", оценка $" + str(qd["cost_usd"]))
     return "\n".join(L)
 
+async def ui_cmd(update, context):
+    """Диагностика редизайна: что видит флаг и какой URL получают кнопки этого пользователя."""
+    cid = update.effective_chat.id
+    u = row(cid)
+    url = webapp_url(u) or "(нет AIWA_WEBAPP_URL)"
+    lines = ["Диагностика мини-аппа:",
+             f"твой id: {cid}",
+             f"redesign включён для тебя: {'ДА' if redesign_on(cid) else 'НЕТ'}",
+             f"id в списке AIWA_REDESIGN_IDS: {len(_REDESIGN_IDS)} шт",
+             f"URL кнопок: {url}",
+             "", "Кнопка ниже ведёт на новый фронт напрямую. Если по ней открывается старый экран — пришли скрин."]
+    kb = None
+    if AIWA_WEBAPP_URL:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Новый апп (прямая ссылка)",
+              web_app=WebAppInfo(url=AIWA_WEBAPP_URL.rstrip("/") + "/?ui=2"))]])
+    await update.message.reply_text("\n".join(lines), reply_markup=kb)
+
 async def voicetest_cmd(update, context):
     """Диагностика голоса: авторизация Сбера, синтез, отправка тестового голосового."""
     cid = update.effective_chat.id
@@ -8668,7 +8685,7 @@ async def run_all():
     app.add_handler(TypeHandler(Update, sync_telegram_identity), group=-1)
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd), ("voicetest", voicetest_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd), ("voicetest", voicetest_cmd), ("ui", ui_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
