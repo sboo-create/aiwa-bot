@@ -19766,7 +19766,7 @@ function jA({ label: a, value: e, ok: l }) {
 function MA({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ p.jsx(pt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ p.jsx(jA, { ...l }, l.label)) }) : null;
 }
-const _A = E.lazy(() => import("./AiwaWebUiChart-CSZl3ymc.js").then((a) => ({
+const _A = E.lazy(() => import("./AiwaWebUiChart-DRjR64GZ.js").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function RA() {

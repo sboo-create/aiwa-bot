@@ -1,4 +1,4 @@
-import { r as v, a as xv, b as Vy, c as Ql, g as Xy, R as Zy, j as W } from "./deslop-main-1jy9UJyf.js";
+import { r as v, a as xv, b as Vy, c as Ql, g as Xy, R as Zy, j as W } from "./deslop-main-DcF91yyP.js";
 function wv(e) {
   var t, r, n = "";
   if (typeof e == "string" || typeof e == "number") n += e;
@@ -20439,7 +20439,7 @@ function M2({
   if (!e.length || !c.length)
     return /* @__PURE__ */ W.jsx("div", { className: "aiwa-area-chart-state", role: "status", children: i });
   const x = Math.max(e.length * 56, 320);
-  return /* @__PURE__ */ W.jsx("div", { className: "aiwa-chart-scroll", ref: s, children: /* @__PURE__ */ W.jsx("div", { style: { minWidth: `${x}px` }, children: /* @__PURE__ */ W.jsx(
+  return /* @__PURE__ */ W.jsx("div", { className: "aiwa-chart-scroll", "data-band": l ? l.join("-") : "none", ref: s, children: /* @__PURE__ */ W.jsx("div", { style: { minWidth: `${x}px` }, children: /* @__PURE__ */ W.jsx(
     t2,
     {
       config: f,
@@ -20488,6 +20488,7 @@ function M2({
               {
                 y1: l[0],
                 y2: l[1],
+                ifOverflow: "extendDomain",
                 fill: "var(--aiwa-hint-color, #8e8e93)",
                 fillOpacity: 0.12,
                 stroke: "none"

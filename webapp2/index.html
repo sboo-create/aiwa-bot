@@ -870,7 +870,7 @@ function renderPaperHome(el){
   }
   var payload={
     name:NAME||'Анна',mode:(D&&D.mode)||'cycle',dateText:homeDateText(),week:week,countdown:countdown,countdownLabel:countdownLabel,
-    aiText:aiText,delay:delay,chartData:paperHomeCycleChartData(s.history||[]),chartSeries:[{key:'value',label:'Длина цикла',color:'var(--aiwa-accent)'}],history:history,panel:HOME_PANEL,
+    aiText:aiText,delay:delay,chartBand:[21,35],chartData:paperHomeCycleChartData(s.history||[]),chartSeries:[{key:'value',label:'Длина цикла',color:'var(--aiwa-accent)'}],history:history,panel:HOME_PANEL,
     checkin:{energy:(D.today_log||{}).energy||0,mood:(D.today_log||{}).mood||0,symptoms:((D.today_log||{}).symptoms||[]).slice(),period:!!PERIOD_DAY[isoOf(today)],intimacy:!!PA_SET[isoOf(today)]},
     symptomGroups:SYMGROUPS,
     metrics:[
@@ -880,6 +880,7 @@ function renderPaperHome(el){
     ]
   };
   var modeConfig=paperModeHomeConfig(s);if(modeConfig)payload=Object.assign(payload,modeConfig);
+  if(payload.chartTitle&&payload.chartTitle!=='Динамика цикла')payload.chartBand=null;   // зона нормы 21-35 только для длины цикла
   var todayIso=isoOf(today);
   payload.selectedIso=SELECTED_DAY||todayIso;
   payload.dayIso=todayIso;
