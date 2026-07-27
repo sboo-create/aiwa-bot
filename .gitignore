@@ -1,5 +1,7 @@
 .env
 venv/
+.venv/
+node_modules/
 aiwa.db
 __pycache__/
 railway_variables.txt
@@ -11,3 +13,10 @@ AIWA_посты_и_трекинг.md
 analytics_spec.md
 training_screen_proposal.md
 Обновить GitHub.command
+
+# Redesign / frontend
+.aiwa-web-debug.db*
+.artifacts/
+# Storybook build output. `npm run verify` rebuilds it; assets/deslop is NOT
+# here on purpose — that bundle is what aiwa_webapp.html actually serves.
+storybook-static/

@@ -1,0 +1,215 @@
+/**
+ * AIWA brand accent — orange instead of TMA/Deslop primary green.
+ * Loaded after @deslop/tma/styles.css so overrides win.
+ *
+ * Vendored TabBar (package build) uses:
+ *   --active-color: var(--ui-action-primary-background)
+ * which defaults to --ui-accent-green. Newer TMA source uses
+ * --tma-action-primary-background. Override both families.
+ */
+
+:root,
+html,
+body {
+  --aiwa-accent: #ff7c3d;
+  --aiwa-accent-strong: #ff7c3d;
+  --aiwa-accent-soft: color-mix(in srgb, var(--aiwa-accent) 16%, transparent);
+  --aiwa-accent-foreground: #ffffff;
+
+  /* Anything painted on top of the accent — button labels, the filled day ring,
+     the user's chat bubble. Named for the role so a caller never reaches for a
+     literal white that would survive into dark mode. */
+  --aiwa-on-accent: var(--aiwa-accent-foreground);
+
+  /* Близость. Not the brand accent — it has to read apart from месячные, which
+     own the orange. Straight off the Deslop red role, so it follows the kit's
+     light/dark pair instead of being a hand-picked hex. */
+  --aiwa-intimacy: var(--ui-accent-red);
+
+  /* Product alias used by composition content styles */
+  --aiwa-paper-orange: var(--aiwa-accent);
+
+  /* Screen canvas + card surface — TMA Page tokens, one source for every screen */
+  --aiwa-screen-bg: var(--tg-theme-secondary-bg-color, var(--tma-background-secondary, #efeff4));
+  --aiwa-surface: var(--tg-theme-section-bg-color, var(--ui-surface, #fff));
+
+  /* Inputs/pills/tiles. Surface by default (they sit on the canvas);
+     white card containers flip this to the canvas colour so nesting stays legible. */
+  --aiwa-control-bg: var(--aiwa-surface);
+
+  /* ── Ink scale ──────────────────────────────────────────────────────────
+     Every level is a Deslop role, not a hand-picked hex, so the whole scale
+     flips with the kit's own light/dark pair. --ui-elevation-* is the kit's
+     translucent ink ramp (#111 in light, #fff in dark, at the given alpha). */
+
+  /* Product ink. Resolved here against the root text token, so controls can safely
+     re-declare --ui-text-primary for their own label and still reach the real ink. */
+  --aiwa-ink: var(--ui-text-primary, #111);
+  --aiwa-ink-secondary: var(--ui-elevation-80, #111c);  /* body copy on cards */
+  --aiwa-ink-muted: var(--ui-text-secondary, #8e8e93);  /* captions, hints */
+  --aiwa-ink-subtle: var(--ui-elevation-30, #1111114d); /* targets, «/95г» */
+
+  /* Solid FAB. An inverse pair rather than two fixed hexes: the disc is filled
+     with the ink and lettered with the surface, so it stays black-on-white in
+     light and flips to light-on-dark in the kit's dark scheme instead of turning
+     into a black hole on a dark canvas. */
+  --aiwa-fab-bg: var(--aiwa-ink);
+  --aiwa-fab-ink: var(--aiwa-surface);
+
+  /* Fills & edges. The 5% ink ramp is what the kit uses for hairlines and
+     recessed fills, so a separator and a secondary button share one source. */
+  --aiwa-fill-secondary: var(--ui-elevation-5, #1111110d);
+  --aiwa-separator: var(--ui-elevation-5, #1111110d);
+
+  /* Shadows stay ink-dark in both schemes — a light shadow on a dark canvas
+     reads as a glow, not as elevation. */
+  --aiwa-shadow-raised: 0 1px 4px rgb(0 0 0 / 8%);
+  --aiwa-shadow-card: 0 4px 19px rgb(0 0 0 / 5%);
+  --aiwa-shadow-gauge: 0 4px 8px rgb(0 0 0 / 8%);
+  --aiwa-shadow-overlay: 0 12px 36px rgb(0 0 0 / 12%);
+  --aiwa-shadow-menu: 0 12px 40px rgb(0 0 0 / 16%), 0 2px 8px rgb(0 0 0 / 8%);
+
+  /* Semantic status. Product greens/oranges that are NOT the brand accent:
+     the accent means «месячные», so a metric that is simply fine cannot use it. */
+  --aiwa-success: #40c466;
+  --aiwa-warning: #ee844d;
+  --aiwa-chart-secondary: var(--aiwa-success);
+
+  /* Cycle phases — the calendar dots and their legend. display-p3 straight from
+     the Paper source; one definition for the dot and the badge that names it. */
+  --aiwa-phase-menstrual: var(--aiwa-accent);
+  --aiwa-phase-follicular: color(display-p3 0.345 0.869 0.533);
+  --aiwa-phase-ovulation: color(display-p3 0.332 0.676 0.974);
+  --aiwa-phase-luteal: color(display-p3 0.649 0.36 0.966);
+
+  /* Macros. Fixed hues: the three tracks have to stay told apart at a glance,
+     and «белки» is the same blue on the card as in the diary. */
+  --aiwa-macro-protein: #25afff;
+  --aiwa-macro-fat: #ffa825;
+  --aiwa-macro-carbs: #b157ff;
+
+  /* Paper aliases. Declared at the root, not on #scr-today, so a component
+     lifted into Storybook or another screen still resolves them. */
+  --aiwa-paper-ink: var(--aiwa-ink);
+  --aiwa-paper-muted: var(--aiwa-ink-muted);
+  --aiwa-paper-surface: var(--aiwa-surface);
+  --aiwa-paper-green: var(--aiwa-success);
+
+  /* --- Vendored @deslop/tma dist (ui-* tokens) --- */
+  --ui-accent-green: var(--aiwa-accent);
+  --ui-accent-orange: var(--aiwa-accent);
+  --ui-action-primary-background: var(--aiwa-accent);
+  --ui-action-primary-foreground: var(--aiwa-accent-foreground);
+
+  /* --- Current TMA semantic roles (tma-* tokens) ---
+     The vendored dist only ships the ui-* family, but both the newer TMA source
+     and @deslop/web-ui read tma-*. Every one of those roles resolved to nothing
+     — including `body { color: var(--tma-text-primary) }`, which is why the base
+     ink was the browser default black instead of a token, and why dark mode
+     painted black text on a black canvas. Alias them onto the ui-* pair. */
+  --tma-action-primary-background: var(--aiwa-accent);
+  --tma-action-primary-foreground: var(--aiwa-accent-foreground);
+  --tma-text-primary: var(--ui-text-primary);
+  --tma-text-secondary: var(--ui-text-secondary);
+  --tma-background: var(--ui-surface);            /* card surface */
+  --tma-background-secondary: var(--ui-background); /* page canvas */
+  --tma-separator: var(--ui-separator);
+
+  /* Primitives accent used if something still points at --accent-green */
+  --accent-green: var(--aiwa-accent);
+  --accent-orange: var(--aiwa-accent);
+
+  /* Tailwind color bridge */
+  --color-action-primary: var(--aiwa-accent);
+  --color-action-primary-foreground: var(--aiwa-accent-foreground);
+  --color-on-action: var(--aiwa-accent-foreground);
+  --color-green: var(--aiwa-accent);
+  --color-orange: var(--aiwa-accent);
+
+  /* Telegram WebApp theme keys (Badge / host CSS) */
+  --tg-theme-button-color: var(--aiwa-accent);
+  --tg-theme-button-text-color: var(--aiwa-accent-foreground);
+  --tg-theme-link-color: var(--aiwa-accent);
+  --tg-theme-accent-text-color: var(--aiwa-accent);
+}
+
+/* TabBar active pill (vendored class: _clipPathContainer_*) */
+.aiwa-nav-tabbar-layer {
+  --aiwa-tab-icon-size: 24px;
+  --aiwa-tab-icon-slot-size: 32px;
+  --active-color: var(--aiwa-accent);
+  --ui-action-primary-background: var(--aiwa-accent);
+  --ui-accent-green: var(--aiwa-accent);
+  --tma-action-primary-background: var(--aiwa-accent);
+  color: inherit;
+}
+
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"] {
+  --active-color: var(--aiwa-accent) !important;
+  --ui-action-primary-background: var(--aiwa-accent) !important;
+}
+
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"] span {
+  color: var(--aiwa-accent) !important;
+}
+
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"] svg,
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"] path {
+  color: var(--aiwa-accent) !important;
+  fill: var(--aiwa-accent) !important;
+  stroke: var(--aiwa-accent) !important;
+}
+
+/* Inactive base row also inherits product ink; active overlay paints orange */
+.aiwa-nav-tabbar-layer [class*="_tab_"] {
+  color: var(--tg-theme-text-color, #1a1a1a);
+}
+
+.aiwa-nav-tabbar-layer [class*="_tab_"] svg,
+.aiwa-nav-tabbar-layer [class*="_tab_"] path {
+  fill: currentColor;
+}
+
+.aiwa-nav-tabbar-layer [class*="_tab_"] [class*="_icon_"] {
+  display: flex;
+  width: var(--aiwa-tab-icon-slot-size);
+  height: var(--aiwa-tab-icon-slot-size);
+  align-items: center;
+  justify-content: center;
+}
+
+.aiwa-nav-tabbar-layer [class*="_tab_"] [class*="_icon_"] svg {
+  display: block;
+  width: var(--aiwa-tab-icon-size) !important;
+  height: var(--aiwa-tab-icon-size) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-color-scheme="light"]),
+  body:not([data-color-scheme="light"]) {
+    --aiwa-accent: #ff7c3d;
+    --aiwa-accent-strong: #ff7c3d;
+    --aiwa-accent-foreground: #1a1a1a;
+    --ui-action-primary-background: var(--aiwa-accent);
+    --ui-action-primary-foreground: var(--aiwa-accent-foreground);
+    --tma-action-primary-background: var(--aiwa-accent);
+    --tma-action-primary-foreground: var(--aiwa-accent-foreground);
+  }
+}
+
+/* The base block above declares on `:root, html, body`, so this override has to
+   reach `body` with real specificity — a `:where([data-color-scheme="dark"])`
+   scores 0 and lost to the plain `body` selector, which left the toggle path
+   (Storybook, and any host that sets the attribute instead of the media query)
+   on the light foreground. */
+:root[data-color-scheme="dark"],
+html[data-color-scheme="dark"],
+body[data-color-scheme="dark"] {
+  --aiwa-accent: #ff7c3d;
+  --aiwa-accent-strong: #ff7c3d;
+  --aiwa-accent-foreground: #1a1a1a;
+  --ui-action-primary-background: var(--aiwa-accent);
+  --ui-action-primary-foreground: var(--aiwa-accent-foreground);
+  --tma-action-primary-background: var(--aiwa-accent);
+  --tma-action-primary-foreground: var(--aiwa-accent-foreground);
+}

@@ -1,0 +1,2435 @@
+/* @deslop/web-ui styles.css грузится после @deslop/tma и переопределяет .opacity-0,
+   но своего .opacity-100 не содержит — из-за этого ImageAvatar навсегда остаётся прозрачным. */
+.opacity-100 {
+  opacity: 1;
+}
+
+body.home-active,
+body.home-active #app,
+body.redesign-active,
+body.redesign-active #app {
+  /* TMA Page secondary — gray canvas, white sections */
+  background: var(--aiwa-screen-bg) !important;
+}
+
+body.home-active {
+  padding-top: var(--safe-top, 56px);
+}
+
+body.home-active #app {
+  max-width: 402px;
+  padding: 0;
+}
+
+body.home-active .bar {
+  display: none;
+}
+
+/* Paper aliases (--aiwa-paper-*) come from theme.css, declared at the root so
+   the same block also resolves in Storybook and on the other screens. */
+#scr-today.paper-home {
+  color: var(--aiwa-paper-ink);
+  font-family: var(--ui-font-interface);
+}
+
+.aiwa-deslop-home {
+  min-height: 100%;
+  background: var(--aiwa-screen-bg);
+}
+
+.aiwa-overview {
+  display: flex;
+  padding: 3px 20px 0;
+  flex-direction: column;
+  align-items: center;
+}
+
+.aiwa-week {
+  display: flex;
+  width: 320px;
+  height: 22px;
+  gap: 30px;
+  align-items: flex-start;
+}
+
+.aiwa-date-cell {
+  position: relative;
+  display: block;
+  width: 20px;
+  height: 22px;
+  flex: 0 0 20px;
+  padding: 0 !important;
+  overflow: visible;
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--aiwa-paper-ink);
+  appearance: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.aiwa-date-cell-ring {
+  position: absolute;
+  top: -6px;
+  left: -7px;
+  width: 34px;
+  height: 34px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.aiwa-date-cell-number {
+  position: relative;
+  z-index: 1;
+  display: flex !important;
+  width: 20px;
+  height: 22px;
+  color: inherit !important;
+  font-family: "SB Sans Interface", var(--ui-font-interface) !important;
+  font-size: 17px !important;
+  font-weight: 400 !important;
+  line-height: 22px !important;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.aiwa-date-cell.is-muted .aiwa-date-cell-number {
+  opacity: 0.3;
+}
+
+.aiwa-date-cell.is-actual-period .aiwa-date-cell-ring {
+  background: var(--aiwa-paper-orange);
+}
+
+.aiwa-date-cell.is-actual-period .aiwa-date-cell-number {
+  color: var(--aiwa-on-accent) !important;
+  opacity: 1;
+}
+
+.aiwa-date-cell.is-predicted-period {
+  color: var(--aiwa-paper-orange);
+}
+
+.aiwa-date-cell.is-predicted-period .aiwa-date-cell-ring {
+  border: 1.5px dashed var(--aiwa-paper-orange);
+}
+
+.aiwa-date-cell.is-predicted-period .aiwa-date-cell-number {
+  opacity: 1;
+}
+
+.aiwa-date-cell-dot {
+  position: absolute;
+  top: 24px;
+  left: 7px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.aiwa-date-cell.is-phase-ovu .aiwa-date-cell-dot {
+  color: var(--aiwa-phase-ovulation);
+}
+
+.aiwa-date-cell.is-phase-fol .aiwa-date-cell-dot {
+  color: var(--aiwa-phase-follicular);
+}
+
+.aiwa-date-cell.is-phase-lut .aiwa-date-cell-dot {
+  color: var(--aiwa-phase-luteal);
+}
+
+.aiwa-date-cell.is-phase-men .aiwa-date-cell-dot {
+  color: var(--aiwa-phase-menstrual);
+}
+
+/* Marking mode: the phase dot's slot becomes a radio, so the day number reads as
+   the label above it. Same ring/check pairing as .aiwa-log-toggle-mark, sized to
+   the calendar cell — one selection glyph across the product. */
+/* The number's line box is 0–22; the radio starts at 28 for ~6px of clear air
+   between them — half the 12px that separates one row from the next, which is
+   what keeps a number and its radio reading as one pair. */
+.aiwa-date-cell-radio {
+  position: absolute;
+  top: 28px;
+  left: 1px;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  box-sizing: border-box;
+  place-items: center;
+  /* currentcolor, not --aiwa-paper-ink: that token is scoped to the home screen,
+     and the calendar page is portaled straight to body. */
+  border: 1.5px solid color-mix(in srgb, currentcolor 28%, transparent);
+  border-radius: 50%;
+}
+
+.aiwa-date-cell-radio.is-checked {
+  border: 0;
+  color: var(--aiwa-accent);
+}
+
+/* !important is not decoration: the vendored @deslop/tma reset ships
+   `svg[viewBox="0 0 24 24"] { width: 24px !important }`, and every Deslop
+   primitive carries that viewBox. Without it the glyph renders 24px in an 18px
+   grid area, overflows to the right and lands 3px off the day number above it.
+   Same workaround as the TabBar icons in theme.css. */
+.aiwa-date-cell-radio svg {
+  display: block;
+  width: 18px !important;
+  height: 18px !important;
+}
+
+/* circle-check ships a hard-coded ink disc; repaint it with the brand accent and
+   keep the tick on the accent foreground. */
+.aiwa-date-cell-radio svg path:first-child {
+  fill: currentcolor;
+}
+
+.aiwa-date-cell-radio svg path:last-child {
+  stroke: var(--aiwa-accent-foreground);
+}
+
+/* «Близость» swaps the radio for the heart the day will actually carry. The ring
+   goes: the heart's own silhouette is the empty state, at the same 28% ink the
+   ring used. */
+.aiwa-date-cell-radio.is-heart {
+  border: 0;
+  color: color-mix(in srgb, currentcolor 28%, transparent);
+}
+
+/* 2 user units in a 24 viewBox drawn at 18px = the ring's 1.5px on screen. */
+.aiwa-date-cell-radio.is-heart svg path {
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+/* Tapped: the same path filled, in the same red the calendar already spends on
+   близость outside marking mode. */
+.aiwa-date-cell-radio.is-heart.is-checked {
+  color: var(--aiwa-intimacy);
+}
+
+.aiwa-date-cell-radio.is-heart.is-checked svg path {
+  fill: currentcolor;
+  stroke: none;
+}
+
+.aiwa-date-cell.is-muted .aiwa-date-cell-radio {
+  opacity: 0.3;
+}
+
+.aiwa-date-cell.is-marking.is-today .aiwa-date-cell-number {
+  color: var(--aiwa-accent) !important;
+  font-weight: 600 !important;
+}
+
+.aiwa-date-cell-heart {
+  position: absolute;
+  z-index: 3;
+  top: -10px;
+  left: 15px;
+  color: var(--aiwa-intimacy);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 18px;
+  text-shadow:
+    -1px 0 var(--aiwa-surface),
+    0 1px var(--aiwa-surface),
+    1px 0 var(--aiwa-surface),
+    0 -1px var(--aiwa-surface);
+  pointer-events: none;
+}
+
+.aiwa-date-cell-today {
+  position: absolute;
+  top: -28px;
+  left: 50%;
+  color: var(--aiwa-ink) !important;
+  font-size: 15px !important;
+  font-weight: 400 !important;
+  line-height: 18px !important;
+  opacity: 0.3;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.aiwa-countdown {
+  display: flex;
+  margin-top: 45px;
+  gap: 4px;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.aiwa-countdown > :first-child {
+  color: var(--aiwa-paper-ink);
+  font-family: "SB Sans Display", var(--ui-font-interface);
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 48px;
+}
+
+.aiwa-countdown > :last-child {
+  color: var(--aiwa-ink-muted);
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 22px;
+}
+
+.aiwa-sequence {
+  display: inline-block;
+  overflow: hidden;
+  width: var(--aiwa-sequence-size);
+  height: var(--aiwa-sequence-size);
+  flex: 0 0 var(--aiwa-sequence-size);
+  border-radius: 50%;
+  background: transparent;
+  line-height: 0;
+}
+
+.aiwa-sequence img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  transform: scale(1.069);
+  transform-origin: center;
+  user-select: none;
+}
+
+/* metric/history cells use pure TMA Cell chrome */
+
+.aiwa-status {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+}
+
+.aiwa-status svg {
+  display: block;
+  width: 32px !important;
+  height: 32px !important;
+}
+
+.aiwa-status.is-ok svg path:first-child {
+  fill: var(--aiwa-success);
+}
+
+.aiwa-status.is-alert svg path:first-child {
+  fill: var(--aiwa-warning);
+}
+
+.aiwa-area-chart-state {
+  display: grid;
+  min-height: 232px;
+  padding: 16px 24px;
+  box-sizing: border-box;
+  color: var(--aiwa-ink-muted);
+  font-size: 15px;
+  line-height: 20px;
+  place-items: center;
+  text-align: center;
+}
+
+.aiwa-area-chart-state.is-loading {
+  overflow: hidden;
+}
+
+.aiwa-area-chart-skeleton {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 164px;
+  overflow: hidden;
+  border-radius: 20px;
+  background: var(--aiwa-screen-bg);
+}
+
+.aiwa-area-chart-skeleton::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--aiwa-ink) 7%, transparent),
+    transparent
+  );
+  content: "";
+  transform: translateX(-100%);
+  animation: aiwa-chart-shimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes aiwa-chart-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aiwa-area-chart-skeleton::after {
+    animation: none;
+  }
+}
+
+/* No overflow here: .aiwa-page is the scroller, so `overflow: auto` only ever
+   clipped — and with padding-top 0 the clip edge sits exactly on the first card,
+   shaving the top of its accent ring. This is a plain padding wrapper. */
+.aiwa-log-scroll {
+  padding: 0 16px calc(24px + env(safe-area-inset-bottom, 0px));
+}
+
+.aiwa-log-sections {
+  display: flex !important;
+  width: 100%;
+  min-height: 0 !important;
+  padding: 0 !important;
+  padding-bottom: 0 !important;
+  flex-direction: column !important;
+  gap: var(--ui-space-12) !important;
+  align-items: stretch !important;
+  background: transparent !important;
+}
+
+.aiwa-log-sections > section {
+  width: 100%;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.aiwa-log-sections > section > div {
+  width: 100%;
+  overflow: hidden;
+  border: 0 !important;
+  border-radius: 36px !important;
+  --aiwa-control-bg: var(--aiwa-screen-bg);
+  background: var(--aiwa-surface) !important;
+  box-shadow: none !important;
+}
+
+.aiwa-log-sections > section > div > div {
+  overflow: visible !important;
+  border-radius: inherit;
+  background: transparent !important;
+}
+
+/* A toggle fills its card edge to edge, so the card must share the pill's radius
+   and stop clipping — the 36px corner cuts into the pill's own, and the card's
+   smooth-corners clip-path swallows anything painted outside the pill, including
+   its accent ring. */
+.aiwa-log-sections > section:has(.aiwa-log-toggle) > div {
+  overflow: visible;
+  border-radius: 999px !important;
+}
+
+.aiwa-log-sections > section:has(.aiwa-log-toggle) > div > div {
+  clip-path: none !important;
+}
+
+/* AiwaChip — a RegularButton in a Tappable. The button's own variants paint it
+   (gray idle / tinted selected), so the only thing this layer does is point those
+   Deslop vars at AIWA surfaces and tighten the pill geometry. */
+.aiwa-chip {
+  --tertiary-fill-background: var(--aiwa-control-bg);
+  --secondary-button-color: var(--aiwa-accent-soft);
+
+  display: flex;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.aiwa-chip.is-fill {
+  width: 100%;
+}
+
+/* A chip is an option, not an action: it reads in the body weight, while the
+   kit's RegularButton hardcodes a semibold label for its primary buttons. The
+   attribute selector is the kit's own, one class heavier — no !important. */
+.aiwa-chip [data-variant="body"][data-weight="semibold"] {
+  font-weight: var(--ui-body-font-weight);
+}
+
+.aiwa-chip > :first-child {
+  display: flex;
+  min-height: 40px;
+  padding: var(--ui-space-10) var(--ui-space-16);
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  box-shadow: none;
+}
+
+/* Selected: the tinted variant fills with --secondary-button-color (the pale
+   accent wash, above), so the label flips to the solid accent. Both token
+   families, like theme.css: the vendored dist reads --ui-*, current TMA source
+   reads --tma-*. */
+.aiwa-chip[aria-pressed="true"] {
+  --ui-text-primary: var(--aiwa-accent);
+  --tma-text-primary: var(--aiwa-accent);
+}
+
+.aiwa-chip:focus-visible {
+  outline: 2px solid var(--aiwa-accent);
+  outline-offset: 3px;
+}
+
+.aiwa-chip-content {
+  display: flex;
+  width: 100%;
+  gap: var(--ui-space-16);
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+}
+
+[class*="_text_"]:has(> .aiwa-chip-content) {
+  width: 100%;
+}
+
+/* JournalToggle — the full-width chip variant (Месячные, Близость). It fills its
+   own card, so idle it takes the card surface instead of the control fill. */
+.aiwa-log-toggle {
+  --tertiary-fill-background: var(--aiwa-surface);
+}
+
+/* A real border, not a shadow: it is part of the element, so it can neither be
+   offset nor clipped by an ancestor. Reserved as transparent in both states and
+   subtracted from the padding, so the row stays 52px and never jumps on toggle.
+   The padding needs !important — `body.apple .button` outranks a plain class. */
+.aiwa-log-toggle > :first-child {
+  min-height: 52px;
+  padding-top: calc(var(--ui-space-14) - 1px) !important;
+  padding-bottom: calc(var(--ui-space-14) - 1px) !important;
+  justify-content: flex-start;
+  border: 0.5px solid transparent;
+}
+
+/* Selected only, in the label's own colour at full strength — the border reads
+   as an edge on the pale fill. */
+.aiwa-log-toggle[aria-pressed="true"] > :first-child {
+  border-color: currentcolor;
+}
+
+.aiwa-log-toggle-mark {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  box-sizing: border-box;
+  place-items: center;
+  border: 2px solid color-mix(in srgb, currentcolor 24%, transparent);
+  border-radius: 50%;
+}
+
+/* Drop the ring entirely rather than hiding it: a transparent 2px border still
+   shrinks the content box to 20px, and the 24px icon would overflow it downwards
+   instead of centring. */
+.aiwa-chip[aria-pressed="true"] .aiwa-log-toggle-mark {
+  border: 0;
+}
+
+.aiwa-log-toggle-mark svg {
+  display: block;
+}
+
+.aiwa-log-toggle-mark svg path:first-child {
+  fill: currentcolor;
+}
+
+/* The disc takes currentcolor (the accent label colour); the tick keeps the
+   icon's own white stroke, which reads against it. */
+
+.aiwa-log-group {
+  width: 100%;
+  padding: var(--ui-space-20);
+  box-sizing: border-box;
+}
+
+.aiwa-log-label {
+  display: block;
+  color: var(--ui-text-secondary, var(--tma-text-secondary));
+}
+
+.aiwa-log-choices {
+  display: flex;
+  width: 100%;
+  margin-top: var(--ui-space-12);
+  flex-wrap: wrap;
+  gap: var(--ui-space-8);
+  align-items: flex-start;
+}
+
+/* Primary CTA docked to the bottom of the log sheet — the only accent on the
+   screen, and the only thing that writes the draft back to the host. */
+.aiwa-log-footer {
+  position: sticky;
+  bottom: 0;
+  padding: var(--ui-space-12) var(--ui-space-16)
+    calc(var(--ui-space-16) + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--aiwa-screen-bg) var(--ui-space-12)
+  );
+}
+
+.aiwa-log-footer > [class*="_button_"] {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+}
+
+.aiwa-calendar-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-8);
+}
+
+.aiwa-calendar-day {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+[data-aiwa-calendar-modal="true"] {
+  width: min(402px, 100%) !important;
+  height: 100dvh !important;
+  min-height: 100dvh !important;
+  max-height: 100dvh !important;
+  border-radius: 0 !important;
+  clip-path: none !important;
+  overflow: hidden !important;
+  background: var(--aiwa-screen-bg) !important;
+  color: var(--aiwa-ink) !important;
+}
+
+.aiwa-calendar-screen {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.aiwa-calendar-screen:focus {
+  outline: none;
+}
+
+/* Calendar header actions use TMA PanelHeader icons — no floating overrides */
+
+.aiwa-calendar-day:focus-visible {
+  outline: 2px solid var(--aiwa-accent);
+  outline-offset: 4px;
+}
+
+.aiwa-calendar-help {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  margin: 8px 16px 0;
+  width: auto;
+  padding: 18px;
+  box-sizing: border-box;
+  flex-direction: column;
+  gap: 12px;
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--aiwa-surface) 96%, transparent);
+  box-shadow: var(--aiwa-shadow-overlay);
+  backdrop-filter: blur(18px);
+}
+
+.aiwa-calendar-help > [data-variant="body"] {
+  color: var(--aiwa-ink);
+  font-size: 17px;
+  line-height: 22px;
+}
+
+.aiwa-calendar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+}
+
+.aiwa-calendar-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.aiwa-calendar-months {
+  display: flex;
+  width: 323px;
+  margin: 0 auto;
+  flex-direction: column;
+  gap: 55px;
+  align-items: center;
+}
+
+.aiwa-calendar-month {
+  display: flex;
+  width: 323px;
+  flex-direction: column;
+  gap: 20px;
+  align-items: center;
+}
+
+.aiwa-calendar-month-title {
+  color: var(--aiwa-ink) !important;
+  font-family: "SB Sans Interface", var(--ui-font-interface) !important;
+  font-size: 17px !important;
+  font-weight: 600 !important;
+  line-height: 22px !important;
+  text-align: center;
+}
+
+.aiwa-calendar-grid {
+  display: grid;
+  width: 320px;
+  grid-template-columns: repeat(7, 20px);
+  grid-auto-rows: 22px;
+  column-gap: 30px;
+  row-gap: 36px;
+  align-items: start;
+}
+
+.aiwa-calendar-day {
+  cursor: pointer;
+}
+
+.aiwa-calendar-day:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+/* Marking mode gives the radio its own half of the cell. The row pitch stays 58px
+   (46 + 12 instead of 22 + 36), so entering the mode never scrolls the calendar. */
+[data-marking="true"] .aiwa-calendar-grid {
+  grid-auto-rows: 46px;
+  row-gap: 12px;
+}
+
+[data-marking="true"] .aiwa-calendar-empty,
+.aiwa-date-cell.is-marking {
+  height: 46px;
+}
+
+/* A <button> centres its content box vertically whatever its display is, so in a
+   46px cell the number drifted 12px down and the radio's offset stopped meaning
+   what it says. Grid + align-content pins the number back to the top edge. */
+.aiwa-date-cell.is-marking {
+  display: grid;
+  align-content: start;
+  justify-items: start;
+}
+
+/* The bar and the FAB float over the last month; give the scroller room to clear
+   them so the final week is always reachable. */
+.aiwa-calendar-scroll {
+  padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+}
+
+/* Only the fallback keeps a bar down there; the native path leaves the bottom to
+   the calendar. */
+[data-markbar="true"] .aiwa-calendar-scroll {
+  padding-bottom: calc(148px + env(safe-area-inset-bottom, 0px));
+}
+
+.aiwa-calendar-legend {
+  padding: 0;
+}
+
+.aiwa-calendar-empty {
+  width: 20px;
+  height: 22px;
+}
+
+#tabs {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  max-width: 402px;
+  margin: 0 auto;
+  pointer-events: none;
+}
+
+/* ── TMA navigation dock ───────────────────────────────────────────
+ * TabBar keeps Deslop TMA chrome (glass, icons, active indicator).
+ * Only host layout + right-side mascot are product-specific.
+ */
+#tabs {
+  position: relative;
+  z-index: 40;
+  pointer-events: none;
+}
+
+#tabs > * {
+  pointer-events: none;
+}
+
+.aiwa-nav-root {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+
+.aiwa-nav-tabbar-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* TabBar root is absolute; restore hits and leave room for mascot on the right */
+.aiwa-nav-tabbar-layer > * {
+  pointer-events: auto !important;
+  /* TMA 3-tab defaults leave ~54px side margins; give mascot a clear right slot */
+  right: 84px !important;
+  left: 16px !important;
+  width: auto !important;
+}
+
+body.material .aiwa-nav-tabbar-layer > * {
+  right: 80px !important;
+  left: 16px !important;
+  width: auto !important;
+}
+
+.aiwa-nav-mascot {
+  position: absolute;
+  right: 12px;
+  bottom: calc(var(--bottom-clearance, 21px) + env(safe-area-inset-bottom, 0px));
+  z-index: 41;
+  display: flex;
+  width: 64px;
+  height: 64px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  pointer-events: auto;
+  transform: rotate(-6deg);
+}
+
+.aiwa-nav-mascot:active {
+  transform: rotate(-6deg) scale(0.96);
+}
+
+body.home-active #scr-today.paper-home,
+body.redesign-active #scr-food.paper-screen,
+body.redesign-active #scr-train.paper-screen,
+body.redesign-active #scr-chat.paper-chat {
+  background: var(--aiwa-screen-bg) !important;
+}
+
+@media (max-width: 370px) {
+  .aiwa-week {
+    width: calc(100vw - 82px);
+    justify-content: space-between;
+    gap: 0;
+  }
+
+}
+
+body.redesign-active {
+  padding-top: var(--safe-top, 56px);
+}
+
+body.redesign-active #app {
+  max-width: 402px;
+  padding: 0;
+}
+
+body.redesign-active .bar {
+  display: none;
+}
+
+#scr-food.paper-screen,
+#scr-train.paper-screen {
+  color: var(--aiwa-ink);
+  font-family: var(--ui-font-interface);
+}
+
+.aiwa-paper-screen {
+  width: 100%;
+  min-height: calc(100dvh - var(--safe-top, 56px));
+  padding: 32px 20px 156px;
+  box-sizing: border-box;
+  background: var(--aiwa-screen-bg);
+}
+
+/* Bottom spacing synced to Home: the shared .aiwa-tma-blocks nav-clearance padding
+   is the only trailing space, so drop the screen's extra bottom padding. */
+.aiwa-food-screen,
+.aiwa-activity-screen {
+  padding-bottom: 0;
+}
+
+.aiwa-screen-title {
+  display: block;
+  margin: 0;
+  color: var(--aiwa-ink) !important;
+  font-family: var(--ui-font-interface) !important;
+  font-size: 32px !important;
+  font-weight: 600 !important;
+  line-height: 40px !important;
+}
+
+/* ── Скелетоны экранов ──────────────────────────────────────────────────────
+   Мерцание живёт в TMA (Skeleton / SkeletonBlock / Redaction), здесь только
+   геометрия. SkeletonBlock рисует плашку в ::after, поэтому размеры задаются
+   боксу, а скругление и нижний отступ — переменными TMA. */
+.aiwa-skeleton-gauge,
+.aiwa-skeleton-macro,
+.aiwa-skeleton-day,
+.aiwa-skeleton-cta,
+.aiwa-skeleton-insight-cta,
+.aiwa-skeleton-thumb {
+  --skeleton-inset-bottom: 0;
+}
+
+.aiwa-skeleton-gauge {
+  width: 338px;
+  height: 180px;
+  margin: 31px auto 0;
+
+  --skeleton-radius: 36px;
+}
+
+.aiwa-skeleton-macro {
+  height: 102px;
+
+  --skeleton-radius: 24px;
+}
+
+.aiwa-skeleton-day {
+  width: 20px;
+  height: 22px;
+
+  --skeleton-radius: 8px;
+}
+
+.aiwa-skeleton-cta {
+  width: 208px;
+  height: 52px;
+  margin-top: 24px;
+
+  --skeleton-radius: 26px;
+}
+
+.aiwa-skeleton-insight-cta {
+  height: 48px;
+  margin-top: 4px;
+
+  --skeleton-radius: 24px;
+}
+
+.aiwa-skeleton-thumb {
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+
+  --skeleton-radius: 12px;
+}
+
+.aiwa-food-gauge {
+  position: relative;
+  width: 338px;
+  height: 180px;
+  margin: 31px auto 0;
+}
+
+.aiwa-food-gauge-arc {
+  display: block;
+  filter: drop-shadow(var(--aiwa-shadow-gauge));
+}
+
+.aiwa-food-gauge-track {
+  stroke: var(--aiwa-surface);
+  stroke-width: 22px;
+  stroke-linecap: round;
+}
+
+.aiwa-food-gauge-progress {
+  stroke: var(--aiwa-success);
+  stroke-width: 22px;
+  stroke-linecap: round;
+
+  /* Заполнение анимируется покадрово в CalorieGauge.jsx — вместе с набалдашником. */
+}
+
+.aiwa-food-gauge-knob {
+  fill: var(--aiwa-success);
+}
+
+.aiwa-food-gauge-center {
+  position: absolute;
+  right: 0;
+  bottom: 34px;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+.aiwa-food-gauge-center [data-variant="title1"] {
+  color: var(--aiwa-ink);
+  font-size: 30px !important;
+  line-height: 36px !important;
+}
+
+.aiwa-food-gauge-center [data-variant="body"] {
+  color: var(--aiwa-ink-muted);
+  font-size: 17px !important;
+  line-height: 22px !important;
+}
+
+.aiwa-macro-grid {
+  display: grid;
+  width: 341px;
+  margin: 23px auto 0;
+  grid-template-columns: repeat(3, 101px);
+  gap: 19px;
+}
+
+/* Food-screen CTA spacing synced to Paper: 28px above the button, 63px below it. */
+.aiwa-food-screen .aiwa-screen-cta > [class*="_button_"] {
+  margin-top: 0 !important;
+}
+
+.aiwa-paper-screen.aiwa-food-screen > .aiwa-tma-blocks {
+  margin-top: 39px !important;
+}
+
+.aiwa-macro-card {
+  display: flex;
+  min-height: 102px;
+  min-width: 0;
+  padding: 16px 12px;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: 24px;
+  background: var(--aiwa-surface);
+  box-sizing: border-box;
+}
+
+.aiwa-macro-card [data-variant="body"] {
+  overflow: hidden;
+  color: var(--aiwa-ink);
+  font-size: 17px !important;
+  line-height: 22px !important;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.aiwa-macro-card [data-variant="body"] span {
+  color: var(--aiwa-ink-subtle);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.aiwa-macro-card [data-variant="caption1"] {
+  color: var(--aiwa-ink-subtle);
+  font-size: 15px !important;
+  line-height: 18px !important;
+  text-transform: none !important;
+  font-family: var(--ui-font-interface) !important;
+}
+
+.aiwa-macro-track {
+  display: block;
+  width: 100%;
+  height: 11px;
+  margin-top: 13px;
+  overflow: hidden;
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--macro-color) 30%, transparent);
+}
+
+.aiwa-macro-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--macro-color);
+}
+
+.aiwa-screen-cta {
+  display: flex !important;
+  justify-content: center;
+  margin-top: 28px !important;
+}
+
+/* Plus-icon header CTAs hug their content with 20px side padding (not full-width). */
+.aiwa-screen-cta > [class*="_button_"],
+.aiwa-overview > [class*="_button_"] {
+  width: fit-content !important;
+  margin-top: 24px !important;
+  padding: 14px 20px !important;
+}
+
+[class*="_text_"]:has(> .aiwa-btn-icon-label) {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+.aiwa-btn-icon-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  line-height: 20px;
+}
+
+.aiwa-btn-icon-label svg {
+  display: block;
+  width: 20px !important;
+  height: 20px !important;
+  flex-shrink: 0;
+}
+
+/* Match the shared insight-button typography (as in .aiwa-tma-blocks). */
+.aiwa-screen-cta [data-variant="body"],
+.aiwa-overview > [class*="_button_"] [data-variant="body"] {
+  font-family: "SB Sans Display", var(--ui-font-interface);
+  font-size: 16px !important;
+  font-weight: 400;
+  line-height: 20px !important;
+}
+
+/* Secondary button state: muted surface fill, dark text (see Paper "secondary button"). */
+.aiwa-btn-secondary {
+  display: flex !important;
+  width: 100% !important;
+  min-height: 48px !important;
+  padding: 14px 16px !important;
+  border: 0 !important;
+  border-radius: 25px !important;
+  background: var(--aiwa-fill-secondary) !important;
+  box-shadow: none !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.aiwa-btn-secondary [class*="_glassBorder_"] {
+  display: none !important;
+}
+
+.aiwa-btn-secondary [data-variant="body"] {
+  color: var(--aiwa-ink-secondary) !important;
+  font-family: "SB Sans Interface", var(--ui-font-interface) !important;
+  font-size: 16px !important;
+  font-weight: 400 !important;
+  line-height: 20px !important;
+}
+
+/* Calendar app bar: legend on the left, «Готово» on the right while marking. */
+.aiwa-calendar-modeswitch {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  padding: 4px 16px 8px;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  box-sizing: border-box;
+}
+
+.aiwa-calendar-done {
+  display: inline-flex;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--aiwa-accent);
+  align-items: center;
+  /* On the native path the left half of the bar is empty while marking, and
+     space-between alone would drag «Готово» across to it. */
+  margin-left: auto;
+}
+
+.aiwa-calendar-done:focus-visible,
+.aiwa-calendar-legend-toggle:focus-visible {
+  outline: 2px solid var(--aiwa-accent);
+  outline-offset: 2px;
+}
+
+.aiwa-calendar-legend-toggle {
+  display: inline-flex;
+  align-self: center;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--aiwa-accent);
+}
+
+.aiwa-calendar-legend-toggle svg {
+  width: 20px;
+  height: 20px;
+}
+
+.aiwa-calendar-legend-toggle[aria-pressed="true"] {
+  background: var(--aiwa-control-bg);
+}
+
+/*
+  Full-screen pages (AiwaModalView day log / calendar) sit above the app and are
+  navigated with Telegram's native header + BackButton — no sheet, backdrop, drag
+  or slide animation. The calendar sits below AiwaModalView (z-index 1000) so a
+  per-day log stacks over it.
+*/
+.aiwa-page {
+  position: fixed;
+  inset: 0;
+  max-width: 480px;
+  margin: 0 auto;
+  z-index: 1000;
+  overflow-y: auto;
+  /* The page scrolls vertically only. Without this, `overflow-y: auto` makes the
+     computed `overflow-x` `auto` too, so any sub-pixel wide child (a rounded
+     viewport width, an input's intrinsic size) turns the whole screen into a
+     horizontal scroller. Rows that scroll sideways on purpose (.aiwa-week,
+     .aiwa-today-chips) are their own scroll containers and keep working. */
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  /* Fixed layers escape body's safe-area padding, so re-apply the Telegram top
+     inset here or content lands under the native nav (Close/···). */
+  padding-top: calc(var(--safe-top, 56px) + 8px);
+  background: var(--aiwa-screen-bg);
+}
+
+.aiwa-calendar-page {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 480px;
+  margin: 0 auto;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding-top: var(--safe-top, 56px);
+  background: var(--aiwa-screen-bg);
+}
+
+/* Floating action button. The glass layers are painted by GlassContainer; the
+   button only carries the disc shape they inherit their radius from. */
+.aiwa-fab {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  /* Reversed out of the solid disc — see --aiwa-fab-bg in theme.css. */
+  color: var(--aiwa-fab-ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* The disc is opaque ink, not glass. GlassContainer stays as the surface anyway —
+   it still owns the shadow and the rim, and re-tokenising its tint is the same
+   move .aiwa-chip makes for its fill. Only the tint layer is ours. */
+.aiwa-fab-surface {
+  --glass-tint-background: var(--aiwa-fab-bg);
+
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  border-radius: 50%;
+}
+
+/* Nothing shows through an opaque fill, so drop the blur the primitive paints —
+   and opt out of iOS 26's native glass material explicitly, since the vendored
+   CSS hands the background over to the system whenever that effect is supported,
+   which would turn the disc translucent again on a real device. */
+.aiwa-fab-surface [class*="_glassBackground_"] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  -apple-visual-effect: none;
+}
+
+.aiwa-fab-icon {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+}
+
+.aiwa-fab-icon svg {
+  display: block;
+  width: 28px;
+  height: 28px;
+}
+
+.aiwa-fab:focus-visible {
+  outline: 2px solid var(--aiwa-accent);
+  outline-offset: 4px;
+  border-radius: 50%;
+}
+
+/* Anchored exactly like the TabBar pill: 16px in from the side (the pill's own
+   left inset once .aiwa-nav-tabbar-layer has re-anchored it) and
+   var(--bottom-clearance) off the bottom with NO extra env(safe-area-inset-bottom)
+   — the pill adds none either, so adding one here floats the button ~34px above
+   the dock on a real device. Same reasoning as .aiwa-nav-mascot. */
+.aiwa-calendar-fab {
+  position: absolute;
+  right: 16px;
+  bottom: var(--bottom-clearance, 21px);
+  z-index: 3;
+}
+
+/* Marking bar — replaces the FAB it grew out of, so the two never share a corner. */
+.aiwa-mark-bar {
+  /* Denser than the FAB's tint: day numbers scrolling under the bar were reading
+     through the chips and the hint. Matches the 96% of .aiwa-calendar-help. */
+  --glass-tint-background: color-mix(in srgb, var(--aiwa-surface) 96%, transparent);
+
+  position: absolute;
+  z-index: 3;
+  left: 16px;
+  right: 16px;
+  /* Same anchor as the FAB it replaces, so entering marking mode does not shift
+     the corner it grew out of. */
+  bottom: var(--bottom-clearance, 21px);
+  display: flex;
+  padding: 12px;
+  box-sizing: border-box;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  border-radius: 24px;
+  animation: aiwa-mark-bar-in 220ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* The material TabBar sits 16px off the bottom where apple sits at 21px; both
+   read --bottom-clearance first, so only the fallback differs. */
+body.material .aiwa-calendar-fab,
+body.material .aiwa-mark-bar {
+  bottom: var(--bottom-clearance, 16px);
+}
+
+/* Idle chips default to the card surface, which is the bar's own colour here —
+   drop them to the canvas fill so «не выбрано» stays visible on the glass. */
+.aiwa-mark-bar .aiwa-chip {
+  --tertiary-fill-background: var(--aiwa-screen-bg);
+
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* Three Russian labels do not fit a phone row at body size, and a wrapped second
+   line would push the bar over the calendar. Equal thirds at caption size keep the
+   row on one line down to 320px. */
+.aiwa-mark-bar .aiwa-chip > :first-child {
+  padding: var(--ui-space-10) var(--ui-space-8);
+}
+
+.aiwa-mark-bar .aiwa-chip [data-variant="body"] {
+  font-size: 15px;
+  line-height: 20px;
+}
+
+.aiwa-mark-bar-chips {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  width: 100%;
+  gap: 6px;
+  justify-content: center;
+  flex-wrap: nowrap;
+}
+
+.aiwa-mark-bar-hint {
+  position: relative;
+  z-index: 2;
+  color: var(--aiwa-ink) !important;
+  opacity: 0.55;
+  text-align: center;
+}
+
+@keyframes aiwa-mark-bar-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aiwa-mark-bar {
+    animation: none;
+  }
+}
+
+.aiwa-paper-card,
+.aiwa-sheet-card {
+  display: flex;
+  width: 100%;
+  padding: 24px;
+  flex-direction: column;
+  gap: 6px;
+  border: 0;
+  border-radius: 36px;
+  --aiwa-control-bg: var(--aiwa-screen-bg);
+  background: var(--aiwa-surface);
+  box-sizing: border-box;
+  color: var(--aiwa-ink);
+  text-align: left;
+}
+
+.aiwa-paper-ai-heading {
+  position: relative;
+  display: flex;
+  height: 46px;
+  padding-bottom: 21px;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+}
+
+.aiwa-paper-ai-heading .aiwa-sequence {
+  margin: -7px 4px -6px -10px;
+  flex: 0 0 auto;
+  transform: rotate(-7.81deg);
+}
+
+.aiwa-paper-ai-heading [data-variant="body"] {
+  color: var(--aiwa-accent);
+  font-size: 17px !important;
+  line-height: 22px !important;
+}
+
+/* PaperRow media variant — 46px thumbnail on the left (see Paper "Рекомендации"). */
+.aiwa-cell-thumb {
+  display: flex;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 12px;
+}
+
+/* Пустой слот превью, пока Айва разбирает фото: спиннер из TMA на том же
+   месте, где потом встанет иконка блюда. */
+.aiwa-cell-thumb-loading {
+  background: var(--aiwa-fill-secondary);
+}
+
+.aiwa-cell-thumb-loading svg path {
+  fill: var(--aiwa-ink-muted);
+}
+
+.aiwa-cell-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Activity header repeats Home: week strip → hero count → CTA. The screen already
+   pads 20px on the sides, so the shared overview preset only keeps its vertical rhythm. */
+.aiwa-activity-screen > .aiwa-overview {
+  padding: 32px 0;
+}
+
+/* The CTA (or stack of them) a card ends with, inside a non-tappable AiwaCell.
+   One preset for the three panels that end this way — they used to carry the
+   same padding as three separate inline styles. */
+.aiwa-cell-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-8);
+  padding: var(--ui-space-12) var(--ui-space-16) var(--ui-space-16);
+}
+
+.aiwa-profile-modes {
+  display: flex;
+  padding: 24px;
+  flex-direction: column;
+  gap: 14px;
+  border-radius: 36px;
+  --aiwa-control-bg: var(--aiwa-screen-bg);
+  background: var(--aiwa-surface);
+}
+
+.aiwa-profile-note {
+  color: var(--aiwa-ink-muted);
+}
+
+.aiwa-sheet-close {
+  display: flex;
+  width: 40px;
+  height: 40px;
+  padding: 8px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--aiwa-control-bg);
+  border: 0 !important;
+  box-sizing: border-box;
+}
+
+.aiwa-sheet-close svg {
+  width: 24px;
+  height: 24px;
+}
+
+.aiwa-sheet-scroll {
+  display: flex;
+  min-height: 0;
+  padding: 20px 20px calc(32px + env(safe-area-inset-bottom));
+  flex-direction: column;
+  gap: 20px;
+}
+
+.aiwa-form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.aiwa-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.aiwa-form-label {
+  color: var(--aiwa-ink);
+}
+
+.aiwa-choice-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.aiwa-choice-pill {
+  display: flex;
+  min-height: 44px;
+  padding: 10px 16px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: var(--aiwa-control-bg);
+  color: var(--aiwa-ink-secondary);
+}
+
+.aiwa-choice-pill.is-active {
+  background: color-mix(in srgb, var(--aiwa-accent) 12%, transparent);
+  color: var(--aiwa-accent);
+}
+
+.aiwa-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--aiwa-ink-muted);
+}
+
+.aiwa-field [data-variant="caption1"] {
+  font-family: var(--ui-font-interface) !important;
+  text-transform: none !important;
+}
+
+.aiwa-field input,
+.aiwa-field textarea {
+  width: 100%;
+  min-height: 52px;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 18px;
+  outline: none;
+  background: var(--aiwa-control-bg);
+  color: var(--aiwa-ink);
+  font: 400 17px/22px var(--ui-font-interface);
+  box-sizing: border-box;
+}
+
+.aiwa-field textarea {
+  min-height: 132px;
+  resize: vertical;
+}
+
+.aiwa-field input:focus,
+.aiwa-field textarea:focus {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--aiwa-accent) 38%, transparent);
+}
+
+.aiwa-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+/* «Свой симптом» — a bare Field; «Сохранить» commits it with the rest of the
+   draft. Typography matched to the surrounding journal groups. */
+.aiwa-custom-symptom {
+  display: flex;
+  padding: var(--ui-space-20);
+}
+
+.aiwa-custom-symptom .aiwa-field {
+  flex: 1 1 auto;
+  gap: var(--ui-space-12);
+}
+
+.aiwa-custom-symptom .aiwa-field [data-variant="caption1"] {
+  color: var(--ui-text-secondary, var(--tma-text-secondary));
+  font-size: var(--ui-subtitle-font-size) !important;
+  line-height: var(--ui-subtitle-line-height) !important;
+}
+
+.aiwa-custom-symptom .aiwa-field input {
+  min-height: 48px;
+  padding: var(--ui-space-12) var(--ui-space-16);
+  border-radius: 999px;
+  font: 400 var(--ui-body-font-size) / var(--ui-body-line-height) var(--ui-font-interface);
+}
+
+.aiwa-upload-zone {
+  display: flex;
+  min-height: 220px;
+  padding: 32px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 36px;
+  background: var(--aiwa-control-bg);
+  color: var(--aiwa-ink-secondary);
+  text-align: center;
+}
+
+.aiwa-upload-zone input {
+  width: 100%;
+  margin-top: 14px;
+  font: 400 15px/18px var(--ui-font-interface);
+}
+
+/* Пока фото разбирается, выбор файла прячем — на его месте спиннер. */
+.aiwa-upload-zone.is-busy input {
+  display: none;
+}
+
+.aiwa-upload-zone.is-busy svg path {
+  fill: var(--aiwa-ink-muted);
+}
+
+.aiwa-exercise-row {
+  display: flex;
+  min-height: 52px;
+  padding: 10px 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--aiwa-separator);
+  background: transparent;
+  color: var(--aiwa-ink-secondary);
+}
+
+#scr-chat.paper-chat:not(.hidden) {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: block;
+  width: min(100vw, 402px);
+  max-width: 402px;
+  margin: 0 auto;
+  padding: 0;
+  background: var(--aiwa-screen-bg);
+}
+
+body:has(#scr-chat.paper-chat:not(.hidden)) #tabs {
+  display: none;
+}
+
+.aiwa-chat-screen {
+  display: flex;
+  height: 100dvh;
+  flex-direction: column;
+  background: var(--aiwa-screen-bg);
+  color: var(--aiwa-ink);
+  font-family: var(--ui-font-interface);
+}
+
+.aiwa-chat-header {
+  display: grid;
+  min-height: 84px;
+  padding: max(16px, var(--safe-top, 56px)) 16px 12px;
+  grid-template-columns: 52px 1fr 40px;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--aiwa-separator);
+  box-sizing: border-box;
+}
+
+.aiwa-chat-header .aiwa-sequence {
+  transform: rotate(-7.81deg);
+}
+
+.aiwa-chat-header > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.aiwa-chat-header [data-variant="caption1"] {
+  color: var(--aiwa-ink-muted);
+}
+
+.aiwa-chat-messages {
+  display: flex;
+  min-height: 0;
+  padding: 20px 16px 24px;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.aiwa-chat-bubble {
+  display: flex;
+  max-width: 86%;
+  padding: 14px 16px;
+  flex-direction: column;
+  gap: 12px;
+  border-radius: 24px;
+}
+
+.aiwa-chat-bubble.is-ai {
+  align-self: flex-start;
+  border-bottom-left-radius: 8px;
+  background: var(--aiwa-surface);
+  color: var(--aiwa-ink);
+}
+
+.aiwa-chat-bubble.is-user {
+  align-self: flex-end;
+  border-bottom-right-radius: 8px;
+  background: var(--aiwa-accent);
+  color: var(--aiwa-on-accent);
+}
+
+.aiwa-chat-bubble [data-variant="body"] {
+  color: inherit;
+  font-size: 17px !important;
+  line-height: 22px !important;
+  white-space: pre-wrap;
+}
+
+.aiwa-chat-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.aiwa-chat-suggestions > * {
+  min-height: 38px;
+  padding: 9px 12px;
+  border-radius: 999px;
+  background: var(--aiwa-control-bg);
+  color: var(--aiwa-accent);
+}
+
+.aiwa-chat-composer {
+  display: grid;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  grid-template-columns: 1fr auto 44px;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--aiwa-separator);
+  --aiwa-control-bg: var(--aiwa-screen-bg);
+  background: var(--aiwa-surface);
+}
+
+.aiwa-chat-composer input {
+  min-width: 0;
+  min-height: 48px;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 18px;
+  outline: none;
+  background: var(--aiwa-control-bg);
+  color: var(--aiwa-ink);
+  font: 400 17px/22px var(--ui-font-interface);
+}
+
+.aiwa-chat-icon {
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 999px;
+  background: var(--aiwa-control-bg);
+  color: var(--aiwa-ink-secondary);
+  border: 0;
+}
+
+.aiwa-chat-icon.is-recording {
+  background: color-mix(in srgb, var(--aiwa-accent) 14%, transparent);
+  color: var(--aiwa-accent);
+}
+
+.aiwa-chat-send {
+  display: flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--aiwa-accent);
+  color: var(--aiwa-on-accent);
+  border: 0;
+}
+
+.aiwa-check {
+  display: flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--aiwa-surface);
+  color: var(--aiwa-ink-muted);
+}
+
+.aiwa-check.is-active {
+  background: var(--aiwa-accent);
+  color: var(--aiwa-on-accent);
+}
+
+@media (max-width: 370px) {
+  .aiwa-paper-screen {
+    padding-inline: 16px;
+  }
+
+  .aiwa-food-gauge {
+    width: min(338px, calc(100vw - 32px));
+  }
+
+  .aiwa-macro-grid {
+    width: 100%;
+    gap: 8px;
+  }
+
+  .aiwa-macro-card {
+    padding: 12px;
+  }
+}
+
+/* TMA-style chevron (fill chevron-right, not arrow-with-tail) */
+
+/* ═══════════════════════════════════════════════════════════
+ * CONTENT BLOCKS — pure TMA storybook
+ * Gray page + white SectionList cards + Cell rows
+ * ═══════════════════════════════════════════════════════════ */
+
+/* Page canvas is gray (set above on body.home-active / redesign-active). */
+
+.aiwa-tma-blocks {
+  display: flex !important;
+  flex-direction: column !important;
+  align-self: stretch !important;
+  width: 100% !important;
+  max-width: none !important;
+  box-sizing: border-box !important;
+  /* Same as body.apple SectionList.root */
+  padding: var(--ui-layout-content-inset, 16px) !important;
+  padding-bottom: calc(var(--ui-layout-content-inset, 16px) + 100px + env(safe-area-inset-bottom, 0px)) !important;
+  gap: var(--ui-layout-section-gap, 16px) !important;
+  background: transparent !important;
+  margin: 0 !important;
+}
+
+.aiwa-tma-blocks > section {
+  display: flex !important;
+  flex-direction: column !important;
+  align-self: stretch !important;
+  width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+}
+
+/* Apple: white paint is on the inner .container */
+body.apple .aiwa-tma-blocks > section > div {
+  display: flex !important;
+  flex-direction: column !important;
+  align-self: stretch !important;
+  width: 100% !important;
+  max-width: none !important;
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+body.apple .aiwa-tma-blocks > section > div > div:last-child,
+body.apple .aiwa-tma-blocks [class*="_container_"] {
+  background-color: var(--aiwa-surface) !important;
+  border-radius: var(--ui-component-section-radius, 26px) !important;
+  overflow: hidden !important;
+}
+
+/* Material: white paint is on .card */
+body.material .aiwa-tma-blocks > section > div,
+body.material .aiwa-tma-blocks [class*="_card_"] {
+  background-color: var(--aiwa-surface) !important;
+  border-radius: var(--ui-radius-16, 16px) !important;
+  overflow: hidden !important;
+  width: 100% !important;
+  height: auto !important;
+}
+
+/* Fallback if skin class missing (first paint before DeviceProvider) */
+.aiwa-tma-blocks > section > div > div:last-child {
+  background-color: var(--aiwa-surface);
+  border-radius: var(--ui-component-section-radius, 26px);
+  overflow: hidden;
+}
+
+.aiwa-deslop-home > .aiwa-tma-blocks,
+.aiwa-paper-screen > .aiwa-tma-blocks {
+  margin-top: 8px !important;
+}
+
+/* Status icons in metric end slots */
+.aiwa-tma-blocks .aiwa-status {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+}
+.aiwa-tma-blocks .aiwa-status svg {
+  width: 24px !important;
+  height: 24px !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ * PAPER 2026-07 — reusable product presets over Deslop TMA
+ * Exact visual values come from the 390px Paper source.
+ * ═══════════════════════════════════════════════════════════ */
+
+/* Header: transparent wrapper; all chrome comes from the TMA PanelHeader. */
+.aiwa-panel-header {
+  background: transparent;
+}
+
+/* Large title (size="large"): the Telegram opening — left-aligned at the same
+   content inset as the cards below it, with the gap under it doing the work the
+   64px bar used to do. */
+.aiwa-panel-header.is-large {
+  padding: var(--ui-space-12) var(--ui-layout-content-inset, 16px) var(--ui-space-20);
+}
+
+.aiwa-panel-header.is-large h1 {
+  margin: 0;
+  color: var(--aiwa-ink);
+}
+
+/* Main overview: segmented week, countdown and compact journal action. */
+.aiwa-overview {
+  width: 100%;
+  padding: 8px 20px 32px;
+  gap: 0;
+  box-sizing: border-box;
+}
+
+.aiwa-week {
+  display: flex;
+  width: 316px;
+  height: 34px;
+  padding: 2px;
+  align-items: stretch;
+  gap: 0;
+  border-radius: 17px;
+  background: var(--aiwa-fill-secondary);
+  box-sizing: border-box;
+  /* A range longer than a week scrolls inside the pill. Seven days still fill
+   * the track exactly, so a single week looks untouched. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+
+.aiwa-week::-webkit-scrollbar {
+  display: none;
+}
+
+.aiwa-week .aiwa-date-cell.is-overview {
+  display: flex;
+  width: calc(100% / 7);
+  height: 30px;
+  min-width: 0;
+  flex: 0 0 calc(100% / 7);
+  align-items: center;
+  justify-content: center;
+  border-radius: 15px !important;
+  color: var(--aiwa-ink);
+}
+
+.aiwa-week .is-overview .aiwa-date-cell-ring,
+.aiwa-week .is-overview .aiwa-date-cell-dot,
+.aiwa-week .is-overview .aiwa-date-cell-heart {
+  display: none;
+}
+
+.aiwa-week .is-overview .aiwa-date-cell-number {
+  display: flex !important;
+  width: auto;
+  height: 30px;
+  color: var(--aiwa-ink) !important;
+  font-family: var(--ui-font-interface) !important;
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  line-height: 16px !important;
+  opacity: 1;
+}
+
+.aiwa-week .aiwa-date-cell.is-overview.is-today,
+.aiwa-week .aiwa-date-cell.is-overview.is-selected {
+  background: var(--aiwa-surface) !important;
+  box-shadow: var(--aiwa-shadow-raised);
+}
+
+.aiwa-week .is-overview.is-today .aiwa-date-cell-number,
+.aiwa-week .is-overview.is-selected .aiwa-date-cell-number {
+  font-weight: 600 !important;
+}
+
+/* Only the chosen day carries the pill once the strip drives the screen. */
+.aiwa-week[data-selection="true"] .aiwa-date-cell.is-overview.is-today:not(.is-selected) {
+  background: transparent !important;
+  box-shadow: none;
+}
+
+.aiwa-week[data-selection="true"] .is-overview.is-today:not(.is-selected) .aiwa-date-cell-number {
+  font-weight: 400 !important;
+}
+
+/* Activity strip: a day with a logged workout carries the accent pill. Placed after
+   the today/selected rules so today + workout keeps the accent fill and the shadow. */
+.aiwa-week .aiwa-date-cell.is-overview.is-workout {
+  background: var(--aiwa-accent) !important;
+}
+
+.aiwa-week .is-overview.is-workout .aiwa-date-cell-number {
+  color: var(--aiwa-accent-foreground) !important;
+  font-weight: 600 !important;
+}
+
+/* Days ahead of today hold no data yet, so they stay out of the picker. */
+.aiwa-week .aiwa-date-cell.is-overview:disabled .aiwa-date-cell-number {
+  opacity: 0.4;
+}
+
+.aiwa-countdown {
+  margin-top: 49px;
+}
+
+/* Shared section rhythm. The header stays outside the white Deslop container. */
+.aiwa-tma-blocks {
+  padding: 24px 16px calc(24px + 100px + env(safe-area-inset-bottom, 0px)) !important;
+  gap: 24px !important;
+  background: var(--aiwa-screen-bg) !important;
+}
+
+.aiwa-deslop-home > .aiwa-tma-blocks {
+  margin-top: 0 !important;
+}
+
+.aiwa-paper-screen > .aiwa-tma-blocks {
+  width: calc(100% + 40px) !important;
+  margin-top: 8px !important;
+  margin-left: -20px !important;
+}
+
+.aiwa-tma-blocks > section > div {
+  overflow: visible !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+body.material .aiwa-tma-blocks > section > div,
+body.material .aiwa-tma-blocks [class*="_card_"] {
+  overflow: visible !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.aiwa-tma-blocks > section > div > :first-child:not(:last-child) {
+  min-height: 20px;
+  padding: 0 0 8px !important;
+  color: var(--aiwa-ink) !important;
+  background: transparent !important;
+}
+
+.aiwa-tma-blocks > section > div > :first-child:not(:last-child) [data-variant="body"] {
+  color: var(--aiwa-ink) !important;
+  font-family: "SB Sans Interface", var(--ui-font-interface);
+  font-size: 16px !important;
+  font-weight: 600 !important;
+  line-height: 20px !important;
+}
+
+.aiwa-tma-blocks > section > div > div:last-child,
+body.material .aiwa-tma-blocks > section > div > div:last-child {
+  padding-block: 8px;
+  overflow: hidden !important;
+  border-radius: 26px !important;
+  --aiwa-control-bg: var(--aiwa-screen-bg);
+  background: var(--aiwa-surface) !important;
+}
+
+.aiwa-tma-blocks > section > div > div:last-child > :is(div, button, a):not([data-aiwa-insight-cell="true"]):has(> [class*="_body_"]) {
+  width: 100% !important;
+  min-height: 59px !important;
+  padding-left: 16px !important;
+  box-sizing: border-box;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.aiwa-tma-blocks > section > div > div:last-child > :is(div, button, a):not([data-aiwa-insight-cell="true"]):has(> [class*="_body_"]) > [class*="_body_"] {
+  min-height: 0 !important;
+  padding: 10px 16px 9px 0 !important;
+}
+
+.aiwa-tma-blocks > section > div > div:last-child > :is(div, button, a):not([data-aiwa-insight-cell="true"]):has(> [class*="_body_"]) > [class*="_end_"] {
+  padding-right: 16px !important;
+}
+
+.aiwa-tma-blocks [data-variant="body"] {
+  font-family: "SB Sans Display", var(--ui-font-interface);
+  font-size: 16px !important;
+  font-weight: 400;
+  line-height: 20px !important;
+}
+
+.aiwa-tma-blocks [data-variant="subheadline2"] {
+  color: var(--aiwa-ink-muted) !important;
+  font-family: "SB Sans Display", var(--ui-font-interface);
+  font-size: 14px !important;
+  line-height: 18px !important;
+}
+
+.aiwa-tma-blocks [class*="_caption_"] {
+  max-height: none;
+}
+
+[data-aiwa-cell="true"] > [class*="_body_"],
+[data-aiwa-cell="true"] > [class*="_end_"] {
+  border-bottom: 0 !important;
+}
+
+.aiwa-tma-blocks .aiwa-status {
+  width: 32px;
+  height: 32px;
+}
+
+.aiwa-tma-blocks .aiwa-status svg {
+  width: 24px !important;
+  height: 24px !important;
+}
+
+/* «Сегодня»: quick-log chips. The header keeps the shared section typography;
+ * the chip row bleeds past the 16px page inset so it scrolls off-screen. */
+.aiwa-today {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.aiwa-today-title {
+  color: var(--aiwa-ink) !important;
+  font-family: "SB Sans Interface", var(--ui-font-interface) !important;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+  line-height: 20px !important;
+}
+
+.aiwa-today-chips {
+  display: flex;
+  gap: 12px;
+  margin-inline: -16px;
+  padding-inline: 16px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  /* Keep the swipe inside the row: at either end it must not chain out to the
+   * page or to Telegram's own back/dismiss gesture. No touch-action here on
+   * purpose — pan-x would also block scrolling the page vertically when the
+   * finger happens to land on a chip. */
+  overscroll-behavior-x: contain;
+}
+
+.aiwa-today-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.aiwa-today-chip {
+  display: flex;
+  height: 48px;
+  /* Cap wide enough that every dictionary label fits untouched ("Тянет на
+   * сладкое" is the longest); only free-text custom symptoms ever clip. */
+  max-width: 240px;
+  flex: 0 0 auto;
+  padding: 0 16px;
+  align-items: center;
+  border: 0;
+  border-radius: 25px;
+  background: var(--aiwa-surface);
+  appearance: none;
+  cursor: pointer;
+}
+
+.aiwa-today-chip [data-variant="body"] {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--aiwa-ink-secondary) !important;
+  font-family: "SB Sans Interface", var(--ui-font-interface) !important;
+  font-size: 16px !important;
+  font-weight: 400 !important;
+  line-height: 20px !important;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* AIWA insight card: custom composition, still backed by SectionList + Cell. */
+.aiwa-insight-section > div > div:last-child {
+  padding-block: 0 !important;
+}
+
+.aiwa-tma-blocks [data-aiwa-insight-cell="true"] {
+  min-height: 0 !important;
+  padding-left: 0 !important;
+}
+
+.aiwa-tma-blocks [data-aiwa-insight-cell="true"] > [class*="_body_"] {
+  min-height: 0 !important;
+  padding: 0 !important;
+  border-bottom: 0 !important;
+}
+
+.aiwa-insight-content {
+  display: flex;
+  width: 100%;
+  padding: 16px;
+  flex-direction: column;
+  gap: 4px;
+  box-sizing: border-box;
+}
+
+.aiwa-insight-content .aiwa-paper-ai-heading [data-variant="body"] {
+  color: var(--aiwa-accent) !important;
+  font-family: "SB Sans Interface", var(--ui-font-interface);
+  font-size: 17px !important;
+  font-weight: 600 !important;
+  line-height: 22px !important;
+}
+
+.aiwa-insight-content .aiwa-paper-ai-heading .aiwa-sequence {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 57.835px;
+  height: 56.972px;
+  margin: 0;
+  transform: translate(-9.693px, -6.801px) rotate(-7.81deg);
+  transform-origin: 0 0;
+}
+
+.aiwa-insight-content .aiwa-paper-ai-heading > div {
+  position: absolute;
+  top: 8.25px;
+  left: 62.25px;
+}
+
+.aiwa-insight-message {
+  color: var(--aiwa-ink) !important;
+  font-family: "SB Sans Display", var(--ui-font-interface) !important;
+  font-size: 16px !important;
+  font-weight: 400 !important;
+  line-height: 20px !important;
+}
+
+.aiwa-insight-detail {
+  margin-top: 8px;
+  color: var(--aiwa-ink-muted) !important;
+  font-family: "SB Sans Display", var(--ui-font-interface) !important;
+  font-size: 15px !important;
+  font-weight: 400 !important;
+  line-height: 20px !important;
+}
+
+.aiwa-insight-content > [class*="_button_"],
+.aiwa-insight-content > .aiwa-btn-secondary {
+  margin-top: 12px;
+}
+
+/* Navigation stays Deslop TabBar; only its product host and chat action move. */
+.aiwa-nav-tabbar-layer > *,
+body.material .aiwa-nav-tabbar-layer > * {
+  right: auto !important;
+  left: max(16px, calc(50% - 176.5px)) !important;
+  width: 262px !important;
+}
+
+/* Bottom vertical fade (TabBar's _gradient_ svg) is scoped to the pill, which
+ * sits off-centre to make room for the mascot, so it gets clipped on the right.
+ * Re-anchor it to the full screen width. The pill's containing-block left edge
+ * is (50vw - 176.5px), so shifting left by that amount lands the svg at x0, and
+ * 100vw makes it span edge to edge. */
+.aiwa-nav-tabbar-layer [class*="_gradient_warzp_"] {
+  left: calc(176.5px - 50vw) !important;
+  right: auto !important;
+  width: 100vw !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+.aiwa-nav-mascot {
+  right: auto;
+  /* Match the TabBar pill's bottom anchor exactly (var(--bottom-clearance)).
+   * The pill has no extra env(safe-area-inset-bottom), so the mascot must not
+   * add one either — otherwise on a real device (env ≈ 34px) it floats above
+   * the tabs. Fallback 18px keeps the current preview alignment. */
+  bottom: var(--bottom-clearance, 18px);
+  left: calc(50% + 101px);
+  width: 67px;
+  height: 66px;
+  transform: rotate(-7.81deg);
+  transform-origin: 0 0;
+}
+
+.aiwa-nav-mascot:active {
+  transform: rotate(-7.81deg) scale(0.96);
+}
+
+.aiwa-nav-mascot .aiwa-sequence {
+  width: 67px;
+  height: 66px;
+  flex-basis: 67px;
+}
+
+/* ── Action menu (local fork of Deslop TMA DropdownMenu) ────────────────── */
+.aiwa-action-menu-trigger {
+  display: inline-flex;
+}
+
+.aiwa-action-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 232px;
+  padding: 12px;
+  background: var(--aiwa-surface);
+  border-radius: 28px;
+  box-shadow: var(--aiwa-shadow-menu);
+  z-index: 1200;
+  animation: aiwa-action-menu-in 0.3s cubic-bezier(0.34, 1.45, 0.5, 1) both;
+}
+
+@keyframes aiwa-action-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.aiwa-action-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: 18px;
+  background: transparent;
+  color: var(--aiwa-ink);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.14s ease;
+}
+
+.aiwa-action-menu-item:hover,
+.aiwa-action-menu-item:focus-visible {
+  background: var(--aiwa-screen-bg);
+  outline: none;
+}
+
+.aiwa-action-menu-item:active {
+  transform: scale(0.98);
+}
+
+.aiwa-action-menu-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  color: var(--aiwa-ink);
+}
+
+.aiwa-action-menu-icon svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+}

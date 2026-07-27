@@ -1,0 +1,567 @@
+{
+  "schemaVersion": 1,
+  "sourceOfTruth": "code",
+  "designTool": "Paper/Figma",
+  "components": [
+    {
+      "id": "cell",
+      "designName": "AIWA/Cell",
+      "export": "AiwaCell",
+      "source": "src/aiwa/components/AiwaCell.jsx",
+      "story": "/showcase/cell",
+      "layer": "primitive"
+    },
+    {
+      "id": "action-menu",
+      "designName": "AIWA/Action menu",
+      "export": "ActionMenu",
+      "source": "src/aiwa/components/ActionMenu.jsx",
+      "story": "/showcase/actionMenu",
+      "layer": "pattern"
+    },
+    {
+      "id": "fab",
+      "designName": "AIWA/Action/FAB",
+      "export": "AiwaFab",
+      "source": "src/aiwa/components/AiwaFab.jsx",
+      "story": "/aiwa/calendarMarking",
+      "layer": "primitive"
+    },
+    {
+      "id": "calendar-mark-bar",
+      "designName": "AIWA/Calendar/Mark bar",
+      "export": "CalendarMarkBar",
+      "source": "src/aiwa/components/CalendarMarkBar.jsx",
+      "story": "/aiwa/calendarMarking",
+      "layer": "pattern"
+    },
+    {
+      "id": "content-row",
+      "designName": "AIWA/Cell/Content row",
+      "export": "PaperRow",
+      "source": "src/aiwa/components/PaperRow.jsx",
+      "story": "/showcase/cell",
+      "layer": "pattern"
+    },
+    {
+      "id": "panel-header",
+      "designName": "AIWA/Header/Panel",
+      "export": "AiwaPanelHeader",
+      "source": "src/aiwa/components/AiwaPanelHeader.jsx",
+      "story": "/showcase/panelHeader",
+      "layer": "pattern"
+    },
+    {
+      "id": "modal-view",
+      "designName": "AIWA/Overlay/Modal view",
+      "export": "AiwaModalView",
+      "source": "src/aiwa/components/AiwaModalView.jsx",
+      "story": "/showcase/modal",
+      "layer": "primitive"
+    },
+    {
+      "id": "insight-card",
+      "designName": "AIWA/Card/Insight",
+      "export": "AiwaInsightCard",
+      "source": "src/aiwa/components/AiwaInsightCard.jsx",
+      "story": "/aiwa/insight",
+      "layer": "pattern"
+    },
+    {
+      "id": "card-heading",
+      "designName": "AIWA/Card/Heading",
+      "export": "AiwaCardHeading",
+      "source": "src/aiwa/components/AiwaCardHeading.jsx",
+      "story": "/aiwa/insight",
+      "layer": "pattern"
+    },
+    {
+      "id": "sequence",
+      "designName": "AIWA/Media/Mascot sequence",
+      "export": "AiwaSequence",
+      "source": "src/aiwa/components/AiwaSequence.jsx",
+      "story": "/aiwa/insight",
+      "layer": "primitive"
+    },
+    {
+      "id": "date-cell",
+      "designName": "AIWA/Calendar/Date",
+      "export": "DateCell",
+      "source": "src/aiwa/components/DateCell.jsx",
+      "story": "/aiwa/week",
+      "layer": "pattern"
+    },
+    {
+      "id": "week",
+      "designName": "AIWA/Calendar/Week",
+      "export": "Week",
+      "source": "src/aiwa/components/Week.jsx",
+      "story": "/aiwa/week",
+      "layer": "composition"
+    },
+    {
+      "id": "metric-cell",
+      "designName": "AIWA/Cell/Metric",
+      "export": "MetricCell",
+      "source": "src/aiwa/components/MetricCell.jsx",
+      "story": "/showcase/cell",
+      "layer": "pattern"
+    },
+    {
+      "id": "field",
+      "designName": "AIWA/Form/Field",
+      "export": "Field",
+      "source": "src/aiwa/components/Field.jsx",
+      "story": "/aiwa/formControls",
+      "layer": "primitive"
+    },
+    {
+      "id": "choice-pills",
+      "designName": "AIWA/Form/Choice pills",
+      "export": "ChoicePills",
+      "source": "src/aiwa/components/ChoicePills.jsx",
+      "story": "/aiwa/formControls",
+      "layer": "pattern"
+    },
+    {
+      "id": "chip",
+      "designName": "AIWA/Form/Chip",
+      "export": "AiwaChip",
+      "source": "src/aiwa/components/AiwaChip.jsx",
+      "story": "/aiwa/journalControls",
+      "layer": "primitive"
+    },
+    {
+      "id": "journal-group",
+      "designName": "AIWA/Journal/Group",
+      "export": "JournalGroup",
+      "source": "src/aiwa/components/JournalGroup.jsx",
+      "story": "/aiwa/journalControls",
+      "layer": "pattern"
+    },
+    {
+      "id": "journal-custom-symptom",
+      "designName": "AIWA/Journal/Custom symptom",
+      "export": "JournalCustomSymptom",
+      "source": "src/aiwa/components/JournalCustomSymptom.jsx",
+      "story": "/aiwa/journalControls",
+      "layer": "pattern"
+    },
+    {
+      "id": "journal-toggle",
+      "designName": "AIWA/Journal/Toggle",
+      "export": "JournalToggle",
+      "source": "src/aiwa/components/JournalToggle.jsx",
+      "story": "/aiwa/journalControls",
+      "layer": "pattern"
+    },
+    {
+      "id": "journal-choice-group",
+      "designName": "AIWA/Journal/Choice group",
+      "export": "JournalChoiceGroup",
+      "source": "src/aiwa/components/JournalChoiceGroup.jsx",
+      "story": "/aiwa/journalControls",
+      "layer": "pattern"
+    },
+    {
+      "id": "journal-symptom-group",
+      "designName": "AIWA/Journal/Symptom group",
+      "export": "JournalSymptomGroup",
+      "source": "src/aiwa/components/JournalSymptomGroup.jsx",
+      "story": "/aiwa/journalControls",
+      "layer": "pattern"
+    },
+    {
+      "id": "food-entry-form",
+      "designName": "AIWA/Food/Entry form",
+      "export": "FoodEntryForm",
+      "source": "src/aiwa/components/FoodEntryForm.jsx",
+      "story": "/aiwa/formControls",
+      "layer": "composition"
+    },
+    {
+      "id": "macro-card",
+      "designName": "AIWA/Food/Macro",
+      "export": "MacroCard",
+      "source": "src/aiwa/components/MacroCard.jsx",
+      "story": "/compositions/food-header",
+      "layer": "pattern"
+    },
+    {
+      "id": "chart",
+      "designName": "AIWA/Data/Chart",
+      "export": "AiwaWebUiChart",
+      "source": "src/aiwa/components/AiwaWebUiChart.jsx",
+      "story": "/aiwa/charts",
+      "layer": "pattern"
+    },
+    {
+      "id": "screen-loading",
+      "designName": "AIWA/Feedback/Screen loading",
+      "export": "ScreenLoading",
+      "source": "src/aiwa/components/ScreenLoading.jsx",
+      "story": "/showcase/loading",
+      "layer": "composition"
+    },
+    {
+      "id": "snackbar",
+      "designName": "AIWA/Feedback/Snackbar",
+      "export": "Snackbar",
+      "source": "src/aiwa/components/Snackbar.jsx",
+      "story": "/showcase/snackbar",
+      "layer": "pattern"
+    },
+    {
+      "id": "status-icon",
+      "designName": "AIWA/Feedback/Status icon",
+      "export": "StatusIcon",
+      "source": "src/aiwa/components/StatusIcon.jsx",
+      "story": "/aiwa/week",
+      "layer": "primitive"
+    },
+    {
+      "id": "calorie-gauge",
+      "designName": "AIWA/Food/Calorie gauge",
+      "export": "CalorieGauge",
+      "source": "src/aiwa/components/CalorieGauge.jsx",
+      "story": "/compositions/food-header",
+      "layer": "pattern"
+    },
+    {
+      "id": "section-today",
+      "designName": "AIWA/Section/Today",
+      "export": "TodaySection",
+      "source": "src/aiwa/sections/TodaySection.jsx",
+      "story": "/compositions/sections",
+      "layer": "composition"
+    },
+    {
+      "id": "section-ai",
+      "designName": "AIWA/Section/AI",
+      "export": "AiSection",
+      "source": "src/aiwa/sections/AiSection.jsx",
+      "story": "/compositions/sections",
+      "layer": "composition"
+    },
+    {
+      "id": "section-delay",
+      "designName": "AIWA/Section/Delay",
+      "export": "DelaySection",
+      "source": "src/aiwa/sections/DelaySection.jsx",
+      "story": "/compositions/sections",
+      "layer": "composition"
+    },
+    {
+      "id": "section-stats",
+      "designName": "AIWA/Section/Stats",
+      "export": "StatsSection",
+      "source": "src/aiwa/sections/StatsSection.jsx",
+      "story": "/compositions/sections",
+      "layer": "composition"
+    },
+    {
+      "id": "section-chart",
+      "designName": "AIWA/Section/Chart",
+      "export": "ChartSection",
+      "source": "src/aiwa/sections/ChartSection.jsx",
+      "story": "/compositions/sections",
+      "layer": "composition"
+    },
+    {
+      "id": "section-history",
+      "designName": "AIWA/Section/History",
+      "export": "HistorySection",
+      "source": "src/aiwa/sections/HistorySection.jsx",
+      "story": "/compositions/sections",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-journal",
+      "designName": "AIWA/Panel/Journal",
+      "export": "JournalPanel",
+      "source": "src/aiwa/panels/JournalPanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-calendar-day-log",
+      "designName": "AIWA/Panel/Calendar day log",
+      "export": "CalendarDayLogPanel",
+      "source": "src/aiwa/panels/CalendarDayLogPanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-add-food",
+      "designName": "AIWA/Panel/Add food",
+      "export": "AddFoodPanel",
+      "source": "src/aiwa/panels/AddFoodPanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-food-diary",
+      "designName": "AIWA/Panel/Food diary",
+      "export": "FoodDiaryPanel",
+      "source": "src/aiwa/panels/FoodDiaryPanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-workout",
+      "designName": "AIWA/Panel/Workout",
+      "export": "WorkoutPanel",
+      "source": "src/aiwa/panels/WorkoutPanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-workout-variants",
+      "designName": "AIWA/Panel/Workout variants",
+      "export": "WorkoutVariantsPanel",
+      "source": "src/aiwa/panels/WorkoutVariantsPanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-workout-history",
+      "designName": "AIWA/Panel/Workout history",
+      "export": "WorkoutHistoryPanel",
+      "source": "src/aiwa/panels/WorkoutHistoryPanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-training-profile",
+      "designName": "AIWA/Panel/Training profile",
+      "export": "TrainingProfilePanel",
+      "source": "src/aiwa/panels/TrainingProfilePanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-profile",
+      "designName": "AIWA/Panel/Profile",
+      "export": "ProfilePanel",
+      "source": "src/aiwa/panels/ProfilePanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition"
+    },
+    {
+      "id": "panel-calendar",
+      "designName": "AIWA/Panel/Calendar",
+      "export": "CalendarPanel",
+      "source": "src/aiwa/panels/CalendarPanel.jsx",
+      "story": "/aiwa/calendarMarking",
+      "layer": "composition"
+    },
+    {
+      "id": "tma-card",
+      "designName": "AIWA/TMA/Surface/Card",
+      "export": "Card",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/surfaces",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-glass-container",
+      "designName": "AIWA/TMA/Surface/Glass container",
+      "export": "GlassContainer",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/surfaces",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-glass-border",
+      "designName": "AIWA/TMA/Surface/Glass border",
+      "export": "GlassBorder",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/surfaces",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-gradient-background",
+      "designName": "AIWA/TMA/Surface/Gradient background",
+      "export": "GradientBackground",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/surfaces",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-start-view",
+      "designName": "AIWA/TMA/Surface/Start view",
+      "export": "StartView",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/surfaces",
+      "layer": "composition"
+    },
+    {
+      "id": "tma-train",
+      "designName": "AIWA/TMA/Surface/Train",
+      "export": "Train",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/surfaces",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-cell-stack",
+      "designName": "AIWA/TMA/List/Cell stack",
+      "export": "CellStack",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/lists",
+      "layer": "pattern"
+    },
+    {
+      "id": "tma-section-header",
+      "designName": "AIWA/TMA/List/Section header",
+      "export": "SectionHeader",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/lists",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-table",
+      "designName": "AIWA/TMA/List/Table",
+      "export": "Table",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/lists",
+      "layer": "pattern"
+    },
+    {
+      "id": "tma-gallery",
+      "designName": "AIWA/TMA/List/Gallery",
+      "export": "Gallery",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/lists",
+      "layer": "pattern"
+    },
+    {
+      "id": "tma-collapsible",
+      "designName": "AIWA/TMA/List/Collapsible",
+      "export": "Collapsible",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/lists",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-tabs",
+      "designName": "AIWA/TMA/Control/Tabs",
+      "export": "Tabs",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/controls",
+      "layer": "pattern"
+    },
+    {
+      "id": "tma-multiline-button",
+      "designName": "AIWA/TMA/Control/Multiline button",
+      "export": "MultilineButton",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/controls",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-switch",
+      "designName": "AIWA/TMA/Control/Switch",
+      "export": "Switch",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/controls",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-tooltip",
+      "designName": "AIWA/TMA/Control/Tooltip",
+      "export": "Tooltip",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/controls",
+      "layer": "pattern"
+    },
+    {
+      "id": "tma-picker",
+      "designName": "AIWA/TMA/Control/Picker",
+      "export": "Picker",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/controls",
+      "layer": "pattern"
+    },
+    {
+      "id": "tma-wheel",
+      "designName": "AIWA/TMA/Control/Wheel",
+      "export": "Wheel",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/controls",
+      "layer": "pattern"
+    },
+    {
+      "id": "tma-markdown",
+      "designName": "AIWA/TMA/Text/Markdown",
+      "export": "Markdown",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/text",
+      "layer": "pattern"
+    },
+    {
+      "id": "tma-streaming-text",
+      "designName": "AIWA/TMA/Text/Streaming text",
+      "export": "StreamingText",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/text",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-fit-text",
+      "designName": "AIWA/TMA/Text/Fit text",
+      "export": "FitText",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/text",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-morph",
+      "designName": "AIWA/TMA/Text/Morph",
+      "export": "Morph",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/text",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-image",
+      "designName": "AIWA/TMA/Media/Image",
+      "export": "Image",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/text",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-redaction",
+      "designName": "AIWA/TMA/State/Redaction",
+      "export": "Redaction",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/state",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-skeleton-block",
+      "designName": "AIWA/TMA/State/Skeleton block",
+      "export": "SkeletonBlock",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/state",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-error-boundary",
+      "designName": "AIWA/TMA/State/Error boundary",
+      "export": "ErrorBoundary",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/state",
+      "layer": "primitive"
+    },
+    {
+      "id": "tma-particle-effect",
+      "designName": "AIWA/TMA/State/Particle effect",
+      "export": "ParticleEffect",
+      "source": "src/aiwa/lib/tma.js",
+      "story": "/tma/state",
+      "layer": "primitive"
+    }
+  ]
+}
