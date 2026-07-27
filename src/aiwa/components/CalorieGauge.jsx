@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Text } from "../lib/tma";
+import { fmtKcal } from "../lib/api";
 
 const ARC = "M 11 169 A 158 158 0 0 1 327 169";
 const ARC_LEN = Math.PI * 158;
@@ -58,8 +59,8 @@ export function CalorieGauge({ kcal, kcalTarget }) {
         <circle className="aiwa-food-gauge-knob" cx={knobX} cy={knobY} r="11" />
       </svg>
       <div className="aiwa-food-gauge-center">
-        <Text variant="title1" weight="semibold">{Math.round(value)} ккал</Text>
-        <Text variant="body" weight="regular">из {Math.round(target)} ккал</Text>
+        <Text variant="title1" weight="semibold">{fmtKcal(value)}</Text>
+        <Text variant="body" weight="regular">из {fmtKcal(target)}</Text>
       </div>
     </div>
   );

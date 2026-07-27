@@ -9,7 +9,7 @@ import { WorkoutPanel } from "../panels/WorkoutPanel";
 import { WorkoutVariantsPanel } from "../panels/WorkoutVariantsPanel";
 import { WorkoutHistoryPanel } from "../panels/WorkoutHistoryPanel";
 import { TrainingProfilePanel } from "../panels/TrainingProfilePanel";
-import { actionProps, call } from "../lib/api";
+import { actionProps, call, openBotChat } from "../lib/api";
 import { useScreenData } from "../lib/screenData";
 import { PlusIcon } from "../lib/icons";
 
@@ -87,7 +87,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
             <AiwaInsightCard
               message={plan.summary || section.text || "Выбирай нагрузку, после которой станет легче, а не хуже."}
               detail={plan.why}
-              onDiscuss={() => call("go", "chat")}
+              onDiscuss={() => openBotChat({ topic: "train" })}
             />
             {options.length ? (
               <SectionList.Item header="Варианты">

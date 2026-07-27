@@ -8,10 +8,12 @@ import { PaperRow } from "../components/PaperRow";
 import { ActionMenu } from "../components/ActionMenu";
 import { AddFoodPanel } from "../panels/AddFoodPanel";
 import { FoodDiaryPanel } from "../panels/FoodDiaryPanel";
+import { RecipePanel } from "../panels/RecipePanel";
 import { PlusIcon, ImageIcon, TextIcon } from "../lib/icons";
-import { FOOD_SLOTS, MEAL_IMAGE } from "../lib/constants";
-import { apiCall, showToast, openBotChat, call } from "../lib/api";
+import { MEAL_IMAGE } from "../lib/constants";
+import { apiCall, showToast, openBotChat, fmtKcal } from "../lib/api";
 import { useScreenData } from "../lib/screenData";
+import { Week } from "../components/Week";
 
 // Ответы прогреваются на старте, поэтому обычно экран открывается сразу;
 // пока данных нет — на их месте скелетон той же раскладки.
@@ -20,9 +22,42 @@ const KEYS = ["foodSection", "diary"];
 // Placeholder thumbnail for recommendations until per-dish images ship.
 const RECOMMENDATION_IMAGE = "/assets/paper-food-placeholder.png";
 
-// Сгенерированные 3d-иконки блюд (gpt-image-2). Манифест "название -> файл"
-// пишет scripts/gen_food_icons.py; здесь просто ищем иконку по названию.
-const dishImageFrom = (icons, name) => (icons?.[String(name || "").trim()] || null);
+// Сгенерированные 3d-иконки блюд. Манифест "название -> файл" пишет
+// scripts/gen_food_icons.py. Названия из дневника и меню свободные, поэтому
+// точное совпадение дополняем подбором по началам слов («куриная грудка» →
+// «Курица с рисом» не нужен, но «Омлет с зеленью» → «Омлет с овощами» да).
+const normDish = (value) => String(value || "").toLowerCase().replace(/ё/g, "е");
+const dishImageFrom = (icons, name) => {
+  const n = normDish(name).trim();
+  if (!icons || !n) return null;
+  const exact = icons[String(name || "").trim()];
+  if (exact) return exact;
+  let best = null;
+  let bestScore = 0;
+  for (const [key, file] of Object.entries(icons)) {
+    const k = normDish(key);
+    if (k === n) return file;
+    const words = k.split(/[^а-яa-z0-9]+/).filter((w) => w.length > 3);
+    let score = 0;
+    for (const w of words) if (n.includes(w.slice(0, 4))) score += w.length > 5 ? 2 : 1;
+    if (score > bestScore) { bestScore = score; best = file; }
+  }
+  return bestScore >= 2 ? best : null;
+};
+
+// Последние 7 дней для мини-календаря истории: сегодня справа.
+const DOW = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+const historyWeek = () => {
+  const days = [];
+  for (let i = 6; i >= 0; i -= 1) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    days.push({ iso, date: String(d.getDate()), label: DOW[d.getDay()], today: i === 0 });
+  }
+  return days;
+};
+const DAY_LABEL = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
 
 /**
  * Food:
@@ -32,6 +67,13 @@ const dishImageFrom = (icons, name) => (icons?.[String(name || "").trim()] || nu
 export function FoodScreen({ mode, revision = 0 }) {
   const [data, refresh, patch] = useScreenData(KEYS, [mode, revision]);
   const [foodIcons, setFoodIcons] = useState({});
+  // Просмотр прошлого дня: дневник за выбранную дату грузится отдельно,
+  // шапка (гейдж и макросы) всегда остаётся про сегодня.
+  const [historyIso, setHistoryIso] = useState("");
+  const [historyDiary, setHistoryDiary] = useState(null);
+  // Рецепт открытого блюда из рекомендаций.
+  const [recipeItem, setRecipeItem] = useState(null);
+  const [recipeBusy, setRecipeBusy] = useState(false);
   const [panel, setPanel] = useState("");
   const [editingMeal, setEditingMeal] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -53,25 +95,55 @@ export function FoodScreen({ mode, revision = 0 }) {
   const diary = data.diary;
   const totals = diary.totals || {};
   const target = diary.target || {};
-  const recommended = (section.menu?.meals || []).slice(0, 2);
-  const meals = (diary.meals || []).slice(-3).reverse();
-  const kcalTarget = Number(target.kcal || section.kcal || 1841);
-  const kcal = Number(totals.kcal || 1240);
+  const menuMeals = section.menu?.meals || [];
+  // Меню генерится на 4 приёма (завтрак, обед, перекус, ужин) — в рекомендациях
+  // показываем три основных, каждый со своим слотом для записи в дневник.
+  const RECO_SLOTS = [
+    { index: 0, value: "breakfast", label: "Завтрак" },
+    { index: 1, value: "lunch", label: "Обед" },
+    { index: menuMeals.length >= 4 ? 3 : 2, value: "dinner", label: "Ужин" },
+  ];
+  const recommended = RECO_SLOTS
+    .map((slot) => ({ ...slot, meal: menuMeals[slot.index] }))
+    .filter((item) => item.meal);
+  const kcalTarget = Number(target.kcal || section.kcal || 0);
+  const kcal = Number(totals.kcal || 0);
+  const macroValue = (key) => Number(totals[key] || 0);
 
-  // Пустой дневник: гейдж и так показывает демо-1240 ккал, поэтому макросы
-  // добиваем той же долей от нормы — иначе шапка сама себе противоречит.
-  const diaryEmpty = !(diary.meals || []).length;
-  const demoShare = kcal / Math.max(1, kcalTarget);
-  const macroValue = (key) =>
-    diaryEmpty ? Math.round(Number(target[key] || 0) * demoShare) : Number(totals[key] || 0);
+  const week = historyWeek();
+  const todayIso = week[week.length - 1].iso;
+  const viewingPast = Boolean(historyIso && historyIso !== todayIso);
+  const shownMeals = viewingPast
+    ? (historyDiary?.meals || [])
+    : (diary.meals || []).slice().reverse();
+  const historyTitle = viewingPast
+    ? `Приёмы за ${DAY_LABEL.format(new Date(`${historyIso}T12:00:00`))}`
+    : "Прошедшие приёмы";
 
-  const addRecommended = async (meal, index) => {
-    const slot = FOOD_SLOTS[Math.min(index, FOOD_SLOTS.length - 1)].value;
-    const result = await apiCall("/api/food_text", { text: meal.dish || meal.title, slot }).catch(() => null);
-    if (result?.ok) {
-      showToast("Добавлено в дневник", { type: "success" });
-      await reloadDiary();
-    } else showToast(result?.message || "Не получилось добавить", { type: "error" });
+  const pickHistoryDay = async (iso) => {
+    setHistoryIso(iso);
+    if (!iso || iso === todayIso) {
+      setHistoryDiary(null);
+      return;
+    }
+    setHistoryDiary(null);
+    const result = await apiCall("/api/diary", { d: iso }).catch(() => null);
+    setHistoryDiary(result || { meals: [] });
+  };
+
+  const addRecommended = async (meal, slot) => {
+    if (recipeBusy) return;
+    setRecipeBusy(true);
+    try {
+      const result = await apiCall("/api/food_text", { text: meal.dish || meal.title, slot }).catch(() => null);
+      if (result?.ok) {
+        showToast("Добавлено в дневник", { type: "success" });
+        setRecipeItem(null);
+        await reloadDiary();
+      } else showToast(result?.message || "Не получилось добавить", { type: "error" });
+    } finally {
+      setRecipeBusy(false);
+    }
   };
 
   const deleteMeal = async (id) => {
@@ -156,39 +228,43 @@ export function FoodScreen({ mode, revision = 0 }) {
           <SectionList className="aiwa-tma-blocks">
             <AiwaInsightCard
               message={section.text || "Выбираем простую еду с белком в каждом приёме."}
-              onDiscuss={() => call("go", "chat")}
+              onDiscuss={() => openBotChat({ topic: "food" })}
             />
             {recommended.length ? (
-              <SectionList.Item header="Рекомендации">
-                {recommended.map((meal, index) => (
+              <SectionList.Item header="Меню на сегодня">
+                {recommended.map((item) => (
                   <PaperRow
-                    key={meal.dish || index}
-                    image={meal.image || dishImageFrom(foodIcons, meal.dish) || RECOMMENDATION_IMAGE}
-                    title={meal.dish || "Рекомендация Айвы"}
-                    description={meal.note || meal.kcal || "Подходит под твой план на сегодня"}
-                    onClick={() => addRecommended(meal, index)}
+                    key={item.value}
+                    image={item.meal.image || dishImageFrom(foodIcons, item.meal.dish) || RECOMMENDATION_IMAGE}
+                    title={item.meal.dish || "Рекомендация Айвы"}
+                    description={[item.label, item.meal.kcal, item.meal.note].filter(Boolean).join(" · ")}
+                    onClick={() => setRecipeItem(item)}
                   />
                 ))}
               </SectionList.Item>
             ) : null}
 
-            <SectionList.Item header="Прошедшие приёмы">
+            <SectionList.Item header={historyTitle}>
+              <Week days={week} selectedIso={historyIso || todayIso} onSelect={pickHistoryDay} />
               {uploading ? (
                 <PaperRow loading title="Разбираю фото…" description="Айва считает КБЖУ" />
               ) : null}
-              {meals.length ? meals.map((meal) => (
+              {viewingPast && !historyDiary ? (
+                <PaperRow loading title="Загружаю…" description="Дневник за выбранный день" />
+              ) : null}
+              {shownMeals.length ? shownMeals.map((meal) => (
                 <PaperRow
                   key={meal.id}
                   image={dishImageFrom(foodIcons, meal.title) || MEAL_IMAGE}
                   title={meal.title}
-                  description={`${Math.round(meal.kcal || 0)} ккал · Б${Math.round(meal.protein || 0)} · Ж${Math.round(meal.fat || 0)} · У${Math.round(meal.carbs || 0)}`}
-                  onClick={() => setPanel("diary")}
+                  description={`${fmtKcal(meal.kcal)} · Б${Math.round(meal.protein || 0)} · Ж${Math.round(meal.fat || 0)} · У${Math.round(meal.carbs || 0)}`}
+                  onClick={viewingPast ? undefined : () => setPanel("diary")}
                 />
-              )) : uploading ? null : (
+              )) : (uploading || (viewingPast && !historyDiary)) ? null : (
                 <PaperRow
-                  title="Дневник пока пуст"
-                  description="Добавь первый приём — фото, текстом или вручную."
-                  onClick={() => setPanel("diary")}
+                  title={viewingPast ? "В этот день записей нет" : "Дневник пока пуст"}
+                  description={viewingPast ? "Дневник за этот день пуст." : "Добавь первый приём — фото, текстом или вручную."}
+                  onClick={viewingPast ? undefined : () => setPanel("diary")}
                 />
               )}
             </SectionList.Item>
@@ -199,6 +275,14 @@ export function FoodScreen({ mode, revision = 0 }) {
             onClose={() => setPanel("")}
             onSaved={reloadDiary}
             editingMeal={editingMeal}
+          />
+          <RecipePanel
+            isOpen={Boolean(recipeItem)}
+            meal={recipeItem?.meal}
+            slotLabel={recipeItem?.label}
+            busy={recipeBusy}
+            onClose={() => setRecipeItem(null)}
+            onAdd={() => recipeItem && addRecommended(recipeItem.meal, recipeItem.value)}
           />
           <FoodDiaryPanel
             isOpen={panel === "diary"}
