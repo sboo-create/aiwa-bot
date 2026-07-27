@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v144-summary-purge"
+AIWA_VERSION = "2026-07-27-v145-redesign-ga"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -120,9 +120,9 @@ def webapp_url(u):
     # Health data must not travel in URLs: it leaks into browser history,
     # access logs and referrers. The authenticated /api/data response already
     # provides everything the mini app needs.
-    # ?ui=2 — не health-данные: выбор нового фронта для теста редизайна.
-    if u and redesign_on(u.get("chat_id")):
-        return AIWA_WEBAPP_URL.rstrip("/") + "/?ui=2"
+    # Новый мини-апп — дефолт для всех; при аварийном откате отдаём старый фронт.
+    if not redesign_on(u.get("chat_id") if u else None):
+        return AIWA_WEBAPP_URL.rstrip("/") + "/?ui=1"
     return AIWA_WEBAPP_URL
 def campaign_id(kind):
     """Stable, non-sensitive daily campaign id for push attribution."""
@@ -5251,7 +5251,7 @@ async def ui_cmd(update, context):
     kb = None
     if AIWA_WEBAPP_URL:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Новый апп (прямая ссылка)",
-              web_app=WebAppInfo(url=AIWA_WEBAPP_URL.rstrip("/") + "/?ui=2"))]])
+              web_app=WebAppInfo(url=AIWA_WEBAPP_URL))]])
     await update.message.reply_text("\n".join(lines), reply_markup=kb)
 
 async def voicetest_cmd(update, context):
@@ -6129,12 +6129,11 @@ async def on_startup(app):
             await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT, web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
         except Exception as e:
             log.warning("menu button: %s", e)
-        # у тестовой группы редизайна кнопка меню персональная — ведёт на новый фронт
+        # редизайн раскатан: персональные кнопки тест-группы возвращаем на общий URL
         for _rid in _REDESIGN_IDS:
             try:
                 await app.bot.set_chat_menu_button(chat_id=int(_rid),
-                    menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT,
-                        web_app=WebAppInfo(url=AIWA_WEBAPP_URL.rstrip("/") + "/?ui=2")))
+                    menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT, web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
             except Exception as e:
                 log.warning("redesign menu button %s: %s", _rid, e)
     try:
@@ -6255,9 +6254,9 @@ def _cors(resp):
     return resp
 _REDESIGN_IDS = set(x.strip().strip('"').strip("'") for x in (os.environ.get("AIWA_REDESIGN_IDS", "") or "").split(",") if x.strip())
 def redesign_on(cid):
-    """Новый мини-апп: точечно по AIWA_REDESIGN_IDS=91428638,625405535 или всем через AIWA_REDESIGN=1."""
-    if os.environ.get("AIWA_REDESIGN", "0") in ("1", "true", "True", "on"): return True
-    return str(cid) in _REDESIGN_IDS
+    """Редизайн раскатан на всех; AIWA_REDESIGN=0 вернёт старый апп всем (аварийный откат)."""
+    if os.environ.get("AIWA_REDESIGN", "1") in ("0", "false", "False", "off"): return False
+    return True
 
 async def _serve_index2(request):
     BD = os.path.dirname(os.path.abspath(__file__))
@@ -6269,7 +6268,9 @@ async def _serve_index2(request):
     return web.Response(text="redesign webapp not found", status=404)
 
 async def _serve_index(request):
-    if request.query.get("ui") == "2":
+    # Редизайн раскатан на всех: базовый URL — новый мини-апп.
+    # Старый фронт остаётся на ?ui=1 как аварийный откат.
+    if request.query.get("ui") != "1":
         return await _serve_index2(request)
     BD = os.path.dirname(os.path.abspath(__file__))
     for p in (os.path.join(WEB_DIR, "index.html"), os.path.join(BD, "index.html"),
