@@ -96,10 +96,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
                     key={option.name || index}
                     title={option.name || `Вариант ${index + 1}`}
                     description={option.benefit || option.how || option.detail}
-                    onClick={() => {
-                      setSuggested(option);
-                      setPanel("variants");
-                    }}
+                    onClick={() => openWorkout(option)}
                   />
                 ))}
               </SectionList.Item>

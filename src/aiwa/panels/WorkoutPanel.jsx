@@ -13,6 +13,9 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
   const [duration, setDuration] = useState("45 мин");
   const [rpe, setRpe] = useState("Нормально");
   const [selected, setSelected] = useState([]);
+  // Вес/подходы/повторы по упражнению — как в старом конструкторе; поля
+  // показываются для силовой, отправляются только заполненные значения.
+  const [details, setDetails] = useState({});
   const [custom, setCustom] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -22,9 +25,19 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
     const nextType = /ход/i.test(hinted) ? "Ходьба" : (/йог|мобил|релиз/i.test(hinted) ? "Йога" : (/кардио/i.test(hinted) ? "Кардио" : "Силовая"));
     setType(nextType);
     setSelected(hinted ? [hinted] : []);
+    setDetails({});
+    setCustom("");
     setDate(todayIso);
   }, [isOpen, suggested, todayIso]);
   const toggleExercise = (name) => setSelected((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name]);
+  const strength = type === "Силовая";
+  const setDetail = (name, key, value) =>
+    setDetails((current) => ({ ...current, [name]: { ...current[name], [key]: value } }));
+  const detailNum = (name, key) => {
+    const raw = String(details[name]?.[key] ?? "").replace(",", ".").trim();
+    const num = Number(raw);
+    return raw && Number.isFinite(num) && num > 0 ? num : null;
+  };
   const save = async () => {
     const names = [...selected, ...(custom.trim() ? [custom.trim()] : [])];
     setBusy(true);
@@ -34,7 +47,12 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
         type,
         duration,
         rpe,
-        items: names.map((name) => ({ name })),
+        items: names.map((name) => ({
+          name,
+          weight: strength ? detailNum(name, "w") : null,
+          sets: strength ? detailNum(name, "sets") : null,
+          reps: strength ? detailNum(name, "reps") : null,
+        })),
       });
       if (!result?.ok) throw new Error(result?.text || "Не получилось сохранить тренировку");
       showToast(`Тренировка сохранена · ~${result.calories || 0} ккал`, { type: "success" });
@@ -56,18 +74,44 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
             <Text className="aiwa-form-label" variant="body" weight="semibold">Упражнения</Text>
             <div className="aiwa-sheet-card">
               {(WORKOUT_EXERCISES[type] || []).map((name) => (
-                <Tappable
-                  as="button"
-                  type="button"
-                  mode="opacity"
-                  className="aiwa-exercise-row"
-                  aria-pressed={selected.includes(name)}
-                  onClick={() => toggleExercise(name)}
-                  key={name}
-                >
-                  <Text variant="body" weight="regular">{name}</Text>
-                  <span className={selected.includes(name) ? "aiwa-check is-active" : "aiwa-check"}>{selected.includes(name) ? "✓" : "+"}</span>
-                </Tappable>
+                <div key={name}>
+                  <Tappable
+                    as="button"
+                    type="button"
+                    mode="opacity"
+                    className="aiwa-exercise-row"
+                    aria-pressed={selected.includes(name)}
+                    onClick={() => toggleExercise(name)}
+                  >
+                    <Text variant="body" weight="regular">{name}</Text>
+                    <span className={selected.includes(name) ? "aiwa-check is-active" : "aiwa-check"}>{selected.includes(name) ? "✓" : "+"}</span>
+                  </Tappable>
+                  {strength && selected.includes(name) ? (
+                    <div className="aiwa-exercise-nums">
+                  <input
+                    inputMode="decimal"
+                    placeholder="кг"
+                    aria-label={`${name}: вес`}
+                    value={details[name]?.w ?? ""}
+                    onChange={(event) => setDetail(name, "w", event.target.value)}
+                  />
+                  <input
+                    inputMode="numeric"
+                    placeholder="подходы"
+                    aria-label={`${name}: подходы`}
+                    value={details[name]?.sets ?? ""}
+                    onChange={(event) => setDetail(name, "sets", event.target.value)}
+                  />
+                  <input
+                    inputMode="numeric"
+                    placeholder="повторы"
+                    aria-label={`${name}: повторы`}
+                    value={details[name]?.reps ?? ""}
+                    onChange={(event) => setDetail(name, "reps", event.target.value)}
+                  />
+                    </div>
+                  ) : null}
+                </div>
               ))}
               <Field label="Добавить своё" value={custom} onChange={setCustom} placeholder="Название упражнения" />
             </div>

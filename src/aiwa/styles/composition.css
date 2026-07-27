@@ -1655,6 +1655,26 @@ body.material .aiwa-mark-bar {
   fill: var(--aiwa-ink-muted);
 }
 
+/* Детали силового упражнения: вес, подходы, повторы в одну строку. */
+.aiwa-exercise-nums {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--aiwa-separator);
+}
+.aiwa-exercise-nums input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--aiwa-secondary-fill, rgba(0, 0, 0, 0.05));
+  font: inherit;
+  font-size: 15px;
+  text-align: center;
+}
+
 .aiwa-exercise-row {
   display: flex;
   min-height: 52px;
