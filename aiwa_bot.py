@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v140-male-fix"
+AIWA_VERSION = "2026-07-27-v141-male-profile"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2336,8 +2336,10 @@ def summary_prepare_hhmm(cid, hhmm):
     return f"{total // 60:02d}:{total % 60:02d}"
 
 def schedule_text(cid, hhmm):
-    actual, _, _ = scheduled_hhmm(cid, hhmm)
-    return f"Утренняя сводка будет приходить в {actual} по Москве."
+    """Пользователю показываем выбранное время — то же, что в профиле приложения.
+    Внутренний сдвиг очереди рассылки (scheduled_hhmm) — деталь доставки, не UI."""
+    shown = (row(cid) or {}).get("send_time") or hhmm or "08:00"
+    return f"Утренняя сводка будет приходить в {shown} по Москве."
 
 def today_start_iso():
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
