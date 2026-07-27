@@ -93,7 +93,7 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode }) 
         <SectionList className="aiwa-log-sections">
           {mode !== "preg" && mode !== "meno" ? (
             <SectionList.Item>
-              <JournalToggle label="Месячные" variant="period" active={period} onChange={setPeriod} />
+              {mode === "male" ? null : <JournalToggle label="Месячные" variant="period" active={period} onChange={setPeriod} />}
             </SectionList.Item>
           ) : null}
 
@@ -126,7 +126,7 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode }) 
           </SectionList.Item>
 
           <SectionList.Item>
-            <JournalToggle label="Близость" active={intimacy} onChange={setIntimacy} />
+            {mode === "male" ? null : <JournalToggle label="Близость" active={intimacy} onChange={setIntimacy} />}
           </SectionList.Item>
         </SectionList>
       </div>

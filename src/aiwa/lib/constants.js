@@ -101,4 +101,5 @@ export const MODE_OPTIONS = [
   { value: "preg", label: "Беременность" },
   { value: "meno", label: "Менопауза" },
   { value: "none", label: "Нет месячных" },
+  { value: "male", label: "Мужской режим" },
 ];
