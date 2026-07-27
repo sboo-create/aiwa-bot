@@ -19370,6 +19370,7 @@ function Wb({
 }) {
   const p = f && y === "heart", g = [r ? `is-${r}` : "", f ? "is-marking" : ""].filter(Boolean).join(" "), v = f ? { iso: a.iso, today: a.today, muted: a.muted } : a, b = /* @__PURE__ */ m.jsxs(m.Fragment, { children: [
     f ? null : /* @__PURE__ */ m.jsx("span", { className: "aiwa-date-cell-ring", "aria-hidden": "true" }),
+    !f && a.cycleDay ? /* @__PURE__ */ m.jsx("span", { className: "aiwa-date-cell-cycleday", "aria-hidden": "true", children: a.cycleDay }) : null,
     /* @__PURE__ */ m.jsx(lt, { className: "aiwa-date-cell-number", variant: "body", weight: "regular", children: a.date }),
     f ? /* @__PURE__ */ m.jsx(
       "span",
@@ -19693,7 +19694,7 @@ function Tj({ label: a, value: e, ok: l }) {
 function Cj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Tj, { ...l }, l.label)) }) : null;
 }
-const Ej = E.lazy(() => import("./AiwaWebUiChart-BGlwUbDk.js").then((a) => ({
+const Ej = E.lazy(() => import("./AiwaWebUiChart-BqRm88Ta.js").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function jj() {
