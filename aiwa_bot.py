@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v132-review2"
+AIWA_VERSION = "2026-07-27-v133-week-review"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -6210,6 +6210,40 @@ async def _api_log_history(request):
               "symptoms": (r[3].split(",") if r[3] else [])} for r in rows]
     return _cors(web.json_response({"items": items}))
 
+# Недельный разбор питания: кэш на день, собирается из дневника за 7 дней.
+_WEEK_FOOD_CACHE = {}
+
+async def _api_week_food_review(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    ck = (cid, dtoday().isoformat())
+    hit = _WEEK_FOOD_CACHE.get(ck)
+    if hit: return _cors(web.json_response({"ok": True, "text": hit}))
+    lines = []
+    for off in range(6, -1, -1):
+        d = (dtoday() - timedelta(days=off)).isoformat()
+        meals = meals_of(cid, d); tot = diary_totals(cid, d)
+        if not meals: continue
+        dishes = ", ".join(f"{m.get('title')} ({round(m.get('kcal') or 0)} ккал)" for m in meals[:8])
+        lines.append(f"{d}: {dishes}; итог {round(tot.get('kcal') or 0)} ккал, Б{round(tot.get('protein') or 0)} Ж{round(tot.get('fat') or 0)} У{round(tot.get('carbs') or 0)}")
+    if not lines:
+        return _cors(web.json_response({"ok": False, "text": "За неделю в дневнике пусто — добавь приёмы, и я сделаю разбор."}))
+    prof = profile_of(u) or {}
+    profile_line = f"цель {prof.get('kcal_goal') or profile_kcal(prof) or '—'} ккал/день" if prof else ""
+    try:
+        usage = []
+        text = await llm_to_thread(cid, "week_food_review", L.week_food_review, "\n".join(lines), profile_line, usage)
+        if usage: ev(cid, "tokens", sum(usage), meta="week_food", calls=len(usage), usage=usage)
+        if not (text or "").strip(): raise ValueError("empty")
+        if len(_WEEK_FOOD_CACHE) > 1000: _WEEK_FOOD_CACHE.clear()
+        _WEEK_FOOD_CACHE[ck] = text
+        return _cors(web.json_response({"ok": True, "text": text}))
+    except Exception as e:
+        log.warning("week food review %s: %s", cid, e)
+        return _cors(web.json_response({"ok": False, "text": "Не получилось собрать разбор, попробуй чуть позже."}, status=502))
+
 # Рецепты меню: кэш на день, чтобы повторный тап по блюду не жёг токены.
 _RECIPE_CACHE = {}
 
@@ -8714,6 +8748,7 @@ def build_web():
     aio.router.add_post("/api/food_prompt", _api_food_prompt)
     aio.router.add_post("/api/recipe", _api_recipe)
     aio.router.add_post("/api/log_history", _api_log_history)
+    aio.router.add_post("/api/week_food_review", _api_week_food_review)
     _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
         aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды

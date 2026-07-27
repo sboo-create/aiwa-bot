@@ -1909,6 +1909,19 @@ def _scale_menu(menu, target):
         menu["macros"] = {"protein": "%d г" % round(target[1]), "fat": "%d г" % round(target[2]), "carbs": "%d г" % round(target[3])}
     return menu
 
+def week_food_review(days_text, profile_line, usage=None):
+    """Разбор дневника питания за неделю: БЖУ, микроэлементы, конкретные советы."""
+    prompt = ("Вот дневник питания за последние 7 дней (день: блюда и КБЖУ):\n" + days_text +
+              ("\nЕё профиль: " + profile_line if profile_line else "") +
+              "\nСделай короткий разбор недели: 1) как в среднем с калориями и БЖУ относительно цели, "
+              "2) каких микроэлементов вероятно не хватает по составу блюд (железо, магний, кальций, омега-3, клетчатка) и в каких продуктах их добрать, "
+              "3) три конкретных совета на следующую неделю. Пиши по-русски, тепло и по делу, без markdown-заголовков, "
+              "простыми абзацами и строками-списками через «- ». До 900 знаков. " + TOV)
+    out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+                max_tokens=700, temperature=0.4, usage=usage)
+    return (out or "").strip()
+
+
 def recipe(dish, usage=None):
     """Короткий домашний рецепт блюда для карточки в мини-аппе."""
     prompt = (f"Дай короткий домашний рецепт блюда «{dish}». Только обычные продукты, доступные в России. "
@@ -1916,7 +1929,8 @@ def recipe(dish, usage=None):
               '{"ingredients":["продукт — количество", ... до 8 позиций],'
               '"steps":["короткий шаг приготовления", ... до 5 шагов],'
               '"kcal":"NNN ккал на порцию","time":"NN минут",'
-              '"macros":{"protein":"NN г","fat":"NN г","carbs":"NN г"}}')
+              '"macros":{"protein":"NN г","fat":"NN г","carbs":"NN г"},'
+              '"micros":["ключевой микроэлемент — чем полезен ей", ... 2-3 позиции]}')
     data = {}; out = ""
     for _ in range(2):   # модель изредка отвечает не-JSON — одна повторная попытка
         out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
@@ -1934,7 +1948,8 @@ def recipe(dish, usage=None):
             "ingredients": [str(x) for x in (data.get("ingredients") or [])][:8],
             "steps": [str(x) for x in (data.get("steps") or [])][:6],
             "kcal": str(data.get("kcal") or ""), "time": str(data.get("time") or ""),
-            "macros": {k: str(macros.get(k) or "") for k in ("protein", "fat", "carbs")}}
+            "macros": {k: str(macros.get(k) or "") for k in ("protein", "fat", "carbs")},
+            "micros": [str(x) for x in (data.get("micros") or [])][:4]}
 
 
 def menu_today(st, profile=None, target=None, usage=None):
