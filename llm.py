@@ -1893,6 +1893,24 @@ def _scale_menu(menu, target):
         menu["macros"] = {"protein": "%d г" % round(target[1]), "fat": "%d г" % round(target[2]), "carbs": "%d г" % round(target[3])}
     return menu
 
+def recipe(dish, usage=None):
+    """Короткий домашний рецепт блюда для карточки в мини-аппе."""
+    prompt = (f"Дай короткий домашний рецепт блюда «{dish}». Только обычные продукты, доступные в России. "
+              "Ответь строго JSON без обрамления: "
+              '{"ingredients":["продукт — количество", ... до 8 позиций],'
+              '"steps":["короткий шаг приготовления", ... до 5 шагов],'
+              '"kcal":"NNN ккал на порцию","time":"NN минут"}')
+    out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON."},
+                 {"role": "user", "content": prompt}], temp=0.4, max_tokens=600, usage=usage)
+    data = _json(out)
+    if not isinstance(data, dict) or not data.get("steps"):
+        raise ValueError(f"recipe: плохой ответ модели: {str(out)[:120]}")
+    return {"dish": dish,
+            "ingredients": [str(x) for x in (data.get("ingredients") or [])][:8],
+            "steps": [str(x) for x in (data.get("steps") or [])][:6],
+            "kcal": str(data.get("kcal") or ""), "time": str(data.get("time") or "")}
+
+
 def menu_today(st, profile=None, target=None, usage=None):
     # Без диет-ограничений отдаём готовый набор под фазу (без обращения к модели, экономим лимит).
     phase_key = (st or {}).get("phase")   # меню всегда генерит модель; пул блюд остался только аварийным фолбэком

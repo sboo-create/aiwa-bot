@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v129-food-endpoints"
+AIWA_VERSION = "2026-07-27-v130-recipes"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -6196,6 +6196,28 @@ async def _serve_index(request):
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
 
+# Рецепты меню: кэш на день, чтобы повторный тап по блюду не жёг токены.
+_RECIPE_CACHE = {}
+
+async def _api_recipe(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    dish = str(body.get("dish") or "").strip()[:80]
+    if not dish: return _cors(web.json_response({"error": "no dish"}, status=400))
+    ck = (dish.lower(), dtoday().isoformat())
+    hit = _RECIPE_CACHE.get(ck)
+    if hit: return _cors(web.json_response(hit))
+    try:
+        usage = []
+        rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage)
+        if usage: ev(cid, "tokens", sum(usage), meta="recipe", calls=len(usage), usage=usage)
+        if len(_RECIPE_CACHE) > 300: _RECIPE_CACHE.clear()
+        _RECIPE_CACHE[ck] = rec
+        return _cors(web.json_response(rec))
+    except Exception as e:
+        log.warning("recipe %s «%s»: %s", cid, dish, e)
+        return _cors(web.json_response({"error": "generation"}, status=502))
+
 async def _api_food_prompt(request):
     """Кнопка «Текстом» в питании: бот спрашивает в чате, что она ела — ответ запишется в дневник."""
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -8667,6 +8689,7 @@ def build_web():
     aio.router.add_get("/app2", _serve_index2)
     aio.router.add_post("/api/nudge", _api_nudge)
     aio.router.add_post("/api/food_prompt", _api_food_prompt)
+    aio.router.add_post("/api/recipe", _api_recipe)
     _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
         aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды
