@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { TMAProvider, Page, Text, RegularButton, SectionList } from "../lib/tma";
 import { ScreenLoading } from "../components/ScreenLoading";
 import { AiwaInsightCard } from "../components/AiwaInsightCard";
@@ -11,6 +11,7 @@ import { WorkoutHistoryPanel } from "../panels/WorkoutHistoryPanel";
 import { TrainingProfilePanel } from "../panels/TrainingProfilePanel";
 import { actionProps, call, openBotChat } from "../lib/api";
 import { useScreenData } from "../lib/screenData";
+import { historyStrip } from "../lib/historyStrip";
 import { PlusIcon } from "../lib/icons";
 
 // Ответы прогреваются на старте, поэтому обычно экран открывается сразу;
@@ -26,14 +27,27 @@ const workoutsWord = (count) => {
   return "тренировок";
 };
 
-/** Week strip like on Home: month numbers, today as a pill, logged days in accent. */
-const overviewWeek = (week) => (week || []).map((day) => ({
-  iso: day.d,
-  date: String(day.d || "").slice(-2).replace(/^0/, ""),
-  label: day.dow,
-  today: !!day.today,
-  workout: !!day.count,
-}));
+/**
+ * Month-long strip like on Home: Week scrolls it horizontally, backend days
+ * with workouts get the accent mark by iso match.
+ */
+const overviewStrip = (week) => {
+  const marked = new Set((week || []).filter((day) => day.count).map((day) => day.d));
+  return historyStrip(30).map((day) => ({ ...day, workout: marked.has(day.iso) }));
+};
+
+// 3d-иконки инвентаря (assets/train): тип или группа → файл из манифеста.
+const trainIcon = (icons, ...keys) => {
+  for (const key of keys) {
+    const hit = icons?.[String(key || "").trim()];
+    if (hit) return hit + "?v=1";
+  }
+  const text = keys.filter(Boolean).join(" ").toLowerCase();
+  for (const [name, file] of Object.entries(icons || {})) {
+    if (text.includes(name.toLowerCase())) return file + "?v=1";
+  }
+  return null;
+};
 
 /**
  * Activity:
@@ -44,6 +58,13 @@ export function ActivityScreen({ mode, revision = 0 }) {
   const [data, refresh] = useScreenData(KEYS, [mode, revision]);
   const [panel, setPanel] = useState("");
   const [suggested, setSuggested] = useState(null);
+  const [trainIcons, setTrainIcons] = useState({});
+  useEffect(() => {
+    fetch("/assets/train/manifest.json?v=1")
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((icons) => setTrainIcons(icons || {}))
+      .catch(() => {});
+  }, []);
 
   // Отметки и профиль перечитываем сразу, разбор от Айвы — только по ревизии экрана.
   const reloadTrain = () => refresh("train");
@@ -70,7 +91,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
           {/* ── HEADER ── */}
           <Text className="aiwa-screen-title" variant="title1" weight="semibold">Нагрузка</Text>
           <div className="aiwa-overview">
-            <Week days={overviewWeek(week)} />
+            <Week days={overviewStrip(week)} />
             <div className="aiwa-countdown">
               <Text variant="title1" weight="semibold">{weekWorkouts}</Text>
               <Text variant="body" weight="regular">{`${workoutsWord(weekWorkouts)} на этой неделе`}</Text>
@@ -94,6 +115,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
                 {options.map((option, index) => (
                   <PaperRow
                     key={option.name || index}
+                    image={trainIcon(trainIcons, option.name)}
                     title={[option.name || `Вариант ${index + 1}`, option.duration].filter(Boolean).join(" · ")}
                     description={[
                       (option.exercises || []).map((e) => [e.name, e.sets && e.reps ? `${e.sets}×${e.reps}` : ""].filter(Boolean).join(" ")).join(", "),
@@ -109,6 +131,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
               {today.length ? today.slice().reverse().map((workout) => (
                 <PaperRow
                   key={workout.id}
+                  image={trainIcon(trainIcons, workout.type)}
                   title={workout.type || "Тренировка"}
                   description={[
                     "сегодня",

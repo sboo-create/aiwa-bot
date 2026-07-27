@@ -34,7 +34,7 @@ export function RecipePanel({ isOpen, meal, slotLabel = "", onClose, onAdd, busy
   const macros = recipe?.macros || {};
   const macroLine = [macros.protein && `Б ${macros.protein}`, macros.fat && `Ж ${macros.fat}`, macros.carbs && `У ${macros.carbs}`]
     .filter(Boolean).join(" · ");
-  const metaLine = [slotLabel, recipe?.kcal || meal?.kcal, macroLine, recipe?.time].filter(Boolean).join(" · ");
+  const metaLine = [slotLabel, meal?.kcal, recipe?.time].filter(Boolean).join(" · ");
 
   return (
     <AiwaModalView isOpen={isOpen} onClose={onClose}>
@@ -60,6 +60,17 @@ export function RecipePanel({ isOpen, meal, slotLabel = "", onClose, onAdd, busy
           <SectionList.Item>
             <AiwaCell tappable={false}>
               <AiwaCell.Text title="Рецепт не собрался" description="Попробуй открыть блюдо ещё раз." />
+            </AiwaCell>
+          </SectionList.Item>
+        ) : null}
+
+        {recipe ? (
+          <SectionList.Item header="Питательность">
+            <AiwaCell tappable={false}>
+              <AiwaCell.Text
+                title={[recipe.kcal, macroLine].filter(Boolean).join(" · ") || "—"}
+                description={(recipe.micros || []).join("; ")}
+              />
             </AiwaCell>
           </SectionList.Item>
         ) : null}

@@ -10,6 +10,7 @@ import { StatsSection } from "../sections/StatsSection";
 import { ChartSection } from "../sections/ChartSection";
 import { HistorySection } from "../sections/HistorySection";
 import { SymptomHistorySection } from "../sections/SymptomHistorySection";
+import { PregnancyProgress } from "../sections/PregnancyProgress";
 import { HomePanels } from "../panels/HomePanels";
 import { ProfilePanel } from "../panels/ProfilePanel";
 
@@ -77,19 +78,25 @@ export function HomeScreen(props) {
             <AiSection aiText={props.aiText} />
             <DelaySection delay={props.delay} />
             <StatsSection metrics={props.metrics} title={props.statsTitle} />
-            <ChartSection
-              data={props.chartData}
-              series={props.chartSeries}
-              title={props.chartTitle}
-              band={props.chartBand}
-              emptyText={props.chartEmptyText}
-            />
-            <HistorySection
-              history={props.history}
-              title={props.historyTitle}
-              emptyTitle={props.historyEmptyTitle}
-              emptyDescription={props.historyEmptyDescription}
-            />
+            {props.pregnancy ? (
+              <PregnancyProgress pregnancy={props.pregnancy} />
+            ) : (
+              <ChartSection
+                data={props.chartData}
+                series={props.chartSeries}
+                title={props.chartTitle}
+                band={props.chartBand}
+                emptyText={props.chartEmptyText}
+              />
+            )}
+            {props.mode === "meno" ? null : (
+              <HistorySection
+                history={props.history}
+                title={props.historyTitle}
+                emptyTitle={props.historyEmptyTitle}
+                emptyDescription={props.historyEmptyDescription}
+              />
+            )}
             <SymptomHistorySection />
           </SectionList>
 

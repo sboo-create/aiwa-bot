@@ -723,7 +723,7 @@ function paperModeHomeConfig(stats){
   }
   if(mode==="preg"&&D.preg){
     var p=D.preg,pregWeek=Math.max(1,Number(p.week)||0),due=new Date(p.due+"T00:00:00"),dueText=due.getDate()+" "+MONTHS[due.getMonth()];
-    return{heroValue:pregWeek+" неделя",countdownLabel:p.trimester+" триместр · ПДР "+dueText,aiText:"Сейчас "+p.trimester+" триместр. В центре — самочувствие, движения малыша и безопасная нагрузка. Отмечай симптомы и энергию, чтобы видеть изменения между приёмами.",chartData:null,metrics:[
+    return{heroValue:pregWeek+" неделя",countdownLabel:p.trimester+" триместр · ПДР "+dueText,pregnancy:{week:pregWeek,trimester:Number(p.trimester)||1},aiText:"Сейчас "+p.trimester+" триместр. В центре — самочувствие, движения малыша и безопасная нагрузка. Отмечай симптомы и энергию, чтобы видеть изменения между приёмами.",chartData:null,metrics:[
       {label:"Текущий срок",value:pregWeek+" недель",ok:true},
       {label:"До ПДР",value:daysText(p.days_left||0),ok:true},
       {label:"Следующий приём",value:"по плану врача",ok:true}

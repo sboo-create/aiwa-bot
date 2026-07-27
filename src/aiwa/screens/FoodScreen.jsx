@@ -11,8 +11,9 @@ import { FoodDiaryPanel } from "../panels/FoodDiaryPanel";
 import { RecipePanel } from "../panels/RecipePanel";
 import { PlusIcon, ImageIcon, TextIcon } from "../lib/icons";
 import { MEAL_IMAGE } from "../lib/constants";
-import { apiCall, showToast, openBotChat, fmtKcal } from "../lib/api";
+import { apiCall, showToast, openBotChat, fmtKcal, actionProps } from "../lib/api";
 import { useScreenData } from "../lib/screenData";
+import { historyStrip } from "../lib/historyStrip";
 import { Week } from "../components/Week";
 
 // Ответы прогреваются на старте, поэтому обычно экран открывается сразу;
@@ -46,18 +47,6 @@ const dishImageFrom = (icons, name) => {
   return bestScore >= 2 ? best + ICON_VERSION : null;
 };
 
-// Последние 7 дней для мини-календаря истории: сегодня справа.
-const DOW = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
-const historyWeek = () => {
-  const days = [];
-  for (let i = 6; i >= 0; i -= 1) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    days.push({ iso, date: String(d.getDate()), label: DOW[d.getDay()], today: i === 0 });
-  }
-  return days;
-};
 const DAY_LABEL = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
 
 /**
@@ -75,6 +64,9 @@ export function FoodScreen({ mode, revision = 0 }) {
   // Рецепт открытого блюда из рекомендаций.
   const [recipeItem, setRecipeItem] = useState(null);
   const [recipeBusy, setRecipeBusy] = useState(false);
+  // Разбор питания за неделю: текст от модели, кэшируется на беке на день.
+  const [weekReview, setWeekReview] = useState(null);
+  const [weekBusy, setWeekBusy] = useState(false);
   const [panel, setPanel] = useState("");
   const [editingMeal, setEditingMeal] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -126,7 +118,7 @@ export function FoodScreen({ mode, revision = 0 }) {
   const kcal = Number(totals.kcal || 0);
   const macroValue = (key) => Number(totals[key] || 0);
 
-  const week = historyWeek();
+  const week = historyStrip(30);
   const todayIso = week[week.length - 1].iso;
   const viewingPast = Boolean(historyIso && historyIso !== todayIso);
   const shownMeals = viewingPast
@@ -137,6 +129,17 @@ export function FoodScreen({ mode, revision = 0 }) {
     const parsed = new Date(`${historyIso}T12:00:00`);
     historyTitle = Number.isNaN(parsed.getTime()) ? "Приёмы за день" : `Приёмы за ${DAY_LABEL.format(parsed)}`;
   }
+
+  const requestWeekReview = async () => {
+    if (weekBusy) return;
+    setWeekBusy(true);
+    try {
+      const result = await apiCall("/api/week_food_review", {}).catch(() => null);
+      setWeekReview(result?.text || "Не получилось собрать разбор, попробуй чуть позже.");
+    } finally {
+      setWeekBusy(false);
+    }
+  };
 
   const pickHistoryDay = async (day) => {
     const iso = typeof day === "string" ? day : day?.iso || "";
@@ -293,6 +296,18 @@ export function FoodScreen({ mode, revision = 0 }) {
                   onClick={viewingPast ? undefined : () => setPanel("diary")}
                 />
               )}
+              {weekReview ? (
+                <AiwaInsightCard message={weekReview} />
+              ) : null}
+              <div className="aiwa-cell-actions aiwa-week-review-cta">
+                <RegularButton
+                  variant="filled"
+                  label={weekBusy ? "Разбираю неделю…" : "Разобрать питание за неделю"}
+                  isFill
+                  disabled={weekBusy}
+                  {...actionProps("Разобрать питание за неделю", requestWeekReview)}
+                />
+              </div>
             </SectionList.Item>
           </SectionList>
 
