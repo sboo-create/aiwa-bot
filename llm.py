@@ -1396,7 +1396,7 @@ def training_today(st, profile=None, recent=None, mode=None, usage=None, pregnan
         '"exercises":[{"name":"упражнение","sets":N,"reps":N}],'
         '"tip":"одна конкретная рекомендация по технике или восстановлению"}],'
         '"suggestions":["три РАЗНЫХ саджеста про нагрузку, восстановление или технику"]}\n' + SUGG_RULES + '\n'
-        "В options 2-3 конкретных варианта с точным временем. Для силовых вариантов подбирай упражнения СТРОГО из списка: "
+        "В options 2-3 конкретных варианта. У КАЖДОГО варианта обязательно заполни duration и tip. Если вариант силовой — exercises обязательны. Для силовых вариантов подбирай упражнения СТРОГО из списка: "
         "Присед, Жим ногами, Выпады, Болгарские, Румынская тяга, Разгибания, Сгибания, Икры, "
         "Вертикальная тяга, Горизонтальная тяга, Тяга в наклоне, Становая, Подтягивания, Гиперэкстензия, "
         "Жим лёжа, Жим гантелей, Жим в наклоне, Сведения, Отжимания, Жим стоя, Махи в стороны, Махи в наклоне, Протяжка, "
@@ -1910,16 +1910,28 @@ def _scale_menu(menu, target):
     return menu
 
 def week_food_review(days_text, profile_line, usage=None):
-    """Разбор дневника питания за неделю: БЖУ, микроэлементы, конкретные советы."""
+    """Разбор дневника за неделю: структура для карточек мини-аппа (не сплошной текст)."""
     prompt = ("Вот дневник питания за последние 7 дней (день: блюда и КБЖУ):\n" + days_text +
               ("\nЕё профиль: " + profile_line if profile_line else "") +
-              "\nСделай короткий разбор недели: 1) как в среднем с калориями и БЖУ относительно цели, "
-              "2) каких микроэлементов вероятно не хватает по составу блюд (железо, магний, кальций, омега-3, клетчатка) и в каких продуктах их добрать, "
-              "3) три конкретных совета на следующую неделю. Пиши по-русски, тепло и по делу, без markdown-заголовков, "
-              "простыми абзацами и строками-списками через «- ». До 900 знаков. " + TOV)
-    out = _call([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
-                max_tokens=700, temperature=0.4, usage=usage)
-    return (out or "").strip()
+              "\nСделай разбор недели. Ответь строго JSON без обрамления и без markdown внутри строк: "
+              '{"summary":"2-3 тёплых предложения: как прошла неделя по калориям и БЖУ относительно цели, с числами",'
+              '"gaps":["микроэлемент — в каких продуктах добрать", ... 2-4 позиции],'
+              '"tips":["конкретный совет на следующую неделю", ... ровно 3]} ' + TOV)
+    data = {}
+    for _ in range(2):
+        out = _call([{"role": "system", "content": SYSTEM + " Отвечай строго JSON."},
+                     {"role": "user", "content": prompt}], max_tokens=700, temperature=0.4, usage=usage)
+        if out:
+            try:
+                data = json.loads(out[out.find("{"):out.rfind("}") + 1])
+            except Exception:
+                data = {}
+        if isinstance(data, dict) and data.get("summary"): break
+    if not isinstance(data, dict) or not (data.get("summary") or "").strip():
+        raise ValueError("week_food_review: плохой ответ модели")
+    return {"summary": str(data.get("summary") or "").strip(),
+            "gaps": [str(x) for x in (data.get("gaps") or [])][:4],
+            "tips": [str(x) for x in (data.get("tips") or [])][:3]}
 
 
 def recipe(dish, usage=None):

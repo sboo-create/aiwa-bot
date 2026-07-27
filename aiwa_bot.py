@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v133-week-review"
+AIWA_VERSION = "2026-07-27-v134-prewarm-blocks"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -6196,6 +6196,25 @@ async def _serve_index(request):
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
 
+async def _prewarm_today(cid):
+    """Прогрев сводки дня при открытии аппа: к моменту запроса /api/today кэш тёплый."""
+    try:
+        u = row(cid)
+        if not is_onboarded(u): return
+        ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
+        if _TODAY_CACHE.get(ck): return
+        _, st = status_of(cid)
+        usage = []
+        note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), usage)
+        if usage: ev(cid, "tokens", sum(usage), meta="today_note", calls=len(usage), usage=usage)
+        if isinstance(note, dict) and (note.get("summary") or "").strip():
+            if st:
+                note.setdefault("day", st.get("day"))
+                note.setdefault("phase", (st.get("phase_ru") or ""))
+            _TODAY_CACHE[ck] = note
+    except Exception as e:
+        log.info("today prewarm %s: %s", cid, e)
+
 async def _api_log_history(request):
     """История журнала: непустые записи симптомов/энергии/настроения для главной."""
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -6247,12 +6266,28 @@ async def _api_week_food_review(request):
 # Рецепты меню: кэш на день, чтобы повторный тап по блюду не жёг токены.
 _RECIPE_CACHE = {}
 
+async def _prewarm_recipes(cid, dishes):
+    """Фоновый прогрев рецептов для блюд меню — карточка открывается мгновенно."""
+    for dish in dishes[:4]:
+        dish = str(dish or "").strip()[:80]
+        if not dish: continue
+        ck = (dish.lower(), dtoday().isoformat(), "v2")
+        if _RECIPE_CACHE.get(ck): continue
+        try:
+            usage = []
+            rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage)
+            if usage: ev(cid, "tokens", sum(usage), meta="recipe", calls=len(usage), usage=usage)
+            if len(_RECIPE_CACHE) > 300: _RECIPE_CACHE.clear()
+            _RECIPE_CACHE[ck] = rec
+        except Exception as e:
+            log.info("recipe prewarm «%s»: %s", dish, e)
+
 async def _api_recipe(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     dish = str(body.get("dish") or "").strip()[:80]
     if not dish: return _cors(web.json_response({"error": "no dish"}, status=400))
-    ck = (dish.lower(), dtoday().isoformat())
+    ck = (dish.lower(), dtoday().isoformat(), "v2")
     hit = _RECIPE_CACHE.get(ck)
     if hit: return _cors(web.json_response(hit))
     try:
@@ -6310,6 +6345,10 @@ async def _api_data(request):
     u = row(cid)
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
     ev(cid, "button", meta="app_open")
+    try:
+        asyncio.create_task(_prewarm_today(cid))
+    except Exception:
+        pass
     campaign = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(body.get("campaign") or ""))[:80]
     if campaign:
         ev(cid, "push_open", meta=campaign)
@@ -6694,6 +6733,10 @@ async def _generate_section(cid, kind, u, st, key):
                    calls=len(sugg_usage), usage=sugg_usage)
             payload = {"menu": menu, "kcal": (target[0] if target else None),
                        "text": text, "suggestions": suggestions}
+            try:
+                asyncio.create_task(_prewarm_recipes(cid, [m.get("dish") for m in (menu.get("meals") or [])]))
+            except Exception:
+                pass
         else:
             pregnancy = None
             if u.get("mode") == "preg" and u.get("last_period"):
@@ -6771,9 +6814,13 @@ async def _api_today(request):
     _su = []
     note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), _su)
     if _su: ev(cid, "tokens", sum(_su), meta="today_note", calls=len(_su), usage=_su)
-    if isinstance(note, dict) and (note.get("summary") or "").strip():
-        if len(_TODAY_CACHE) > 2000: _TODAY_CACHE.clear()
-        _TODAY_CACHE[ck] = note
+    if isinstance(note, dict):
+        if st:
+            note.setdefault("day", st.get("day"))
+            note.setdefault("phase", (st.get("phase_ru") or ""))
+        if (note.get("summary") or "").strip():
+            if len(_TODAY_CACHE) > 2000: _TODAY_CACHE.clear()
+            _TODAY_CACHE[ck] = note
     return _cors(web.json_response(note))
 
 async def _api_chat(request):
@@ -8156,6 +8203,18 @@ async def _api_track(request):
         ev(cid, "flow_start", meta=flow)
     return _cors(web.json_response({"ok": True}))
 
+async def _api_train_day(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    d = str(body.get("d") or "")[:10]
+    try:
+        dd = date.fromisoformat(d)
+        if dd > dtoday() or (dtoday() - dd).days > 92: raise ValueError
+    except Exception:
+        return _cors(web.json_response({"error": "bad date"}, status=400))
+    return _cors(web.json_response({"ok": True, "d": d, "workouts": workouts_of(cid, d)}))
+
 async def _api_train(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -8766,6 +8825,7 @@ def build_web():
     aio.router.add_post("/api/food_text", _api_food_text)
     aio.router.add_post("/api/track", _api_track)
     aio.router.add_post("/api/train", _api_train)
+    aio.router.add_post("/api/train_day", _api_train_day)
     aio.router.add_post("/api/workout", _api_workout)
     aio.router.add_post("/api/train_profile", _api_train_profile)
     aio.router.add_post("/api/diary", _api_diary)
