@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v130-recipes"
+AIWA_VERSION = "2026-07-27-v131-journal-history"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -6196,6 +6196,20 @@ async def _serve_index(request):
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
 
+async def _api_log_history(request):
+    """История журнала: непустые записи симптомов/энергии/настроения для главной."""
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    c = db()
+    rows = c.execute(
+        "SELECT log_date,energy,mood,symptoms FROM logs WHERE chat_id=? "
+        "AND (COALESCE(symptoms,'')!='' OR energy IS NOT NULL OR mood IS NOT NULL) "
+        "ORDER BY log_date DESC LIMIT 60", (cid,)).fetchall()
+    c.close()
+    items = [{"d": r[0], "energy": r[1], "mood": r[2],
+              "symptoms": (r[3].split(",") if r[3] else [])} for r in rows]
+    return _cors(web.json_response({"items": items}))
+
 # Рецепты меню: кэш на день, чтобы повторный тап по блюду не жёг токены.
 _RECIPE_CACHE = {}
 
@@ -8690,6 +8704,7 @@ def build_web():
     aio.router.add_post("/api/nudge", _api_nudge)
     aio.router.add_post("/api/food_prompt", _api_food_prompt)
     aio.router.add_post("/api/recipe", _api_recipe)
+    aio.router.add_post("/api/log_history", _api_log_history)
     _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
         aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды

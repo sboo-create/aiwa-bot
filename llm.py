@@ -1900,9 +1900,16 @@ def recipe(dish, usage=None):
               '{"ingredients":["продукт — количество", ... до 8 позиций],'
               '"steps":["короткий шаг приготовления", ... до 5 шагов],'
               '"kcal":"NNN ккал на порцию","time":"NN минут"}')
-    out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON."},
-                 {"role": "user", "content": prompt}], temp=0.4, max_tokens=600, usage=usage)
-    data = _json(out)
+    data = {}; out = ""
+    for _ in range(2):   # модель изредка отвечает не-JSON — одна повторная попытка
+        out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
+                     {"role": "user", "content": prompt}], max_tokens=700, temperature=0.4, usage=usage)
+        if out:
+            try:
+                data = json.loads(out[out.find("{"):out.rfind("}") + 1])
+            except Exception:
+                data = {}
+        if isinstance(data, dict) and data.get("steps"): break
     if not isinstance(data, dict) or not data.get("steps"):
         raise ValueError(f"recipe: плохой ответ модели: {str(out)[:120]}")
     return {"dish": dish,
