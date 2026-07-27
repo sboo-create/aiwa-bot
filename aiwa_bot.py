@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v141-male-profile"
+AIWA_VERSION = "2026-07-27-v142-no-menu"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2587,12 +2587,11 @@ def sugg_kb(cid, items, app_user=None, app_label=None, feedback_id=None, campaig
     if feedback_id:
         rows.append([B("👍 Полезно", f"fb:helpful:{feedback_id}"),
                      B("👎 Не помогло", f"fb:unhelpful:{feedback_id}")])
-    rows.append([B("Меню", "menu", KBS.PRIMARY)]); return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup(rows)
 def summary_kb(u=None, campaign=None):
     rows = []
     if AIWA_WEBAPP_URL:
         rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=campaign_webapp_url(u, campaign)))])
-    rows.append([B("Меню", "menu")])
     return InlineKeyboardMarkup(rows)
 def summary_suggestions(st):
     if not st:
@@ -5445,8 +5444,7 @@ async def on_text(update, context):
         log.exception("text handler failed for %s", cid)
         ev(cid, "error", meta=type(e).__name__)
         await update.message.reply_text(
-            "Я вижу сообщение, но сейчас не смогла собрать ответ. Попробуй ещё раз через минуту или открой Меню.",
-            reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
+            "Я вижу сообщение, но сейчас не смогла собрать ответ. Попробуй ещё раз через минуту.")
 
 async def on_voice(update, context):
     cid = update.effective_chat.id; txt = None; _sti = {}
@@ -6013,8 +6011,7 @@ async def on_error(update, context):
         if isinstance(update, Update) and update.effective_chat:
             ev(update.effective_chat.id, "error", meta=type(err).__name__)
             await context.bot.send_message(update.effective_chat.id,
-                "Упс, что-то пошло не так. Попробуй ещё раз.",
-                reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
+                "Упс, что-то пошло не так. Попробуй ещё раз.")
         await admin_alert(context.application, "handler_error",
             f"⚠️ Ошибка обработчика: {type(err).__name__}\nПроверь Railway logs.")
     except Exception: pass
@@ -6131,7 +6128,6 @@ async def on_startup(app):
     try:
         await app.bot.set_my_commands([
             BotCommand("start", "Старт"),
-            BotCommand("menu", "Меню"),
             BotCommand("today", "Сводка за день"),
             BotCommand("app", "Приложение"),
             BotCommand("report", "Выписка для врача"),
@@ -6420,12 +6416,19 @@ async def _api_nudge(request):
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"ok": False}))
     topic = str(body.get("topic") or "")[:20]
-    prompts = {"food": ("Обсудим питание: могу разобрать твой дневник за сегодня, собрать меню под фазу или ответить про конкретные продукты.",
+    cycle_user = is_cycle(u) and bool(u.get("last_period"))
+    ctx_word = "под фазу" if cycle_user else "под твою цель"
+    prompts = {"food": (f"Обсудим питание: могу разобрать твой дневник за сегодня, собрать меню {ctx_word} или ответить про конкретные продукты.",
                         ["Разбери мой дневник", "Что съесть на ужин?"]),
-               "train": ("Обсудим нагрузку: подберу тренировку под фазу и твои последние занятия или отвечу про восстановление.",
+               "train": (f"Обсудим нагрузку: подберу тренировку {ctx_word} с учётом последних занятий или отвечу про восстановление.",
                          ["Собери тренировку", "Что с восстановлением?"])}
-    text, suggs = prompts.get(topic, ("Я здесь. Спрашивай про цикл, самочувствие, питание или нагрузку — отвечу с учётом твоих данных.",
-                                      ["Что по циклу сегодня?", "Что съесть сегодня?"]))
+    if cycle_user:
+        default = ("Я здесь. Спрашивай про цикл, самочувствие, питание или нагрузку — отвечу с учётом твоих данных.",
+                   ["Что по циклу сегодня?", "Что съесть сегодня?"])
+    else:
+        default = ("Я здесь. Спрашивай про питание, тренировки и самочувствие — отвечу с учётом твоих данных.",
+                   ["Что съесть сегодня?", "Собери тренировку"])
+    text, suggs = prompts.get(topic, default)
     try:
         if BOT_APP:
             kb = sugg_kb(cid, suggs, app_user=u)
