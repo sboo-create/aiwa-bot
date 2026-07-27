@@ -29,22 +29,41 @@ const RECOMMENDATION_IMAGE = "/assets/paper-food-placeholder.png";
 // «Курица с рисом» не нужен, но «Омлет с зеленью» → «Омлет с овощами» да).
 const normDish = (value) => String(value || "").toLowerCase().replace(/ё/g, "е");
 const ICON_VERSION = "?v=2";
+const dishWords = (value) => normDish(value).split(/[^а-яa-z0-9]+/).filter((w) => w.length >= 3);
+const sameRoot = (a, b) => {
+  const len = Math.min(4, a.length, b.length);
+  return a.slice(0, len) === b.slice(0, len);
+};
+
+/**
+ * Иконка по названию блюда. Скоринг двусторонний: считаем, какая ДОЛЯ слов
+ * ключа совпала со словами запроса — «Суп куриный с лапшой» выбирает
+ * «Куриный суп» (совпали оба слова ключа), а не «Курица с рисом» (одно из двух).
+ */
 const dishImageFrom = (icons, name) => {
   const n = normDish(name).trim();
   if (!icons || !n) return null;
   const exact = icons[String(name || "").trim()];
   if (exact) return exact + ICON_VERSION;
+  const queryWords = dishWords(name);
+  if (!queryWords.length) return null;
   let best = null;
-  let bestScore = 0;
+  let bestMatched = 0;
+  let bestShare = 0;
   for (const [key, file] of Object.entries(icons)) {
     const k = normDish(key);
-    if (k === n) return file;
-    const words = k.split(/[^а-яa-z0-9]+/).filter((w) => w.length > 3);
-    let score = 0;
-    for (const w of words) if (n.includes(w.slice(0, 4))) score += w.length > 5 ? 2 : 1;
-    if (score > bestScore) { bestScore = score; best = file; }
+    if (k === n) return file + ICON_VERSION;
+    const keyWords = dishWords(key);
+    if (!keyWords.length) continue;
+    const matched = keyWords.filter((kw) => queryWords.some((qw) => sameRoot(kw, qw))).length;
+    const share = matched / keyWords.length;
+    if (matched > 0 && (share > bestShare || (share === bestShare && matched > bestMatched))) {
+      bestShare = share;
+      bestMatched = matched;
+      best = file;
+    }
   }
-  return bestScore >= 2 ? best + ICON_VERSION : null;
+  return bestShare >= 0.5 ? best + ICON_VERSION : null;
 };
 
 const DAY_LABEL = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
