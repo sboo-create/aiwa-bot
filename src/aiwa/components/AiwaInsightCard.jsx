@@ -9,6 +9,7 @@ export function AiwaInsightCard({
   message,
   detail,
   onDiscuss,
+  chip = "",
   className = "",
 }) {
   return (
@@ -16,6 +17,7 @@ export function AiwaInsightCard({
       <AiwaCell data-aiwa-insight-cell="true" tappable={false}>
         <div className="aiwa-insight-content">
           <AiwaCardHeading />
+          {chip ? <span className="aiwa-insight-chip">{chip}</span> : null}
           <Text className="aiwa-insight-message" variant="body" weight="regular">
             {message}
           </Text>

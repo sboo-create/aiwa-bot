@@ -9,7 +9,7 @@ import { WorkoutPanel } from "../panels/WorkoutPanel";
 import { WorkoutVariantsPanel } from "../panels/WorkoutVariantsPanel";
 import { WorkoutHistoryPanel } from "../panels/WorkoutHistoryPanel";
 import { TrainingProfilePanel } from "../panels/TrainingProfilePanel";
-import { actionProps, call, openBotChat } from "../lib/api";
+import { actionProps, apiCall, call, openBotChat } from "../lib/api";
 import { useScreenData } from "../lib/screenData";
 import { historyStrip } from "../lib/historyStrip";
 import { PlusIcon } from "../lib/icons";
@@ -59,6 +59,9 @@ export function ActivityScreen({ mode, revision = 0 }) {
   const [panel, setPanel] = useState("");
   const [suggested, setSuggested] = useState(null);
   const [trainIcons, setTrainIcons] = useState({});
+  // Выбранный день в полосе: тренировки за него грузятся отдельно.
+  const [dayIso, setDayIso] = useState("");
+  const [dayWorkouts, setDayWorkouts] = useState(null);
   useEffect(() => {
     fetch("/assets/train/manifest.json?v=1")
       .then((r) => (r.ok ? r.json() : {}))
@@ -83,6 +86,23 @@ export function ActivityScreen({ mode, revision = 0 }) {
     setSuggested(option);
     setPanel("workout");
   };
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const viewingPast = Boolean(dayIso && dayIso !== todayIso);
+  const pickDay = async (day) => {
+    const iso = typeof day === "string" ? day : day?.iso || "";
+    setDayIso(iso);
+    if (!iso || iso === todayIso) { setDayWorkouts(null); return; }
+    setDayWorkouts(null);
+    const result = await apiCall("/api/train_day", { d: iso }).catch(() => null);
+    setDayWorkouts(result?.workouts || []);
+  };
+  const dayLabel = (() => {
+    if (!viewingPast) return "Прошедшие тренировки";
+    const parsed = new Date(`${dayIso}T12:00:00`);
+    return Number.isNaN(parsed.getTime()) ? "Тренировки за день"
+      : `Тренировки за ${new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(parsed)}`;
+  })();
+  const shownWorkouts = viewingPast ? (dayWorkouts || []) : today.slice().reverse();
 
   return (
     <TMAProvider>
@@ -91,7 +111,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
           {/* ── HEADER ── */}
           <Text className="aiwa-screen-title" variant="title1" weight="semibold">Нагрузка</Text>
           <div className="aiwa-overview">
-            <Week days={overviewStrip(week)} />
+            <Week days={overviewStrip(week)} selectedIso={dayIso || todayIso} onSelect={pickDay} />
             <div className="aiwa-countdown">
               <Text variant="title1" weight="semibold">{weekWorkouts}</Text>
               <Text variant="body" weight="regular">{`${workoutsWord(weekWorkouts)} на этой неделе`}</Text>
@@ -127,21 +147,26 @@ export function ActivityScreen({ mode, revision = 0 }) {
               </SectionList.Item>
             ) : null}
 
-            <SectionList.Item header="Прошедшие тренировки">
-              {today.length ? today.slice().reverse().map((workout) => (
+            <SectionList.Item header={dayLabel}>
+              {viewingPast && !dayWorkouts ? (
+                <PaperRow loading title="Загружаю…" description="Тренировки за выбранный день" />
+              ) : null}
+              {shownWorkouts.length ? shownWorkouts.map((workout) => (
                 <PaperRow
                   key={workout.id}
                   image={trainIcon(trainIcons, workout.type)}
                   title={workout.type || "Тренировка"}
                   description={[
-                    "сегодня",
+                    viewingPast ? "" : "сегодня",
                     workout.duration,
                     workout.kcal ? `${Math.round(workout.kcal)} ккал` : "",
                     String(workout.rpe || "").toLowerCase(),
                   ].filter(Boolean).join(" · ")}
                   onClick={() => setPanel("history")}
                 />
-              )) : weekRows.length ? weekRows.map((day) => (
+              )) : (viewingPast && !dayWorkouts) ? null : viewingPast ? (
+                <PaperRow title="В этот день тренировок нет" description="Выбери другой день или отметь тренировку." />
+              ) : weekRows.length ? weekRows.map((day) => (
                 <PaperRow
                   key={day.d}
                   title={day.type || "Тренировка"}

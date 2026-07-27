@@ -1655,6 +1655,21 @@ body.material .aiwa-mark-bar {
   fill: var(--aiwa-ink-muted);
 }
 
+.aiwa-avatar-initial { position: relative; overflow: hidden; }
+.aiwa-avatar-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+/* Чип «День N · фаза» в карточке Айвы. */
+.aiwa-insight-chip {
+  align-self: flex-start;
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(232, 121, 46, 0.14);
+  color: #e8792e;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
 /* Шкала беременности: прогресс по 40 неделям, маркер текущей, карточка размера малыша. */
 .aiwa-preg-progress { width: 100%; display: flex; flex-direction: column; gap: 10px; padding: 4px 0; }
 .aiwa-preg-track { position: relative; height: 10px; border-radius: 999px; background: rgba(0, 0, 0, 0.07); }

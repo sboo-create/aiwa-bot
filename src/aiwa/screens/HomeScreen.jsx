@@ -27,12 +27,21 @@ import { ProfilePanel } from "../panels/ProfilePanel";
 function ProfileAvatar() {
   const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
   const photo = tgUser?.photo_url;
-  if (photo) return <ImageAvatar src={photo} size={36} />;
   const data = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
   const name = (data?.name || tgUser?.first_name || "").trim();
+  // Оранжевый круг с инициалом рисуется всегда; фото ложится поверх и просто
+  // исчезает, если клиент его не отдал или загрузка упала.
   return (
     <span className="aiwa-avatar-initial" aria-hidden="true">
       {(name[0] || "•").toUpperCase()}
+      {photo ? (
+        <img
+          className="aiwa-avatar-photo"
+          src={photo}
+          alt=""
+          onError={(event) => { event.currentTarget.style.display = "none"; }}
+        />
+      ) : null}
     </span>
   );
 }
@@ -75,7 +84,7 @@ export function HomeScreen(props) {
           {/* ── All content cards: white TMA sections ── */}
           <SectionList className="aiwa-tma-blocks">
             <TodaySection title={props.dayTitle} checkin={props.dayCheckin ?? props.checkin} symptomGroups={props.symptomGroups} />
-            <AiSection aiText={props.aiText} />
+            <AiSection aiText={props.aiText} aiChip={props.aiChip} />
             <DelaySection delay={props.delay} />
             <StatsSection metrics={props.metrics} title={props.statsTitle} />
             {props.pregnancy ? (
@@ -89,7 +98,7 @@ export function HomeScreen(props) {
                 emptyText={props.chartEmptyText}
               />
             )}
-            {props.mode === "meno" ? null : (
+            {props.mode === "meno" || props.mode === "preg" ? null : (
               <HistorySection
                 history={props.history}
                 title={props.historyTitle}

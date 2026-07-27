@@ -135,7 +135,8 @@ export function FoodScreen({ mode, revision = 0 }) {
     setWeekBusy(true);
     try {
       const result = await apiCall("/api/week_food_review", {}).catch(() => null);
-      setWeekReview(result?.text || "Не получилось собрать разбор, попробуй чуть позже.");
+      if (result?.review?.summary) setWeekReview(result.review);
+      else setWeekReview({ summary: result?.text || "Не получилось собрать разбор, попробуй чуть позже.", gaps: [], tips: [] });
     } finally {
       setWeekBusy(false);
     }
@@ -297,7 +298,25 @@ export function FoodScreen({ mode, revision = 0 }) {
                 />
               )}
               {weekReview ? (
-                <AiwaInsightCard message={weekReview} />
+                <>
+                  <AiwaInsightCard message={weekReview.summary} />
+                  {weekReview.gaps?.length ? (
+                    <>
+                      <PaperRow title="Чего не хватает" description="" />
+                      {weekReview.gaps.map((gap) => (
+                        <PaperRow key={gap} title={gap} />
+                      ))}
+                    </>
+                  ) : null}
+                  {weekReview.tips?.length ? (
+                    <>
+                      <PaperRow title="Советы на неделю" description="" />
+                      {weekReview.tips.map((tip, index) => (
+                        <PaperRow key={tip} title={`${index + 1}. ${tip}`} />
+                      ))}
+                    </>
+                  ) : null}
+                </>
               ) : null}
               <div className="aiwa-cell-actions aiwa-week-review-cta">
                 <RegularButton
