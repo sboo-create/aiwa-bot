@@ -103,6 +103,7 @@ export function ProfilePanel({ isOpen, onClose }) {
         <div className="aiwa-sheet-scroll">
           {view === "main" ? (
             <>
+              {data.mode === "male" ? null : (
               <div className="aiwa-profile-modes">
                 <Text variant="body" weight="semibold">Режим</Text>
                 <div className="aiwa-choice-pills">
@@ -121,9 +122,10 @@ export function ProfilePanel({ isOpen, onClose }) {
                   ))}
                 </div>
               </div>
+              )}
               <SectionList className="aiwa-tma-blocks">
                 <SectionList.Item>
-                  <PaperRow title="Выписка для врача" description="PDF в чат бота" onClick={() => setView("report")} />
+                  {data.mode === "male" ? null : <PaperRow title="Выписка для врача" description="PDF в чат бота" onClick={() => setView("report")} />}
                   <PaperRow title="Предпочтения по питанию" description="ограничения и цель калорий" onClick={() => setView("data")} />
                   <PaperRow title="Мои данные" description="рост · вес · возраст · цикл" onClick={() => setView("data")} />
                   <PaperRow title="Утренняя сводка" description={`${form.send_time || "08:00"} · МСК`} onClick={() => setView("summary")} />
@@ -136,7 +138,7 @@ export function ProfilePanel({ isOpen, onClose }) {
                       description={form.proactive_enabled === false ? "выключены" : "не больше одного в день"}
                     />
                   </AiwaCell.Switch>
-                  <PaperRow title="Партнёр и близкие" description="короткая бережная сводка" onClick={openPartner} />
+                  {data.mode === "male" ? null : <PaperRow title="Партнёр и близкие" description="короткая бережная сводка" onClick={openPartner} />}
                 </SectionList.Item>
               </SectionList>
             </>
