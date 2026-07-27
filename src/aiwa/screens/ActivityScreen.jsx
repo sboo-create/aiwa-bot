@@ -11,6 +11,7 @@ import { WorkoutHistoryPanel } from "../panels/WorkoutHistoryPanel";
 import { TrainingProfilePanel } from "../panels/TrainingProfilePanel";
 import { actionProps, apiCall, call, openBotChat } from "../lib/api";
 import { useScreenData } from "../lib/screenData";
+import { ProfilePanel } from "../panels/ProfilePanel";
 import { historyStrip } from "../lib/historyStrip";
 import { PlusIcon } from "../lib/icons";
 
@@ -69,6 +70,10 @@ const trainIcon = (icons, ...keys) => {
  */
 export function ActivityScreen({ mode, revision = 0 }) {
   const [data, refresh] = useScreenData(KEYS, [mode, revision]);
+  // Мужской режим: главной с профилем нет, поэтому профиль открывается отсюда.
+  const aiwaHost = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
+  const maleProfile = aiwaHost?.mode === "male";
+  const [profileOpen, setProfileOpen] = useState(false);
   const [panel, setPanel] = useState("");
   const [suggested, setSuggested] = useState(null);
   const [trainIcons, setTrainIcons] = useState({});
@@ -122,7 +127,19 @@ export function ActivityScreen({ mode, revision = 0 }) {
       <Page mode="secondary">
         <div className="aiwa-paper-screen aiwa-activity-screen">
           {/* ── HEADER ── */}
-          <Text className="aiwa-screen-title" variant="title1" weight="semibold">Нагрузка</Text>
+          <div className="aiwa-screen-titlebar">
+            <Text className="aiwa-screen-title" variant="title1" weight="semibold">Нагрузка</Text>
+            {maleProfile ? (
+              <button
+                type="button"
+                className="aiwa-avatar-initial aiwa-screen-profile"
+                aria-label="Открыть профиль"
+                onClick={() => setProfileOpen(true)}
+              >
+                {(aiwaHost?.name || "•").trim()[0]?.toUpperCase() || "•"}
+              </button>
+            ) : null}
+          </div>
           <div className="aiwa-overview">
             <Week days={overviewStrip(week)} selectedIso={dayIso || todayIso} onSelect={pickDay} />
             <div className="aiwa-countdown">
@@ -207,6 +224,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
             </SectionList.Item>
           </SectionList>
 
+          {maleProfile ? <ProfilePanel isOpen={profileOpen} onClose={() => setProfileOpen(false)} /> : null}
           <WorkoutPanel isOpen={panel === "workout"} onClose={() => setPanel("")} onSaved={reloadTrain} suggested={suggested} />
           <WorkoutVariantsPanel
             isOpen={panel === "variants"}

@@ -13,6 +13,7 @@ import { PlusIcon, ImageIcon, TextIcon } from "../lib/icons";
 import { MEAL_IMAGE } from "../lib/constants";
 import { apiCall, showToast, openBotChat, fmtKcal, actionProps } from "../lib/api";
 import { useScreenData } from "../lib/screenData";
+import { ProfilePanel } from "../panels/ProfilePanel";
 import { historyStrip } from "../lib/historyStrip";
 import { Week } from "../components/Week";
 
@@ -75,6 +76,10 @@ const DAY_LABEL = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "lon
  */
 export function FoodScreen({ mode, revision = 0 }) {
   const [data, refresh, patch] = useScreenData(KEYS, [mode, revision]);
+  // Мужской режим: главной с профилем нет, поэтому профиль открывается отсюда.
+  const aiwaHost = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
+  const maleProfile = aiwaHost?.mode === "male";
+  const [profileOpen, setProfileOpen] = useState(false);
   const [foodIcons, setFoodIcons] = useState({});
   // Просмотр прошлого дня: дневник за выбранную дату грузится отдельно,
   // шапка (гейдж и макросы) всегда остаётся про сегодня.
@@ -239,7 +244,19 @@ export function FoodScreen({ mode, revision = 0 }) {
       <Page mode="secondary">
         <div className="aiwa-paper-screen aiwa-food-screen">
           {/* ── HEADER ── */}
-          <Text className="aiwa-screen-title" variant="title1" weight="semibold">Питание</Text>
+          <div className="aiwa-screen-titlebar">
+            <Text className="aiwa-screen-title" variant="title1" weight="semibold">Питание</Text>
+            {maleProfile ? (
+              <button
+                type="button"
+                className="aiwa-avatar-initial aiwa-screen-profile"
+                aria-label="Открыть профиль"
+                onClick={() => setProfileOpen(true)}
+              >
+                {(aiwaHost?.name || "•").trim()[0]?.toUpperCase() || "•"}
+              </button>
+            ) : null}
+          </div>
           <CalorieGauge kcal={kcal} kcalTarget={kcalTarget} />
           <div className="aiwa-macro-grid">
             <MacroCard label="Жиры" value={macroValue("fat")} target={target.fat} macro="fat" />
@@ -349,6 +366,7 @@ export function FoodScreen({ mode, revision = 0 }) {
             </SectionList.Item>
           </SectionList>
 
+          {maleProfile ? <ProfilePanel isOpen={profileOpen} onClose={() => setProfileOpen(false)} /> : null}
           <AddFoodPanel
             isOpen={panel === "add"}
             onClose={() => setPanel("")}
