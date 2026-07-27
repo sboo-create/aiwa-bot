@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v134-prewarm-blocks"
+AIWA_VERSION = "2026-07-27-v135-cache-evict"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -6227,10 +6227,20 @@ async def _api_log_history(request):
     c.close()
     items = [{"d": r[0], "energy": r[1], "mood": r[2],
               "symptoms": (r[3].split(",") if r[3] else [])} for r in rows]
+    ev(cid, "button", meta="web_log_history")
     return _cors(web.json_response({"items": items}))
 
 # Недельный разбор питания: кэш на день, собирается из дневника за 7 дней.
 _WEEK_FOOD_CACHE = {}
+
+def _evict_today_cache(cid):
+    """Сводка дня зависит от чек-ина, циклов и профиля — сбрасываем при их изменении."""
+    for k in [k for k in _TODAY_CACHE if k[0] == cid]:
+        _TODAY_CACHE.pop(k, None)
+
+def _evict_week_food_cache(cid):
+    for k in [k for k in _WEEK_FOOD_CACHE if k[0] == cid]:
+        _WEEK_FOOD_CACHE.pop(k, None)
 
 async def _api_week_food_review(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -6260,6 +6270,7 @@ async def _api_week_food_review(request):
         return _cors(web.json_response({"ok": True, "review": review}))
     except Exception as e:
         log.warning("week food review %s: %s", cid, e)
+        ev(cid, "fallback", meta="static:week_food_fail")
         return _cors(web.json_response({"ok": False, "text": "Не получилось собрать разбор, попробуй чуть позже."}, status=502))
 
 # Рецепты меню: кэш на день, чтобы повторный тап по блюду не жёг токены.
@@ -6298,6 +6309,7 @@ async def _api_recipe(request):
         return _cors(web.json_response(rec))
     except Exception as e:
         log.warning("recipe %s «%s»: %s", cid, dish, e)
+        ev(cid, "fallback", meta="static:recipe_fail")
         return _cors(web.json_response({"error": "generation"}, status=502))
 
 async def _api_food_prompt(request):
@@ -6307,9 +6319,9 @@ async def _api_food_prompt(request):
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"ok": False}))
     try:
+        ev(cid, "button", meta="web_food_prompt")
         if BOT_APP:
             await BOT_APP.bot.send_message(cid, "Что ты скушала? Напиши обычным текстом — например «200 г творога и банан» — я посчитаю КБЖУ и запишу в дневник.")
-        ev(cid, "button", meta="web_food_prompt")
         return _cors(web.json_response({"ok": True}))
     except Exception as e:
         log.warning("food_prompt %s: %s", cid, e)
@@ -6420,6 +6432,7 @@ async def _api_data(request):
 async def _api_period(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_today_cache(cid)
     action = body.get("action"); ds = body.get("date")
     try: d = date.fromisoformat(ds) if ds else dtoday()
     except Exception: d = dtoday()
@@ -6481,6 +6494,7 @@ async def _api_pa(request):
 async def _api_checkin(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_today_cache(cid)
     ds = body.get("date") or dtoday().isoformat()
     try: date.fromisoformat(ds)
     except Exception: ds = dtoday().isoformat()
@@ -6526,6 +6540,7 @@ async def _api_proactive(request):
 async def _api_profile(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_today_cache(cid)
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"error": "onboard"}, status=403))
@@ -7945,8 +7960,9 @@ async def log_workout_action(cid, u, text, user_generation=None, mutation_key=No
     if not rec:
         return {"ok": False, "text": "Не поняла, какую тренировку записать. Напиши, например «бегала 30 минут, запиши тренировку»."}
     prof = profile_of(u) or {}
-    if rec.get("duration"):
-        rec["kcal"] = workout_calories(rec["type"], rec["duration"], rec.get("rpe"), prof.get("weight"))
+    # Как в мини-аппе: без явной длительности считаем от 40 минут, чтобы запись
+    # из чата не висела с нулём калорий в дневнике приложения.
+    rec["kcal"] = workout_calories(rec["type"], rec.get("duration") or "40 мин", rec.get("rpe"), prof.get("weight"))
     saved = workout_add(
         cid, rec, d=event_date.isoformat(), user_generation=generation, mutation_key=mutation_key,
         args_hash=args_hash, return_status=True,
@@ -8012,8 +8028,9 @@ async def log_workout_update_action(cid, u, text, target_id, user_generation=Non
     if not rec.get("items") and current.get("items"):
         rec["items"] = current["items"]
     prof = profile_of(u) or {}
-    if rec.get("duration"):
-        rec["kcal"] = workout_calories(rec["type"], rec["duration"], rec.get("rpe"), prof.get("weight"))
+    # Как в мини-аппе: без явной длительности считаем от 40 минут, чтобы запись
+    # из чата не висела с нулём калорий в дневнике приложения.
+    rec["kcal"] = workout_calories(rec["type"], rec.get("duration") or "40 мин", rec.get("rpe"), prof.get("weight"))
     saved = workout_update(
         cid, target_id, rec, user_generation=generation, mutation_key=mutation_key,
         args_hash=args_hash, return_status=True,
@@ -8119,6 +8136,7 @@ async def _api_food_photo(request):
         return _cors(web.json_response({"ok": False, "message": "Не получила фото."}, status=400))
     cid = _verify_init(data.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте: /start."}, status=403))
@@ -8157,6 +8175,7 @@ async def _api_food_photo(request):
 async def _api_food_text(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте."}, status=403))
@@ -8212,6 +8231,7 @@ async def _api_train_day(request):
         if dd > dtoday() or (dtoday() - dd).days > 92: raise ValueError
     except Exception:
         return _cors(web.json_response({"error": "bad date"}, status=400))
+    ev(cid, "button", meta="web_train_day")
     return _cors(web.json_response({"ok": True, "d": d, "workouts": workouts_of(cid, d)}))
 
 async def _api_train(request):
@@ -8310,6 +8330,7 @@ async def _api_diary(request):
 async def _api_diary_del(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     try: meal_del(cid, int(body.get("id")))
     except Exception: pass
@@ -8319,6 +8340,7 @@ async def _api_diary_del(request):
 async def _api_diary_scale(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     try: meal_scale(cid, int(body.get("id")), int(body.get("grams")))
     except Exception: pass
@@ -8328,6 +8350,7 @@ async def _api_diary_scale(request):
 async def _api_diary_slot(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     try: meal_set_slot(cid, int(body.get("id")), body.get("slot"))
     except Exception: pass
@@ -8337,6 +8360,7 @@ async def _api_diary_slot(request):
 async def _api_diary_edit(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     kw = {}
     if body.get("title") is not None: kw["title"] = str(body["title"]).strip()[:80]
@@ -8355,6 +8379,7 @@ async def _api_diary_edit(request):
 async def _api_food_manual(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву."}, status=403))
     ev(cid, "flow_start", meta="food")
     title = (body.get("title") or "").strip()[:80]
@@ -8400,6 +8425,7 @@ async def _api_mode(request):
 async def _api_prefs(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_today_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     note = (body.get("diet_note") or "").strip()[:300]
     upsert(cid, diet_note=note)
