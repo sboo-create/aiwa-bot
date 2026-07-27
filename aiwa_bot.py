@@ -329,6 +329,9 @@ def _activate_user(cid):
 
 def row(cid):
     c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    return _user_row(r)
+
+def _user_row(r):
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
             "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
@@ -3672,42 +3675,52 @@ async def _serve_index(request):
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
 
+def _api_data_reads(cid, today_iso):
+    return (
+        pa_list(cid), chatlog_get(cid, 60), partner_of(cid), log_get(cid, today_iso),
+        logs_of(cid, (date.fromisoformat(today_iso) - timedelta(days=45)).isoformat()),
+        periods_of(cid), streak_of(cid),
+    )
+
 async def _api_data(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    u = row(cid)
+    u = await asyncio.to_thread(row, cid)
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
-    ev(cid, "button", meta="app_open")
+    _queue_event(cid, "button", meta="app_open")
     campaign = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(body.get("campaign") or ""))[:80]
     if campaign:
-        ev(cid, "push_open", meta=campaign)
+        _queue_event(cid, "push_open", meta=campaign)
         if campaign.split(":", 1)[0] == "daily_summary":
-            ev(cid, "summary_open", meta="daily_summary")
+            _queue_event(cid, "summary_open", meta="daily_summary")
+    today_iso = dtoday().isoformat()
+    pa, chatlog, partner, today_log, symptom_log, periods, streak = await asyncio.to_thread(
+        _api_data_reads, cid, today_iso,
+    )
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
-           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
-           "partner_linked": bool(partner_of(cid)),
+           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa, "chatlog": chatlog,
+           "partner_linked": bool(partner),
            "proactive_enabled": bool(u.get("proactive_enabled", True)),
-           "today_log": log_get(cid, dtoday().isoformat()) or {"symptoms": []},
+           "today_log": today_log or {"symptoms": []},
            "send_time": u.get("send_time") or "08:00",
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
                        "activity": u.get("activity"), "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}}
-    out["sym_log"] = logs_of(cid, (dtoday() - timedelta(days=45)).isoformat())
-    out["past_periods"] = periods_of(cid)
+    out["sym_log"] = symptom_log
+    out["past_periods"] = periods
     try:
         _pr = profile_of(u)
         out["kcal_base"] = calc_calories(_pr["height"], _pr["weight"], _pr["age"], _pr["activity"])[0] if _pr else None
     except Exception:
         out["kcal_base"] = None
     try:
-        out["streak"] = streak_of(cid)
+        out["streak"] = streak
     except Exception:
         out["streak"] = 0
     if out["cycle"]:
         stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
         out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
                     "days_since": stt["days_since"], "status": stt["status"], "delay_days": stt["delay_days"]})
-        periods = periods_of(cid)
         if u.get("period_end"):
             for p in periods:
                 if p["start"] == u.get("last_period") and not p.get("end"):
@@ -3813,34 +3826,35 @@ async def _api_checkin(request):
     ds = body.get("date") or dtoday().isoformat()
     try: date.fromisoformat(ds)
     except Exception: ds = dtoday().isoformat()
-    log_ensure(cid, ds)
+    await asyncio.to_thread(log_ensure, cid, ds)
     changed = False
     if body.get("energy"):
         try:
-            log_set(cid, ds, energy=max(1, min(3, int(body["energy"]))))
+            await asyncio.to_thread(log_set, cid, ds, energy=max(1, min(3, int(body["energy"]))))
             changed = True
         except Exception: pass
     if body.get("mood"):
         try:
-            log_set(cid, ds, mood=max(1, min(3, int(body["mood"]))))
+            await asyncio.to_thread(log_set, cid, ds, mood=max(1, min(3, int(body["mood"]))))
             changed = True
         except Exception: pass
     if body.get("symptom"):
         code = str(body.get("symptom"))
         if code in SYM or code.startswith("custom:"):
-            log_toggle(cid, ds, code)
+            await asyncio.to_thread(log_toggle, cid, ds, code)
             changed = True
     if body.get("custom_symptom"):
         code = symptom_code(str(body.get("custom_symptom")))
         if code:
-            log_add_symptom(cid, ds, code)
+            await asyncio.to_thread(log_add_symptom, cid, ds, code)
             changed = True
     if changed:
-        ev(cid, "manual", meta="web_checkin")
+        _queue_event(cid, "manual", meta="web_checkin")
         # In the mini app every successful field save is a completed check-in:
         # unlike the bot flow there is intentionally no separate “Готово” button.
-        ev(cid, "goal", meta="web_checkin_complete")
-    return _cors(web.json_response({"ok": True, "log": log_get(cid, ds) or {"symptoms": []}}))
+        _queue_event(cid, "goal", meta="web_checkin_complete")
+    current_log = await asyncio.to_thread(log_get, cid, ds)
+    return _cors(web.json_response({"ok": True, "log": current_log or {"symptoms": []}}))
 
 async def _api_proactive(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -4388,11 +4402,72 @@ def _media_job_claim(job_id):
     finally:
         c.close()
 
+async def _media_job_create_async(cid, raw, filename):
+    if not database_backend.uses_postgres():
+        return await asyncio.to_thread(_media_job_create, cid, raw, filename)
+    job_id = "media_" + secrets.token_hex(16)
+    now = datetime.now(TZ).isoformat()
+    pool = await database_backend.get_async_pool()
+    async with pool.connection() as conn:
+        await conn.execute(
+            """INSERT INTO media_jobs(job_id, chat_id, status, filename, image_data, created_at, updated_at)
+               VALUES(%s, %s, 'queued', %s, %s, %s, %s)""",
+            (job_id, cid, filename, raw, now, now),
+        )
+    return job_id
+
+async def _media_job_get_async(job_id, cid=None):
+    if not database_backend.uses_postgres():
+        return await asyncio.to_thread(_media_job_get, job_id, cid)
+    pool = await database_backend.get_async_pool()
+    sql = """SELECT job_id, chat_id, status, filename, image_data, result_json, error,
+                    created_at, updated_at FROM media_jobs WHERE job_id=%s"""
+    params = (job_id,)
+    if cid is not None:
+        sql += " AND chat_id=%s"
+        params = (job_id, cid)
+    async with pool.connection() as conn:
+        cur = await conn.execute(sql, params)
+        row_value = await cur.fetchone()
+    if not row_value:
+        return None
+    keys = ("job_id", "chat_id", "status", "filename", "image_data", "result_json",
+            "error", "created_at", "updated_at")
+    return dict(zip(keys, row_value))
+
+async def _media_job_update_async(job_id, status, *, result=None, error=None, clear_image=False):
+    if not database_backend.uses_postgres():
+        return await asyncio.to_thread(
+            _media_job_update, job_id, status, result=result, error=error,
+            clear_image=clear_image,
+        )
+    pool = await database_backend.get_async_pool()
+    async with pool.connection() as conn:
+        await conn.execute(
+            """UPDATE media_jobs SET status=%s, result_json=%s, error=%s, updated_at=%s,
+               image_data=CASE WHEN %s THEN NULL ELSE image_data END WHERE job_id=%s""",
+            (status, json.dumps(result, ensure_ascii=False) if result is not None else None,
+             (str(error)[:500] if error else None), datetime.now(TZ).isoformat(),
+             bool(clear_image), job_id),
+        )
+
+async def _media_job_claim_async(job_id):
+    if not database_backend.uses_postgres():
+        return await asyncio.to_thread(_media_job_claim, job_id)
+    pool = await database_backend.get_async_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """UPDATE media_jobs SET status='processing', updated_at=%s
+               WHERE job_id=%s AND status='queued'""",
+            (datetime.now(TZ).isoformat(), job_id),
+        )
+        return bool(cur.rowcount)
+
 async def process_food_photo_job(job_id):
-    claimed = await asyncio.to_thread(_media_job_claim, job_id)
+    claimed = await _media_job_claim_async(job_id)
     if not claimed:
         return
-    job = await asyncio.to_thread(_media_job_get, job_id)
+    job = await _media_job_get_async(job_id)
     if not job:
         return
     cid = int(job["chat_id"])
@@ -4415,19 +4490,80 @@ async def process_food_photo_job(job_id):
                 detail = ""
             raise RuntimeError(detail or "photo was not recognized")
         meal_id = await asyncio.to_thread(meal_add, cid, rec)
-        ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage), usage=usage)
-        ev(cid, "goal", meta="food_log")
-        ev(cid, "manual", meta="food_log")
+        await asyncio.to_thread(_record_food_photo_events, cid, usage)
         result = {"ok": True, "meal_id": meal_id, "rec": rec}
         result.update(await asyncio.to_thread(diary_payload, cid, prof))
-        await asyncio.to_thread(
-            _media_job_update, job_id, "completed", result=result, clear_image=True,
+        await _media_job_update_async(
+            job_id, "completed", result=result, clear_image=True,
         )
     except Exception as exc:
         log.warning("food photo job %s failed: %s", job_id, exc)
-        await asyncio.to_thread(
-            _media_job_update, job_id, "failed", error=exc, clear_image=True,
+        await _media_job_update_async(
+            job_id, "failed", error=exc, clear_image=True,
         )
+
+
+def _prepare_food_photo_request(cid):
+    user = row(cid)
+    if not is_onboarded(user):
+        return None
+    generation = _user_generation(cid)
+    ev(cid, "flow_start", meta="food")
+    return generation
+
+async def _prepare_food_photo_request_async(cid):
+    if not database_backend.uses_postgres():
+        return await asyncio.to_thread(_prepare_food_photo_request, cid)
+    pool = await database_backend.get_async_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,
+                      height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,
+                      period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,
+                      proactive_enabled FROM users WHERE chat_id=%s""",
+            (cid,),
+        )
+        user = _user_row(await cur.fetchone())
+        if not is_onboarded(user):
+            return None
+        cur = await conn.execute(
+            "SELECT generation FROM user_lifecycle WHERE user_key=%s",
+            (A2.user_key(cid),),
+        )
+        lifecycle = await cur.fetchone()
+    _queue_event(cid, "flow_start", meta="food")
+    return int(lifecycle[0]) if lifecycle else 0
+
+
+def _record_food_photo_events(cid, usage):
+    ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage), usage=usage)
+    ev(cid, "goal", meta="food_log")
+    ev(cid, "manual", meta="food_log")
+
+_EVENT_QUEUE = None
+_EVENT_TASK = None
+
+async def _event_writer():
+    while True:
+        args, kwargs = await _EVENT_QUEUE.get()
+        try:
+            await asyncio.to_thread(ev, *args, **kwargs)
+        except Exception:
+            log.exception("background event write failed")
+        finally:
+            _EVENT_QUEUE.task_done()
+
+def _queue_event(*args, **kwargs):
+    global _EVENT_QUEUE, _EVENT_TASK
+    if _EVENT_QUEUE is None:
+        _EVENT_QUEUE = asyncio.Queue(maxsize=10000)
+    if _EVENT_TASK is None or _EVENT_TASK.done():
+        _EVENT_TASK = asyncio.create_task(_event_writer())
+    try:
+        _EVENT_QUEUE.put_nowait((args, kwargs))
+    except asyncio.QueueFull:
+        log.warning("analytics event queue full")
+
 
 async def _api_food_photo(request):
     job_id = None
@@ -4437,30 +4573,28 @@ async def _api_food_photo(request):
         return _cors(web.json_response({"ok": False, "message": "Не получила фото."}, status=400))
     cid = _verify_init(data.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    u = row(cid)
-    if not is_onboarded(u):
+    generation = await _prepare_food_photo_request_async(cid)
+    if generation is None:
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте: /start."}, status=403))
-    generation = _user_generation(cid)
-    ev(cid, "flow_start", meta="food")
     raw, fn = _read_upload(data.get("photo"))
     if not raw:
         return _cors(web.json_response({"ok": False, "message": "Пустое фото."}))
     if len(raw) > 12 * 1024 * 1024:
         return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
     try:
-        job_id = await asyncio.to_thread(_media_job_create, cid, raw, fn)
+        job_id = await _media_job_create_async(cid, raw, fn)
         from media_runtime import enqueue_food_photo
         await enqueue_food_photo(job_id, cid)
     except Exception as e:
         log.warning("food photo enqueue %s: %s", cid, e)
         if job_id:
-            await asyncio.to_thread(
-                _media_job_update, job_id, "failed", error=e, clear_image=True,
+            await _media_job_update_async(
+                job_id, "failed", error=e, clear_image=True,
             )
         return _cors(web.json_response(
             {"ok": False, "message": "Не удалось поставить фото в очередь."}, status=503,
         ))
-    ev(cid, "flow_start", meta="food_photo_queued")
+    _queue_event(cid, "flow_start", meta="food_photo_queued")
     return _cors(web.json_response(
         {"ok": True, "job_id": job_id, "status": "queued"}, status=202,
     ))
@@ -4471,7 +4605,7 @@ async def _api_food_photo_status(request):
     if not cid:
         return _cors(web.json_response({"error": "auth"}, status=401))
     job_id = str(body.get("job_id") or "")
-    job = await asyncio.to_thread(_media_job_get, job_id, cid)
+    job = await _media_job_get_async(job_id, cid)
     if not job:
         return _cors(web.json_response({"error": "not_found"}, status=404))
     out = {"ok": True, "job_id": job_id, "status": job["status"]}
@@ -4610,9 +4744,9 @@ async def _api_train_profile(request):
 async def _api_diary(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
-    ev(cid, "button", meta="web_diary")
-    return _cors(web.json_response(diary_payload(cid)))
+    if not is_onboarded(await asyncio.to_thread(row, cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    _queue_event(cid, "button", meta="web_diary")
+    return _cors(web.json_response(await asyncio.to_thread(diary_payload, cid)))
 
 async def _api_diary_del(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -4662,8 +4796,8 @@ async def _api_diary_edit(request):
 async def _api_food_manual(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    if not is_onboarded(row(cid)): return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву."}, status=403))
-    ev(cid, "flow_start", meta="food")
+    if not is_onboarded(await asyncio.to_thread(row, cid)): return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву."}, status=403))
+    _queue_event(cid, "flow_start", meta="food")
     title = (body.get("title") or "").strip()[:80]
     kcal = int(_num(body.get("kcal")))
     if not title and not kcal:
@@ -4673,8 +4807,11 @@ async def _api_food_manual(request):
            "carbs": round(_num(body.get("carbs")), 1), "grams": (int(_num(body.get("grams"))) or None),
            "source": "manual"}
     if body.get("slot") in ("breakfast", "lunch", "snack", "dinner"): rec["slot"] = body["slot"]
-    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
-    out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid))
+    mid = await asyncio.to_thread(meal_add, cid, rec)
+    _queue_event(cid, "goal", meta="food_log")
+    _queue_event(cid, "manual", meta="food_log")
+    out = {"ok": True, "meal_id": mid, "rec": rec}
+    out.update(await asyncio.to_thread(diary_payload, cid))
     return _cors(web.json_response(out))
 
 async def _api_diary_reco(request):
@@ -5321,6 +5458,21 @@ async def _trace_request(request, handler):
                  request.method, request.path, response.status)
         return response
 
+@web.middleware
+async def _database_overload(request, handler):
+    try:
+        return await handler(request)
+    except Exception as exc:
+        from psycopg_pool import PoolTimeout
+        if not isinstance(exc, PoolTimeout):
+            raise
+        log.warning("postgres pool exhausted path=%s", request.path)
+        return _cors(web.json_response(
+            {"error": "busy", "message": "Сервис перегружен, повтори через несколько секунд."},
+            status=503,
+            headers={"Retry-After": "3"},
+        ))
+
 
 @web.middleware
 async def _security_headers(request, handler):
@@ -5347,7 +5499,7 @@ async def _health(request):
 
 def build_web():
     aio = web.Application(client_max_size=20 * 1024 * 1024,
-                          middlewares=[_trace_request, _security_headers])  # фото до ~20 МБ
+                          middlewares=[_database_overload, _trace_request, _security_headers])  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
     aio.router.add_get("/health", _health)
     aio.router.add_get("/admin", _admin_page)
@@ -5386,6 +5538,11 @@ def build_web():
     aio.router.add_post("/api/report", _api_report)
     aio.router.add_route("OPTIONS", "/api/{tail:.*}", _api_opts)
     aio.router.add_get("/{tail:.*}", _serve_index)
+    async def close_media_publisher(_app):
+        from media_runtime import close_publisher
+        await close_publisher()
+        await database_backend.close_async_pool()
+    aio.on_cleanup.append(close_media_publisher)
     return aio
 
 def build_telegram_application():

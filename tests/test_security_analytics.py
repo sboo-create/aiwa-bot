@@ -354,10 +354,14 @@ class SecurityAnalyticsTests(unittest.TestCase):
         cid = 82
         bot._activate_user(cid)
         bot.upsert(cid, mode="irregular")
-        with mock.patch.object(bot, "_verify_init", return_value=cid):
-            response = asyncio.run(bot._api_checkin(FakeJsonRequest({
+        async def request_and_flush():
+            response = await bot._api_checkin(FakeJsonRequest({
                 "initData": "signed", "date": date.today().isoformat(), "energy": 2,
-            })))
+            }))
+            await bot._EVENT_QUEUE.join()
+            return response
+        with mock.patch.object(bot, "_verify_init", return_value=cid):
+            response = asyncio.run(request_and_flush())
 
         self.assertEqual(response.status, 200)
         conn = bot.db()
@@ -632,6 +636,19 @@ class SecurityAnalyticsTests(unittest.TestCase):
         completed = bot._media_job_get(job_id, 42)
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(json.loads(completed["result_json"]), result)
+        self.assertIsNone(completed["image_data"])
+
+    def test_async_media_job_api_preserves_sqlite_fallback(self):
+        async def exercise():
+            job_id = await bot._media_job_create_async(42, b"async-photo", "food.jpg")
+            self.assertTrue(await bot._media_job_claim_async(job_id))
+            await bot._media_job_update_async(
+                job_id, "completed", result={"ok": True}, clear_image=True,
+            )
+            return await bot._media_job_get_async(job_id, 42)
+
+        completed = asyncio.run(exercise())
+        self.assertEqual(completed["status"], "completed")
         self.assertIsNone(completed["image_data"])
 
     def test_openrouter_payload_is_private_by_default(self):

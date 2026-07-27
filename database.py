@@ -1,10 +1,13 @@
 """Shared DB access: SQLite locally, pooled PostgreSQL when DATABASE_URL is set."""
+import asyncio
 import os
 import re
 import sqlite3
 import threading
 
 _pool = None
+_async_pool = None
+_async_pool_lock = None
 _pool_lock = threading.Lock()
 _schema_lock = threading.Lock()
 _schema_ready = False
@@ -29,6 +32,36 @@ def _get_pool():
                     max_size=int(os.environ.get("AIWA_PG_POOL_MAX", "10")),
                 )
     return _pool
+
+
+async def get_async_pool():
+    """Return the process-wide psycopg async pool for HTTP/worker hot paths."""
+    global _async_pool, _async_pool_lock
+    if _async_pool is not None:
+        return _async_pool
+    if _async_pool_lock is None:
+        _async_pool_lock = asyncio.Lock()
+    async with _async_pool_lock:
+        if _async_pool is None:
+            from psycopg_pool import AsyncConnectionPool
+            pool = AsyncConnectionPool(
+                database_url(),
+                min_size=1,
+                max_size=int(os.environ.get("AIWA_PG_ASYNC_POOL_MAX", "15")),
+                timeout=float(os.environ.get("AIWA_PG_POOL_TIMEOUT", "3")),
+                open=False,
+            )
+            await pool.open()
+            _async_pool = pool
+    return _async_pool
+
+
+async def close_async_pool():
+    global _async_pool, _async_pool_lock
+    pool, _async_pool = _async_pool, None
+    _async_pool_lock = None
+    if pool is not None:
+        await pool.close()
 
 
 def _pg_sql(sql):

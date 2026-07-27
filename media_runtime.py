@@ -14,10 +14,25 @@ import tracing as TR
 log = logging.getLogger("aiwa.media")
 STREAM = os.environ.get("AIWA_MEDIA_JOBS_STREAM", "aiwa:media_jobs")
 GROUP = os.environ.get("AIWA_MEDIA_JOBS_GROUP", "aiwa-media-workers")
+_publisher = None
 
 
 def _client():
     return redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+
+
+def _publisher_client():
+    global _publisher
+    if _publisher is None:
+        _publisher = _client()
+    return _publisher
+
+
+async def close_publisher():
+    global _publisher
+    client, _publisher = _publisher, None
+    if client is not None:
+        await client.aclose()
 
 
 async def _ensure_group(client):
@@ -29,20 +44,17 @@ async def _ensure_group(client):
 
 
 async def enqueue_food_photo(job_id, chat_id):
-    client = _client()
+    client = _publisher_client()
     envelope = TR.JobEnvelope.create(
         "food_photo", {"job_id": job_id, "chat_id": int(chat_id)}, job_id,
         job_id=job_id,
     )
-    try:
-        await client.xadd(
-            STREAM,
-            {"envelope": json.dumps(envelope.as_dict(), ensure_ascii=False)},
-            maxlen=int(os.environ.get("AIWA_MEDIA_JOBS_MAXLEN", "10000")),
-            approximate=True,
-        )
-    finally:
-        await client.aclose()
+    await client.xadd(
+        STREAM,
+        {"envelope": json.dumps(envelope.as_dict(), ensure_ascii=False)},
+        maxlen=int(os.environ.get("AIWA_MEDIA_JOBS_MAXLEN", "10000")),
+        approximate=True,
+    )
     log.info("media job queued type=food_photo job_id=%s", job_id)
 
 
@@ -87,3 +99,4 @@ async def run_media_worker():
         for task in tasks:
             task.cancel()
         await client.aclose()
+        await bot.database_backend.close_async_pool()
