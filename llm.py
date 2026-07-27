@@ -1391,9 +1391,18 @@ def training_today(st, profile=None, recent=None, mode=None, usage=None, pregnan
         '"duration":"диапазон, напр. 35-50 мин",'
         '"summary":"1-2 живых предложения: что делать сегодня и ради чего",'
         '"why":"2-3 предложения простыми словами: физиология именно сегодня — фаза, гормоны или самочувствие",'
-        '"options":[{"name":"короткое название","benefit":"чем полезно именно ей сегодня","how":"как делать: время, подходы или темп"}],'
+        '"options":[{"name":"короткое название","benefit":"чем полезно именно ей сегодня",'
+        '"how":"как делать: темп и структура","duration":"NN мин",'
+        '"exercises":[{"name":"упражнение","sets":N,"reps":N}],'
+        '"tip":"одна конкретная рекомендация по технике или восстановлению"}],'
         '"suggestions":["три РАЗНЫХ саджеста про нагрузку, восстановление или технику"]}\n' + SUGG_RULES + '\n'
-        "В options 2-3 конкретных варианта. Только обычная доступная активность. По-русски, без markdown."
+        "В options 2-3 конкретных варианта с точным временем. Для силовых вариантов подбирай упражнения СТРОГО из списка: "
+        "Присед, Жим ногами, Выпады, Болгарские, Румынская тяга, Разгибания, Сгибания, Икры, "
+        "Вертикальная тяга, Горизонтальная тяга, Тяга в наклоне, Становая, Подтягивания, Гиперэкстензия, "
+        "Жим лёжа, Жим гантелей, Жим в наклоне, Сведения, Отжимания, Жим стоя, Махи в стороны, Махи в наклоне, Протяжка, "
+        "Ягодичный мост, Отведение бедра, Мах ногой, Плие-присед, Бицепс, Молоток, Разгибания трицепс, Французский жим, "
+        "Планка, Скручивания, Подъём ног, Русский твист — 3-5 штук с подходами и повторами. "
+        "Для кардио/йоги/ходьбы exercises оставь пустым. Только обычная доступная активность. По-русски, без markdown."
     )
     if mode == "preg":
         prompt += (
@@ -1426,7 +1435,14 @@ def training_today(st, profile=None, recent=None, mode=None, usage=None, pregnan
         "day": (st.get("day", "") if st else ""),
         "cycle_len": (st.get("cycle_len", "") if st else ""),
         "options": [{"name": o.get("name", ""), "benefit": o.get("benefit", ""),
-                     "how": o.get("how") or o.get("detail", "")} for o in opts[:3]],
+                     "how": o.get("how") or o.get("detail", ""),
+                     "duration": str(o.get("duration") or ""),
+                     "tip": str(o.get("tip") or ""),
+                     "exercises": [
+                         {"name": str(e.get("name") or "")[:40],
+                          "sets": e.get("sets"), "reps": e.get("reps")}
+                         for e in (o.get("exercises") or []) if isinstance(e, dict) and e.get("name")
+                     ][:5]} for o in opts[:3]],
         "suggestions": sugg,
     }
 
@@ -1899,7 +1915,8 @@ def recipe(dish, usage=None):
               "Ответь строго JSON без обрамления: "
               '{"ingredients":["продукт — количество", ... до 8 позиций],'
               '"steps":["короткий шаг приготовления", ... до 5 шагов],'
-              '"kcal":"NNN ккал на порцию","time":"NN минут"}')
+              '"kcal":"NNN ккал на порцию","time":"NN минут",'
+              '"macros":{"protein":"NN г","fat":"NN г","carbs":"NN г"}}')
     data = {}; out = ""
     for _ in range(2):   # модель изредка отвечает не-JSON — одна повторная попытка
         out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
@@ -1912,10 +1929,12 @@ def recipe(dish, usage=None):
         if isinstance(data, dict) and data.get("steps"): break
     if not isinstance(data, dict) or not data.get("steps"):
         raise ValueError(f"recipe: плохой ответ модели: {str(out)[:120]}")
+    macros = data.get("macros") if isinstance(data.get("macros"), dict) else {}
     return {"dish": dish,
             "ingredients": [str(x) for x in (data.get("ingredients") or [])][:8],
             "steps": [str(x) for x in (data.get("steps") or [])][:6],
-            "kcal": str(data.get("kcal") or ""), "time": str(data.get("time") or "")}
+            "kcal": str(data.get("kcal") or ""), "time": str(data.get("time") or ""),
+            "macros": {k: str(macros.get(k) or "") for k in ("protein", "fat", "carbs")}}
 
 
 def menu_today(st, profile=None, target=None, usage=None):

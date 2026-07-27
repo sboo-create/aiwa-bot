@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v131-journal-history"
+AIWA_VERSION = "2026-07-27-v132-review2"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -6722,15 +6722,24 @@ async def _api_section(request):
     except Exception:
         payload = _section_fallback(cid, kind, u, st)
         return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
+# Сводка дня в мини-аппе: кэш на день, чтобы апп открывался сразу, а не ждал модель.
+_TODAY_CACHE = {}
+
 async def _api_today(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
     _, st = status_of(cid); ev(cid, "button", meta="web_today")
+    ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
+    hit = _TODAY_CACHE.get(ck)
+    if hit: return _cors(web.json_response(hit))
     _su = []
     note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), _su)
     if _su: ev(cid, "tokens", sum(_su), meta="today_note", calls=len(_su), usage=_su)
+    if isinstance(note, dict) and (note.get("summary") or "").strip():
+        if len(_TODAY_CACHE) > 2000: _TODAY_CACHE.clear()
+        _TODAY_CACHE[ck] = note
     return _cors(web.json_response(note))
 
 async def _api_chat(request):
