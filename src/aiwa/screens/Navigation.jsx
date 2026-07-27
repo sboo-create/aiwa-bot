@@ -14,8 +14,12 @@ const TABS = [
 ];
 
 export function Navigation({ active }) {
+  // Мужской режим: пока только питание и нагрузка — без главной с циклом и чек-инами.
+  const data = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
+  const male = data?.mode === "male";
+  const tabs = male ? TABS.filter((tab) => tab.id !== "today") : TABS;
   const selected = active === "stats" ? "today" : active;
-  const defaultIndex = Math.max(0, TABS.findIndex((tab) => tab.id === selected));
+  const defaultIndex = Math.max(0, tabs.findIndex((tab) => tab.id === selected));
 
   return (
     <TMAProvider>
@@ -23,9 +27,9 @@ export function Navigation({ active }) {
       <div className="aiwa-nav-root" data-aiwa-nav="true">
         <div className="aiwa-nav-tabbar-layer">
           <TabBar
-            tabs={TABS.map(({ label, icon }) => ({ label, icon }))}
+            tabs={tabs.map(({ label, icon }) => ({ label, icon }))}
             defaultIndex={defaultIndex}
-            onChange={(index) => call("go", TABS[index].id)}
+            onChange={(index) => call("go", tabs[index].id)}
           />
         </div>
         <Tappable
