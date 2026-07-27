@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v137-gender-onb-diskcache"
+AIWA_VERSION = "2026-07-27-v138-onb-copy"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -168,17 +168,17 @@ def symptom_label(code):
 def symptoms_labels(items):
     return [symptom_label(x) for x in (items or []) if symptom_label(x)]
 
-START_TEXT = ("Привет, я Айва — ИИ wellness-ассистент.\n\n"
- "Каждый день помогаю с самочувствием, питанием и нагрузкой:\n"
+START_TEXT = ("Привет, это Айва — ИИ wellness-ассистент про самочувствие, питание и нагрузку.\n\n"
+ "Внутри:\n"
  "• утренняя сводка под твоё состояние\n"
- "• персональное меню и тренировки\n"
+ "• персональное меню и тренировки на день\n"
  "• ответы на вопросы о здоровье — текстом или голосом\n"
  "• дневник еды, можно просто по фото\n"
- "• для женщин — календарь цикла и поддержка на каждую фазу\n"
+ "• календарь цикла и поддержка на каждую фазу — для женщин\n"
  "• выписка для врача\n\n"
- "Настройка займёт около минуты. Для начала подскажи, кто ты:")
+ "Настройка займёт около минуты. Кто ты?")
 
-FEMALE_START_TEXT = ("Отлично. Теперь выбери, что ближе:")
+FEMALE_START_TEXT = ("Принято. Что ближе?")
 ABOUT_TEXT = ("Я Айва — ИИ wellness-ассистент: самочувствие, питание, нагрузка; для женщин — цикл и календарь.\n\n"
  "Что я умею:\n"
  "• веду календарь цикла и присылаю утреннюю сводку под фазу\n"
@@ -2267,8 +2267,8 @@ MENU_KB = InlineKeyboardMarkup([
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Я женщина", callback_data="onb_female")],
-    [InlineKeyboardButton("Я мужчина", callback_data="mode:male")],
+    [InlineKeyboardButton("Женщина", callback_data="onb_female")],
+    [InlineKeyboardButton("Мужчина", callback_data="mode:male")],
 ])
 FEMALE_ONB_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
