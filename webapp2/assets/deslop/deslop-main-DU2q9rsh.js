@@ -19693,7 +19693,7 @@ function Tj({ label: a, value: e, ok: l }) {
 function Cj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Tj, { ...l }, l.label)) }) : null;
 }
-const Ej = E.lazy(() => import("./AiwaWebUiChart-Cf17WunT.js").then((a) => ({
+const Ej = E.lazy(() => import("./AiwaWebUiChart-BGlwUbDk.js").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function jj() {
@@ -20695,7 +20695,7 @@ function Fj(a) {
     ] }),
     /* @__PURE__ */ m.jsxs(yt, { className: "aiwa-tma-blocks", children: [
       /* @__PURE__ */ m.jsx(mj, { title: a.dayTitle, checkin: a.dayCheckin ?? a.checkin, symptomGroups: a.symptomGroups }),
-      /* @__PURE__ */ m.jsx(xj, { aiText: a.aiText, aiChip: a.aiChip }),
+      /* @__PURE__ */ m.jsx(xj, { aiText: a.aiText }),
       /* @__PURE__ */ m.jsx(Sj, { delay: a.delay }),
       /* @__PURE__ */ m.jsx(Cj, { metrics: a.metrics, title: a.statsTitle }),
       a.pregnancy ? /* @__PURE__ */ m.jsx(Uj, { pregnancy: a.pregnancy }) : /* @__PURE__ */ m.jsx(
@@ -21551,17 +21551,41 @@ const mA = ["trainingSection", "train"], pA = (a) => {
 }, yA = (a) => {
   const e = new Set((a || []).filter((l) => l.count).map((l) => l.d));
   return hx(30).map((l) => ({ ...l, workout: e.has(l.iso) }));
-}, av = (a, ...e) => {
+}, gA = [
+  ["силов", "Силовая"],
+  ["ходь", "Ходьба"],
+  ["прогул", "Прогулка"],
+  ["шаг", "Ходьба"],
+  ["бег", "Бег"],
+  ["кардио", "Кардио"],
+  ["велос", "Велотренажёр"],
+  ["велотрен", "Велотренажёр"],
+  ["эллипс", "Эллипс"],
+  ["греб", "Гребля"],
+  ["скакал", "Скакалка"],
+  ["йог", "Йога"],
+  ["растяж", "Растяжка"],
+  ["стретч", "Растяжка"],
+  ["мобил", "Растяжка"],
+  ["пилатес", "Йога"],
+  ["плава", "Плавание"],
+  ["бассейн", "Плавание"],
+  ["отдых", "Отдых"],
+  ["восстанов", "Отдых"]
+], av = (a, ...e) => {
+  if (!a) return null;
   for (const s of e) {
-    const r = a?.[String(s || "").trim()];
+    const r = a[String(s || "").trim()];
     if (r) return r + "?v=1";
   }
   const l = e.filter(Boolean).join(" ").toLowerCase();
-  for (const [s, r] of Object.entries(a || {}))
+  for (const [s, r] of Object.entries(a))
     if (l.includes(s.toLowerCase())) return r + "?v=1";
-  return null;
+  for (const [s, r] of gA)
+    if (l.includes(s) && a[r]) return a[r] + "?v=1";
+  return a.Силовая && /трениров/.test(l) ? a.Силовая + "?v=1" : null;
 };
-function gA({ mode: a, revision: e = 0 }) {
+function vA({ mode: a, revision: e = 0 }) {
   const [l, s] = dx(mA, [a, e]), [r, c] = E.useState(""), [f, h] = E.useState(null), [y, p] = E.useState({}), [g, v] = E.useState(""), [b, T] = E.useState(null);
   E.useEffect(() => {
     fetch("/assets/train/manifest.json?v=1").then((Y) => Y.ok ? Y.json() : {}).then((Y) => p(Y || {})).catch(() => {
@@ -21685,7 +21709,7 @@ function gA({ mode: a, revision: e = 0 }) {
     /* @__PURE__ */ m.jsx(hA, { isOpen: r === "profile", onClose: () => c(""), profile: j.profile, onSaved: S })
   ] }) }) });
 }
-function vA({ initialMessages: a = [] }) {
+function bA({ initialMessages: a = [] }) {
   const [e, l] = E.useState(() => a.map((S, w) => ({
     id: `initial-${w}`,
     role: S.role === "user" ? "user" : "assistant",
@@ -21791,7 +21815,7 @@ const Yf = [
   { id: "food", label: "Питание", icon: /* @__PURE__ */ m.jsx(ZE, {}) },
   { id: "train", label: "Нагрузка", icon: /* @__PURE__ */ m.jsx(QE, {}) }
 ];
-function bA({ active: a }) {
+function xA({ active: a }) {
   const e = a === "stats" ? "today" : a, l = Math.max(0, Yf.findIndex((s) => s.id === e));
   return /* @__PURE__ */ m.jsx(sl, { children: /* @__PURE__ */ m.jsxs("div", { className: "aiwa-nav-root", "data-aiwa-nav": "true", children: [
     /* @__PURE__ */ m.jsx("div", { className: "aiwa-nav-tabbar-layer", children: /* @__PURE__ */ m.jsx(
@@ -21862,10 +21886,10 @@ const Qa = () => {
     a && (Kf !== a ? (as?.unmount(), Kf = a, as = $i.createRoot(a)) : sr += 1, lr = e, as.render(/* @__PURE__ */ m.jsx(nv, { ...lr, revision: sr })));
   },
   renderActivity(a, e = {}) {
-    a && (lv !== a ? (Zf?.unmount(), lv = a, Zf = $i.createRoot(a)) : ov += 1, sv = e, Zf.render(/* @__PURE__ */ m.jsx(gA, { ...sv, revision: ov })));
+    a && (lv !== a ? (Zf?.unmount(), lv = a, Zf = $i.createRoot(a)) : ov += 1, sv = e, Zf.render(/* @__PURE__ */ m.jsx(vA, { ...sv, revision: ov })));
   },
   renderChat(a, e = {}) {
-    a && (rv !== a && (Qf?.unmount(), rv = a, Qf = $i.createRoot(a)), Qf.render(/* @__PURE__ */ m.jsx(vA, { initialMessages: e.messages || [] })));
+    a && (rv !== a && (Qf?.unmount(), rv = a, Qf = $i.createRoot(a)), Qf.render(/* @__PURE__ */ m.jsx(bA, { initialMessages: e.messages || [] })));
   },
   refreshFood() {
     !Kf || !as || (sr += 1, as.render(/* @__PURE__ */ m.jsx(nv, { ...lr, mode: le("aiwaMode") || lr.mode, revision: sr })));
@@ -21875,13 +21899,13 @@ const Qa = () => {
     lA();
   },
   renderNav(a, e) {
-    a && (iv !== a && (Pf?.unmount(), iv = a, Pf = $i.createRoot(a)), Pf.render(/* @__PURE__ */ m.jsx(bA, { active: e })));
+    a && (iv !== a && (Pf?.unmount(), iv = a, Pf = $i.createRoot(a)), Pf.render(/* @__PURE__ */ m.jsx(xA, { active: e })));
   }
 };
-function xA() {
+function SA() {
   window.AiwaDeslop = Ld, ej(), window.dispatchEvent(new CustomEvent("aiwa:deslop-ready"));
 }
-xA();
+SA();
 export {
   q3 as R,
   Ss as a,
