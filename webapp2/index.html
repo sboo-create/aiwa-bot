@@ -594,7 +594,7 @@ var D=null,today=new Date();today.setHours(0,0,0,0);
 window.aiwaData=function(){return D||{};};
 var HOME_PANEL="";
 // Выбранный в недельной ленте день ("" = сегодня) и последняя сводка Айвы за сегодня.
-var SELECTED_DAY="",TODAY_NOTE="";
+var SELECTED_DAY="",TODAY_NOTE="",TODAY_CHIP="";
 var STARTS=[],calOffset=0,PREG_CAL_OFFSET=0,PA_SET={},CYCLE_SET={},PERIODS=[],PERIOD_DAY={},PERIOD_START={},PERIOD_END={},EDIT_PERIODS=false,EDIT_DAYS={},CHECKIN_SEQ=0,PREG_PERIOD_SET={};
 function lastDate(){return D.last_period?new Date(D.last_period+"T00:00:00"):(function(){var d=new Date();d.setDate(d.getDate()-6);return d;})();}
 function dayOfCycle(dt){var L=lastDate();var diff=Math.floor((dt-L)/86400000);if(dt<=today&&diff>=0)return diff+1;return((diff%D.cycle_len)+D.cycle_len)%D.cycle_len+1;}
@@ -890,7 +890,7 @@ function renderPaperHome(el){
     // Пока месячные идут, счётчик показывает их день, а не прогноз следующих.
     var runningDay=(!delayed&&(!D.mode||D.mode==='cycle'||D.mode==='irregular'))?periodDayNumber(todayIso,today):0;
     if(runningDay){payload.heroValue=runningDay+"-й день";payload.countdown=String(runningDay);payload.countdownLabel="месячных";}
-    if(TODAY_NOTE&&!delayed)payload.aiText=TODAY_NOTE;
+    if(TODAY_NOTE&&!delayed){payload.aiText=TODAY_NOTE;payload.aiChip=TODAY_CHIP;}
   }
   el.className='paper-home';
   var homeRoot=el.querySelector('#deslop-home-root');
@@ -901,7 +901,7 @@ function renderPaperHome(el){
   calOffset=0;
   window.AiwaDeslop.renderHome(homeRoot,payload);
   updateHomeBtn();
-  if(!delayed&&!SELECTED_DAY)api('/api/today',{}).then(function(n){if(n&&n.summary){TODAY_NOTE=n.summary;if(!SELECTED_DAY&&window.AiwaDeslop)window.AiwaDeslop.patchHome({aiText:n.summary});}}).catch(function(){});
+  if(!delayed&&!SELECTED_DAY)api('/api/today',{}).then(function(n){if(n&&n.summary){TODAY_NOTE=n.summary;TODAY_CHIP=(n.day&&n.phase)?("День "+n.day+" · "+String(n.phase).toLowerCase()):"";if(!SELECTED_DAY&&window.AiwaDeslop)window.AiwaDeslop.patchHome({aiText:n.summary,aiChip:TODAY_CHIP});}}).catch(function(){});
 }
 function renderToday(){
   var el=document.getElementById('scr-today');
