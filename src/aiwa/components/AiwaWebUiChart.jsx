@@ -84,7 +84,7 @@ export function AiwaWebUiChart({
 
   const minWidth = Math.max(data.length * 56, 320);
   return (
-    <div className="aiwa-chart-scroll" ref={scrollRef}>
+    <div className="aiwa-chart-scroll" data-band={band ? band.join("-") : "none"} ref={scrollRef}>
       <div style={{ minWidth: `${minWidth}px` }}>
         <ChartContainer
           config={config}
@@ -125,6 +125,7 @@ export function AiwaWebUiChart({
           <ReferenceArea
             y1={band[0]}
             y2={band[1]}
+            ifOverflow="extendDomain"
             fill="var(--aiwa-hint-color, #8e8e93)"
             fillOpacity={0.12}
             stroke="none"
