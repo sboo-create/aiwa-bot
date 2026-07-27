@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v117-redesign-flagged"
+AIWA_VERSION = "2026-07-27-v125-redesign-assets"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -8613,9 +8613,9 @@ def build_web():
     aio.router.add_get("/", _serve_index)
     aio.router.add_get("/app2", _serve_index2)
     aio.router.add_post("/api/nudge", _api_nudge)
-    _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets", "deslop")
+    _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
-        aio.router.add_static("/assets/deslop/", path=_bd2)
+        aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды
     aio.router.add_get("/health", _health)
     aio.router.add_route("*", "/admin", _legacy_admin_removed)
     aio.router.add_route("*", "/admin/login", _legacy_admin_removed)
