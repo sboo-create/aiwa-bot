@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-27-v143-male-summary"
+AIWA_VERSION = "2026-07-27-v144-summary-purge"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -2950,6 +2950,15 @@ def _summary_unpack(value):
     if isinstance(value, dict):
         return str(value.get("body") or ""), list(value.get("facts") or [])[:3]
     return str(value or ""), []
+
+def prepared_summary_clear(cid):
+    """Сводки, подготовленные под прежний режим/профиль, не должны доезжать после смены."""
+    for k in [k for k in list(_SUM_CACHE) if k[0] == cid]:
+        _SUM_CACHE.pop(k, None)
+    try:
+        c = db(); c.execute("DELETE FROM prepared_summaries WHERE chat_id=?", (cid,)); c.commit(); c.close()
+    except Exception as e:
+        log.info("prepared clear %s: %s", cid, e)
 
 def prepared_summary_get(cid, day, cache_key):
     c = db()
@@ -5880,7 +5889,7 @@ async def on_cb(update, context):
             "Айва работает и без регулярного цикла: при нерегулярных месячных, беременности и менопаузе.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
         m = data.split(":")[1]; upsert(cid, mode=m)
-        _evict_today_cache(cid); _evict_week_food_cache(cid); menu_cache_clear(cid); dc_del(cid)
+        _evict_today_cache(cid); _evict_week_food_cache(cid); menu_cache_clear(cid); dc_del(cid); prepared_summary_clear(cid)
         if m == "male":
             # тестовые/старые аккаунты: дата цикла от прежнего профиля не должна
             # включать циклическую логику в ответах и сводках
