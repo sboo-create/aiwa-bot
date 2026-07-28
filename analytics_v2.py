@@ -186,14 +186,27 @@ def mark_user_deleted(conn, chat_id):
     return generation
 
 
-def write_allowed(conn, chat_id=None, key=None, generation=None):
+def write_allowed(
+    conn, chat_id=None, key=None, generation=None, occurred_at=None,
+):
     """Fail closed only for known tombstones; pre-migration active users remain compatible."""
     key = key or user_key(chat_id)
     row = _lifecycle_row(conn, key)
     if not row:
         return generation in (None, 0)
     current, active = int(row[0]), bool(row[1])
-    return active and (generation is None or int(generation) == current)
+    if not active or (generation is not None and int(generation) != current):
+        return False
+    if generation is None and occurred_at:
+        lifecycle = conn.execute(
+            "SELECT updated_at FROM user_lifecycle WHERE user_key=?", (key,)
+        ).fetchone()
+        # Async best-effort telemetry often has no turn-pinned generation.
+        # Its creation time still prevents an event queued before /stop from
+        # leaking into a newly activated lifecycle after /start.
+        if lifecycle and str(lifecycle[0] or "") > str(occurred_at):
+            return False
+    return True
 
 
 def write_allowed_path(db_path, chat_id, generation=None):
@@ -327,8 +340,10 @@ def _epoch(value):
         return datetime.now(timezone.utc).timestamp()
 
 
-def insert_event_v2(conn, chat_id, action, meta=None, latency_ms=0, app_version=None,
-                    request_id=None, calls=0):
+def insert_event_v2(
+    conn, chat_id, action, meta=None, latency_ms=0, app_version=None,
+    request_id=None, calls=0, occurred_at=None,
+):
     if not write_allowed(conn, chat_id=chat_id):
         return None
     event_name, screen = _legacy_event_name(action, meta)
@@ -404,7 +419,10 @@ def insert_event_v2(conn, chat_id, action, meta=None, latency_ms=0, app_version=
         if reason:
             props["reason"] = reason
     event_id = str(uuid.uuid4())
-    occurred = datetime.now(timezone.utc)
+    occurred = (
+        datetime.fromisoformat(str(occurred_at).replace("Z", "+00:00"))
+        if occurred_at else datetime.now(timezone.utc)
+    )
     key = user_key(chat_id)
     conn.execute(
         """INSERT INTO events_v2(event_id,occurred_at,user_key,event_name,source,screen,request_id,status,

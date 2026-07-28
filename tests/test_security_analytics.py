@@ -301,6 +301,28 @@ class SecurityAnalyticsTests(unittest.TestCase):
             bot._EVENT_WRITER_ACTIVE = original_active
             bot._EVENT_WRITER_STOP = original_stop
 
+    def test_unpinned_event_cannot_cross_delete_and_reactivation(self):
+        cid = 9181
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="male", height=178, weight=81, age=41)
+        queued_before_delete = (
+            cid, "manual", "view_today", 0, 0, None, None,
+            bot.datetime.now(bot.timezone.utc).isoformat(),
+        )
+
+        bot.del_user(cid)
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="male", height=178, weight=81, age=41)
+
+        self.assertEqual(bot._write_event_batch([queued_before_delete]), 0)
+        conn = sqlite3.connect(bot.DB)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM events_v2 WHERE user_key=?",
+            (bot.A2.user_key(cid),),
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
+
     def test_event_enqueue_restarts_dead_writer(self):
         original_queue = bot._EVENT_WRITE_Q
         original_thread = bot._EVENT_WRITER_THREAD

@@ -580,12 +580,15 @@ def _write_event_batch(items):
         # allowing a queued telemetry item to reappear after deletion.
         c.execute("BEGIN IMMEDIATE")
         for item in items:
-            cid, action, meta, ms, calls, request_id, generation = item
-            if not _user_write_allowed(cid, generation, conn=c):
+            cid, action, meta, ms, calls, request_id, generation, occurred_at = item
+            if not A2.write_allowed(
+                c, chat_id=cid, generation=generation, occurred_at=occurred_at,
+            ):
                 continue
             event_id = A2.insert_event_v2(
                 c, cid, action, meta=meta, latency_ms=ms,
                 app_version=AIWA_VERSION, request_id=request_id, calls=calls,
+                occurred_at=occurred_at,
             )
             if event_id:
                 written += 1
@@ -696,7 +699,10 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
     Safety and push-delivery decisions are durable before returning. High-volume
     UX telemetry is accepted into the monitored/drained batch writer.
     """
-    item = (cid, action, meta, int(ms), int(calls), request_id, user_generation)
+    item = (
+        cid, action, meta, int(ms), int(calls), request_id, user_generation,
+        datetime.now(timezone.utc).isoformat(),
+    )
     if action in {"safety", "broadcast"}:
         try:
             return _write_event_batch([item]) == 1
