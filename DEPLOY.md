@@ -61,6 +61,9 @@ railway ssh keys remove SHA256:REPLACE_WITH_FINGERPRINT
 - настройки выбранного LLM provider
 - URL и ключ доставки продуктовой аналитики
 - точные origins в `AIWA_ALLOWED_ORIGINS`
+- `AIWA_TELEGRAM_API_ORIGIN` обычно не задаётся и использует
+  `https://api.telegram.org`; разрешённый `:8443` нужен только изолированному
+  staging-туннелю, где TLS всё равно проверяется для `api.telegram.org`
 
 Обязательны Volume с mount path `/data`, одна реплика и публичный домен,
 направленный на порт `8080`. Текущие идентификаторы можно получить так:

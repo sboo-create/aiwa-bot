@@ -643,8 +643,9 @@ def _event_writer_loop():
                 time.sleep(delay)
         if not persisted:
             # Isolate a poison item so one malformed telemetry event cannot stall
-            # every later event or clean shutdown. Safety/push events never reach
-            # this path: ev() persists them synchronously.
+            # every later event or clean shutdown. A critical event can reach
+            # this path only after its synchronous contention retries exhaust;
+            # any final drop increments the health-visible counter below.
             for item in batch:
                 try:
                     _write_event_batch([item])
@@ -693,7 +694,7 @@ def stop_event_writer(timeout=10):
 atexit.register(stop_event_writer)
 
 def _write_durable_event(item, max_attempts=3):
-    """Persist a critical event, retrying only transient SQLite contention."""
+    """Persist a critical event or retain it for the monitored writer."""
     global _EVENT_WRITER_FAILURES, _EVENT_WRITER_LAST_ERROR_AT
     action = item[1]
     for attempt in range(1, max(1, int(max_attempts)) + 1):
@@ -703,7 +704,29 @@ def _write_durable_event(item, max_attempts=3):
             transient = any(
                 marker in str(exc).lower() for marker in ("locked", "busy")
             )
-            if not transient or attempt >= max_attempts:
+            if not transient:
+                log.error(
+                    "durable events_v2 write failed for %s "
+                    "(attempt=%d/%d): %s",
+                    action, attempt, max_attempts, exc,
+                )
+                return False
+            if attempt >= max_attempts:
+                if (
+                    _EVENT_WRITER_ACTIVE
+                    and _EVENT_WRITER_THREAD
+                    and _EVENT_WRITER_THREAD.is_alive()
+                ):
+                    try:
+                        _EVENT_WRITE_Q.put_nowait(item)
+                        log.error(
+                            "durable events_v2 write exhausted retries for %s; "
+                            "retained in monitored writer queue",
+                            action,
+                        )
+                        return True
+                    except queue.Full:
+                        pass
                 log.error(
                     "durable events_v2 write failed for %s "
                     "(attempt=%d/%d): %s",

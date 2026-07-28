@@ -384,6 +384,22 @@ class SecurityAnalyticsTests(unittest.TestCase):
         write.assert_called_once()
         sleep.assert_not_called()
 
+    def test_durable_event_retains_transient_exhaustion_in_monitored_queue(self):
+        writer = mock.Mock()
+        writer.is_alive.return_value = True
+        with mock.patch.object(
+            bot, "_write_event_batch",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ) as write, mock.patch.object(bot.time, "sleep"), \
+                mock.patch.object(bot, "_EVENT_WRITER_ACTIVE", True), \
+                mock.patch.object(bot, "_EVENT_WRITER_THREAD", writer), \
+                mock.patch.object(bot._EVENT_WRITE_Q, "put_nowait") as put:
+            self.assertTrue(bot.ev(cid=920, action="safety", meta="urgent"))
+
+        self.assertEqual(write.call_count, 3)
+        put.assert_called_once()
+        self.assertEqual(put.call_args.args[0][1], "safety")
+
     def test_poison_telemetry_does_not_stall_clean_shutdown(self):
         original_queue = bot._EVENT_WRITE_Q
         original_thread = bot._EVENT_WRITER_THREAD
