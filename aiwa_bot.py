@@ -2,7 +2,7 @@
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
 import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue, atexit
 from collections import deque
-from datetime import datetime, date, time as dtime, timedelta
+from datetime import datetime, date, time as dtime, timedelta, timezone
 from difflib import SequenceMatcher
 
 def _load_secret_file(env_name):
@@ -110,7 +110,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v166-review-hardening")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v167-event-durability")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 AIWA_TELEGRAM_API_ORIGIN = os.environ.get(
@@ -518,6 +518,9 @@ _EVENT_WRITE_Q = queue.Queue(maxsize=max(1000, int(os.environ.get("AIWA_EVENT_QU
 _EVENT_WRITER_STOP = threading.Event()
 _EVENT_WRITER_THREAD = None
 _EVENT_WRITER_ACTIVE = False
+_EVENT_WRITER_LOCK = threading.Lock()
+_EVENT_WRITER_FAILURES = 0
+_EVENT_WRITER_LAST_ERROR_AT = None
 
 def _write_event_batch(items):
     if not items:
@@ -541,6 +544,7 @@ def _write_event_batch(items):
     return written
 
 def _event_writer_loop():
+    global _EVENT_WRITER_FAILURES, _EVENT_WRITER_LAST_ERROR_AT
     batch_size = max(1, min(500, int(os.environ.get("AIWA_EVENT_BATCH_SIZE", "100"))))
     flush_seconds = max(0.05, min(2.0, float(os.environ.get("AIWA_EVENT_FLUSH_SECONDS", "0.25"))))
     while not _EVENT_WRITER_STOP.is_set() or not _EVENT_WRITE_Q.empty():
@@ -557,25 +561,39 @@ def _event_writer_loop():
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(min(0.01, max(0, deadline - time.monotonic())))
-        try:
-            _write_event_batch(batch)
-        except Exception:
-            log.exception("events_v2 batch write failed")
-        finally:
-            for _ in batch:
-                _EVENT_WRITE_Q.task_done()
+        attempt = 0
+        while True:
+            try:
+                _write_event_batch(batch)
+                for _ in batch:
+                    _EVENT_WRITE_Q.task_done()
+                break
+            except Exception:
+                attempt += 1
+                _EVENT_WRITER_FAILURES += 1
+                _EVENT_WRITER_LAST_ERROR_AT = datetime.now(timezone.utc).isoformat()
+                delay = min(5.0, 0.05 * (2 ** min(attempt - 1, 7)))
+                log.exception(
+                    "events_v2 batch write failed; retaining %d events for retry "
+                    "(attempt=%d, retry_in=%.2fs)",
+                    len(batch), attempt, delay,
+                )
+                # Do not task_done()/discard this batch: queue backpressure is safer
+                # than silently losing analytics used by product safety decisions.
+                time.sleep(delay)
 
 def start_event_writer():
     global _EVENT_WRITER_THREAD, _EVENT_WRITER_ACTIVE
-    if _EVENT_WRITER_THREAD and _EVENT_WRITER_THREAD.is_alive():
+    with _EVENT_WRITER_LOCK:
+        if _EVENT_WRITER_THREAD and _EVENT_WRITER_THREAD.is_alive():
+            _EVENT_WRITER_ACTIVE = True
+            return
+        _EVENT_WRITER_STOP.clear()
+        _EVENT_WRITER_THREAD = threading.Thread(
+            target=_event_writer_loop, name="aiwa-events-v2-writer", daemon=True
+        )
+        _EVENT_WRITER_THREAD.start()
         _EVENT_WRITER_ACTIVE = True
-        return
-    _EVENT_WRITER_STOP.clear()
-    _EVENT_WRITER_THREAD = threading.Thread(
-        target=_event_writer_loop, name="aiwa-events-v2-writer", daemon=True
-    )
-    _EVENT_WRITER_THREAD.start()
-    _EVENT_WRITER_ACTIVE = True
 
 def flush_event_writer(timeout=5):
     if not _EVENT_WRITER_ACTIVE:
@@ -603,6 +621,11 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
        user_generation=None):
     """Write privacy-preserving analytics v2 only; legacy events is read-only."""
     item = (cid, action, meta, int(ms), int(calls), request_id, user_generation)
+    if _EVENT_WRITER_ACTIVE and not (
+        _EVENT_WRITER_THREAD and _EVENT_WRITER_THREAD.is_alive()
+    ):
+        log.error("events_v2 writer is not alive; restarting it before enqueue")
+        start_event_writer()
     if _EVENT_WRITER_ACTIVE:
         try:
             _EVENT_WRITE_Q.put_nowait(item)
@@ -10519,6 +10542,11 @@ async def _health(request):
             "version": AIWA_VERSION,
             "journal_router": "v2" if journal_v2_enabled() else "v1",
             "event_queue": _EVENT_WRITE_Q.qsize(),
+            "event_writer_alive": bool(
+                _EVENT_WRITER_THREAD and _EVENT_WRITER_THREAD.is_alive()
+            ),
+            "event_writer_failures": _EVENT_WRITER_FAILURES,
+            "event_writer_last_error_at": _EVENT_WRITER_LAST_ERROR_AT,
             "ai_workers": sum(1 for task in _AI_JOB_TASKS if not task.done()),
             "ai_worker_limit": _AI_TODAY_WORKERS,
             "llm_concurrency_limit": _AI_LLM_CONCURRENCY_LIMIT,
@@ -10645,6 +10673,21 @@ async def run_all():
         await asyncio.Event().wait()
     finally:
         APP_READY = False
+        # Stop accepting new work before draining analytics produced by the last
+        # in-flight handlers. This is the explicit SIGINT/SIGTERM deploy path;
+        # atexit remains a final fallback only.
+        for name, shutdown in (
+            ("telegram polling", app.updater.stop),
+            ("telegram application", app.stop),
+            ("telegram resources", app.shutdown),
+            ("HTTP server", runner.cleanup),
+        ):
+            try:
+                await shutdown()
+            except (RuntimeError, asyncio.CancelledError) as exc:
+                log.info("%s already stopped during shutdown: %s", name, exc)
+            except Exception:
+                log.exception("%s shutdown failed", name)
         drained = await asyncio.to_thread(stop_event_writer, 10)
         if not drained:
             log.error(

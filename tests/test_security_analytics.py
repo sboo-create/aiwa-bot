@@ -243,6 +243,63 @@ class SecurityAnalyticsTests(unittest.TestCase):
             bot._EVENT_WRITER_ACTIVE = original_active
             bot._EVENT_WRITER_STOP = original_stop
 
+    def test_event_writer_retries_failed_batch_without_dropping_it(self):
+        original_queue = bot._EVENT_WRITE_Q
+        original_thread = bot._EVENT_WRITER_THREAD
+        original_active = bot._EVENT_WRITER_ACTIVE
+        original_stop = bot._EVENT_WRITER_STOP
+        attempts = []
+        try:
+            bot._EVENT_WRITE_Q = bot.queue.Queue(maxsize=10)
+            bot._EVENT_WRITER_THREAD = None
+            bot._EVENT_WRITER_ACTIVE = False
+            bot._EVENT_WRITER_STOP = bot.threading.Event()
+
+            def write(items):
+                attempts.append(list(items))
+                if len(attempts) == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return len(items)
+
+            with mock.patch.object(bot, "_write_event_batch", side_effect=write), \
+                 mock.patch.object(bot.time, "sleep", return_value=None):
+                bot.start_event_writer()
+                self.assertTrue(bot.ev(cid=918, action="test_retry"))
+                self.assertTrue(bot.stop_event_writer(timeout=2))
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(attempts[0], attempts[1])
+            self.assertEqual(bot._EVENT_WRITE_Q.unfinished_tasks, 0)
+        finally:
+            bot._EVENT_WRITE_Q = original_queue
+            bot._EVENT_WRITER_THREAD = original_thread
+            bot._EVENT_WRITER_ACTIVE = original_active
+            bot._EVENT_WRITER_STOP = original_stop
+
+    def test_event_enqueue_restarts_dead_writer(self):
+        original_queue = bot._EVENT_WRITE_Q
+        original_thread = bot._EVENT_WRITER_THREAD
+        original_active = bot._EVENT_WRITER_ACTIVE
+        original_stop = bot._EVENT_WRITER_STOP
+        written = []
+        try:
+            bot._EVENT_WRITE_Q = bot.queue.Queue(maxsize=10)
+            bot._EVENT_WRITER_THREAD = None
+            bot._EVENT_WRITER_ACTIVE = True
+            bot._EVENT_WRITER_STOP = bot.threading.Event()
+            with mock.patch.object(
+                bot,
+                "_write_event_batch",
+                side_effect=lambda items: written.extend(items) or len(items),
+            ):
+                self.assertTrue(bot.ev(cid=919, action="test_restart"))
+                self.assertTrue(bot.stop_event_writer(timeout=2))
+            self.assertEqual(len(written), 1)
+        finally:
+            bot._EVENT_WRITE_Q = original_queue
+            bot._EVENT_WRITER_THREAD = original_thread
+            bot._EVENT_WRITER_ACTIVE = original_active
+            bot._EVENT_WRITER_STOP = original_stop
+
     def test_schema_migration_takes_sqlite_write_lock_before_ddl(self):
         class FakeConnection:
             def __init__(self):
