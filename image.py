@@ -119,6 +119,191 @@ def render_delay(st):
     buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
 
 
+def render_general_summary(mode, today, pregnancy=None):
+    """Карточка утренней сводки для режимов, где фазу цикла не прогнозируем."""
+    W,H=720,540
+    img=Image.new("RGB",(W*S,H*S),PAPER); d=ImageDraw.Draw(img)
+    def X(v): return int(v*S)
+    f_eye=_f("DejaVuSans-Bold.ttf",22); f_date=_f("DejaVuSans.ttf",20)
+    f_h=_f("DejaVuSerif.ttf",38); f_big=_f("DejaVuSerif.ttf",58)
+    f_sm=_f("DejaVuSans.ttf",21); f_lab=_f("DejaVuSans-Bold.ttf",15)
+
+    cards={
+        "irregular": ("Нерегулярный цикл", "Сегодня", "Опираемся на самочувствие и отметки,\nа не на прогноз фазы цикла."),
+        "meno": ("Менопауза", "Сегодня", "В фокусе сон, энергия, настроение\nи другие отмеченные симптомы."),
+        "none": ("Без месячных", "Сегодня", "Фазу цикла не прогнозируем.\nСводка учитывает твои отметки."),
+        "preg": ("Беременность", "Сегодня", "Сводка учитывает срок беременности\nи сегодняшнее самочувствие."),
+        "male": ("Мой день", "Сегодня", "Питание, нагрузка и самочувствие\nпо твоим отметкам и целям."),
+    }
+    title,big,note=cards.get(mode,cards["none"])
+    if mode=="preg" and pregnancy:
+        week=max(1,int(pregnancy.get("week") or 1))
+        trimester=max(1,int(pregnancy.get("trimester") or 1))
+        big=f"{week} неделя"
+        note=f"{trimester} триместр. Сводка учитывает срок\nбеременности и самочувствие."
+
+    d.text((X(40),X(34)),"AIWA",font=f_eye,fill=ROSE)
+    d.text((X(W-40),X(38)),f"{today.day} {MONTHS[today.month-1]}",font=f_date,fill=SOFT,anchor="ra")
+    d.text((X(40),X(78)),title,font=f_h,fill=INK)
+
+    d.rounded_rectangle([X(40),X(150),X(W-40),X(350)],radius=X(34),fill=ROSEWASH)
+    d.text((X(W//2),X(202)),"СВОДКА НА СЕГОДНЯ",font=f_lab,fill=ROSE,anchor="mm")
+    d.text((X(W//2),X(265)),big,font=f_big,fill=INK,anchor="mm")
+
+    y=X(394)
+    for line in note.splitlines():
+        d.text((X(40),y),line,font=f_sm,fill=INKMID)
+        y+=X(31)
+    d.text((X(40),X(500)),"Открой сводку, чтобы увидеть рекомендации на день.",font=f_sm,fill=INK)
+
+    img=img.resize((W,H),Image.LANCZOS)
+    buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
+
+
+def render_summary_card(mode, today, facts=None, cycle=None, pregnancy=None, variant=None):
+    """Render one of three stable daily-card templates.
+
+    The date deterministically rotates the template, so repeated renders on the
+    same day are identical.  All numbers come from application state; ``facts``
+    are selected from the reviewed catalogue in ``llm.py``.
+    """
+    import textwrap
+    W,H=720,1040
+    mode=mode or "none"
+    variant=(today.toordinal()+(1 if mode=="preg" else 0))%3 if variant is None else int(variant)%3
+    accent=(105,126,91) if mode=="preg" else ROSE
+    wash=(236,239,229) if mode=="preg" else ROSEWASH
+    apricot=(232,139,72)
+    palettes=[
+        (accent,wash,(242,239,231)),
+        ((177,103,119) if mode!="preg" else (119,139,102),(249,235,229),(235,239,228)),
+        ((202,116,83) if mode!="preg" else (103,133,113),(246,231,226),(239,235,218)),
+    ]
+    accent,wash,soft2=palettes[variant]
+    img=Image.new("RGB",(W*S,H*S),PAPER); d=ImageDraw.Draw(img)
+    def X(v): return int(v*S)
+    f_brand=_f("DejaVuSerif.ttf",34); f_date=_f("DejaVuSans.ttf",18)
+    f_title=_f("DejaVuSans.ttf",28); f_metric=_f("DejaVuSerif.ttf",54)
+    f_label=_f("DejaVuSans-Bold.ttf",14); f_fact=_f("DejaVuSans.ttf",17)
+    f_num=_f("DejaVuSans-Bold.ttf",17); f_small=_f("DejaVuSans.ttf",15)
+
+    title="Сегодня"
+    metric="Персональная сводка"
+    metric_label="САМОЧУВСТВИЕ"
+    status=""
+    if mode=="cycle" and cycle:
+        day=max(1,int(cycle.get("day") or 1))
+        phase=str(cycle.get("phase_ru") or "Фаза цикла")
+        left=max(0,int(cycle.get("days_to_next") or 0))
+        title=f"Сегодня — {day} день цикла"
+        metric=phase+" фаза"
+        metric_label="ПРОГНОЗИРУЕМАЯ ФАЗА"
+        status=f"До месячных ориентировочно ~{left} дн."
+    elif mode=="preg" and pregnancy:
+        week=max(1,int(pregnancy.get("week") or 1))
+        tri=max(1,int(pregnancy.get("trimester") or 1))
+        left=max(0,int(pregnancy.get("days_left") or 0))
+        title=f"Сегодня — {week} неделя"
+        metric=("I" if tri==1 else "II" if tri==2 else "III")+" триместр"
+        metric_label="СРОК БЕРЕМЕННОСТИ"
+        status=f"До ПДР ориентировочно ~{left} дн."
+    elif mode=="meno":
+        title="Самочувствие сегодня"; metric="Менопауза"; metric_label="БЕЗ ПРОГНОЗА ФАЗЫ"
+    elif mode=="irregular":
+        title="Самочувствие сегодня"; metric="Нерегулярный цикл"; metric_label="БЕЗ ПРОГНОЗА ФАЗЫ"
+
+    clean=[]
+    for value in facts or []:
+        value=" ".join(str(value or "").split()).strip(" •-")
+        if value and value not in clean and len(value)<=110:
+            clean.append(value)
+        if len(clean)>=3: break
+    fallbacks={
+        "cycle":["Ориентируйся на сегодняшнее самочувствие","Выбирай привычную нагрузку без работы через боль","Оставь время на сон, еду и восстановление"],
+        "preg":["Ориентируйся на самочувствие и рекомендации врача","Выбирай привычное спокойное движение без перегрузки","При новых или сильных симптомах свяжись с врачом"],
+    }
+    for fact in fallbacks.get(mode,["Ориентируйся на сегодняшнее самочувствие"]):
+        if len(clean)>=3: break
+        if fact not in clean: clean.append(fact)
+
+    # Shared paper texture and calm organic shapes from the approved references.
+    d.ellipse([X(-140),X(-110),X(260),X(250)],fill=(247,232,225))
+    d.ellipse([X(520),X(-120),X(850),X(235)],fill=soft2)
+    d.ellipse([X(-150),X(845),X(250),X(1160)],fill=soft2)
+    d.ellipse([X(525),X(850),X(850),X(1160)],fill=(248,229,221))
+    d.text((X(42),X(42)),"AIWA",font=f_brand,fill=INK)
+    d.text((X(W-42),X(54)),f"{today.day} {MONTHS[today.month-1]}",font=f_date,fill=INKMID,anchor="ra")
+
+    if variant==0:
+        # Reference A: generous hero plus three editorial columns.
+        d.rounded_rectangle([X(42),X(135),X(W-42),X(475)],radius=X(34),fill=(255,250,247),outline=wash,width=X(2))
+        d.text((X(W//2),X(188)),title,font=f_title,fill=INK,anchor="mm")
+        d.text((X(W//2),X(260)),metric,font=f_metric,fill=accent,anchor="mm")
+        d.text((X(W//2),X(320)),metric_label,font=f_label,fill=accent,anchor="mm")
+        if status:
+            d.rounded_rectangle([X(120),X(366),X(W-120),X(438)],radius=X(35),fill=accent)
+            d.text((X(W//2),X(402)),status,font=f_num,fill=(255,255,255),anchor="mm")
+        d.text((X(42),X(515)),"СЕГОДНЯ ВАЖНО",font=f_label,fill=INKMID)
+        gap=12; cw=(W-84-gap*2)//3
+        for i,fact in enumerate(clean[:3]):
+            x=42+i*(cw+gap)
+            fill=(255,246,243) if i==0 else ((246,248,240) if i==1 else (255,247,237))
+            d.rounded_rectangle([X(x),X(552),X(x+cw),X(850)],radius=X(24),fill=fill,outline=wash,width=X(1))
+            d.ellipse([X(x+cw//2-24),X(584),X(x+cw//2+24),X(632)],fill=wash)
+            d.text((X(x+cw//2),X(608)),str(i+1),font=f_num,fill=accent,anchor="mm")
+            lines=textwrap.wrap(fact,width=20,break_long_words=False,break_on_hyphens=False)[:6]
+            y=674-(len(lines)-3)*10
+            for line in lines:
+                d.text((X(x+cw//2),X(y)),line,font=f_fact,fill=INK,anchor="mm"); y+=27
+    elif variant==1:
+        # Reference B: asymmetrical editorial stripe and stacked insights.
+        d.rounded_rectangle([X(42),X(140),X(W-42),X(380)],radius=X(34),fill=wash)
+        d.rounded_rectangle([X(42),X(140),X(62),X(380)],radius=X(10),fill=accent)
+        d.text((X(88),X(190)),metric_label,font=f_label,fill=accent)
+        d.text((X(88),X(238)),title,font=f_title,fill=INK)
+        d.text((X(88),X(302)),metric,font=f_metric,fill=INK)
+        if status: d.text((X(88),X(354)),status,font=f_num,fill=accent)
+        d.text((X(42),X(430)),"ТРИ ОРИЕНТИРА НА ДЕНЬ",font=f_label,fill=INKMID)
+        y=470
+        for i,fact in enumerate(clean[:3]):
+            fill=(255,249,246) if i%2==0 else (245,248,240)
+            d.rounded_rectangle([X(42),X(y),X(W-42),X(y+126)],radius=X(24),fill=fill)
+            d.ellipse([X(62),X(y+36),X(112),X(y+86)],fill=wash)
+            d.text((X(87),X(y+61)),str(i+1),font=f_num,fill=accent,anchor="mm")
+            lines=textwrap.wrap(fact,width=48,break_long_words=False,break_on_hyphens=False)[:3]
+            ty=y+36
+            for line in lines:
+                d.text((X(138),X(ty)),line,font=f_fact,fill=INK); ty+=28
+            y+=142
+    else:
+        # Reference C: circular status seal and compact numbered cards.
+        d.text((X(42),X(150)),title,font=f_title,fill=INK)
+        cx,cy=X(W//2),X(330); rr=X(154)
+        d.ellipse([cx-rr,cy-rr,cx+rr,cy+rr],fill=wash)
+        d.text((cx,X(285)),metric_label,font=f_label,fill=accent,anchor="mm")
+        metric_lines=textwrap.wrap(metric,width=18,break_long_words=False)
+        my=330-(len(metric_lines)-1)*28
+        for line in metric_lines:
+            d.text((cx,X(my)),line,font=f_metric,fill=INK,anchor="mm"); my+=58
+        if status: d.text((cx,X(414)),status,font=f_small,fill=accent,anchor="mm")
+        d.text((X(42),X(530)),"СЕГОДНЯ ВАЖНО",font=f_label,fill=INKMID)
+        y=570
+        for i,fact in enumerate(clean[:3]):
+            d.rounded_rectangle([X(42),X(y),X(W-42),X(y+105)],radius=X(52),fill=(255,250,247))
+            d.ellipse([X(58),X(y+18),X(127),X(y+87)],fill=(wash if i<2 else (249,230,216)))
+            d.text((X(92),X(y+52)),str(i+1),font=f_num,fill=(accent if i<2 else apricot),anchor="mm")
+            lines=textwrap.wrap(fact,width=48,break_long_words=False,break_on_hyphens=False)[:3]
+            ty=y+26
+            for line in lines:
+                d.text((X(150),X(ty)),line,font=f_fact,fill=INK); ty+=27
+            y+=120
+
+    footer="Прогноз цикла ориентировочный · не метод контрацепции" if mode=="cycle" else "Срок рассчитан по данным профиля · рекомендации обновляются"
+    d.text((X(W//2),X(H-48)),footer,font=f_small,fill=SOFT,anchor="mm")
+    img=img.resize((W,H),Image.LANCZOS)
+    buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()
+
+
 def render_menu(data, phase_ru="Лютеиновая", target_kcal=None):
     """Карточка питания на день. Единый рендер (3x супер-сэмплинг), длинный текст обрезается, а не вылезает."""
     W=720
@@ -216,3 +401,132 @@ if __name__=="__main__":
     with tempfile.NamedTemporaryFile(prefix="aiwa-cycle-", suffix=".png", delete=False) as fh:
         fh.write(render_cycle(date(2026,5,25),29,date(2026,6,17)))
         print("wrote", fh.name)
+
+
+# ================= Карточка сводки v2: белый фон + маскот + персональные строки =================
+WHITE=(255,255,255); CARD_INK=(31,41,55); CARD_SOFT=(120,113,108)
+ORANGE=(249,115,22); PEACH=(255,237,213); PEACH_SOFT=(255,247,237)
+MASCOT=os.path.join(HERE,"assets","mascot.png")
+
+def _mascot(img, cx, top, h):
+    """Маскот из PNG как есть; если файла нет — карточка рисуется без него."""
+    if not os.path.exists(MASCOT): return top
+    try:
+        m=Image.open(MASCOT).convert("RGBA")
+        w=int(h*m.width/m.height)
+        m=m.resize((w,h), Image.LANCZOS)
+        img.paste(m,(cx-w//2,top),m)
+        return top+h
+    except Exception:
+        return top
+
+def _chip(d, cx, y, text, font, pad_x, pad_y, bg, fg, S_):
+    tw=d.textlength(text,font=font)
+    x0=cx-tw/2-pad_x; x1=cx+tw/2+pad_x
+    d.rounded_rectangle([x0,y,x1,y+font.size+pad_y*2], radius=(font.size+pad_y*2)//2, fill=bg)
+    d.text((cx,y+pad_y),text,font=font,fill=fg,anchor="ma")
+    return y+font.size+pad_y*2
+
+def _wrap(d, text, font, maxw):
+    words=(text or "").split(); lines=[]; cur=""
+    fixed=[]
+    for w in words:                        # мегаслово без пробелов режем по ширине
+        while d.textlength(w,font=font) > maxw and len(w) > 2:
+            k=len(w)
+            while k>1 and d.textlength(w[:k],font=font) > maxw: k-=1
+            fixed.append(w[:k]); w=w[k:]
+        fixed.append(w)
+    words=fixed
+    for w in words:
+        t=(cur+" "+w).strip()
+        if d.textlength(t,font=font)<=maxw: cur=t
+        else:
+            if cur: lines.append(cur)
+            cur=w
+    if cur: lines.append(cur)
+    if len(lines) > 2:                     # не влезло в две строки — честное многоточие
+        lines = lines[:2]
+        while lines[1] and d.textlength(lines[1] + "…", font=font) > maxw:
+            lines[1] = lines[1][:-1].rstrip()
+        lines[1] += "…"
+    return lines
+
+def _icon_row(d, x, y, w, label, text, f_lab, f_txt, S_):
+    """Ряд-чип: слева капс-лейбл в персиковой пилюле, справа текст (эмодзи в PIL нецветные, поэтому лейблы)."""
+    row_h=int(76*S_)
+    d.rounded_rectangle([x,y,x+w,y+row_h], radius=int(20*S_), fill=PEACH_SOFT)
+    lw=d.textlength(label,font=f_lab)
+    px=int(14*S_); py=int(10*S_)
+    d.rounded_rectangle([x+px,y+row_h//2-f_lab.size//2-py//2, x+px+lw+px*2, y+row_h//2+f_lab.size//2+py//2],
+                        radius=int(12*S_), fill=PEACH)
+    d.text((x+px*2,y+row_h//2),label,font=f_lab,fill=ORANGE,anchor="lm")
+    tx=x+px*3+lw+int(6*S_)
+    lines=_wrap(d,text,f_txt,w-(tx-x)-px)
+    if len(lines)==1:
+        d.text((tx,y+row_h//2),lines[0],font=f_txt,fill=CARD_INK,anchor="lm")
+    else:
+        d.text((tx,y+row_h//2-f_txt.size//2-int(2*S_)),lines[0],font=f_txt,fill=CARD_INK,anchor="lm")
+        d.text((tx,y+row_h//2+f_txt.size//2+int(2*S_)),lines[1],font=f_txt,fill=CARD_INK,anchor="lm")
+    return y+row_h+int(14*S_)
+
+def _fit_big(d, text, maxw, start=64, floor=34):
+    """Крупный заголовок: уменьшаем кегль, пока не влезет по ширине."""
+    size=start
+    while size > floor:
+        f=_f("DejaVuSans-Bold.ttf", size)
+        if d.textlength(str(text), font=f) <= maxw: return f
+        size -= 4
+    return _f("DejaVuSans-Bold.ttf", floor)
+
+def _fit_big_text(d, text, maxw, start=64, floor=34):
+    f=_fit_big(d,text,maxw,start,floor)
+    t=str(text)
+    while t and d.textlength(t+"…",font=f) > maxw:
+        t=t[:-1]
+    return (t+"…" if t!=str(text) else t), f
+
+def render_daily_card(mode, data):
+    """Карточка сводки: белый фон, маскот, крупные данные + персональные строки от модели.
+    data: cycle: day,total,to_period,phase_ru,feature,food,activity
+          preg:  week,trimester,days_left,fruit,feature,food,activity
+          meno:  focus,theme,feature,food,activity,sleep"""
+    W,H=720,960
+    img=Image.new("RGB",(W*S,H*S),WHITE); d=ImageDraw.Draw(img)
+    def X(v): return int(v*S)
+    f_big=_f("DejaVuSans-Bold.ttf",64); f_chip=_f("DejaVuSans-Bold.ttf",22)
+    f_acc=_f("DejaVuSans-Bold.ttf",26); f_feat=_f("DejaVuSans.ttf",22)
+    f_lab=_f("DejaVuSans-Bold.ttf",15); f_row=_f("DejaVuSans.ttf",20)
+    cx=X(W//2); pad=X(48); cw=X(W)-pad*2
+    y=_mascot(img,cx,X(36),X(150)) + X(20)
+    if mode=="preg":
+        _t=f"{data.get('week','')} неделя"; _t,f_big=_fit_big_text(d,_t,cw)
+        d.text((cx,y),_t,font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
+        y=_chip(d,cx,y,f"{data.get('trimester','')} триместр",f_chip,X(18),X(9),PEACH,ORANGE,S)+X(12)
+        d.text((cx,y),f"До встречи ~{data.get('days_left','')} дней",font=f_acc,fill=ORANGE,anchor="ma"); y+=f_acc.size+X(12)
+        if data.get("fruit"):
+            d.text((cx,y),f"Малыш размером с {data['fruit']}",font=f_feat,fill=CARD_SOFT,anchor="ma"); y+=f_feat.size+X(10)
+        rows=[("ПИТАНИЕ",data.get("food")),("АКТИВНОСТЬ",data.get("activity"))]
+    elif mode=="meno":
+        _t=str(data.get("focus","Твой день")); _t,f_big=_fit_big_text(d,_t,cw)
+        d.text((cx,y),_t,font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
+        if data.get("theme"):
+            y=_chip(d,cx,y,data["theme"],f_chip,X(18),X(9),PEACH,ORANGE,S)+X(12)
+        rows=[("ПИТАНИЕ",data.get("food")),("ДВИЖЕНИЕ",data.get("activity")),("СОН",data.get("sleep"))]
+    else:
+        _t=f"День {data.get('day','')} из {data.get('total','')}"; _t,f_big=_fit_big_text(d,_t,cw)
+        d.text((cx,y),_t,font=f_big,fill=CARD_INK,anchor="ma"); y+=f_big.size+X(16)
+        y=_chip(d,cx,y,f"{data.get('phase_ru','')} фаза",f_chip,X(18),X(9),PEACH,ORANGE,S)+X(12)
+        d.text((cx,y),f"До месячных ~{data.get('to_period','')} дней",font=f_acc,fill=ORANGE,anchor="ma"); y+=f_acc.size+X(12)
+        rows=[("ПИТАНИЕ",data.get("food")),("НАГРУЗКА",data.get("activity"))]
+    if data.get("feature"):
+        for ln in _wrap(d,data["feature"],f_feat,cw):
+            d.text((cx,y),ln,font=f_feat,fill=CARD_SOFT,anchor="ma"); y+=f_feat.size+X(6)
+        y+=X(14)
+    else:
+        y+=X(10)
+    for label,text in rows:
+        if text: y=_icon_row(d,pad,y,cw,label,text,f_lab,f_row,S)
+    # высота по контенту: без пустой нижней трети
+    bottom=min(H*S, y+X(28))
+    img=img.crop((0,0,W*S,bottom)).resize((W,bottom//S),Image.LANCZOS)
+    buf=io.BytesIO(); img.save(buf,"PNG"); return buf.getvalue()

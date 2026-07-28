@@ -9,6 +9,7 @@ import tempfile
 import time
 import types
 import unittest
+import requests
 from datetime import date
 from pathlib import Path
 from unittest import mock
@@ -56,10 +57,54 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_db = bot.DB
         bot.DB = os.path.join(self.tmp.name, "test.db")
+        bot._SUM_CACHE.clear()
+        bot._MENU_CACHE.clear()
+        bot._SECTION_CACHE.clear()
+        bot._SECTION_TASKS.clear()
 
     def tearDown(self):
+        bot._SECTION_CACHE.clear()
+        bot._SECTION_TASKS.clear()
         bot.DB = self.old_db
         self.tmp.cleanup()
+
+    def test_miniapp_section_is_fast_singleflight_and_then_cached(self):
+        cid = 909
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        init_data = signed_init_data(cid)
+        gate = asyncio.Event()
+        calls = []
+
+        async def slow_llm(_cid, _purpose, _func, *args, **kwargs):
+            calls.append(_purpose)
+            await gate.wait()
+            return llm.general_training(None, "irregular")
+
+        async def scenario():
+            req = lambda refresh=False: FakeJsonRequest({
+                "initData": init_data, "kind": "training", "refresh": refresh,
+            })
+            with (
+                mock.patch.object(bot, "_SECTION_FAST_WAIT_SECONDS", 0.01),
+                mock.patch.object(bot, "llm_to_thread", side_effect=slow_llm),
+            ):
+                first, second = await asyncio.gather(
+                    bot._api_section(req()), bot._api_section(req())
+                )
+                first_data = json.loads(first.text)
+                second_data = json.loads(second.text)
+                self.assertTrue(first_data["refreshing"])
+                self.assertTrue(second_data["refreshing"])
+                self.assertEqual(calls, ["training_recommendation"])
+                gate.set()
+                await asyncio.gather(*list(bot._SECTION_TASKS.values()))
+                cached = json.loads((await bot._api_section(req(True))).text)
+                self.assertTrue(cached["cached"])
+                self.assertFalse(cached["refreshing"])
+                self.assertEqual(calls, ["training_recommendation"])
+
+        asyncio.run(scenario())
 
     def test_webapp_url_never_contains_health_data(self):
         old = bot.AIWA_WEBAPP_URL
@@ -83,12 +128,92 @@ class SecurityAnalyticsTests(unittest.TestCase):
         finally:
             bot.AIWA_WEBAPP_URL = old
 
+    def test_webapp_root_allows_telegram_frame_but_api_routes_do_not(self):
+        async def handler(_request):
+            return bot.web.Response(
+                text="ok",
+                headers={"X-Frame-Options": "SAMEORIGIN"},
+            )
+
+        root = asyncio.run(bot._security_headers(
+            types.SimpleNamespace(path="/", headers={}),
+            handler,
+        ))
+        self.assertNotIn("X-Frame-Options", root.headers)
+        frame_policy = root.headers.get("Content-Security-Policy", "")
+        self.assertIn("frame-ancestors 'self'", frame_policy)
+        self.assertIn("https://web.telegram.org", frame_policy)
+        self.assertIn("https://*.telegram.org", frame_policy)
+        self.assertNotIn("frame-ancestors *", frame_policy)
+
+        api = asyncio.run(bot._security_headers(
+            types.SimpleNamespace(path="/api/data", headers={}),
+            handler,
+        ))
+        self.assertEqual(api.headers.get("X-Frame-Options"), "SAMEORIGIN")
+        self.assertNotIn("Content-Security-Policy", api.headers)
+
     def test_feedback_must_match_prompt_shown_to_same_user(self):
         answer_id = "a1b2c3d4e5f60708"
         bot.ev(101, "feedback_prompt", meta=f"{answer_id}|webapp")
         self.assertTrue(bot._feedback_prompt_exists(101, answer_id))
         self.assertFalse(bot._feedback_prompt_exists(202, answer_id))
         self.assertFalse(bot._feedback_prompt_exists(101, "ffffffffffffffff"))
+
+    def test_feedback_is_durable_idempotent_and_owned_by_the_recipient(self):
+        answer_id = "a1b2c3d4e5f60708"
+        self.assertTrue(bot._register_feedback_prompt(101, answer_id, "bot"))
+
+        self.assertEqual(bot._submit_feedback(202, answer_id, "helpful", "bot"), "missing")
+        self.assertEqual(bot._submit_feedback(101, answer_id, "helpful", "bot"), "saved")
+        self.assertEqual(bot._submit_feedback(101, answer_id, "unhelpful", "bot"), "duplicate")
+
+        conn = sqlite3.connect(bot.DB)
+        request = conn.execute(
+            "SELECT channel,rating,submitted_at FROM feedback_requests WHERE chat_id=? AND answer_id=?",
+            (101, answer_id),
+        ).fetchone()
+        feedback_events = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE chat_id=? AND action='feedback'",
+            (101,),
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(request[:2], ("bot", "helpful"))
+        self.assertTrue(request[2])
+        self.assertEqual(feedback_events, 1)
+
+    def test_rich_answer_registers_feedback_and_runs_common_instrumentation(self):
+        cid = 303
+        context = types.SimpleNamespace(bot=types.SimpleNamespace(send_message=mock.AsyncMock()))
+        rich_send = mock.AsyncMock()
+        with mock.patch.object(bot, "RICH_OK", True), \
+             mock.patch.object(bot, "send_rich", rich_send), \
+             mock.patch.object(bot, "_feedback_sampled", return_value=True), \
+             mock.patch.object(bot, "sugg_kb", return_value=None), \
+             mock.patch.object(bot.L, "split_followups", return_value=("Ответ", [])), \
+             mock.patch.object(bot.L, "followups", return_value=[]), \
+             mock.patch.object(bot, "_voice_reply_on", return_value=False):
+            asyncio.run(bot.send_answer(context, cid, "Ответ", None, "Вопрос", usage=[]))
+
+        rich_send.assert_awaited_once()
+        context.bot.send_message.assert_not_awaited()
+        conn = sqlite3.connect(bot.DB)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM feedback_requests WHERE chat_id=?",
+                (cid,),
+            ).fetchone()[0],
+            1,
+        )
+        actions = [
+            row[0] for row in conn.execute(
+                "SELECT action FROM events WHERE chat_id=? ORDER BY id",
+                (cid,),
+            ).fetchall()
+        ]
+        conn.close()
+        self.assertIn("feedback_prompt", actions)
+        self.assertIn("tokens", actions)
 
     def test_feedback_sampling_can_be_disabled_or_enabled_for_all_answers(self):
         with mock.patch.dict(os.environ, {"AIWA_FEEDBACK_SAMPLE_RATE": "0"}):
@@ -162,7 +287,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn.close()
         self.assertEqual(row[1:4], ("screen_viewed", "webapp", "food"))
         self.assertNotIn("987654321", row[0])
-        self.assertEqual(json.loads(row[4]), {})
+        self.assertEqual(json.loads(row[4]), {"platform": "webapp"})
 
     def test_external_traction_outbox_is_pseudonymous_and_idempotent(self):
         cid = 987654321
@@ -203,6 +328,64 @@ class SecurityAnalyticsTests(unittest.TestCase):
             self.assertTrue(item["device_id"].startswith("u_"))
             self.assertFalse({"chat_id", "telegram_id", "user_id"} & set(item["properties"]))
 
+    def test_tool_lifecycle_exports_status_without_arguments_or_results(self):
+        cid = 456
+        request_id = "r_tool_test"
+        bot.ev(
+            cid, "tool_execution",
+            meta="success|today_diary|webapp",
+            ms=12, request_id=request_id,
+        )
+        bot.ev(
+            cid, "tool_outcome",
+            meta="success|tool_assisted_answer|webapp",
+            request_id=request_id,
+        )
+
+        batch = a2.traction_batch(bot.DB)
+        by_name = {item["name"]: item["properties"] for item in batch}
+        execution = by_name["tool_execution_completed"]
+        outcome = by_name["tool_outcome_completed"]
+        self.assertEqual(execution["tool_name"], "today_diary")
+        self.assertEqual(execution["status"], "success")
+        self.assertEqual(execution["request_id"], request_id)
+        self.assertEqual(execution["platform"], "webapp")
+        self.assertEqual(outcome["outcome_type"], "tool_assisted_answer")
+        self.assertFalse({"arguments", "result", "profile", "symptoms"} & set(execution))
+
+    def test_agent_records_real_tool_execution_and_assisted_outcome(self):
+        plan = {
+            "content": "",
+            "tool_calls": [{
+                "id": "call_1",
+                "function": {"name": "cycle_status", "arguments": "{}"},
+            }],
+        }
+        no_more_tools = {"content": "", "tool_calls": None}
+        with mock.patch.object(
+            bot, "llm_to_thread",
+            new=mock.AsyncMock(side_effect=[plan, no_more_tools]),
+        ), mock.patch.object(
+            bot, "_agent_exec", return_value={"tracked": True, "day": 12},
+        ), mock.patch.object(
+            bot, "_agent_final", new=mock.AsyncMock(return_value="Готовый ответ"),
+        ):
+            answer = asyncio.run(bot._agent_answer(
+                789, {"mode": "cycle"}, "Какой день?", [], "r_agent",
+                channel="webapp",
+            ))
+
+        self.assertEqual(answer, "Готовый ответ")
+        conn = sqlite3.connect(bot.DB)
+        actions = conn.execute(
+            "SELECT action,meta FROM events WHERE chat_id=? ORDER BY id", (789,)
+        ).fetchall()
+        conn.close()
+        self.assertEqual(actions, [
+            ("tool_execution", "success|cycle_status|webapp"),
+            ("tool_outcome", "success|tool_assisted_answer|webapp"),
+        ])
+
     def test_daily_checkin_push_is_sent_once_per_campaign(self):
         cid = 123
         campaign = "daily_checkin:2026-07-23"
@@ -228,6 +411,49 @@ class SecurityAnalyticsTests(unittest.TestCase):
         )
         conn.close()
 
+    def test_permanent_push_failure_suppresses_future_jobs_until_inbound_update(self):
+        cid = 122
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="none")
+
+        failure_class = bot._record_push_failure(
+            cid, "daily_summary:2026-07-24", bot.Forbidden("bot was blocked by the user")
+        )
+
+        self.assertEqual(failure_class, "blocked")
+        self.assertEqual(bot.row(cid)["push_suppression_reason"], "blocked")
+        self.assertNotIn(cid, bot.all_users())
+        self.assertTrue(bot._clear_push_suppression(cid))
+        self.assertIsNone(bot.row(cid)["push_suppressed_at"])
+        self.assertIn(cid, bot.all_users())
+
+        batch = a2.traction_batch(bot.DB)
+        failure = next(item for item in batch if item["name"] == "push_failed")
+        self.assertEqual(failure["properties"]["failure_class"], "blocked")
+        self.assertFalse(failure["properties"]["retryable"])
+
+    def test_legacy_blocked_recipient_is_backfilled_once(self):
+        cid = 121
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="none")
+        bot.ev(cid, "broadcast", meta="blocked|daily_summary:2026-07-23")
+
+        self.assertEqual(bot._backfill_push_suppressions(), 1)
+        self.assertEqual(bot._backfill_push_suppressions(), 0)
+        self.assertEqual(bot.row(cid)["push_suppression_reason"], "blocked")
+        self.assertNotIn(cid, bot.all_users())
+
+    def test_backfill_does_not_suppress_recipient_reachable_after_old_block(self):
+        cid = 120
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="none")
+        bot.ev(cid, "broadcast", meta="blocked|daily_summary:2026-07-22")
+        bot.ev(cid, "user_message", meta="text")
+
+        self.assertEqual(bot._backfill_push_suppressions(), 0)
+        self.assertIsNone(bot.row(cid)["push_suppressed_at"])
+        self.assertIn(cid, bot.all_users())
+
     def test_failed_checkin_send_releases_claim_for_retry(self):
         cid = 124
         campaign = "daily_checkin:2026-07-23"
@@ -244,6 +470,69 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertFalse(failed)
         self.assertTrue(retried)
         self.assertEqual(send_message.await_count, 2)
+
+    def test_expired_push_claim_is_recovered_but_fresh_claim_is_not(self):
+        cid = 126
+        campaign = "daily_summary:2026-07-23"
+        conn = bot.db()
+        conn.execute(
+            """INSERT INTO push_deliveries
+               (chat_id,campaign_id,status,claimed_at) VALUES(?,?,'claimed',?)""",
+            (cid, campaign, "2020-01-01T00:00:00+03:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.dict(os.environ, {"AIWA_PUSH_CLAIM_TTL_SEC": "60"}):
+            self.assertTrue(bot._claim_push_delivery(cid, campaign))
+            self.assertFalse(bot._claim_push_delivery(cid, campaign))
+
+    def test_scheduled_summary_cache_miss_uses_fast_fallback_without_llm(self):
+        cycle_cid = 127
+        general_cid = 128
+        bot.upsert(
+            cycle_cid,
+            mode="cycle",
+            last_period=date.today().isoformat(),
+            cycle_len=28,
+        )
+        bot.upsert(general_cid, mode="irregular")
+        context = types.SimpleNamespace(
+            bot=types.SimpleNamespace(send_message=mock.AsyncMock(), send_photo=mock.AsyncMock())
+        )
+        llm_call = mock.AsyncMock(side_effect=AssertionError("delivery must not call the model"))
+        with mock.patch.object(bot, "RICH_OK", False), \
+             mock.patch.object(bot, "llm_to_thread", new=llm_call), \
+             mock.patch.object(bot, "sugg_kb", return_value=None):
+            cycle_sent = asyncio.run(
+                bot.push_summary(
+                    context,
+                    cycle_cid,
+                    with_image=False,
+                    campaign="daily_summary:cycle-test",
+                )
+            )
+            general_sent = asyncio.run(
+                bot.push_summary(
+                    context,
+                    general_cid,
+                    with_image=False,
+                    campaign="daily_summary:general-test",
+                )
+            )
+
+        self.assertTrue(cycle_sent)
+        self.assertTrue(general_sent)
+        llm_call.assert_not_awaited()
+        conn = sqlite3.connect(bot.DB)
+        self.assertEqual(
+            conn.execute(
+                """SELECT COUNT(*) FROM events
+                   WHERE action='fallback' AND meta='static:summary_delivery_cache_miss'"""
+            ).fetchone()[0],
+            2,
+        )
+        conn.close()
 
     def test_sent_checkin_keeps_claim_if_delivery_bookkeeping_fails(self):
         cid = 125
@@ -295,6 +584,15 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn.execute("INSERT INTO proactive_state(chat_id,signal,last_ts) VALUES(?,?,?)", (cid, "x", "now"))
         conn.execute("INSERT INTO memory(chat_id,mkey,mval,updated) VALUES(?,?,?,?)", (cid, "x", "private", "now"))
         conn.execute("INSERT INTO referrals(chat_id,source,ts) VALUES(?,?,?)", (cid, "test", "now"))
+        conn.execute("""INSERT INTO prepared_summaries
+                        (chat_id,summary_date,context_key,body,prepared_at)
+                        VALUES(?,?,?,?,?)""", (cid, "2026-07-23", "ctx", "private", "now"))
+        conn.execute("""INSERT INTO feedback_requests
+                        (chat_id,answer_id,channel,created_at)
+                        VALUES(?,?,?,?)""", (cid, "abcdef1234567890", "bot", "now"))
+        conn.execute("""INSERT INTO chat_mutations
+                        (chat_id,mutation_key,generation,kind,record_id,created_at)
+                        VALUES(?,?,?,?,?,?)""", (cid, "telegram:test", 1, "food", "1", "now"))
         conn.execute("INSERT INTO partners(partner_id,woman_id,created) VALUES(?,?,?)", (88, cid, "now"))
         a2.insert_legacy_event(conn, cid, "manual", meta="text")
         conn.commit(); conn.close()
@@ -304,7 +602,8 @@ class SecurityAnalyticsTests(unittest.TestCase):
 
         conn = bot.db()
         for table in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals",
-                      "workouts", "proactive_log", "proactive_state", "memory", "referrals"):
+                      "workouts", "proactive_log", "proactive_state", "memory", "referrals",
+                      "prepared_summaries", "feedback_requests", "chat_mutations"):
             self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE chat_id=?", (cid,)).fetchone()[0], 0, table)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid)).fetchone()[0], 0)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM events_v2 WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 0)
@@ -559,7 +858,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
              mock.patch.object(bot, "ev"):
             asyncio.run(bot.on_voice(update, context))
 
-        self.assertEqual(spoken, ["Сводка готова\nВсё хорошо."])
+        self.assertEqual(spoken, ["Сводка готова Всё хорошо."])
         telegram_bot.send_voice.assert_awaited_once_with(cid, b"summary-audio")
 
     def test_telegram_text_never_enables_voice_reply(self):
@@ -572,6 +871,43 @@ class SecurityAnalyticsTests(unittest.TestCase):
              mock.patch.object(bot, "_send_voice_reply", new=mock.AsyncMock()) as voice_reply:
             asyncio.run(bot.on_text(update, context))
         voice_reply.assert_not_awaited()
+
+    def test_non_cycle_summary_sends_context_image_and_text(self):
+        cid = 88
+        bot.upsert(cid, mode="irregular")
+        telegram_bot = types.SimpleNamespace(
+            send_photo=mock.AsyncMock(),
+            send_message=mock.AsyncMock(),
+        )
+        context = types.SimpleNamespace(bot=telegram_bot)
+        answer = "💛 **Самочувствие**\n• Сегодня лучше выбрать ровный темп и следить за энергией."
+        with mock.patch.object(bot.IMG, "render_summary_card", return_value=b"png") as render, \
+             mock.patch.object(bot, "llm_to_thread", new=mock.AsyncMock(return_value=answer)), \
+             mock.patch.object(bot.L, "split_followups", return_value=(answer, [])), \
+             mock.patch.object(bot, "sugg_kb", return_value=None):
+            asyncio.run(bot.push_summary(context, cid))
+
+        render.assert_called_once()
+        self.assertEqual(render.call_args.args[0], "irregular")
+        self.assertEqual(render.call_args.args[2], [])
+        telegram_bot.send_photo.assert_awaited_once()
+        telegram_bot.send_message.assert_awaited_once()
+
+    def test_non_cycle_summary_can_skip_context_image(self):
+        cid = 89
+        bot.upsert(cid, mode="meno")
+        telegram_bot = types.SimpleNamespace(
+            send_photo=mock.AsyncMock(),
+            send_message=mock.AsyncMock(),
+        )
+        context = types.SimpleNamespace(bot=telegram_bot)
+        with mock.patch.object(bot, "llm_to_thread", new=mock.AsyncMock(return_value="Сводка готова.")), \
+             mock.patch.object(bot.L, "split_followups", return_value=("Сводка готова.", [])), \
+             mock.patch.object(bot, "sugg_kb", return_value=None):
+            asyncio.run(bot.push_summary(context, cid, with_image=False))
+
+        telegram_bot.send_photo.assert_not_awaited()
+        telegram_bot.send_message.assert_awaited_once()
 
     def test_joy_voice_uses_erm_24000_for_salutespeech(self):
         response = types.SimpleNamespace(
@@ -589,41 +925,37 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(audio, b"joy-audio")
         self.assertEqual(post.call_args.kwargs["params"]["voice"], "Erm_24000")
 
-    def test_http_admin_keeps_legacy_key_but_prefers_separate_secret(self):
-        old_admin = bot.AIWA_ADMIN
-        old_key = os.environ.get("AIWA_ADMIN_KEY")
-        bot.AIWA_ADMIN = "123"
-        os.environ.pop("AIWA_ADMIN_KEY", None)
-        try:
-            legacy_session = bot._admin_session_value("123")
-            self.assertTrue(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: legacy_session})))
-            self.assertFalse(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: "123"})))
-            self.assertFalse(bot._admin_key_ok(FakeRequest(query={"key": "123"})))
-            os.environ["AIWA_ADMIN_KEY"] = "a" * 48
-            session = bot._admin_session_value("a" * 48)
-            self.assertFalse(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: legacy_session})))
-            self.assertTrue(bot._admin_key_ok(FakeRequest(cookies={bot._ADMIN_COOKIE: session})))
-            self.assertFalse(bot._admin_key_ok(FakeRequest(query={"key": "a" * 48})))
-            self.assertTrue(bot._admin_key_ok(FakeRequest(headers={"X-Admin-Key": "a" * 48})))
-            response = bot.web.Response()
-            bot._refresh_admin_session(FakeRequest(cookies={bot._ADMIN_COOKIE: session}), response)
-            self.assertEqual(response.cookies[bot._ADMIN_COOKIE]["max-age"], str(7 * 24 * 3600))
-        finally:
-            bot.AIWA_ADMIN = old_admin
-            if old_key is None: os.environ.pop("AIWA_ADMIN_KEY", None)
-            else: os.environ["AIWA_ADMIN_KEY"] = old_key
+    def test_tts_pronounces_formula_operators_and_table_cells(self):
+        spoken = llm._tts_spoken_text(
+            "BMR = 10×57 + 6.25×170 - 5×23 - 161 = 1357 ккал\n"
+            "Показатель\tБелки (г)\tКалории (ккал)\n"
+            "Дневная норма\t115\t2100"
+        )
+        self.assertIn("базовый обмен равно 10 умножить на 57", spoken)
+        self.assertIn("6,25 умножить на 170", spoken)
+        self.assertIn("1357 килокалорий", spoken)
+        self.assertNotIn("×", spoken)
+        self.assertNotIn("\t", spoken)
 
-    def test_legacy_admin_is_marked_deprecated_and_links_to_new_dashboard(self):
-        with mock.patch.object(bot, "_admin_key_ok", return_value=False):
-            login = asyncio.run(bot._admin_page(FakeRequest()))
-        self.assertIn("Эта админка устарела", login.text)
-        self.assertIn("https://stats.multitool.works/#/p/aiwa", login.text)
+    def test_tts_chunks_keep_the_complete_answer(self):
+        text = " ".join(f"Предложение номер {i}." for i in range(1, 80))
+        chunks = llm.tts_chunks(text, limit=220)
+        self.assertGreater(len(chunks), 1)
+        self.assertIn("Предложение номер 79.", " ".join(chunks))
+        self.assertTrue(all(len(chunk) <= 220 for chunk in chunks))
 
-        with mock.patch.object(bot, "_admin_key_ok", return_value=True):
-            dashboard = asyncio.run(bot._admin_page(FakeRequest()))
-        self.assertIn("Старая аналитика — только для сверки", dashboard.text)
-        self.assertIn("планируем удалить после переходного периода", dashboard.text)
-        self.assertIn("rel=\"noopener noreferrer\"", dashboard.text)
+    def test_legacy_admin_is_gone_for_page_login_and_api(self):
+        response = asyncio.run(bot._legacy_admin_removed(FakeRequest()))
+        self.assertEqual(response.status, 410)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+        app = bot.build_web()
+        mounted = {(route.method, route.resource.canonical) for route in app.router.routes()}
+        self.assertIn(("*", "/admin"), mounted)
+        self.assertIn(("*", "/admin/login"), mounted)
+        self.assertIn(("*", "/api/admin_stats"), mounted)
+        self.assertFalse(hasattr(bot, "_admin_page"))
+        self.assertFalse(hasattr(bot, "_admin_stats"))
 
     def test_llm_usage_keeps_legacy_total_and_captures_split(self):
         captured = []
@@ -726,6 +1058,54 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(config["name"], "litellm")
         self.assertEqual(config["cost_unit"], "usd")
 
+    def test_llm_route_circuit_opens_immediately_for_auth_failure(self):
+        cfg = {"name": "broken", "url": "https://proxy.test/v1/chat/completions", "model": "m"}
+        response = mock.Mock(status_code=403, text="forbidden", headers={})
+        llm._ROUTE_CIRCUITS.clear()
+        with mock.patch.object(llm._HTTP, "post", return_value=response) as post:
+            self.assertIsNone(llm._call_proxy_one(
+                cfg, [{"role": "user", "content": "hello"}], 10, 0.2, [], attempts=2,
+            ))
+            self.assertIsNone(llm._call_proxy_one(
+                cfg, [{"role": "user", "content": "hello"}], 10, 0.2, [], attempts=2,
+            ))
+        self.assertEqual(post.call_count, 1)
+        llm._ROUTE_CIRCUITS.clear()
+
+    def test_llm_route_circuit_opens_after_repeated_transport_failures(self):
+        cfg = {"name": "broken", "url": "https://proxy.test/v1/chat/completions", "model": "m"}
+        llm._ROUTE_CIRCUITS.clear()
+        with mock.patch.object(llm._HTTP, "post",
+                               side_effect=requests.ConnectionError("offline")) as post, \
+                mock.patch.dict(os.environ, {"AIWA_LLM_CIRCUIT_FAILURES": "3"}, clear=False):
+            for _ in range(4):
+                self.assertIsNone(llm._call_proxy_one(
+                    cfg, [{"role": "user", "content": "hello"}], 10, 0.2, [], attempts=1,
+                ))
+        self.assertEqual(post.call_count, 3)
+        llm._ROUTE_CIRCUITS.clear()
+
+    def test_empty_provider_response_is_recorded_as_failure_not_success(self):
+        cfg = {"name": "proxy", "url": "https://proxy.test/v1/chat/completions", "model": "m"}
+        response = mock.Mock(status_code=200, headers={})
+        response.json.return_value = {
+            "provider": "upstream", "model": "m",
+            "choices": [{"message": {"content": ""}}],
+        }
+        captured = []
+        previous_sink = llm._USAGE_SINK
+        llm._ROUTE_CIRCUITS.clear()
+        llm.set_usage_sink(captured.append)
+        try:
+            with mock.patch.object(llm._HTTP, "post", return_value=response):
+                self.assertIsNone(llm._call_proxy_one(
+                    cfg, [{"role": "user", "content": "hello"}], 10, 0.2, [], attempts=1,
+                ))
+        finally:
+            llm.set_usage_sink(previous_sink)
+            llm._ROUTE_CIRCUITS.clear()
+        self.assertEqual([item["status"] for item in captured], ["empty_response"])
+
     def test_long_telegram_text_is_split_without_losing_content(self):
         text = (("🌿 Длинный ответ с полезными пояснениями. " * 140) + "\n\n") * 3
 
@@ -769,6 +1149,116 @@ class SecurityAnalyticsTests(unittest.TestCase):
             llm.answer_question(None, "Почему?", {})
         self.assertEqual(call.call_args.kwargs["max_tokens"], 1200)
         self.assertIn("ЖЁСТКИЙ предел 1900 знаков", call.call_args.args[0][-1]["content"])
+
+    def test_rich_contract_does_not_forbid_its_own_markup(self):
+        self.assertIn("**жирный**", llm.SYSTEM)
+        self.assertIn("GFM-таблицы", llm.SYSTEM)
+        self.assertIn("все запрошенные периоды", llm.SYSTEM)
+        self.assertNotIn("НИКОГДА не используй символы #, *, _", llm.SYSTEM)
+
+    def test_followup_fallback_matches_answer_topic(self):
+        suggestions = llm.followups(
+            {"phase": "ovulation"},
+            "Какие жиры мне есть?",
+            "Подойдут оливковое масло, авокадо и орехи.",
+        )
+        self.assertEqual(suggestions, ["Какие жиры выбрать?", "Сколько орехов в день?"])
+        self.assertNotIn("Можно интенсивнее?", suggestions)
+
+    def test_send_answer_replaces_well_formed_but_irrelevant_model_buttons(self):
+        fake_bot = mock.AsyncMock()
+        context = types.SimpleNamespace(bot=fake_bot)
+        answer = "Подойдут оливковое масло и орехи."
+        with mock.patch.object(
+            bot.L, "split_followups",
+            return_value=(answer, ["Почему пик энергии?", "Можно интенсивнее?"]),
+        ), mock.patch.object(bot, "sugg_kb", return_value=None) as keyboard, \
+             mock.patch.object(bot, "ev"), \
+             mock.patch.object(bot, "_voice_reply_on", return_value=False):
+            asyncio.run(bot.send_answer(context, 7, answer, None, "Какие жиры мне есть?"))
+
+        self.assertEqual(
+            keyboard.call_args.args[1],
+            ["Какие жиры выбрать?", "Сколько орехов в день?"],
+        )
+
+    def test_unknown_followup_topic_does_not_invent_phase_buttons(self):
+        self.assertEqual(
+            llm.followups({"phase": "ovulation"}, "Расскажи про книгу", "Это роман."),
+            [],
+        )
+
+    def test_card_facts_accept_only_catalog_ids(self):
+        with mock.patch.object(
+            llm, "_call",
+            return_value='{"ids":["recovery","invented_dosage","sleep"]}',
+        ):
+            facts = llm.summary_card_facts("cycle", {"phase": "luteal"})
+        allowed = {
+            *llm.SUMMARY_CARD_FACTS["cycle_common"].values(),
+            *llm.SUMMARY_CARD_FACTS["luteal"].values(),
+        }
+        self.assertEqual(len(facts), 3)
+        self.assertTrue(all(fact in allowed for fact in facts))
+        self.assertNotIn("invented_dosage", " ".join(facts))
+
+    def test_telegram_pre_block_never_contains_nested_bold(self):
+        rendered = bot.tg_rich("**Заголовок**\n```\n**Колонка**  Значение\n```")
+        self.assertIn("<b>Заголовок</b>", rendered)
+        self.assertIn("<pre>**Колонка**  Значение</pre>", rendered)
+        self.assertNotIn("<pre><b>", rendered)
+
+    def test_selected_summary_time_is_exact_and_preparation_is_earlier(self):
+        with mock.patch.dict(os.environ, {
+            "AIWA_SUMMARY_PREPARE_MIN": "10",
+            "AIWA_SUMMARY_PREPARE_SPREAD_MIN": "20",
+        }):
+            self.assertEqual(bot.scheduled_hhmm(15, "10:00")[0], "10:00")
+            self.assertEqual(
+                bot.schedule_text(15, "10:00"),
+                "Время сводки: 10:00 по Москве — подготовлю заранее и начну отправку в это время. "
+                "При высокой нагрузке доставка может занять несколько минут.",
+            )
+            self.assertEqual(bot.summary_prepare_hhmm(15, "10:00"), "09:35")
+
+    def test_prepared_summary_survives_memory_cache_loss(self):
+        cid = 702
+        bot.upsert(cid, mode="irregular")
+        day = bot.dtoday().isoformat()
+        cache_key = (cid, day, "mode:irregular", "None")
+        self.assertTrue(bot.prepared_summary_put(cid, day, cache_key, "Готовая сводка"))
+        bot._SUM_CACHE.clear()
+        self.assertEqual(bot.prepared_summary_get(cid, day, cache_key), "Готовая сводка")
+
+    def test_deleted_lifecycle_cannot_restore_inflight_prepared_summary(self):
+        cid = 703
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="preg", last_period="2026-04-01")
+        generation = bot._user_generation(cid)
+        day = bot.dtoday().isoformat()
+        key = (cid, day, "context")
+        bot._SUM_CACHE[key] = bot._summary_pack("Старая приватная сводка", ["Старый факт"])
+
+        bot.del_user(cid)
+        self.assertNotIn(key, bot._SUM_CACHE)
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="preg", last_period="2026-04-01")
+
+        self.assertFalse(bot.prepared_summary_put(
+            cid, day, key, bot._summary_pack("Старая приватная сводка"), generation=generation
+        ))
+        self.assertIsNone(bot.prepared_summary_get(cid, day, key))
+
+    def test_training_section_calls_model_with_static_plan_only_as_fallback(self):
+        st = {
+            "phase": "follicular", "subphase": "ранняя", "phase_ru": "Фолликулярная",
+            "day": 7, "cycle_len": 28, "days_to_next": 21,
+            "content": {"general": "Больше энергии.", "food": "Белок.", "training": "Умеренно."},
+        }
+        with mock.patch.object(llm, "_call", return_value="Персональная нагрузка") as call:
+            answer = llm.explain_section(st, "training")
+        self.assertEqual(answer, "Персональная нагрузка")
+        self.assertIn("Проверенный базовый план нагрузки", call.call_args.args[0][1]["content"])
 
     def test_onboarding_completion_counts_as_traction_activity(self):
         cid = 700

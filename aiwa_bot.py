@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging
+import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
+from difflib import SequenceMatcher
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -74,6 +75,7 @@ def hist_push(cid, q, a):
     clean = a
     try: clean = L.split_followups(a)[0]
     except Exception: pass
+    clean = guard_aiwa_reply(cid, clean)
     dq.append({"role": "user", "content": q[:600]}); dq.append({"role": "assistant", "content": (clean or a)[:1200]})
     try: chatlog_add(cid, "user", q[:1000]); chatlog_add(cid, "ai", (clean or a)[:1500])
     except Exception: pass
@@ -94,12 +96,12 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-23-v88-checkin-idempotency"
+AIWA_VERSION = "2026-07-27-v146-summary-dedup"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
-APP_BUTTON_TEXT = "📱 Приложение"
+APP_BUTTON_TEXT = "Открыть Айву"
 APP_MENU_BUTTON_TEXT = "Айва"
-APP_CTA_HTML = "📱 <b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
+APP_CTA_HTML = "<b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
 ANNOUNCE_TEXT = (
     "🌸 Большое обновление в приложении Айвы: теперь можно вести дневник питания и отмечать тренировки.\n\n"
     "🍎 Дневник калорий. Отмечай приёмы пищи по фото тарелки, текстом или вручную — Айва посчитает калории и БЖУ, "
@@ -122,6 +124,9 @@ def webapp_url(u):
     # Health data must not travel in URLs: it leaks into browser history,
     # access logs and referrers. The authenticated /api/data response already
     # provides everything the mini app needs.
+    # Новый мини-апп — дефолт для всех; при аварийном откате отдаём старый фронт.
+    if not redesign_on(u.get("chat_id") if u else None):
+        return AIWA_WEBAPP_URL.rstrip("/") + "/?ui=1"
     return AIWA_WEBAPP_URL
 def campaign_id(kind):
     """Stable, non-sensitive daily campaign id for push attribution."""
@@ -167,16 +172,18 @@ def symptom_label(code):
 def symptoms_labels(items):
     return [symptom_label(x) for x in (items or []) if symptom_label(x)]
 
-START_TEXT = ("Привет, я Айва — ИИ-ассистент по циклу и женскому здоровью.\n\n"
- "Что я умею:\n"
- "• считать цикл и присылать утреннюю сводку под твою фазу\n"
- "• подбирать питание и нагрузку\n"
- "• отвечать на вопросы о здоровье — текстом или голосом\n"
- "• вести дневник еды, можно просто по фото\n"
- "• собирать выписку для врача\n"
- "• подсказывать партнёру, как поддержать\n\n"
- "Настройка займёт около минуты. Выбери, что ближе:")
-ABOUT_TEXT = ("Я Айва — ИИ-ассистент по женскому здоровью.\n\n"
+START_TEXT = ("Привет, это Айва — ИИ wellness-ассистент про самочувствие, питание и нагрузку.\n\n"
+ "Внутри:\n"
+ "• утренняя сводка под твоё состояние\n"
+ "• персональное меню и тренировки на день\n"
+ "• ответы на вопросы о здоровье — текстом или голосом\n"
+ "• дневник еды, можно просто по фото\n"
+ "• календарь цикла и поддержка на каждую фазу — для женщин\n"
+ "• выписка для врача\n\n"
+ "Настройка займёт около минуты. Кто ты?")
+
+FEMALE_START_TEXT = ("Принято. Что ближе?")
+ABOUT_TEXT = ("Я Айва — ИИ wellness-ассистент: самочувствие, питание, нагрузка; для женщин — цикл и календарь.\n\n"
  "Что я умею:\n"
  "• веду календарь цикла и присылаю утреннюю сводку под фазу\n"
  "• подбираю питание и тренировки\n"
@@ -248,6 +255,8 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER,
         ts TEXT, action TEXT, tokens INTEGER DEFAULT 0)""")
     c.execute("CREATE TABLE IF NOT EXISTS partners(partner_id INTEGER PRIMARY KEY, woman_id INTEGER, created TEXT)")
+    # Дневной кэш генераций (меню, сводка, рецепты, недельный разбор) — переживает рестарты процесса.
+    c.execute("CREATE TABLE IF NOT EXISTS day_cache(chat_id INTEGER, d TEXT, kind TEXT, k TEXT, js TEXT, PRIMARY KEY(chat_id,d,kind,k))")
     c.execute("""CREATE TABLE IF NOT EXISTS meals(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, d TEXT, ts TEXT,
         title TEXT, kcal INTEGER DEFAULT 0, protein REAL DEFAULT 0, fat REAL DEFAULT 0, carbs REAL DEFAULT 0,
         grams INTEGER, items TEXT, source TEXT)""")
@@ -269,6 +278,32 @@ def db():
         job_id TEXT PRIMARY KEY, chat_id INTEGER NOT NULL, status TEXT NOT NULL,
         filename TEXT NOT NULL, image_data BLOB, result_json TEXT, error TEXT,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS prepared_summaries(
+        chat_id INTEGER NOT NULL,
+        summary_date TEXT NOT NULL,
+        context_key TEXT NOT NULL,
+        body TEXT NOT NULL,
+        prepared_at TEXT NOT NULL,
+        PRIMARY KEY(chat_id, summary_date))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS feedback_requests(
+        chat_id INTEGER NOT NULL,
+        answer_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        rating TEXT,
+        submitted_at TEXT,
+        PRIMARY KEY(chat_id, answer_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS chat_mutations(
+        chat_id INTEGER NOT NULL,
+        mutation_key TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        record_id TEXT,
+        args_hash TEXT,
+        result_json TEXT,
+        created_at TEXT NOT NULL,
+        reversed_at TEXT,
+        PRIMARY KEY(chat_id, mutation_key))""")
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
                 "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
@@ -281,13 +316,17 @@ def db():
     except sqlite3.OperationalError: pass
     try: c.execute("ALTER TABLE meals ADD COLUMN fclass TEXT")
     except sqlite3.OperationalError: pass
+    # True only when the slot came from server time rather than user meaning.
+    try: c.execute("ALTER TABLE meals ADD COLUMN slot_guessed INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
     for _wcol in ("kcal INTEGER DEFAULT 0", "muscles TEXT"):
         try: c.execute(f"ALTER TABLE workouts ADD COLUMN {_wcol}")
         except sqlite3.OperationalError: pass
     for _ix in ("CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts)",
                 "CREATE INDEX IF NOT EXISTS ix_events_cid_ts ON events(chat_id, ts)",
                 "CREATE INDEX IF NOT EXISTS ix_meals_cid_d ON meals(chat_id, d)",
-                "CREATE INDEX IF NOT EXISTS ix_workouts_cid_d ON workouts(chat_id, d)"):
+                "CREATE INDEX IF NOT EXISTS ix_workouts_cid_d ON workouts(chat_id, d)",
+                "CREATE INDEX IF NOT EXISTS ix_prepared_summary_date ON prepared_summaries(summary_date)"):
         try: c.execute(_ix)
         except sqlite3.OperationalError: pass
     try: c.execute("CREATE INDEX IF NOT EXISTS ix_media_jobs_chat_created ON media_jobs(chat_id, created_at)")
@@ -296,7 +335,8 @@ def db():
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
                 "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER",
                 "last_phase_notified TEXT", "last_reactivation TEXT",
-                "proactive_enabled INTEGER DEFAULT 1"):
+                "proactive_enabled INTEGER DEFAULT 1", "tg_first_name TEXT",
+                "push_suppressed_at TEXT", "push_suppression_reason TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     c.commit()
@@ -328,7 +368,7 @@ def _activate_user(cid):
         c.close()
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled,tg_first_name,push_suppressed_at,push_suppression_reason FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     return _user_row(r)
 
 def _user_row(r):
@@ -338,17 +378,22 @@ def _user_row(r):
             "height": r[7], "weight": r[8], "age": r[9], "activity": r[10], "diet": r[11] or "", "partner_code": r[12],
             "mode": r[13] or "cycle", "diet_note": r[14] or "", "period_end": r[15], "period_len": r[16],
             "train_profile": r[17], "kcal_goal": r[18], "last_phase_notified": r[19],
-            "last_reactivation": r[20], "proactive_enabled": r[21] is None or bool(r[21])}
+            "last_reactivation": r[20], "proactive_enabled": r[21] is None or bool(r[21]),
+            "tg_first_name": r[22] or "", "push_suppressed_at": r[23],
+            "push_suppression_reason": r[24] or ""}
 
 _USER_UPDATE_COLUMNS = frozenset({"activity", "age", "cycle_len", "diet", "diet_note", "height", "kcal_goal",
     "last_period", "last_phase_notified", "last_reactivation", "mode", "partner_code", "pending_date",
-    "period_end", "period_len", "proactive_enabled", "send_time", "state", "train_profile", "weight"})
-def upsert(cid, **kw):
+    "period_end", "period_len", "proactive_enabled", "push_suppressed_at",
+    "push_suppression_reason", "send_time", "state", "tg_first_name", "train_profile", "weight"})
+def upsert(cid, *, user_generation=None, **kw):
     unknown = set(kw) - _USER_UPDATE_COLUMNS
     if unknown:
         raise ValueError("unknown user fields: " + ", ".join(sorted(unknown)))
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close()
         return False
     if not c.execute("SELECT 1 FROM users WHERE chat_id=?", (cid,)).fetchone():
@@ -357,6 +402,50 @@ def upsert(cid, **kw):
     for k, v in kw.items(): c.execute(f"UPDATE users SET {k}=? WHERE chat_id=?", (v, cid))  # nosec B608
     c.commit(); c.close(); return True
 
+def _clean_telegram_first_name(value):
+    """Telegram profile label used only for addressing, never inferred from chat."""
+    raw = re.sub(r"\s+", " ", str(value or "")).strip()
+    # first_name is user-controlled profile text. Use only its first name-like
+    # token and pass it to the model later as delimited data, never as prose.
+    tokens = re.findall(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*", raw, flags=re.UNICODE)
+    return tokens[0][:64] if tokens else ""
+
+def _store_telegram_first_name(cid, raw_name, allow_create=False):
+    """Persist a changed private-chat label without resurrecting deleted users."""
+    if raw_name is None:
+        return False
+    name = _clean_telegram_first_name(raw_name)
+    try:
+        current = row(cid)
+        if current is None and not allow_create:
+            return False
+        if current is not None and current.get("tg_first_name", "") == name:
+            return True
+        return upsert(cid, tg_first_name=name)
+    except Exception as exc:
+        log.warning("telegram identity sync %s: %s", cid, exc)
+        return False
+
+def _sync_telegram_identity(update, allow_create=False):
+    """Refresh the private-chat first name without resurrecting deleted users."""
+    user = getattr(update, "effective_user", None)
+    chat = getattr(update, "effective_chat", None)
+    cid = getattr(chat, "id", None)
+    if not user or cid is None or getattr(chat, "type", "private") != "private":
+        return False
+    return _store_telegram_first_name(cid, getattr(user, "first_name", None), allow_create)
+
+async def sync_telegram_identity(update, context):
+    """Run before normal Telegram handlers so this turn sees the current name."""
+    _sync_telegram_identity(update)
+    chat = getattr(update, "effective_chat", None)
+    cid = getattr(chat, "id", None)
+    if cid is not None and getattr(chat, "type", "private") == "private":
+        if _clear_push_suppression(cid):
+            user = row(cid) or {}
+            if is_onboarded(user):
+                schedule_daily(context.application, cid, user.get("send_time") or "08:00")
+
 def add_sugg(cid, q):
     c = db()
     if not _user_write_allowed(cid, conn=c):
@@ -364,7 +453,8 @@ def add_sugg(cid, q):
     sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?) RETURNING id", (cid, q)).fetchone()[0]; c.commit(); c.close(); return sid
 def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
-def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None):
+def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None,
+       user_generation=None):
     """Dual-write legacy counters and privacy-preserving analytics v2."""
     request_id = request_id or TR.current_trace_id(create=False) or None
     tin = tout = 0; model = None
@@ -372,7 +462,9 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
         try: tin, tout, model = L.usage_split(usage)
         except Exception: pass
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close(); return False
     c.execute(
         "INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n,calls,tok_in,tok_out,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -407,27 +499,50 @@ def normalize_food(data, source="photo"):
     if not isinstance(data, dict):
         return None
     items = []
-    for it in (data.get("items") or []):
+    for it in (data.get("items") or [])[:24]:
         if not isinstance(it, dict):
             continue
+        grams = max(0, min(5000, int(_num(it.get("grams")))))
+        kcal = max(0, min(10000, int(_num(it.get("kcal")))))
+        protein = max(0, min(1000, round(_num(it.get("protein")), 1)))
+        fat = max(0, min(1000, round(_num(it.get("fat")), 1)))
+        carbs = max(0, min(1000, round(_num(it.get("carbs")), 1)))
         items.append({"name": str(it.get("name") or "").strip()[:60],
-                      "grams": int(_num(it.get("grams"))), "kcal": int(_num(it.get("kcal"))),
-                      "protein": round(_num(it.get("protein")), 1), "fat": round(_num(it.get("fat")), 1),
-                      "carbs": round(_num(it.get("carbs")), 1)})
+                      "grams": grams, "kcal": kcal,
+                      "protein": protein, "fat": fat, "carbs": carbs})
     tot = data.get("total") or {}
-    kcal = int(_num(tot.get("kcal"))) or int(_num(data.get("kcal"))) or sum(i["kcal"] for i in items)
-    protein = round(_num(tot.get("protein")) or _num(data.get("protein")) or sum(i["protein"] for i in items), 1)
-    fat = round(_num(tot.get("fat")) or _num(data.get("fat")) or sum(i["fat"] for i in items), 1)
-    carbs = round(_num(tot.get("carbs")) or _num(data.get("carbs")) or sum(i["carbs"] for i in items), 1)
-    grams = int(_num(data.get("grams"))) or sum(i["grams"] for i in items) or None
+    kcal = max(0, min(10000, int(_num(tot.get("kcal"))) or int(_num(data.get("kcal"))) or sum(i["kcal"] for i in items)))
+    protein = max(0, min(1000, round(_num(tot.get("protein")) or _num(data.get("protein")) or sum(i["protein"] for i in items), 1)))
+    fat = max(0, min(1000, round(_num(tot.get("fat")) or _num(data.get("fat")) or sum(i["fat"] for i in items), 1)))
+    carbs = max(0, min(1000, round(_num(tot.get("carbs")) or _num(data.get("carbs")) or sum(i["carbs"] for i in items), 1)))
+    grams = max(0, min(5000, int(_num(data.get("grams"))) or sum(i["grams"] for i in items))) or None
     has_title = bool(str(data.get("title") or "").strip())
     title = str(data.get("title") or (items[0]["name"] if items else "Приём пищи")).strip()[:80]
     if not (kcal or items or has_title):
         return None
     fclass = L.food_class_norm(data.get("fclass") or data.get("class") or data.get("category"), protein, fat, carbs)
+    unparsed = [
+        str(x).strip()[:120]
+        for x in (data.get("unparsed") or [])[:8]
+        if str(x or "").strip()
+    ]
+    item_names = [str(x.get("name") or "").strip().casefold() for x in items]
+    unparsed = [
+        fragment for fragment in unparsed
+        if not any(
+            SequenceMatcher(
+                None,
+                re.sub(r"[^а-яёa-z0-9]+", "", fragment.casefold())[:48],
+                re.sub(r"[^а-яёa-z0-9]+", "", name)[:48],
+            ).ratio() >= 0.72
+            for name in item_names
+            if name
+        )
+    ]
     return {"title": title, "kind": data.get("kind") or "dish", "items": items, "fclass": fclass,
             "kcal": kcal, "protein": protein, "fat": fat, "carbs": carbs, "grams": grams,
-            "confidence": data.get("confidence") or "medium", "note": str(data.get("note") or "")[:160], "source": source}
+            "unparsed": unparsed, "confidence": data.get("confidence") or "medium",
+            "note": str(data.get("note") or "")[:160], "source": source}
 
 def slot_for_now():
     try: h = datetime.now(TZ).hour
@@ -438,23 +553,60 @@ def slot_for_now():
     if 18 <= h < 24: return "dinner"
     return "snack"
 
-def meal_add(cid, rec, d=None):
+def meal_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_hash=None, return_status=False):
     d = d or dtoday().isoformat()
     slot = rec.get("slot") or slot_for_now()
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None or mutation_key:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close(); return None
+    if mutation_key:
+        prior = c.execute(
+            "SELECT kind,record_id,args_hash,result_json,reversed_at FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            try: prior_id = int(prior[1])
+            except (TypeError, ValueError): prior_id = None
+            status = "mismatch" if prior[0] != "food" or (prior[2] or "") != (args_hash or "") else (
+                "reversed" if prior[4] else "duplicate"
+            )
+            try: saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError): saved_data = {}
+            result = {"id": prior_id, "created": False, "status": status, "data": saved_data}
+            return result if return_status else prior_id
     mid = c.execute(
-        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
+        "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
         (cid, d, datetime.now(TZ).isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
          float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
          json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo", slot,
-         rec.get("fclass") or None)).fetchone()[0]
-    c.commit(); c.close(); return mid
+         rec.get("fclass") or None, int(bool(rec.get("slot_guessed"))))).fetchone()[0]
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (cid, mutation_key,
+             int(user_generation if user_generation is not None else A2.lifecycle_generation(c, cid)),
+             "food", str(mid), args_hash or "",
+             json.dumps(dict(rec, slot=slot, date=d), ensure_ascii=False, sort_keys=True),
+             datetime.now(TZ).isoformat()),
+        )
+    c.commit(); c.close()
+    result = {"id": mid, "created": True, "status": "created", "data": dict(rec, slot=slot, date=d)}
+    return result if return_status else mid
 
 def meal_set_slot(cid, mid, slot):
     if slot not in ("breakfast", "lunch", "snack", "dinner"): return False
-    c = db(); c.execute("UPDATE meals SET slot=? WHERE chat_id=? AND id=?", (slot, cid, int(mid))); c.commit(); c.close(); return True
+    c = db()
+    changed = c.execute(
+        "UPDATE meals SET slot=?,slot_guessed=0 WHERE chat_id=? AND id=?",
+        (slot, cid, int(mid)),
+    ).rowcount
+    c.commit(); c.close()
+    return bool(changed)
 
 def slot_from_text(t):
     t = (t or "").lower()
@@ -470,6 +622,8 @@ def meal_edit(cid, mid, **kw):
     for k, col in cols.items():
         if kw.get(k) is not None:
             sets.append(col + "=?"); vals.append(kw[k])
+            if k == "slot":
+                sets.append("slot_guessed=0")
     if not sets: return False
     vals += [cid, int(mid)]
     # SET identifiers come exclusively from the fixed cols mapping above.
@@ -477,13 +631,131 @@ def meal_edit(cid, mid, **kw):
 
 def meals_of(cid, d=None):
     d = d or dtoday().isoformat()
-    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
+    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
     return [{"id": x[0], "ts": x[1], "title": x[2], "kcal": x[3], "protein": x[4], "fat": x[5], "carbs": x[6],
              "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9], "slot": (x[10] or "snack"),
-             "fclass": x[11] or None} for x in r]
+             "fclass": x[11] or None, "slot_guessed": bool(x[12])} for x in r]
+
+def meal_get(cid, mid):
+    """Read back one owned meal. Mutation confirmations must use this DB receipt."""
+    try:
+        wanted = int(mid)
+    except (TypeError, ValueError):
+        return None
+    c = db()
+    x = c.execute(
+        """SELECT id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed
+           FROM meals WHERE chat_id=? AND id=?""",
+        (cid, wanted),
+    ).fetchone()
+    c.close()
+    if not x:
+        return None
+    return {
+        "id": x[0], "date": x[1], "ts": x[2], "title": x[3], "kcal": x[4],
+        "protein": x[5], "fat": x[6], "carbs": x[7], "grams": x[8],
+        "items": json.loads(x[9] or "[]"), "source": x[10],
+        "slot": x[11] or "snack", "fclass": x[12] or None, "slot_guessed": bool(x[13]),
+    }
+
+def meal_update(cid, mid, rec, *, user_generation=None, mutation_key=None,
+                args_hash=None, mutation_kind="food_update", return_status=False):
+    """Atomically replace one owned meal and persist an idempotent verified receipt."""
+    try:
+        wanted = int(mid)
+    except (TypeError, ValueError):
+        return None
+    c = db()
+    c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close()
+        return None
+    if mutation_key:
+        prior = c.execute(
+            """SELECT kind,record_id,args_hash,result_json,reversed_at
+               FROM chat_mutations WHERE chat_id=? AND mutation_key=?""",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            status = "mismatch" if (
+                prior[0] != mutation_kind
+                or str(prior[1] or "") != str(wanted)
+                or (prior[2] or "") != (args_hash or "")
+            ) else ("reversed" if prior[4] else "duplicate")
+            try:
+                saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError):
+                saved_data = {}
+            result = {"id": wanted, "updated": False, "status": status, "data": saved_data}
+            return result if return_status else (wanted if status == "duplicate" else None)
+    current = c.execute(
+        "SELECT d,slot,slot_guessed FROM meals WHERE chat_id=? AND id=?",
+        (cid, wanted),
+    ).fetchone()
+    if not current:
+        c.rollback(); c.close()
+        result = {"id": None, "updated": False, "status": "missing", "data": {}}
+        return result if return_status else None
+    slot = rec.get("slot") or current[1] or "snack"
+    slot_guessed = (
+        bool(rec["slot_guessed"])
+        if "slot_guessed" in rec
+        else bool(current[2])
+    )
+    c.execute(
+        """UPDATE meals
+           SET title=?,kcal=?,protein=?,fat=?,carbs=?,grams=?,items=?,source=?,slot=?,fclass=?,ts=?,slot_guessed=?
+           WHERE chat_id=? AND id=?""",
+        (
+            rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
+            float(rec["carbs"]), int(rec["grams"]) if rec.get("grams") else None,
+            json.dumps(rec.get("items") or [], ensure_ascii=False),
+            rec.get("source") or "text", slot, rec.get("fclass") or None,
+            datetime.now(TZ).isoformat(), int(slot_guessed), cid, wanted,
+        ),
+    )
+    x = c.execute(
+        """SELECT id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed
+           FROM meals WHERE chat_id=? AND id=?""",
+        (cid, wanted),
+    ).fetchone()
+    if not x:
+        c.rollback(); c.close()
+        result = {"id": None, "updated": False, "status": "verify_failed", "data": {}}
+        return result if return_status else None
+    verified = {
+        "id": x[0], "date": x[1], "ts": x[2], "title": x[3], "kcal": x[4],
+        "protein": x[5], "fat": x[6], "carbs": x[7], "grams": x[8],
+        "items": json.loads(x[9] or "[]"), "source": x[10],
+        "slot": x[11] or "snack", "fclass": x[12] or None, "slot_guessed": bool(x[13]),
+    }
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                cid, mutation_key,
+                int(user_generation if user_generation is not None else A2.lifecycle_generation(c, cid)),
+                mutation_kind, str(wanted), args_hash or "",
+                json.dumps(verified, ensure_ascii=False, sort_keys=True),
+                datetime.now(TZ).isoformat(),
+            ),
+        )
+    c.commit(); c.close()
+    result = {"id": wanted, "updated": True, "status": "updated", "data": verified}
+    return result if return_status else wanted
 
 def meal_del(cid, mid):
-    c = db(); c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, int(mid))); c.commit(); c.close()
+    c = db()
+    c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, int(mid)))
+    c.execute(
+        """UPDATE chat_mutations SET reversed_at=?,result_json=NULL
+           WHERE chat_id=? AND kind IN ('food','food_update','food_move_slot','food_append') AND record_id=?""",
+        (datetime.now(TZ).isoformat(), cid, str(int(mid))),
+    )
+    c.commit(); c.close()
 
 def meal_scale(cid, mid, new_grams):
     """Пересчитывает КБЖУ приёма пропорционально новой граммовке."""
@@ -495,7 +767,8 @@ def meal_scale(cid, mid, new_grams):
               (int(round(r[0] * k)), round(r[1] * k, 1), round(r[2] * k, 1), round(r[3] * k, 1), int(new_grams), cid, int(mid)))
     c.commit(); c.close(); return True
 
-_MET = {"Силовая": 5.0, "Кардио": 8.0, "Йога": 3.0, "Ходьба": 3.5, "Плавание": 7.0}
+_MET = {"Силовая": 5.0, "Кардио": 8.0, "Йога": 3.0, "Ходьба": 3.5, "Плавание": 7.0,
+        "Пилатес": 3.0, "Растяжка": 2.5}
 def workout_calories(wtype, duration, rpe, weight_kg):
     m = re.search(r"\d+", str(duration or "")); mins = int(m.group()) if m else 40
     met = _MET.get(wtype, 5.0)
@@ -505,16 +778,242 @@ def workout_calories(wtype, duration, rpe, weight_kg):
     w = weight_kg if (weight_kg and weight_kg > 30) else 65
     return int(round(met * w * (mins / 60.0)))
 
-def workout_add(cid, rec, d=None):
+def workout_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_hash=None, return_status=False):
     d = d or dtoday().isoformat()
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None or mutation_key:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close(); return None
+    if mutation_key:
+        prior = c.execute(
+            "SELECT kind,record_id,args_hash,result_json,reversed_at FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            try: prior_id = int(prior[1])
+            except (TypeError, ValueError): prior_id = None
+            status = "mismatch" if prior[0] != "workout" or (prior[2] or "") != (args_hash or "") else (
+                "reversed" if prior[4] else "duplicate"
+            )
+            try: saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError): saved_data = {}
+            result = {"id": prior_id, "created": False, "status": status, "data": saved_data}
+            return result if return_status else prior_id
     cur = c.execute("INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note,review,kcal,muscles) VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
         (cid, d, datetime.now(TZ).isoformat(), rec.get("type", ""), json.dumps(rec.get("items", []), ensure_ascii=False),
          rec.get("duration", ""), rec.get("rpe", ""), rec.get("note", ""), rec.get("review", ""),
          int(rec.get("kcal") or 0), rec.get("muscles", "")))
-    wid = cur.fetchone()[0]; c.commit(); c.close(); return wid
+    wid = cur.fetchone()[0]
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (cid, mutation_key,
+             int(user_generation if user_generation is not None else A2.lifecycle_generation(c, cid)),
+             "workout", str(wid), args_hash or "",
+             json.dumps(dict(rec, date=d), ensure_ascii=False, sort_keys=True),
+             datetime.now(TZ).isoformat()),
+        )
+    c.commit(); c.close()
+    result = {"id": wid, "created": True, "status": "created", "data": dict(rec, date=d)}
+    return result if return_status else wid
+
+def workout_get(cid, wid):
+    """Read back one owned workout for verified mutation receipts."""
+    try:
+        wanted = int(wid)
+    except (TypeError, ValueError):
+        return None
+    c = db()
+    x = c.execute(
+        """SELECT id,d,ts,type,items,duration,rpe,note,review,kcal,muscles
+           FROM workouts WHERE chat_id=? AND id=?""",
+        (cid, wanted),
+    ).fetchone()
+    c.close()
+    if not x:
+        return None
+    return {
+        "id": x[0], "date": x[1], "ts": x[2], "type": x[3],
+        "items": json.loads(x[4] or "[]"), "duration": x[5] or "",
+        "rpe": x[6] or "", "note": x[7] or "", "review": x[8] or "",
+        "kcal": int(x[9] or 0), "muscles": x[10] or "",
+    }
+
+def workout_update(cid, wid, rec, *, user_generation=None, mutation_key=None,
+                   args_hash=None, return_status=False):
+    """Atomically replace one owned workout and verify it before acknowledging."""
+    try:
+        wanted = int(wid)
+    except (TypeError, ValueError):
+        return None
+    c = db()
+    c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close()
+        return None
+    if mutation_key:
+        prior = c.execute(
+            """SELECT kind,record_id,args_hash,result_json,reversed_at
+               FROM chat_mutations WHERE chat_id=? AND mutation_key=?""",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            status = "mismatch" if (
+                prior[0] != "workout_update"
+                or str(prior[1] or "") != str(wanted)
+                or (prior[2] or "") != (args_hash or "")
+            ) else ("reversed" if prior[4] else "duplicate")
+            try:
+                saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError):
+                saved_data = {}
+            result = {"id": wanted, "updated": False, "status": status, "data": saved_data}
+            return result if return_status else (wanted if status == "duplicate" else None)
+    current = c.execute(
+        "SELECT d FROM workouts WHERE chat_id=? AND id=?",
+        (cid, wanted),
+    ).fetchone()
+    if not current:
+        c.rollback(); c.close()
+        result = {"id": None, "updated": False, "status": "missing", "data": {}}
+        return result if return_status else None
+    c.execute(
+        """UPDATE workouts
+           SET type=?,items=?,duration=?,rpe=?,note=?,review=?,kcal=?,muscles=?,ts=?
+           WHERE chat_id=? AND id=?""",
+        (
+            rec.get("type", ""), json.dumps(rec.get("items") or [], ensure_ascii=False),
+            rec.get("duration", ""), rec.get("rpe", ""), rec.get("note", ""),
+            rec.get("review", ""), int(rec.get("kcal") or 0), rec.get("muscles", ""),
+            datetime.now(TZ).isoformat(), cid, wanted,
+        ),
+    )
+    x = c.execute(
+        """SELECT id,d,ts,type,items,duration,rpe,note,review,kcal,muscles
+           FROM workouts WHERE chat_id=? AND id=?""",
+        (cid, wanted),
+    ).fetchone()
+    if not x:
+        c.rollback(); c.close()
+        result = {"id": None, "updated": False, "status": "verify_failed", "data": {}}
+        return result if return_status else None
+    verified = {
+        "id": x[0], "date": x[1], "ts": x[2], "type": x[3],
+        "items": json.loads(x[4] or "[]"), "duration": x[5] or "",
+        "rpe": x[6] or "", "note": x[7] or "", "review": x[8] or "",
+        "kcal": int(x[9] or 0), "muscles": x[10] or "",
+    }
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                cid, mutation_key,
+                int(user_generation if user_generation is not None else A2.lifecycle_generation(c, cid)),
+                "workout_update", str(wanted), args_hash or "",
+                json.dumps(verified, ensure_ascii=False, sort_keys=True),
+                datetime.now(TZ).isoformat(),
+            ),
+        )
+    c.commit(); c.close()
+    result = {"id": wanted, "updated": True, "status": "updated", "data": verified}
+    return result if return_status else wanted
+
+_WORKOUT_TYPES = {
+    "бассейн": "Плавание", "плав": "Плавание", "силов": "Силовая", "кардио": "Кардио",
+    "бег": "Кардио", "пробеж": "Кардио", "йог": "Йога", "ход": "Ходьба", "гуля": "Ходьба",
+    "пилатес": "Пилатес", "растяж": "Растяжка",
+    "стретч": "Растяжка", "велосипед": "Кардио", "вело": "Кардио",
+}
+
+def _workout_type_from_text(text):
+    low = (text or "").lower()
+    for marker, canonical in _WORKOUT_TYPES.items():
+        if marker in low:
+            return canonical
+    return ""
+
+def _workout_minutes(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        mins = int(round(float(value)))
+    else:
+        raw = str(value).lower().replace(",", ".")
+        hour = re.search(r"(\d+(?:\.\d+)?)\s*(?:ч|час)", raw)
+        minute = re.search(r"(\d+)\s*(?:мин)", raw)
+        if hour:
+            mins = int(round(float(hour.group(1)) * 60)) + (int(minute.group(1)) if minute else 0)
+        else:
+            number = re.search(r"\d+", raw)
+            mins = int(number.group()) if number else 0
+    return mins if 1 <= mins <= 600 else None
+
+def normalize_workout(data, source_text=""):
+    """Очищает извлечённую моделью тренировку; отсутствующие факты не выдумываются."""
+    data = data if isinstance(data, dict) else {}
+    raw_type = str(data.get("type") or "").strip()[:40]
+    allowed = {"Силовая", "Кардио", "Йога", "Ходьба", "Плавание", "Пилатес", "Растяжка", "Другая"}
+    wtype = raw_type if raw_type in allowed else _workout_type_from_text(raw_type or source_text)
+    items = []
+    groups = []
+    for item in (data.get("items") or [])[:24]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:60]
+        if not name:
+            continue
+        group = str(item.get("group") or "").strip()[:30]
+        clean = {"name": name}
+        for key in ("sets", "reps"):
+            val = int(_num(item.get(key))) if item.get(key) not in (None, "", 0) else None
+            clean[key] = val if val and 1 <= val <= 1000 else None
+        weight = _num(item.get("weight")) if item.get("weight") not in (None, "", 0) else None
+        clean["weight"] = weight if weight and 0 < weight <= 1000 else None
+        clean["group"] = group or None
+        items.append(clean)
+        if group and group not in groups:
+            groups.append(group)
+    if not wtype and items:
+        wtype = "Силовая"
+    if not wtype and not items:
+        return None
+    minutes = _workout_minutes(data.get("duration_minutes") or data.get("duration"))
+    rpe_raw = str(data.get("rpe") or "").lower()
+    rpe = "лёгкая" if "лег" in rpe_raw or "лёг" in rpe_raw else (
+        "тяжёлая" if "тяж" in rpe_raw else ("средняя" if "сред" in rpe_raw else "")
+    )
+    return {
+        "type": wtype or "Другая",
+        "items": items,
+        "duration": (f"{minutes} мин" if minutes else ""),
+        "rpe": rpe,
+        "note": str(data.get("note") or "").strip()[:200],
+        "review": "",
+        "kcal": 0,
+        "muscles": ", ".join(groups),
+    }
+
+def basic_workout_from_text(text):
+    """Детерминированный фолбэк, если модель недоступна."""
+    wtype = _workout_type_from_text(text)
+    if not wtype:
+        return None
+    low = (text or "").lower()
+    duration = None
+    duration_match = re.search(r"\d+(?:[.,]\d+)?\s*(?:ч(?:ас(?:а|ов)?)?|мин(?:ут[аы]?)?)", low)
+    if duration_match:
+        duration = _workout_minutes(duration_match.group(0))
+    rpe = "лёгкая" if re.search(r"л[её]гк", low) else (
+        "тяжёлая" if re.search(r"тяж", low) else ("средняя" if re.search(r"средн", low) else "")
+    )
+    return {"type": wtype, "items": [], "duration_minutes": duration, "rpe": rpe, "note": ""}
 
 def workouts_of(cid, d=None):
     d = d or dtoday().isoformat()
@@ -528,7 +1027,14 @@ def workouts_recent(cid, days=10, limit=8):
     return [{"d": x[0], "type": x[1], "items": json.loads(x[2] or "[]"), "duration": x[3], "rpe": x[4]} for x in r]
 
 def workout_del(cid, wid):
-    c = db(); c.execute("DELETE FROM workouts WHERE chat_id=? AND id=?", (cid, int(wid))); c.commit(); c.close()
+    c = db()
+    c.execute("DELETE FROM workouts WHERE chat_id=? AND id=?", (cid, int(wid)))
+    c.execute(
+        """UPDATE chat_mutations SET reversed_at=?,result_json=NULL
+           WHERE chat_id=? AND kind IN ('workout','workout_update') AND record_id=?""",
+        (datetime.now(TZ).isoformat(), cid, str(int(wid))),
+    )
+    c.commit(); c.close()
 
 def train_week(cid, offset=0):
     today = datetime.now(TZ).date(); monday = today - timedelta(days=today.weekday()) + timedelta(days=offset * 7)
@@ -552,15 +1058,23 @@ def diary_totals(cid, d=None):
     return {"kcal": sum(m["kcal"] for m in ms), "protein": round(sum(m["protein"] for m in ms)),
             "fat": round(sum(m["fat"] for m in ms)), "carbs": round(sum(m["carbs"] for m in ms)), "count": len(ms)}
 
-def cyc_add(cid, d, end=None):
+def cyc_add(cid, d, end=None, user_generation=None):
     c = db()
-    if not _user_write_allowed(cid, conn=c):
+    if user_generation is not None:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
         c.close(); return False
     c.execute("INSERT INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?) ON CONFLICT DO NOTHING", (cid, d, end))
     if end: c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end, cid, d))
     c.commit(); c.close(); return True
-def cyc_set_end(cid, start_iso, end_iso):
-    c = db(); c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end_iso, cid, start_iso)); c.commit(); c.close()
+def cyc_set_end(cid, start_iso, end_iso, user_generation=None):
+    c = db()
+    if user_generation is not None:
+        c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close(); return False
+    c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end_iso, cid, start_iso))
+    c.commit(); c.close(); return True
 def pa_list(cid):
     c = db(); r = c.execute("SELECT d FROM intimacy WHERE chat_id=? ORDER BY d", (cid,)).fetchall(); c.close(); return [x[0] for x in r]
 def pa_toggle(cid, iso):
@@ -609,19 +1123,28 @@ def last_hint(cid):
     return "; ".join(parts) or None
 def all_users():
     c = db(); rows = c.execute("""SELECT chat_id FROM users
-        WHERE (last_period IS NOT NULL AND cycle_len IS NOT NULL)
-           OR mode IN ('irregular','none','meno','preg')""").fetchall(); c.close(); return [x[0] for x in rows]
+        WHERE push_suppressed_at IS NULL
+          AND ((last_period IS NOT NULL AND cycle_len IS NOT NULL)
+               OR mode IN ('irregular','none','meno','preg'))""").fetchall(); c.close(); return [x[0] for x in rows]
 def meno_users():
-    c = db(); rows = c.execute("SELECT chat_id FROM users WHERE mode='meno'").fetchall(); c.close(); return [x[0] for x in rows]
+    c = db(); rows = c.execute(
+        "SELECT chat_id FROM users WHERE mode='meno' AND push_suppressed_at IS NULL"
+    ).fetchall(); c.close(); return [x[0] for x in rows]
 def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
-              "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries"):
+              "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries",
+              "prepared_summaries", "feedback_requests", "chat_mutations"):
         c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))  # nosec B608
     c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid))
     A2.delete_user(c, cid)
     c.commit(); c.close()
     CHAT_HIST.pop(cid, None)
+    menu_cache_clear(cid)
+    section_cache_clear(cid)
+    for key in [key for key in list(_SUM_CACHE) if key and key[0] == cid]:
+        _SUM_CACHE.pop(key, None)
+    BCAST_PENDING.discard(cid)
 def chatlog_add(cid, role, text):
     if not text: return
     c = db()
@@ -741,8 +1264,9 @@ def parse_time(t):
     except Exception: pass
     return None
 
-def calc_calories(cm, kg, age, act):
-    bmr = 10 * kg + 6.25 * cm - 5 * age - 161
+def calc_calories(cm, kg, age, act, male=False):
+    # Миффлин-Сан Жеор: −161 для женщин, +5 для мужчин.
+    bmr = 10 * kg + 6.25 * cm - 5 * age + (5 if male else -161)
     tdee = bmr * {1: 1.2, 2: 1.375, 3: 1.55, 4: 1.725, 5: 1.9}.get(act, 1.375)
     p = round(1.6 * kg); fat = round(tdee * 0.3 / 9); carbs = round(max(0, tdee - p * 4 - fat * 9) / 4)
     return round(tdee), p, fat, carbs
@@ -753,13 +1277,46 @@ DIETD = dict(DIET)
 def profile_of(u):
     if u and u.get("height") and u.get("weight") and u.get("age"):
         return {"height": u["height"], "weight": u["weight"], "age": u["age"], "activity": u.get("activity") or 2,
-                "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}
+                "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal"),
+                "male": (u.get("mode") == "male")}
     return None
+def llm_profile_of(u):
+    """LLM context includes Telegram identity even when health profile was skipped."""
+    profile = dict(profile_of(u) or {})
+    name = _clean_telegram_first_name((u or {}).get("tg_first_name"))
+    if name:
+        profile["first_name"] = name
+    return profile or None
+_UNVERIFIED_MUTATION_CLAIM_RE = re.compile(
+    r"(?<!бы\s)\b(?:я\s+)?(?:записал[аи]?|сохранил[аи]?|внесл[аи]?|"
+    r"скорректировал[аи]?)\b(?!\s+бы\b)|"
+    r"\b(?:добавил[аи]?|исправил[аи]?|обновил[аи]?|отметил[аи]?)\b"
+    r".{0,60}\b(?:дневник\w*|запис\w*|трениров\w*|месячн\w*|"
+    r"календар\w*|профил\w*|данн\w*)\b|"
+    r"\b(?:вс[её]\s+)?(?:сохранено|записано|добавлено|обновлено)\b|"
+    r"\bзапись\s+уже\s+(?:видна|в\s+дневнике)\b",
+    re.I,
+)
+
+def guard_aiwa_reply(cid, text, verified_mutation=False):
+    """Final identity and write-truth invariants before model text reaches the user."""
+    try:
+        guarded = L.guard_user_address(text, llm_profile_of(row(cid)))
+    except Exception:
+        guarded = text
+    if not verified_mutation and _UNVERIFIED_MUTATION_CLAIM_RE.search(str(guarded or "")):
+        ev(cid, "journal_claim_blocked", meta="unverified_model_claim")
+        return (
+            "В этом сообщении сервер не подтвердил изменение дневника, поэтому я не буду "
+            "говорить, что запись сохранена. Напиши, что именно нужно добавить или исправить, "
+            "и я подтвержу результат только после проверки в приложении."
+        )
+    return guarded
 def diet_human(code_csv):
     if not code_csv: return "без ограничений"
     return ", ".join(DIETD.get(x, x) for x in code_csv.split(",") if x) or "без ограничений"
 def profile_kcal(p):
-    base = calc_calories(p["height"], p["weight"], p["age"], p["activity"])
+    base = calc_calories(p["height"], p["weight"], p["age"], p["activity"], male=bool(p.get("male")))
     try:
         goal = int(p.get("kcal_goal") or 0)
     except (TypeError, ValueError):
@@ -825,16 +1382,173 @@ ADDCYCLES_TEXT = ("\U0001F4C5 История цикла вручную.\n\n"
     "12.04.2026 - 16.04.2026\n14.05.2026 - 18.05.2026\n10.06.2026\n\n"
     "Этот список ПОЛНОСТЬЮ заменит твою историю циклов в календаре, поэтому пришли все нужные даты разом. Если ошиблась в дате раньше, просто пришли правильный список, и старые даты заменятся.")
 
+_JOURNAL_THIRD_PARTY_EVENT_RE = (
+    r"(?:съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|кушал\w*|"
+    r"выпил\w*|попробовал\w*|кусал\w*|куснул\w*|"
+    r"тренировал\w*|потренир\w*|занимал\w*|сделал\w*|бегал\w*|"
+    r"ходил\w*|плавал\w*|начал\w*|пришл\w*|законч\w*|завершил\w*)"
+)
+_JOURNAL_NON_NAME_STARTERS = (
+    r"Сегодня|Вчера|Позавчера|Пожалуйста|Айва|После|Перед|Только|На|"
+    r"Ну|А|И|Ещё|Еще|Кстати|Короче|Вообще|Ладно|Нет|Да|"
+    r"Как|Можешь|Запиши|Записать|Добавь|Добавить|Внеси|Внести|"
+    r"Отметь|Отметить|Зафиксируй|Зафиксировать|"
+    r"Месячные|Менструация|Тренировка|Тренировку|Тренировки|Кардио|"
+    r"Силовая|Силовую|Йога|Завтрак|Обед|Ужин|Перекус"
+)
+
+def _journal_third_party_source(text):
+    """Общий fail-closed guard для старого и семантического mutation router."""
+    raw = str(text or "")
+    low = raw.lower()
+    if re.search(r"\b(?:по\s+словам|со\s+слов|как\s+рассказал\w*|как\s+сообщил\w*)\b", low):
+        return True
+    if re.search(
+        r"\bу\s+(?!меня\b)(?:[А-ЯЁ][а-яё-]{1,30}|подруг\w*|дочер\w*|дочк\w*|"
+        r"сестр\w*|мам\w*|жен\w*|девушк\w*)\b",
+        raw,
+        re.I,
+    ):
+        return True
+    if re.search(
+        r"\b(?:моя\s+|мой\s+)?(?:дочь|дочка|подруга|сестра|мама|жена|девушка|"
+        r"сын|муж|парень|она|он)\b.{0,55}" + _JOURNAL_THIRD_PARTY_EVENT_RE,
+        low,
+        re.I,
+    ):
+        return True
+    return bool(re.search(
+        r"\b(?!(?:" + _JOURNAL_NON_NAME_STARTERS + r")\b)"
+        r"[А-ЯЁ][а-яё-]{1,30}\b.{0,55}" + _JOURNAL_THIRD_PARTY_EVENT_RE,
+        raw,
+    ))
+
+def _journal_explicit_first_person_event(text):
+    """True when a fragment explicitly attributes an event to this account owner."""
+    raw = str(text or "")
+    return bool(
+        re.search(r"\bя\b.{0,90}" + _JOURNAL_THIRD_PARTY_EVENT_RE, raw, re.I)
+        and not re.search(
+            r"\b(?:по\s+словам|как\s+рассказал\w*|как\s+сообщил\w*|"
+            r"цитир\w*|сказал\w*\s*,?\s+что)\b",
+            raw,
+            re.I,
+        )
+    )
+
 def match_intent(t):
+    raw_t = str(t or "")
     t = t.lower()
+    _mutation_denied = bool(re.search(
+        r"\b(?:не|не\s+надо|не\s+нужно)\s+(?:запис\w*|запиш\w*|добав\w*|внос\w*|"
+        r"внес\w*|занос\w*|занес\w*|отмеч\w*|отмет\w*|фиксир\w*|зафиксир\w*)",
+        t,
+    ))
+    _mutation_context_blocked = bool(
+        _journal_third_party_source(raw_t)
+        or "?" in t
+        or re.search(r"\b(кажется|вроде|возможно|наверное|не\s+уверен\w*|может\s+быть|"
+                     r"допустим|например|представим|цитат\w*|если|в\s+случае|когда|"
+                     r"у\s+(?:подруг\w*|дочк\w*|сестр\w*|мам\w*)|"
+                     r"(?:я|она|он|мне)\s+(?:сказал\w*|говорил\w*)|мне\s+говорят|"
+                     r"(?:говорят|сказали|сообщили|рассказали)|"
+                     r"не\s+был[оаи]?|нет\s+(?:месячн\w*|трениров\w*))\b", t)
+        or re.search(
+            r"\b(?:моя\s+|мой\s+)?(?:дочь|дочка|подруга|сестра|мама|жена|девушка|"
+            r"сын|муж|парень|она|он)\s+.{0,24}(?:съел\w*|поел\w*|ел\w*|кушал\w*|"
+            r"тренировал\w*|бегал\w*|ходил\w*|плавал\w*|начал\w*|пришл\w*)",
+            t,
+        )
+        or re.search(r"[«»\"]", t)
+        or re.search(
+            r"^\s*У\s+(?!меня\b)[А-ЯЁ][а-яё-]{1,30}\s+.{0,30}"
+            r"(?:начал\w*|пришл\w*|съел\w*|поел\w*|бегал\w*|ходил\w*|плавал\w*)",
+            raw_t,
+        )
+        or re.search(
+            r"\b(?!(?:Сегодня|Вчера|Позавчера|Месячные|Менструация|Я|Айва|Как|"
+            r"Можешь|Пожалуйста|После|Перед|Только)\b)"
+            r"[А-ЯЁ][а-яё-]{1,30}\s+(?:(?:сегодня|вчера|позавчера)\s+)?"
+            r"(?:начал\w*|пришл\w*|съел\w*|поел\w*|бегал\w*|ходил\w*|плавал\w*)",
+            raw_t,
+        )
+    )
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
     if re.search(r"(добав|ввес|внес|загруз|импорт)\w*.{0,16}(истори\w*\s*цикл|цикл)|истори\w*\s*цикл\w*\s*вручную|(импорт|перенес\w*).{0,12}(flo|фло)", t): return "addcycles"
     if re.search(r"(ввес\w*|поменя\w*|измен\w*|обнов\w*|исправ\w*|задат\w*|укаж\w*|написа\w*|внес\w*|поправ\w*)\s*(свой|свои|мой|мои)?\s*(вес|рост|возраст|данные|параметр)|мой вес|новый вес|неправильн\w*.{0,18}(вес|рост|возраст|данные)", t): return "profile"
     if re.search(r"фаз", t) and re.search(r"(что так|что значит|расскаж|объясн|не понима|не разбира|какие бывают|подробнее|про фаз)", t): return "phases"
-    if re.search(r"месячн|менструац", t) and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t): return "period_end"
+    if (
+        re.search(r"месячн|менструац", t)
+        and re.search(r"(законч[иеё]\w*|кончил\w*|завершил\w*|прошл[иаяо]|перестал\w*|отошл\w*|закончен)", t)
+        and not re.search(r"\b(когда|как|почему|сколько|можно\s+ли)\b", t)
+        and not re.search(r"\bне\s+(?:законч\w*|кончил\w*|завершил\w*|прошл\w*|перестал\w*|отошл\w*)", t)
+        and not _mutation_denied
+        and not _mutation_context_blocked
+    ):
+        return "period_end"
+    _write = re.search(r"\b(запис\w*|запиш\w*|добав\w*|внес\w*|занес\w*|отмет\w*|зафиксир\w*|залогир\w*|логни)\b", t)
+    if _mutation_denied:
+        _write = None
+    _hard_write_question = re.search(
+        r"^\s*(?:айва[,\s]*)?(?:как|где|когда|почему)\s+(?:мне\s+|это\s+)?"
+        r"(?:запис\w*|добав\w*|внес\w*|занес\w*|отмет\w*|зафиксир\w*)",
+        t,
+    )
+    _capability_question = re.search(r"\b(можно\s+ли|можешь\s+ли|можешь|умеешь\s+ли)\b", t)
+    _food_done = re.search(
+        r"\b(?:я\s+)?(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|скушал\w*|покушал\w*|выпил\w*)",
+        t,
+    )
+    _food_negated = re.search(
+        r"\bне\s+(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|скушал\w*|покушал\w*|выпил\w*)",
+        t,
+    )
+    _food_slot = re.search(r"\b(?:завтрак\w*|обед\w*|ужин\w*|перекус\w*|полдник\w*)", t)
+    _food_non_event = re.search(r"\b(?:рецепт\w*|меню|план\w*|расписани\w*|встреч\w*)", t)
+    _workout_done = re.search(
+        r"\b(?:потренир\w*|тренировал\w*|занимал\w*|бегал\w*|пробежал\w*|"
+        r"ходил\w*|плавал\w*|сделал\w*.{0,12}трениров\w*|был[аи]?\s+на\s+(?:йог|пилатес))",
+        t,
+    )
+    _workout_negated = re.search(
+        r"\bне\s+(?:потренир\w*|тренировал\w*|занимал\w*|бегал\w*|пробежал\w*|ходил\w*|плавал\w*)",
+        t,
+    )
+    _period_started = re.search(
+        r"(?:начал\w*|пришл\w*|пошл\w*)\s+(?:сегодня\s+)?(?:месячн|менструац)|"
+        r"(?:месячн|менструац)\w*\s+(?:начал\w*|пришл\w*|пошл\w*)",
+        t,
+    )
+    _period_negated = re.search(r"\bне\s+(?:начал\w*|пришл\w*|пошл\w*)", t)
+    if (
+        re.search(r"(месячн|менструац|критическ\w*\s+дн)", t)
+        and (_write or _period_started)
+        and not _mutation_denied
+        and not _period_negated
+        and not _mutation_context_blocked
+        and not _hard_write_question
+        and not (_capability_question and not _period_started)
+    ):
+        return "logperiod"
+    if (
+        _write
+        and not _food_negated
+        and not _food_non_event
+        and not _mutation_context_blocked
+        and (_food_done or _food_slot)
+        and not _hard_write_question
+        and not (_capability_question and not _food_done)
+    ):
+        return "logmeal"
+    if _write and not _workout_negated and not _mutation_context_blocked and not _hard_write_question and not (_capability_question and not _workout_done) and re.search(
+        r"(трениров\w*|потренир\w*|занимал\w*|бегал\w*|пробеж\w*|ходил\w*|"
+        r"йог\w*|пилатес\w*|плавал\w*|кардио|силов\w*|растяж\w*|велосипед\w*|"
+        r"присед\w*|выпад\w*|планк\w*|отжим\w*|подтяг\w*|жим\w*|тяг\w*)",
+        t,
+    ):
+        return "logworkout"
     if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
     if re.search(r"(нагрузк|трениров|какой\s+спорт|каким\s+спортом|позанима|чем\s+(мне\s+)?заня|упражнени|фитнес|какая\s+(сегодня\s+)?активн|как\s+(мне\s+)?двигат|размят|разминк|зарядк|можно\s+ли\s+(мне\s+)?(бегать|качат|присед)|(какую|какая)\s+(мне\s+)?(сегодня\s+)?(трениров|нагрузк)|что\s+по\s+(спорт|трениров|нагрузк))", t): return "training"
-    if re.search(r"(?:(?:добав\w*|запиш\w*|занес\w*|отмет\w*)\s+.{0,40}(?:(?:на\s+|в\s+)?(?:завтрак|обед|ужин|полдник|перекус)\b|в\s+дневник|в\s+еду|в\s+приём|съел|поел|скушал|покушал|съела|поела|\bела\b|поем)|(?:залогир\w*|\bлогни\b)\s+\S)", t): return "logmeal"
     if re.search(r"(мой\s+дневник|дневник\s+питани|что\s+(?:мне\s+)?добрать|добрать\s+.{0,12}(белк|калор|бжу)|сколько\s+.{0,12}(съел|калор|ккал)\s*.{0,10}сегодн|мой\s+калораж|хватает\s+ли\s+.{0,12}(белк|калор)|итог\w*\s*.{0,10}(дн|калор|по\s+еде|бжу)|сколько\s+осталось\s+.{0,12}(калор|ккал|съесть))", t): return "diary"
     if re.search(r"(что\s+(?:мне\s+|тебе\s+|лучше\s+|полезн\w*\s+|стоит\s+|сейчас\s+|сегодня\s+|можно\s+|бы\s+|такого\s+|нужно\s+)*(?:есть|поесть|съесть|покушать|скушать|кушать|приготовить|готовить)\b(?!\s*(?:ли\b|у\s+мен|в\s+профил|в\s+приложени|в\s+холодильник|дома|интересн|врем|деньг|дела|презентац|отчёт|доклад))|полезн\w*\s+(?:есть|поесть|кушать|съесть)|(?:поесть|покушать|съесть|скушать|кушать)\s+полезн|что\s+(?:есть|поесть)\s+(?:полезн|при\b|для\s|чтобы|на\s+(?:завтрак|обед|ужин|перекус))|какое\s+питани|какая\s+(?:сегодня\s+)?еда|какие\s+(?:мне\s+)?продукт|какие\s+продукты\s+полезн|меню\s+(?:на\s+)?(?:сегодня|день|завтра)|составь\s+меню|подбери\s+меню|обнови\s+меню|дай\s+меню|покажи\s+меню|пересобер\w*\s+меню|чем\s+(?:мне\s+)?(?:сегодня\s+)?питат|как\s+(?:мне\s+)?(?:лучше\s+)?питат|что\s+по\s+(?:еде|питани)|(?:посоветуй|подскажи|дай|хочу|можешь|порекоменду)\w*\s+.{0,24}(?:поесть|съесть|еду|питани|меню|рацион|продукт|блюд)|\bрацион\b|еда\s+на\s+сегодня|что\s+поедим|проголодал|что\s+на\s+(?:завтрак|обед|ужин|перекус))", t): return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
@@ -848,6 +1562,668 @@ def match_intent(t):
     if re.search(r"месячн|менструац|критическ\w* дн", t) and re.search(r"(отмет|отмеч|добав|записа|внес|залог|зафиксир|поменя|измен|обнов|исправ|как.{0,14}(отмет|добав|внес))", t): return "period"
     if re.search(r"(месячные начал|у меня (сегодня )?месячн|пришли месячн|начались месячн|сегодня начал\w* месячн|снова месячн|опять месячн)", t): return "period"
     return None
+
+_JOURNAL_MUTATION_INTENTS = frozenset({
+    "logmeal", "updatemeal", "movemealslot", "appendmealitem",
+    "logworkout", "updateworkout", "logperiod", "period_end",
+    "journalunavailable", "journalreplay",
+})
+_JOURNAL_SEMANTIC_CANDIDATE_RE = re.compile(
+    r"\b(?:"
+    r"съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|кушал\w*|скушал\w*|"
+    r"покушал\w*|пил[аи]?\b|выпил\w*|попробовал\w*|кусал\w*|куснул\w*|"
+    r"завтрак\w*|обед\w*|ужин\w*|перекус\w*|"
+    r"тренир\w*|потренир\w*|занимал\w*|спорт\w*|зал\w*|упражнен\w*|"
+    r"бегал\w*|пробеж\w*|ходил\w*|гулял\w*|плавал\w*|бассейн\w*|"
+    r"йог\w*|пилатес\w*|кардио\w*|силов\w*|растяж\w*|зарядк\w*|"
+    r"велосипед\w*|присед\w*|выпад\w*|планк\w*|отжим\w*|подтяг\w*|"
+    r"месячн\w*|менструац\w*|критическ\w*\s+дн\w*"
+    r")\b",
+    re.I,
+)
+_JOURNAL_SEMANTIC_HARD_BLOCK_RE = re.compile(
+    r"\b(?:"
+    r"если|допустим|представим|кажется|вроде|возможно|наверное|не\s+уверен\w*|"
+    r"может\s+быть|планир\w*|собира\w*|буду|хочу|хотел\w*|"
+    r"посовет\w*|подскаж\w*|состав\w*|порекоменду\w*|"
+    r"говорят|сказали|сообщили|рассказали|цитат\w*"
+    r")\b",
+    re.I,
+)
+_JOURNAL_META_INSTRUCTION_RE = re.compile(
+    r"\b(?:игнорируй|инструкц\w*|системн\w*\s+промпт|system|assistant|json|"
+    r"action|subject|confidence|primary_purpose|верни\s+ответ|ответь\s+строго)\b",
+    re.I,
+)
+_JOURNAL_PERIOD_SOURCE_RE = re.compile(r"\b(?:месячн\w*|менструац\w*|критическ\w*\s+дн\w*)\b", re.I)
+_JOURNAL_FOOD_COMPLETED_RE = re.compile(
+    r"\b(?:съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|кушал\w*|"
+    r"скушал\w*|покушал\w*|пил[аи]?\b|выпил\w*|попробовал\w*|"
+    r"кусал\w*|куснул\w*)\b|"
+    r"\b(?:на\s+)?(?:завтрак\w*|обед\w*|ужин\w*|перекус\w*)\b"
+    r"(?:\s+у\s+меня)?\s+(?:был[аи]?|были|съел\w*|поел\w*|:|-)",
+    re.I,
+)
+_JOURNAL_FOOD_NEGATED_RE = re.compile(
+    r"\bне\s+(?:съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|"
+    r"кушал\w*|скушал\w*|покушал\w*|пил[аи]?\b|выпил\w*|"
+    r"попробовал\w*|кусал\w*|куснул\w*)\b",
+    re.I,
+)
+_JOURNAL_WORKOUT_COMPLETED_RE = re.compile(
+    r"\b(?:потренир\w*|тренировал\w*|занимал\w*|бегал\w*|пробежал\w*|"
+    r"ходил\w*|сходил\w*|гулял\w*|плавал\w*|качал\w*|танцевал\w*|"
+    r"приседал\w*|поприседал\w*|отжимал\w*|подтягивал\w*|"
+    r"делал\w*\s+(?:планк\w*|выпад\w*|присед\w*|упражнен\w*))\b|"
+    r"\b(?:был[аи]?|сходил\w*)\s+(?:сегодня\s+|вчера\s+|позавчера\s+)?"
+    r"(?:на|в)\s+(?:трениров\w*|йог\w*|пилатес\w*|фитнес\w*|бокс\w*|"
+    r"танц\w*|бассейн\w*|зал\w*)\b|"
+    r"\b(?:сделал\w*|провел\w*|закончил\w*)\b.{0,45}"
+    r"\b(?:трениров\w*|кардио\w*|силов\w*|растяж\w*|зарядк\w*)\b|"
+    r"\b(?:трениров\w*|кардио\w*|силов\w*|растяж\w*|зарядк\w*)\b.{0,45}"
+    r"\b(?:сделал\w*|провел\w*|закончил\w*)\b",
+    re.I,
+)
+_JOURNAL_PERIOD_START_RE = re.compile(
+    r"\b(?:начал\w*|пришл\w*|пошл\w*|открыл\w*)\b", re.I,
+)
+_JOURNAL_PERIOD_END_RE = re.compile(
+    r"\b(?:законч\w*|кончил\w*|завершил\w*|прошл\w*|перестал\w*|отошл\w*)\b", re.I,
+)
+_JOURNAL_CONTEXT_OPEN_RE = re.compile(
+    r"^\s*(?:а\s+)?(?:и\s+)?(?:ещ[её]|также|плюс)\b|"
+    r"^\s*(?:ну|нет|неа|точнее|вернее|на\s+самом\s+деле)\b|"
+    r"\b(?:исправ\w*|скорректир\w*|измени\w*|поменя\w*|"
+    r"было\s+не|не\s+\d+|меньше|больше|всего)\b",
+    re.I,
+)
+_JOURNAL_CORRECTION_RE = re.compile(
+    r"\b(?:исправ\w*|скорректир\w*|измени\w*|поменя\w*|"
+    r"точнее|вернее|на\s+самом\s+деле|меньше|больше|"
+    r"\d+(?:[.,]\d+)?\s*(?:г|гр|грамм\w*|кг|ккал|мин\w*|час\w*|"
+    r"подход\w*|повтор\w*))\b",
+    re.I,
+)
+
+def _journal_recent_context(cid, limit=5):
+    """Small DB-backed context for ellipsis and corrections; IDs stay server-owned."""
+    c = db()
+    meals = c.execute(
+        """SELECT id,d,ts,title,grams,kcal,slot,items,slot_guessed FROM meals
+           WHERE chat_id=? ORDER BY ts DESC,id DESC LIMIT ?""",
+        (cid, int(limit)),
+    ).fetchall()
+    workouts = c.execute(
+        """SELECT id,d,ts,type,duration,rpe,note FROM workouts
+           WHERE chat_id=? ORDER BY ts DESC,id DESC LIMIT ?""",
+        (cid, int(limit)),
+    ).fetchall()
+    last_mutation = c.execute(
+        """SELECT kind,record_id,created_at FROM chat_mutations
+           WHERE chat_id=? AND reversed_at IS NULL
+             AND kind IN (
+               'food','food_update','food_move_slot','food_append',
+               'workout','workout_update'
+             )
+           ORDER BY created_at DESC LIMIT 1""",
+        (cid,),
+    ).fetchone()
+    c.close()
+    return {
+        "meals": [
+            {"id": x[0], "date": x[1], "ts": x[2], "title": x[3],
+             "grams": x[4], "kcal": x[5], "slot": x[6] or "snack",
+             "items": json.loads(x[7] or "[]"), "slot_guessed": bool(x[8])}
+            for x in meals
+        ],
+        "workouts": [
+            {"id": x[0], "date": x[1], "ts": x[2], "type": x[3],
+             "duration": x[4] or "", "rpe": x[5] or "", "note": x[6] or ""}
+            for x in workouts
+        ],
+        "last_mutation": (
+            {"kind": last_mutation[0], "record_id": int(last_mutation[1]),
+             "created_at": last_mutation[2]}
+            if last_mutation and str(last_mutation[1] or "").isdigit() else None
+        ),
+    }
+
+def _journal_has_recent_mutation(context, max_minutes=180):
+    last = (context or {}).get("last_mutation") or {}
+    raw = last.get("created_at")
+    if not raw:
+        return False
+    try:
+        stamp = datetime.fromisoformat(raw)
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=TZ)
+        return timedelta(0) <= datetime.now(TZ) - stamp <= timedelta(minutes=max_minutes)
+    except (TypeError, ValueError):
+        return False
+
+def journal_v2_enabled(cid=None):
+    if str(os.environ.get("AIWA_JOURNAL_V2") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        return True
+    allowed = {
+        x.strip()
+        for x in str(os.environ.get("AIWA_JOURNAL_V2_IDS") or "").split(",")
+        if x.strip()
+    }
+    return cid is not None and str(cid) in allowed
+
+def _semantic_journal_candidate(text, context=None, enable_v2=False):
+    """Дешёвый prefilter; решение принимает модель, а не набор фраз/порядок слов."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if "\n" in raw or "\r" in raw or re.search(r"[«»\"]", raw):
+        return False
+    if _JOURNAL_META_INSTRUCTION_RE.search(raw):
+        return False
+    # Keep the production-v1 prefilter byte-for-byte conservative while the
+    # broader model-owned routing is canaried behind AIWA_JOURNAL_V2.
+    if not enable_v2 and _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(raw):
+        return False
+    # V2 validates the model-selected evidence fragments independently below.
+    # Whole-message rejection would incorrectly drop mixed self/other reports.
+    if _journal_third_party_source(raw) and not enable_v2:
+        return False
+    domain_hint = bool(_JOURNAL_SEMANTIC_CANDIDATE_RE.search(raw))
+    contextual_repair = bool(
+        enable_v2
+        and _journal_has_recent_mutation(context)
+        and (context or {}).get("meals")
+        and len(raw) <= 300
+        and (
+            domain_hint
+            or re.search(r"\b(?:дневник\w*|запис\w*|добав\w*|пропуст\w*)\b", raw, re.I)
+        )
+    )
+    if (
+        re.search(
+            r"^\s*(?:айва[,\s]*)?(?:что|как|какая|какую|какие|почему|зачем|"
+            r"когда|сколько|можно\s+ли|нужно\s+ли)\b",
+            raw,
+            re.I,
+        )
+        and not contextual_repair
+    ):
+        return False
+    if "?" in raw and not contextual_repair:
+        return False
+    personal_report_shape = bool(
+        re.search(r"^\s*(?:(?:ну|а|кстати|короче)[,\s]+)*(?:я|сегодня|вчера|позавчера)\b", raw, re.I)
+        or (len(raw) <= 220 and re.search(r"\b[а-яё-]{3,}(?:ла|лась)\b", raw, re.I))
+    )
+    contextual_followup = bool(
+        _journal_has_recent_mutation(context)
+        and len(raw) <= 300
+        and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
+    )
+    return domain_hint or personal_report_shape or contextual_followup or contextual_repair
+
+def _semantic_evidence_spans(source_text, payload):
+    """Return ordered, non-overlapping exact quotes selected by the model."""
+    raw = str(source_text or "")
+    data = payload or {}
+    if "evidence_spans" in data:
+        values = data.get("evidence_spans")
+        if not isinstance(values, list) or not values or len(values) > 8:
+            return []
+    else:
+        values = [data.get("evidence_span")]
+    folded = raw.casefold()
+    cursor = 0
+    total = 0
+    spans = []
+    for value in values:
+        span = str(value or "").strip()
+        if not span or len(span) > 300 or total + len(span) > 900:
+            return []
+        start = folded.find(span.casefold(), cursor)
+        if start < 0:
+            return []
+        exact = raw[start:start + len(span)]
+        spans.append(exact)
+        cursor = start + len(span)
+        total += len(span)
+    return spans
+
+def _semantic_evidence_span(source_text, payload):
+    """Backward-compatible access to the first verified evidence quote."""
+    spans = _semantic_evidence_spans(source_text, payload)
+    return spans[0] if spans else None
+
+def _semantic_food_evidence_safe(source_text, payload):
+    """Every selected food fragment must prove a completed, positive event."""
+    spans = _semantic_evidence_spans(source_text, payload)
+    return bool(
+        spans
+        and all(
+            _JOURNAL_FOOD_COMPLETED_RE.search(span)
+            and not _JOURNAL_FOOD_NEGATED_RE.search(span)
+            and _semantic_source_subject_safe(span)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(span)
+            for span in spans
+        )
+    )
+
+def _semantic_filter_food_record(source_text, payload):
+    """Bind every item from the multi-span contract to allowed source evidence."""
+    record = (payload or {}).get("food_record")
+    if not isinstance(record, dict):
+        return None
+    if "evidence_spans" not in (payload or {}):
+        return record
+    allowed = _semantic_evidence_spans(source_text, payload)
+    if not allowed:
+        return None
+
+    def inside_allowed(fragment):
+        quote = str(fragment or "").strip()
+        return bool(
+            quote
+            and len(quote) <= 300
+            and any(quote.casefold() in span.casefold() for span in allowed)
+        )
+
+    def item_supported_by_allowed_evidence(item):
+        name_tokens = re.findall(
+            r"[а-яёa-z0-9]{3,}",
+            str(item.get("name") or "").casefold().replace("ё", "е"),
+        )
+        source_tokens = re.findall(
+            r"[а-яёa-z0-9]{3,}",
+            " ".join(allowed).casefold().replace("ё", "е"),
+        )
+        ignored = {
+            "один", "одна", "одно", "несколько", "примерно", "домашний",
+            "грамм", "грамма", "граммов", "порция",
+        }
+        name_tokens = [token for token in name_tokens if token not in ignored]
+
+        def related(left, right):
+            common = 0
+            for a, b in zip(left, right):
+                if a != b:
+                    break
+                common += 1
+            return (
+                left == right
+                or SequenceMatcher(None, left, right).ratio() >= 0.72
+                or (
+                    common >= 2
+                    and common / min(len(left), len(right)) >= 0.65
+                )
+            )
+
+        matched = sum(
+            any(related(name_token, source_token) for source_token in source_tokens)
+            for name_token in name_tokens
+        )
+        return bool(name_tokens and matched >= math.ceil(len(name_tokens) * 0.6))
+
+    items = []
+    for item in (record.get("items") or [])[:24]:
+        if not isinstance(item, dict) or not item_supported_by_allowed_evidence(item):
+            continue
+        clean = dict(item)
+        clean.pop("evidence_span", None)
+        if str(clean.get("name") or "").strip():
+            items.append(clean)
+    unparsed = [
+        str(fragment).strip()
+        for fragment in (record.get("unparsed") or [])[:8]
+        if inside_allowed(fragment)
+    ]
+    if not items and not unparsed:
+        return None
+    clean_record = dict(record)
+    clean_record["items"] = items
+    clean_record["unparsed"] = unparsed
+    clean_record["title"] = (
+        ", ".join(str(item.get("name") or "").strip() for item in items[:4])
+        or "Приём пищи"
+    )[:80]
+    for aggregate in ("total", "grams", "kcal", "protein", "fat", "carbs"):
+        clean_record.pop(aggregate, None)
+    return clean_record
+
+def _semantic_owned_recent_target(context, domain, target):
+    """Only the sole row or the last verified mutation is safe to edit."""
+    rows = list((context or {}).get(domain) or [])
+    wanted = str(target or "")
+    if wanted not in {str(x.get("id")) for x in rows}:
+        return False
+    if len(rows) == 1:
+        return True
+    last = (context or {}).get("last_mutation") or {}
+    expected_kind = "food" if domain == "meals" else "workout"
+    return (
+        str(last.get("kind") or "").startswith(expected_kind)
+        and str(last.get("record_id") or "") == wanted
+    )
+
+def _semantic_source_subject_safe(text):
+    return (
+        not _journal_third_party_source(text)
+        or _journal_explicit_first_person_event(text)
+    )
+
+def _semantic_action_matches_source(
+    action, text, context=None, payload=None, require_evidence=False,
+):
+    """Модель выбирает смысл, код независимо подтверждает разрешённый домен события."""
+    raw = str(text or "").strip()
+    if not raw or "\n" in raw or "\r" in raw or _JOURNAL_META_INSTRUCTION_RE.search(raw):
+        return False
+    if require_evidence:
+        evidence_spans = _semantic_evidence_spans(raw, payload)
+        if not evidence_spans or any(
+            not _semantic_source_subject_safe(span)
+            or _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(span)
+            for span in evidence_spans
+        ):
+            return False
+    elif not _semantic_source_subject_safe(raw):
+        return False
+    if not require_evidence:
+        if action == "food":
+            return bool(
+                _JOURNAL_FOOD_COMPLETED_RE.search(raw)
+                or (
+                    _journal_has_recent_mutation(context)
+                    and bool((context or {}).get("meals"))
+                    and str(
+                        ((context or {}).get("last_mutation") or {}).get("kind") or ""
+                    ).startswith("food")
+                    and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
+                    and str((payload or {}).get("food_text") or "").strip()
+                )
+            )
+        if action == "food_update":
+            target = str((payload or {}).get("target_id") or "")
+            owned = {str(x.get("id")) for x in ((context or {}).get("meals") or [])}
+            return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
+        if action == "workout":
+            return bool(_JOURNAL_WORKOUT_COMPLETED_RE.search(raw))
+        if action == "workout_update":
+            target = str((payload or {}).get("target_id") or "")
+            owned = {
+                str(x.get("id")) for x in ((context or {}).get("workouts") or [])
+            }
+            return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
+        if action == "period_start":
+            return bool(
+                _JOURNAL_PERIOD_SOURCE_RE.search(raw)
+                and _JOURNAL_PERIOD_START_RE.search(raw)
+            )
+        if action == "period_end":
+            return bool(
+                _JOURNAL_PERIOD_SOURCE_RE.search(raw)
+                and _JOURNAL_PERIOD_END_RE.search(raw)
+            )
+        return False
+    if action == "food":
+        return bool(
+            (
+                _semantic_food_evidence_safe(raw, payload)
+            )
+            or (
+                _journal_has_recent_mutation(context)
+                and bool((context or {}).get("meals"))
+                and str(((context or {}).get("last_mutation") or {}).get("kind") or "").startswith("food")
+                and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
+                and str((payload or {}).get("food_text") or "").strip()
+                and _semantic_food_evidence_safe(raw, payload)
+            )
+        )
+    if action == "food_update":
+        target = str((payload or {}).get("target_id") or "")
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            _semantic_owned_recent_target(context, "meals", target)
+            and evidence
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
+    if action == "move_meal_slot":
+        target = str((payload or {}).get("target_id") or "")
+        slot = str((payload or {}).get("slot") or "")
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            _semantic_owned_recent_target(context, "meals", target)
+            and slot in {"breakfast", "lunch", "snack", "dinner"}
+            and evidence
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
+    if action == "append_meal_item":
+        target = str((payload or {}).get("target_id") or "")
+        food_text = str((payload or {}).get("food_text") or "").strip()
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            _semantic_owned_recent_target(context, "meals", target)
+            and food_text
+            and evidence
+            and _JOURNAL_FOOD_COMPLETED_RE.search(evidence)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
+    if action == "workout":
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            evidence
+            and _JOURNAL_WORKOUT_COMPLETED_RE.search(evidence)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
+    if action == "workout_update":
+        target = str((payload or {}).get("target_id") or "")
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            _semantic_owned_recent_target(context, "workouts", target)
+            and evidence
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
+    if action == "period_start":
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            evidence
+            and _JOURNAL_PERIOD_SOURCE_RE.search(evidence)
+            and _JOURNAL_PERIOD_START_RE.search(evidence)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
+    if action == "period_end":
+        evidence = _semantic_evidence_span(raw, payload)
+        return bool(
+            evidence
+            and _JOURNAL_PERIOD_SOURCE_RE.search(evidence)
+            and _JOURNAL_PERIOD_END_RE.search(evidence)
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+        )
+    return False
+
+def _normalize_semantic_journal(data, source_text="", context=None, enable_v2=False):
+    """Fail-closed валидация решения модели перед любой записью в БД."""
+    if not isinstance(data, dict):
+        return None
+    action_to_intent = {
+        "food": "logmeal",
+        "food_update": "updatemeal",
+        "move_meal_slot": "movemealslot",
+        "append_meal_item": "appendmealitem",
+        "workout": "logworkout",
+        "workout_update": "updateworkout",
+        "period_start": "logperiod",
+        "period_end": "period_end",
+    }
+    action = str(data.get("action") or "").strip().lower()
+    if action in {"move_meal_slot", "append_meal_item"} and not enable_v2:
+        return None
+    confidence_raw = data.get("confidence")
+    confidence = (
+        float(confidence_raw)
+        if isinstance(confidence_raw, (int, float)) and not isinstance(confidence_raw, bool)
+        else -1.0
+    )
+    if (
+        action not in action_to_intent
+        or not math.isfinite(confidence)
+        or not 0.85 <= confidence <= 1.0
+        or not _semantic_action_matches_source(
+            action, source_text, context, data, require_evidence=enable_v2,
+        )
+        or str(data.get("subject") or "").lower() != "self"
+        or str(data.get("status") or "").lower() != "completed"
+        or str(data.get("polarity") or "").lower() != "positive"
+        or str(data.get("certainty") or "").lower() != "certain"
+        or str(data.get("primary_purpose") or "").lower() not in (
+            {"journal", "repair"}
+            if action in {"move_meal_slot", "append_meal_item"}
+            else {"journal"}
+        )
+    ):
+        return None
+    out = {"intent": action_to_intent[action], "confidence": confidence}
+    if action == "food":
+        food_record = (
+            _semantic_filter_food_record(source_text, data)
+            if enable_v2 else None
+        )
+        if enable_v2 and "evidence_spans" in data:
+            if not food_record:
+                return None
+            parts = [
+                str(item.get("name") or "").strip()
+                for item in (food_record.get("items") or [])
+                if str(item.get("name") or "").strip()
+            ] + list(food_record.get("unparsed") or [])
+            out["food_text"] = ", ".join(parts)[:500]
+        else:
+            out["food_text"] = str(data.get("food_text") or "").strip()[:500]
+        if enable_v2 and food_record:
+            out["food_record"] = food_record
+        slot = str(data.get("slot") or "")
+        if slot in {"breakfast", "lunch", "snack", "dinner"}:
+            out["slot"] = slot
+    elif action == "food_update":
+        out["target_id"] = int(data.get("target_id"))
+        out["food_text"] = str(data.get("food_text") or "").strip()[:500]
+        if enable_v2 and isinstance(data.get("food_record"), dict):
+            out["food_record"] = data["food_record"]
+    elif action == "move_meal_slot":
+        out["target_id"] = int(data.get("target_id"))
+        out["slot"] = str(data.get("slot") or "")
+    elif action == "append_meal_item":
+        out["target_id"] = int(data.get("target_id"))
+        out["food_text"] = str(data.get("food_text") or "").strip()[:500]
+        if enable_v2 and isinstance(data.get("food_record"), dict):
+            out["food_record"] = data["food_record"]
+    elif action == "workout":
+        workout = data.get("workout")
+        out["workout"] = workout if isinstance(workout, dict) else {}
+    elif action == "workout_update":
+        out["target_id"] = int(data.get("target_id"))
+        workout = data.get("workout")
+        out["workout"] = workout if isinstance(workout, dict) else {}
+    return out
+
+def _semantic_update_clarification(
+    data, source_text, context=None, enable_v2=False,
+):
+    """Recognize a safe correction whose target is ambiguous instead of guessing an ID."""
+    if not isinstance(data, dict):
+        return None
+    action = str(data.get("action") or "").strip().lower()
+    confidence = data.get("confidence")
+    if enable_v2 and action in {"move_meal_slot", "append_meal_item"}:
+        evidence = _semantic_evidence_span(source_text, data)
+        action_shape_ok = (
+            str(data.get("slot") or "") in SLOT_RU
+            if action == "move_meal_slot"
+            else (
+                bool(str(data.get("food_text") or "").strip())
+                and evidence
+                and bool(_JOURNAL_FOOD_COMPLETED_RE.search(evidence))
+            )
+        )
+        if (
+            isinstance(confidence, (int, float))
+            and not isinstance(confidence, bool)
+            and math.isfinite(float(confidence))
+            and float(confidence) >= 0.85
+            and evidence
+            and action_shape_ok
+            and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
+            and str(data.get("subject") or "").lower() == "self"
+            and str(data.get("status") or "").lower() == "completed"
+            and str(data.get("polarity") or "").lower() == "positive"
+            and str(data.get("certainty") or "").lower() == "certain"
+            and str(data.get("primary_purpose") or "").lower() == "repair"
+            and not _journal_third_party_source(source_text)
+        ):
+            return "clarifymeal"
+        return None
+    if (
+        action not in {"food_update", "workout_update"}
+        or not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
+        or not math.isfinite(float(confidence)) or float(confidence) < 0.85
+        or str(data.get("subject") or "").lower() != "self"
+        or str(data.get("status") or "").lower() != "completed"
+        or str(data.get("polarity") or "").lower() != "positive"
+        or str(data.get("certainty") or "").lower() != "certain"
+        or str(data.get("primary_purpose") or "").lower() != "journal"
+        or not _semantic_source_subject_safe(source_text)
+        or not _JOURNAL_CORRECTION_RE.search(str(source_text or ""))
+    ):
+        return None
+    return "clarifymeal" if action == "food_update" else "clarifyworkout"
+
+async def resolve_semantic_journal_action(cid, text, user_generation=None):
+    """Распознаёт естественное журналирование без привязки к порядку конкретных слов."""
+    context = _journal_recent_context(cid)
+    v2 = journal_v2_enabled(cid)
+    if not _semantic_journal_candidate(text, context, enable_v2=v2):
+        return None
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    usage = []
+    try:
+        timeout_s = max(
+            3.0,
+            min(30.0, float(os.environ.get("AIWA_JOURNAL_ROUTE_TIMEOUT_SECONDS") or "15")),
+        )
+        classified = await asyncio.wait_for(
+            llm_to_thread(
+                cid, "journal_route", L.classify_journal_event, text, usage, context,
+                v2,
+                user_generation=generation,
+            ),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        ev(cid, "journal_route_failed", meta="timeout", user_generation=generation)
+        return {"intent": "journalunavailable", "reason": "timeout"}
+    except Exception as exc:
+        log.warning("journal route %s: %s", cid, exc)
+        ev(cid, "journal_route_failed", meta="error", user_generation=generation)
+        return {"intent": "journalunavailable", "reason": "error"}
+    if not _user_write_allowed(cid, generation):
+        return None
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="journal_route", calls=len(usage), usage=usage,
+           user_generation=generation)
+    if classified is None:
+        ev(cid, "journal_route_failed", meta="empty", user_generation=generation)
+        return {"intent": "journalunavailable", "reason": "empty"}
+    plan = _normalize_semantic_journal(classified, text, context, enable_v2=v2)
+    if not plan:
+        clarification = _semantic_update_clarification(
+            classified, text, context, enable_v2=v2,
+        )
+        if clarification:
+            return {"intent": clarification}
+    if plan:
+        ev(cid, "journal_action_planned", meta=plan["intent"], user_generation=generation)
+    return plan
 
 def is_question_like(txt):
     t = (txt or "").strip().lower()
@@ -871,10 +2247,10 @@ def match_guide(text):
         if any(k in t for k in g["kw"]): return g
     return None
 
-def is_cycle(u): return not (u and u.get("mode") in ("irregular", "none", "meno", "preg"))
+def is_cycle(u): return not (u and u.get("mode") in ("irregular", "none", "meno", "preg", "male"))
 def is_onboarded(u):
     if not u: return False
-    if u.get("mode") in ("irregular", "none", "meno", "preg"): return True
+    if u.get("mode") in ("irregular", "none", "meno", "preg", "male"): return True
     return bool(u.get("last_period") and u.get("cycle_len"))
 def status_of(cid):
     u = row(cid)
@@ -908,6 +2284,10 @@ MENU_KB = InlineKeyboardMarkup([
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Женщина", callback_data="onb_female")],
+    [InlineKeyboardButton("Мужчина", callback_data="mode:male")],
+])
+FEMALE_ONB_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
     [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
 ])
@@ -953,34 +2333,33 @@ def time_kb():
     times = ["07:00", "08:00", "09:00", "10:00", "21:00", "22:00"]
     return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=f"tm:{t}") for t in times[i:i + 3]] for i in (0, 3)])
 
-def schedule_jitter_min():
-    try:
-        return max(0, int(os.environ.get("AIWA_SCHEDULE_JITTER_MIN", "15")))
-    except (TypeError, ValueError):
-        return 15
-
-def summary_spread_min():
-    try:
-        return max(1, int(os.environ.get("AIWA_SUMMARY_SPREAD_MIN", "180")))
-    except (TypeError, ValueError):
-        return 180
-
 def scheduled_hhmm(cid, hhmm):
+    """The selected time is the delivery time, never a load-spreading hint."""
     h, m = map(int, hhmm.split(":"))
-    # дефолтную утреннюю сводку (08:00) размазываем по окну 08:00-11:00; кастомное время — маленький анти-коллизионный джиттер
-    window = summary_spread_min() if hhmm == "08:00" else schedule_jitter_min()
-    offset = abs(int(cid)) % window if window else 0
-    m += offset
-    h = (h + m // 60) % 24
-    return f"{h:02d}:{m % 60:02d}", offset, window
+    return f"{h % 24:02d}:{m % 60:02d}", 0, 0
+
+def summary_prepare_hhmm(cid, hhmm):
+    """Spread expensive generation before, rather than after, delivery time."""
+    try:
+        lead = max(1, int(os.environ.get("AIWA_SUMMARY_PREPARE_MIN", "10")))
+    except (TypeError, ValueError):
+        lead = 10
+    try:
+        spread = max(1, int(os.environ.get("AIWA_SUMMARY_PREPARE_SPREAD_MIN", "20")))
+    except (TypeError, ValueError):
+        spread = 20
+    h, m = map(int, hhmm.split(":"))
+    total = (h * 60 + m - lead - (abs(int(cid)) % spread)) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 def schedule_text(cid, hhmm):
-    actual, offset, window = scheduled_hhmm(cid, hhmm)
-    if hhmm == "08:00":
-        return (f"Утренняя сводка будет приходить около {actual} по Москве. Точное время можно поменять в Меню.")
-    if not offset:
-        return f"Время сводки: {hhmm} (МСК)."
-    return f"Время сводки: {hhmm} по Москве, фактически около {actual}."
+    """Пользователю показываем выбранное время — то же, что в профиле приложения.
+    Внутренний сдвиг очереди рассылки (scheduled_hhmm) — деталь доставки, не UI."""
+    shown = (row(cid) or {}).get("send_time") or hhmm or "08:00"
+    return (
+        f"Время сводки: {shown} по Москве — подготовлю заранее и начну отправку "
+        "в это время. При высокой нагрузке доставка может занять несколько минут."
+    )
 
 def today_start_iso():
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
@@ -995,10 +2374,125 @@ def summary_sent_today(cid):
     c.close()
     return bool(r)
 
+_PERMANENT_PUSH_FAILURES = frozenset({"blocked", "chat_not_found", "user_deactivated"})
+_RETRYABLE_PUSH_FAILURES = frozenset({"rate_limit", "timeout", "network"})
+
+def _push_failure_class(exc):
+    """Map Telegram exceptions to stable, privacy-safe delivery diagnostics."""
+    if isinstance(exc, Forbidden):
+        return "blocked"
+    if isinstance(exc, RetryAfter):
+        return "rate_limit"
+    if isinstance(exc, TimedOut):
+        return "timeout"
+    if isinstance(exc, NetworkError):
+        return "network"
+    if isinstance(exc, BadRequest):
+        text = str(exc or "").lower()
+        if "chat not found" in text:
+            return "chat_not_found"
+        if "user is deactivated" in text or "user deactivated" in text:
+            return "user_deactivated"
+        return "bad_request"
+    return "internal_or_unknown"
+
+def _suppress_push_delivery(cid, reason):
+    if reason not in _PERMANENT_PUSH_FAILURES:
+        return False
+    c = db()
+    try:
+        changed = c.execute(
+            """UPDATE users
+               SET push_suppressed_at=?, push_suppression_reason=?
+               WHERE chat_id=? AND push_suppressed_at IS NULL""",
+            (datetime.now(TZ).isoformat(), reason, cid),
+        ).rowcount == 1
+        c.commit()
+        return changed
+    finally:
+        c.close()
+
+def _clear_push_suppression(cid):
+    """An inbound private Telegram update proves that this recipient is reachable again."""
+    c = db()
+    try:
+        changed = c.execute(
+            """UPDATE users
+               SET push_suppressed_at=NULL, push_suppression_reason=NULL
+               WHERE chat_id=? AND push_suppressed_at IS NOT NULL""",
+            (cid,),
+        ).rowcount == 1
+        c.commit()
+        if changed:
+            log.info("push delivery restored after inbound update: %s", cid)
+        return changed
+    finally:
+        c.close()
+
+def _backfill_push_suppressions():
+    """Persist legacy blocked recipients so deploy catch-up does not retry them again."""
+    c = db()
+    try:
+        changed = c.execute(
+            """UPDATE users
+               SET push_suppressed_at=(
+                     SELECT MAX(e.ts) FROM events e
+                     WHERE e.chat_id=users.chat_id
+                       AND e.action='broadcast' AND e.meta LIKE 'blocked|%'
+                   ),
+                   push_suppression_reason='blocked'
+               WHERE push_suppressed_at IS NULL
+                 AND EXISTS (
+                     SELECT 1 FROM events e
+                     WHERE e.chat_id=users.chat_id
+                       AND e.action='broadcast' AND e.meta LIKE 'blocked|%'
+                 )
+                 AND (
+                     SELECT MAX(e.ts) FROM events e
+                     WHERE e.chat_id=users.chat_id
+                       AND e.action='broadcast' AND e.meta LIKE 'blocked|%'
+                 ) > COALESCE((
+                     SELECT MAX(e.ts) FROM events e
+                     WHERE e.chat_id=users.chat_id
+                       AND (
+                           (e.action='broadcast' AND e.meta LIKE 'sent|%')
+                           OR e.action IN ('command','user_message','voice','button','suggest')
+                       )
+                 ), '')"""
+        ).rowcount
+        c.commit()
+        if changed:
+            log.info("push suppression backfilled for %d blocked recipients", changed)
+        return changed
+    finally:
+        c.close()
+
+def _record_push_failure(cid, campaign, exc):
+    """Record one attempt without leaking Telegram error text or identifiers."""
+    failure_class = _push_failure_class(exc)
+    permanent = failure_class in _PERMANENT_PUSH_FAILURES
+    if permanent:
+        _suppress_push_delivery(cid, failure_class)
+    status = "blocked" if permanent else "error"
+    ev(
+        cid,
+        "broadcast",
+        meta="|".join((status, campaign or "unknown", failure_class,
+                       "retryable" if failure_class in _RETRYABLE_PUSH_FAILURES else "terminal")),
+    )
+    return failure_class
+
 def _claim_push_delivery(cid, campaign):
-    """Atomically reserve one daily push across workers, replicas and restarts."""
+    """Atomically reserve a push using a recoverable lease, not a permanent lock."""
     if not campaign:
         return True
+    try:
+        lease_seconds = max(60, int(os.environ.get("AIWA_PUSH_CLAIM_TTL_SEC", "900")))
+    except (TypeError, ValueError):
+        lease_seconds = 900
+    now = datetime.now(TZ)
+    now_iso = now.isoformat()
+    stale_before = (now - timedelta(seconds=lease_seconds)).isoformat()
     c = db()
     try:
         c.execute("BEGIN" if database_backend.uses_postgres() else "BEGIN IMMEDIATE")
@@ -1013,7 +2507,7 @@ def _claim_push_delivery(cid, campaign):
                 """INSERT INTO push_deliveries
                    (chat_id,campaign_id,status,claimed_at,sent_at)
                    VALUES(?,?,'sent',?,?) ON CONFLICT DO NOTHING""",
-                (cid, campaign, datetime.now(TZ).isoformat(), datetime.now(TZ).isoformat()),
+                (cid, campaign, now_iso, now_iso),
             )
             c.commit()
             return False
@@ -1021,8 +2515,18 @@ def _claim_push_delivery(cid, campaign):
             """INSERT INTO push_deliveries
                (chat_id,campaign_id,status,claimed_at)
                VALUES(?,?,'claimed',?) ON CONFLICT DO NOTHING""",
-            (cid, campaign, datetime.now(TZ).isoformat()),
+            (cid, campaign, now_iso),
         ).rowcount == 1
+        if not claimed:
+            # A process may die after claiming and before completing. Reclaim only
+            # an expired in-flight lease; a sent row is never reopened.
+            claimed = c.execute(
+                """UPDATE push_deliveries
+                   SET claimed_at=?, sent_at=NULL
+                   WHERE chat_id=? AND campaign_id=? AND status='claimed'
+                     AND claimed_at<=?""",
+                (now_iso, cid, campaign, stale_before),
+            ).rowcount == 1
         c.commit()
         return claimed
     finally:
@@ -1070,6 +2574,8 @@ def should_catchup_broadcast(cid, hhmm):
     return due <= now <= due + timedelta(hours=hours) and not summary_sent_today(cid)
 
 async def enqueue_broadcast(cid, meta="queued"):
+    if (row(cid) or {}).get("push_suppressed_at"):
+        return False
     if summary_sent_today(cid):
         return False
     if cid in BCAST_PENDING:
@@ -1111,12 +2617,11 @@ def sugg_kb(cid, items, app_user=None, app_label=None, feedback_id=None, campaig
     if feedback_id:
         rows.append([B("👍 Полезно", f"fb:helpful:{feedback_id}"),
                      B("👎 Не помогло", f"fb:unhelpful:{feedback_id}")])
-    rows.append([B("Меню", "menu", KBS.PRIMARY)]); return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup(rows)
 def summary_kb(u=None, campaign=None):
     rows = []
     if AIWA_WEBAPP_URL:
         rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=campaign_webapp_url(u, campaign)))])
-    rows.append([B("Меню", "menu")])
     return InlineKeyboardMarkup(rows)
 def summary_suggestions(st):
     if not st:
@@ -1175,15 +2680,176 @@ async def begin_onboard(cid, msg, force=False):
     upsert(cid, state=None, pending_date=None)
     await msg.reply_text(START_TEXT, reply_markup=ONB_KB)
 
+_CARD_CACHE = {}
+_NEW_CARDS_ALL = os.environ.get("AIWA_NEW_CARDS", "0") in ("1", "true", "True", "on")
+_NEW_CARDS_IDS = set(x.strip() for x in (os.environ.get("AIWA_NEW_CARDS_IDS", "") or "").split(",") if x.strip())
+for _bad in [x for x in _NEW_CARDS_IDS if len(x) < 6]:
+    print(f"ВНИМАНИЕ: AIWA_NEW_CARDS_IDS содержит «{_bad}» — это не похоже на chat_id (нужен полный id, напр. 625405535). "
+          f"Для включения всем используйте AIWA_NEW_CARDS=1.")
+def new_cards_on(cid):
+    """Новые карточки: всем через AIWA_NEW_CARDS=1 или точечно через AIWA_NEW_CARDS_IDS=123,456."""
+    return _NEW_CARDS_ALL or str(cid) in _NEW_CARDS_IDS
+
+def _card_ctx(cid, u, st=None, preg=None):
+    """Контекст для персональных строк карточки: состояние + чек-ин + дневник + память."""
+    bits = []
+    if st: bits.append(f"День цикла {st['day']} из {st['cycle_len']}, {st['subphase']} {st['phase_ru'].lower()} фаза, до месячных ~{st['days_to_next']} дн")
+    if preg: bits.append(f"Беременность: {preg.get('week')} нед, {preg.get('trimester')} триместр")
+    if u and u.get("mode") == "meno": bits.append("Режим: менопауза")
+    h = last_hint(cid)
+    if h: bits.append("Вчерашний чек-ин: " + h)
+    try:
+        from datetime import timedelta as _td
+        _y = (dtoday() - _td(days=1)).isoformat()
+        _tot = diary_totals(cid, _y)
+        if _tot and _tot.get("kcal"): bits.append(f"Еда вчера: {round(_tot['kcal'])} ккал, белок {round(_tot.get('protein',0))} г")
+    except Exception: pass
+    try:
+        _rw = _recent_workouts_text(cid)
+        if _rw: bits.append("Недавние тренировки: " + _rw)
+    except Exception: pass
+    try:
+        _mm = mem_text(cid, 8)
+        if _mm: bits.append("Память: " + _mm)
+    except Exception: pass
+    p = profile_of(u)
+    if p and p.get("age"): bits.append(f"Возраст {p['age']}")
+    return ". ".join(bits)
+
+async def _card_captions(cid, mode, ctx, summary=None):
+    key = (cid, dtoday().isoformat(), AIWA_VERSION, mode, bool(summary))
+    hit = _CARD_CACHE.get(key)
+    if hit is not None: return hit
+    if summary:
+        ctx = (ctx or "") + " || Текст сегодняшней сводки — строки карточки ОБЯЗАНЫ быть согласованы с ним: питание — суть блока про питание, нагрузка — суть блока про нагрузку, не выдумывай нового: " + str(summary)[:1800]
+    _cu = []
+    caps = {}
+    try:
+        caps = await llm_to_thread(cid, "card_captions", L.card_captions, mode, ctx, _cu) or {}
+    except Exception as e:
+        log.warning("card_captions %s: %s", cid, e)
+    if _cu: ev(cid, "tokens", sum(_cu), meta="card", calls=len(_cu), usage=_cu)
+    def _cut(v, lim=80):
+        v = str(v).strip()
+        if len(v) <= lim: return v
+        cut = v[:lim].rsplit(" ", 1)[0].rstrip(",;:")
+        if len(cut) < lim // 2: cut = v[:lim]      # строка без пробелов — чистый срез
+        return cut + "…"
+    caps = {k: _cut(v, 40 if k in ("focus", "theme") else 80) for k, v in caps.items()}
+    _CARD_CACHE[key] = caps; _prune_day(_CARD_CACHE)
+    return caps
+
+async def _cycle_card_png(cid, u, st, summary=None):
+    """Белая персональная карточка цикла; None, если выключено/не собралось."""
+    if not (IMG and new_cards_on(cid) and hasattr(IMG, "render_daily_card")): return None
+    try:
+        caps = await _card_captions(cid, "cycle", _card_ctx(cid, u, st=st), summary=summary)
+        if not caps.get("food"):
+            ev(cid, "fallback", meta="static:card_caps_empty"); return None
+        data = {"day": st["day"], "total": st["cycle_len"], "to_period": st["days_to_next"],
+                "phase_ru": st["phase_ru"], **caps}
+        return await asyncio.to_thread(IMG.render_daily_card, "cycle", data)
+    except Exception as e:
+        log.warning("cycle card %s: %s", cid, e); return None
+
+async def _general_card_png(cid, u, summary=None):
+    """Белая карточка для беременности/менопаузы; None, если выключено/не собралось."""
+    if not (IMG and new_cards_on(cid) and hasattr(IMG, "render_daily_card")): return None
+    mode = (u or {}).get("mode") or "none"
+    pregnancy = None
+    if mode == "preg" and u.get("last_period"):
+        try: pregnancy = C.preg_status(u["last_period"])
+        except Exception: pregnancy = None
+    _m = "preg" if pregnancy else ("meno" if mode == "meno" else None)
+    if not _m: return None
+    try:
+        caps = await _card_captions(cid, _m, _card_ctx(cid, u, preg=pregnancy), summary=summary)
+        if not caps.get("food"):
+            ev(cid, "fallback", meta="static:card_caps_empty"); return None
+        if _m == "preg":
+            data = {"week": pregnancy.get("week"), "trimester": pregnancy.get("trimester"),
+                    "days_left": max(0, pregnancy.get("days_left", 0)),
+                    "fruit": _fruit_label(pregnancy.get("week")), **caps}
+        else:
+            data = dict(caps)
+        return await asyncio.to_thread(IMG.render_daily_card, _m, data)
+    except Exception as e:
+        log.warning("general card %s: %s", cid, e); return None
+
 async def send_infographic(bot, cid):
     if not IMG: return
     u, st = status_of(cid)
     if not st: return
     try:
-        png = await asyncio.to_thread(IMG.render_cycle, date.fromisoformat(u["last_period"]), u["cycle_len"], dtoday())
+        png = await _cycle_card_png(cid, u, st)
+        if png is None:
+            png = await asyncio.to_thread(IMG.render_cycle, date.fromisoformat(u["last_period"]), u["cycle_len"], dtoday())
         bio = io.BytesIO(png); bio.name = "cycle.png"
         await bot.send_photo(cid, photo=bio, caption=f"AIWA · {st['subphase']} {st['phase_ru'].lower()}, день {st['day']}. Месячные через ~{st['days_to_next']} дн.")
+        return True
     except Exception as e: log.warning("infographic: %s", e)
+    return False
+
+async def send_general_infographic(bot, cid, u=None):
+    """Картинка к сводке для беременности и режимов без прогноза фазы цикла."""
+    if not IMG: return False
+    u = u or row(cid)
+    if not u: return False
+    mode = u.get("mode") or "none"
+    pregnancy = None
+    if mode == "preg" and u.get("last_period"):
+        try:
+            pregnancy = C.preg_status(u["last_period"])
+        except Exception:
+            pregnancy = None
+    try:
+        _m = ("preg" if (mode == "preg" and pregnancy) else ("meno" if mode == "meno" else None)) if new_cards_on(cid) else None
+        png = None
+        if _m and hasattr(IMG, "render_daily_card"):
+            caps = await _card_captions(cid, _m, _card_ctx(cid, u, preg=pregnancy))
+            if caps.get("food"):
+                if _m == "preg":
+                    data = {"week": pregnancy.get("week"), "trimester": pregnancy.get("trimester"),
+                            "days_left": max(0, pregnancy.get("days_left", 0)),
+                            "fruit": _fruit_label(pregnancy.get("week")), **caps}
+                else:
+                    data = dict(caps)
+                png = await asyncio.to_thread(IMG.render_daily_card, _m, data)
+        if png is None:
+            png = await asyncio.to_thread(IMG.render_general_summary, mode, dtoday(), pregnancy)
+        bio = io.BytesIO(png); bio.name = "summary.png"
+        await bot.send_photo(cid, photo=bio)
+        return True
+    except Exception as e:
+        log.warning("general infographic (%s): %s", mode, e)
+        return False
+
+async def send_daily_infographic(bot, cid, u, facts=None, st=None):
+    """Render trusted metrics plus model-selected reviewed facts."""
+    if not IMG or not u:
+        return False
+    mode = "cycle" if st is not None else (u.get("mode") or "none")
+    pregnancy = None
+    if mode == "preg" and u.get("last_period"):
+        try:
+            pregnancy = C.preg_status(u["last_period"])
+        except Exception:
+            pregnancy = None
+    try:
+        png = await asyncio.to_thread(
+            IMG.render_summary_card,
+            mode,
+            dtoday(),
+            facts or [],
+            st,
+            pregnancy,
+        )
+        bio = io.BytesIO(png); bio.name = "aiwa-today.png"
+        await bot.send_photo(cid, photo=bio)
+        return True
+    except Exception as e:
+        log.warning("daily infographic (%s): %s", mode, e)
+        return False
 
 async def send_training_card(context, cid, st):
     if not IMG: return
@@ -1199,29 +2865,227 @@ def _menu_key(cid, st, prof, mode):
     diet = ((prof.get("diet") if prof else "") or "", (prof.get("diet_note") if prof else "") or "")
     phase = (st.get("phase") if st else ("mode:" + str(mode)))
     return (cid, dtoday().isoformat(), phase, diet)
+def dc_get(cid, kind, key=""):
+    """Дневной кэш в SQLite: чтобы деплой/рестарт не заставлял модель генерить всё заново."""
+    c = db(); r = c.execute("SELECT js FROM day_cache WHERE chat_id=? AND d=? AND kind=? AND k=?",
+                            (cid, dtoday().isoformat(), kind, str(key)[:120])).fetchone(); c.close()
+    if not r: return None
+    try:
+        return json.loads(r[0])
+    except Exception:
+        return None
+
+def dc_put(cid, kind, payload, key=""):
+    try:
+        c = db()
+        c.execute("INSERT OR REPLACE INTO day_cache(chat_id,d,kind,k,js) VALUES(?,?,?,?,?)",
+                  (cid, dtoday().isoformat(), kind, str(key)[:120], json.dumps(payload, ensure_ascii=False)))
+        c.execute("DELETE FROM day_cache WHERE d<?", ((dtoday() - timedelta(days=2)).isoformat(),))
+        c.commit(); c.close()
+    except Exception as e:
+        log.info("day_cache put %s/%s: %s", cid, kind, e)
+
+def dc_del(cid, kind=None):
+    try:
+        c = db()
+        if kind: c.execute("DELETE FROM day_cache WHERE chat_id=? AND kind=?", (cid, kind))
+        else: c.execute("DELETE FROM day_cache WHERE chat_id=?", (cid,))
+        c.commit(); c.close()
+    except Exception:
+        pass
+
 def menu_cached(cid, st, prof, target, mode=None, usage=None):
     """Дневной кэш меню: обращаемся к модели максимум раз в день на юзера, дальше — мгновенно."""
     key = _menu_key(cid, st, prof, mode)
     hit = _MENU_CACHE.get(key)
     if hit is not None:
         return hit
+    disk = dc_get(cid, "menu", key[2:])
+    if disk is not None:
+        _MENU_CACHE[key] = disk
+        return disk
     if st is not None:
         m = L.menu_today(st, profile=prof, target=target, usage=usage)
     else:
         m = L.general_menu(prof, mode, target, usage=usage)
+    if isinstance(m, dict) and m.pop("_fallback", None):
+        ev(cid, "fallback", meta="static:menu_pool")
     _MENU_CACHE[key] = m
+    dc_put(cid, "menu", m, key[2:])
     _prune_day(_MENU_CACHE)
     return m
 def menu_cache_clear(cid):
     for k in [k for k in list(_MENU_CACHE) if k[0] == cid]:
         _MENU_CACHE.pop(k, None)
+    dc_del(cid, "menu")
 
 _SUM_CACHE = {}
 def _prune_day(cache):
     today = dtoday().isoformat()
     if len(cache) > 1500:
-        for k in [k for k in list(cache) if k[1] != today]:
+        tomorrow = (dtoday() + timedelta(days=1)).isoformat()
+        for k in [k for k in list(cache) if k[1] not in (today, tomorrow)]:
             cache.pop(k, None)
+
+def _prepared_context_key(cache_key):
+    raw = json.dumps(list(cache_key[2:]), ensure_ascii=False, sort_keys=True, default=str)
+    return _hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def _summary_state_for_day(u, day):
+    target = date.fromisoformat(day)
+    if is_cycle(u) and u.get("last_period") and u.get("cycle_len"):
+        return C.cycle_status(date.fromisoformat(u["last_period"]), int(u["cycle_len"]), target), None
+    if u.get("mode") == "preg" and u.get("last_period"):
+        try:
+            return None, C.preg_status(u["last_period"], target)
+        except Exception:
+            pass
+    return None, None
+
+def _summary_hint(cid, u, pregnancy=None):
+    hint = last_hint(cid) or ""
+    if u.get("mode") == "preg" and pregnancy:
+        hint = ((hint + " ") if hint else "") + (
+            f"Беременность, срок примерно {pregnancy['week']} недель, "
+            f"{pregnancy['trimester']} триместр."
+        )
+    return hint or None
+
+def _summary_key(cid, u, day, st=None, pregnancy=None):
+    profile = profile_of(u) or {}
+    snapshot = {
+        "mode": "cycle" if st is not None else (u.get("mode") or "none"),
+        "last_period": u.get("last_period"),
+        "cycle_len": u.get("cycle_len"),
+        "period_len": u.get("period_len"),
+        "modules": list(u.get("modules") or []),
+        "profile": {k: profile.get(k) for k in (
+            "height", "weight", "age", "activity", "diet", "diet_note", "kcal_goal"
+        )},
+        "checkin": log_get(cid, day) or {},
+        "hint": _summary_hint(cid, u, pregnancy),
+        "cycle": ({k: st.get(k) for k in (
+            "day", "cycle_len", "phase", "subphase", "days_to_next", "status"
+        )} if st else None),
+        "pregnancy": ({k: pregnancy.get(k) for k in (
+            "week", "day", "trimester", "due", "days_left"
+        )} if pregnancy else None),
+    }
+    return (cid, day, json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str))
+
+def _summary_pack(body, facts=None):
+    return {"v": 2, "body": str(body or ""), "facts": list(facts or [])[:3]}
+
+def _summary_unpack(value):
+    if isinstance(value, dict):
+        return str(value.get("body") or ""), list(value.get("facts") or [])[:3]
+    return str(value or ""), []
+
+def prepared_summary_clear(cid):
+    """Сводки, подготовленные под прежний режим/профиль, не должны доезжать после смены."""
+    for k in [k for k in list(_SUM_CACHE) if k[0] == cid]:
+        _SUM_CACHE.pop(k, None)
+    try:
+        c = db(); c.execute("DELETE FROM prepared_summaries WHERE chat_id=?", (cid,)); c.commit(); c.close()
+    except Exception as e:
+        log.info("prepared clear %s: %s", cid, e)
+
+def prepared_summary_get(cid, day, cache_key):
+    c = db()
+    try:
+        row_ = c.execute(
+            """SELECT body FROM prepared_summaries
+               WHERE chat_id=? AND summary_date=? AND context_key=?""",
+            (cid, day, _prepared_context_key(cache_key)),
+        ).fetchone()
+        if not row_:
+            return None
+        raw = row_[0]
+        try:
+            value = json.loads(raw)
+            if isinstance(value, dict) and value.get("v") == 2:
+                return value
+        except Exception:
+            pass
+        return raw
+    finally:
+        c.close()
+
+_PREP_CLEANUP_DAY = None
+def prepared_summary_put(cid, day, cache_key, value, generation=None):
+    global _PREP_CLEANUP_DAY
+    body, _ = _summary_unpack(value)
+    if not body:
+        return False
+    stored = (json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+              if isinstance(value, dict) else str(value))
+    c = db()
+    try:
+        if not _user_write_allowed(cid, generation=generation, conn=c):
+            return False
+        c.execute(
+            """INSERT OR REPLACE INTO prepared_summaries
+               (chat_id,summary_date,context_key,body,prepared_at)
+               VALUES(?,?,?,?,?)""",
+            (cid, day, _prepared_context_key(cache_key), stored, datetime.now(TZ).isoformat()),
+        )
+        cleanup_day = dtoday().isoformat()
+        if _PREP_CLEANUP_DAY != cleanup_day:
+            c.execute("DELETE FROM prepared_summaries WHERE summary_date<?",
+                      ((dtoday() - timedelta(days=2)).isoformat(),))
+            _PREP_CLEANUP_DAY = cleanup_day
+        c.commit()
+        return True
+    finally:
+        c.close()
+
+async def prepare_daily_summary(cid, target_day=None):
+    """Warm the daily LLM result before the user's exact delivery time."""
+    generation = _user_generation(cid)
+    u = row(cid)
+    if not u or not is_onboarded(u):
+        return False
+    usage = []; day = target_day or dtoday().isoformat()
+    st, pregnancy = _summary_state_for_day(u, day)
+    if st is not None and st.get("status") != "normal":
+        return False
+    key = _summary_key(cid, u, day, st, pregnancy)
+    if _SUM_CACHE.get(key) is not None or prepared_summary_get(cid, day, key) is not None:
+        return True
+    hint = _summary_hint(cid, u, pregnancy)
+    if st is None:
+        body = await llm_to_thread(
+            cid, "daily_summary_prepare", L.general_summary,
+            profile_of(u), u.get("mode"), hint=hint, usage=usage,
+            user_generation=generation,
+        )
+    else:
+        body = await llm_to_thread(
+            cid, "daily_summary_prepare", L.generate_summary,
+            st, u["modules"], hint=hint, usage=usage,
+            user_generation=generation,
+        )
+    if not body or not _user_write_allowed(cid, generation=generation):
+        return False
+    mode = "cycle" if st is not None else (u.get("mode") or "none")
+    facts = []
+    if mode in ("cycle", "preg"):
+        facts = await llm_to_thread(
+            cid, "summary_card_facts", L.summary_card_facts,
+            mode, st, pregnancy, hint, usage,
+            user_generation=generation,
+        )
+    if not _user_write_allowed(cid, generation=generation):
+        return False
+    value = _summary_pack(body, facts)
+    _prune_day(_SUM_CACHE)
+    _SUM_CACHE[key] = value
+    if not prepared_summary_put(cid, day, key, value, generation=generation):
+        _SUM_CACHE.pop(key, None)
+        return False
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="summary_prepare", calls=len(usage), usage=usage)
+    return True
 
 async def send_menu(context, cid, with_image=False):
     u, st = status_of(cid)
@@ -1253,8 +3117,15 @@ async def send_section(context, cid, st, key):
     await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
     usage = []
     if key == "training":
-        text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
-        text += "\n\n📱 В приложении Айвы можно посмотреть нагрузку рядом с календарём, симптомами и фазой цикла. Открой приложение кнопкой ниже."
+        _recent = _recent_workouts_text(cid)
+        _fq = ("Составь рекомендацию по нагрузке на сегодня под мою фазу. Мои последние тренировки: "
+               + (_recent or "данных нет") + ". ОБЯЗАТЕЛЬНО учти их: если вчера была тяжёлая тренировка "
+               "(например на ноги) — сегодня предложи другие группы мышц или восстановление, и скажи об этом прямо. "
+               "Формат: короткий заголовок, почему именно так (гормоны и восстановление), 2-3 конкретных варианта с «как».")
+        text = await think_llm(context, cid, L.answer_question, st, _fq, llm_profile_of(row(cid)), None, usage=usage)
+        if not text or "не вернула ответ" in text:
+            text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
+        text += "\n\nВ приложении Айвы можно посмотреть нагрузку рядом с календарём, симптомами и фазой цикла. Открой приложение кнопкой ниже."
         return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage,
             app_user=row(cid), app_label="Открыть нагрузку")
     if key == "food":
@@ -1264,17 +3135,19 @@ async def send_section(context, cid, st, key):
             text = L.menu_text(st, mdata, target)
         else:
             text = L.section_text(st, "food")
-        text += "\n\n📱 В приложении Айвы меню удобнее: рядом с каждым блюдом есть кнопка «Заменить», можно быстро выбрать другой вариант без пересборки всего дня. Открой приложение кнопкой ниже."
+        text += "\n\nВ приложении Айвы меню удобнее: рядом с каждым блюдом есть кнопка «Заменить», можно быстро выбрать другой вариант без пересборки всего дня. Открой приложение кнопкой ниже."
         return await send_answer(context, cid, text, st, "питание сегодня", usage=usage,
             app_user=row(cid), app_label="Открыть питание")
     text = L.section_text(st, key)
     await send_answer(context, cid, text, st, text, usage=usage)
 
 async def send_delay(context, cid, st, campaign=None):
-    if IMG:
-        try:
-            bio = io.BytesIO(await asyncio.to_thread(IMG.render_delay, st)); bio.name = "delay.png"; await context.bot.send_photo(cid, photo=bio)
-        except Exception as e: log.warning("delay img: %s", e)
+    claimed = False; sent_any = False
+    if campaign:
+        claimed = _claim_push_delivery(cid, campaign)
+        if not claimed:
+            log.info("delay summary skipped as duplicate: %s %s", cid, campaign)
+            return False
     msgs = {
         "due": (
             "🟡 Сводка на сегодня: месячные ожидаются примерно сейчас.\n\n"
@@ -1309,13 +3182,32 @@ async def send_delay(context, cid, st, campaign=None):
             "• Если месячных действительно нет так долго, это повод обсудить ситуацию с гинекологом.\n"
             "• Возможные причины: беременность, СПКЯ, щитовидная железа, резкая потеря веса, стресс, перименопауза."
         )}
-    u = row(cid)
-    body = msgs.get(st["status"], "")
-    await context.bot.send_message(cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
-        reply_markup=summary_sugg_kb(cid, u, st, app_label="Открыть календарь"), parse_mode="HTML")
-    if campaign:
-        ev(cid, "goal", meta="summary")
-        ev(cid, "broadcast", meta="sent|" + campaign)
+    try:
+        if IMG:
+            try:
+                bio = io.BytesIO(await asyncio.to_thread(IMG.render_delay, st))
+                bio.name = "delay.png"
+                await context.bot.send_photo(cid, photo=bio)
+                sent_any = True
+            except Exception as e:
+                log.warning("delay img: %s", e)
+        u = row(cid)
+        body = msgs.get(st["status"], "")
+        await context.bot.send_message(
+            cid, html.escape(body) + "\n\n" + APP_CTA_HTML,
+            reply_markup=summary_sugg_kb(cid, u, st, app_label="Открыть календарь"),
+            parse_mode="HTML",
+        )
+        sent_any = True
+        if campaign:
+            _complete_push_delivery(cid, campaign)
+            ev(cid, "goal", meta="summary")
+            ev(cid, "broadcast", meta="sent|" + campaign)
+        return True
+    except Exception:
+        if claimed and not sent_any:
+            _release_push_delivery(cid, campaign)
+        raise
 
 async def send_guide(context, cid, g):
     path = os.path.join(GUIDE_DIR, g["file"])
@@ -1333,6 +3225,105 @@ async def send_guide(context, cid, g):
     except Exception as e:
         log.warning("guide: %s", e)
         with open(path, "rb") as fh: await context.bot.send_photo(cid, photo=fh, caption=g["title"])
+
+RICH_OK = os.environ.get("AIWA_RICH", "1") in ("1", "true", "True", "on")
+
+async def send_rich_with_photo(bot, cid, md_text, png_bytes, reply_markup=None):
+    """Одно сообщение: карточка + текст сводки. Bot API 10.1: media в rich-markdown через tg://photo?id=."""
+    def _do():
+        import requests as _rq
+        md = re.sub(r"(?m)^(\s*)•\s+", r"\1- ", str(md_text))
+        rich = {"markdown": "![](tg://photo?id=card)\n\n" + md,
+                "media": [{"id": "card", "media": {"type": "photo", "media": "attach://cardpng"}}]}
+        data = {"chat_id": str(cid), "rich_message": json.dumps(rich, ensure_ascii=False)}
+        if reply_markup is not None:
+            data["reply_markup"] = reply_markup.to_json()
+        last = None
+        for _att in (1, 2):
+            try:
+                r = _rq.post(f"https://api.telegram.org/bot{bot.token}/sendRichMessage",
+                             data=data, files={"cardpng": ("card.png", png_bytes, "image/png")}, timeout=60)
+                j = r.json()
+                if j.get("ok"): return j
+                last = RuntimeError(f"sendRichMessage(photo): {j.get('description')}")
+                if "retry" not in str(j.get("description", "")).lower(): break
+            except Exception as e:
+                last = e
+        raise last
+    _LAST_SPOKEN[cid] = md_plain(md_text)
+    return await asyncio.to_thread(_do)
+
+async def send_rich(bot, cid, md_text, reply_markup=None):
+    """Отправка через sendRichMessage (Bot API 10.1+): Telegram сам рендерит GFM —
+    таблицы, ### заголовки, списки, цитаты. Бросает исключение, если метод недоступен."""
+    md_text = guard_aiwa_reply(cid, md_text)
+    md_text = re.sub(r"(?m)^(\s*)•\s+", r"\1- ", str(md_text))   # любые «• » -> GFM-список, иначе рендер склеит/задвоит
+    _LAST_SPOKEN[cid] = md_plain(md_text)                            # rich не проходит через текстовый прокси озвучки
+    data = {"chat_id": cid, "rich_message": json.dumps({"markdown": md_text})}
+    if reply_markup is not None:
+        data["reply_markup"] = reply_markup.to_json()
+    return await bot._post("sendRichMessage", data)
+
+def tg_rich(text):
+    """Лёгкие маркеры от модели -> Telegram HTML: **жирный**, __курсив__, ```моноширинный блок```."""
+    if not text: return ""
+    # Protect fenced blocks before applying inline entities: Telegram rejects
+    # nested <b>/<i> inside <pre>.
+    chunks = re.split(r"(```[a-z]*\n?.*?```)", str(text), flags=re.S)
+    out = []
+    for chunk in chunks:
+        if chunk.startswith("```") and chunk.endswith("```"):
+            body = re.sub(r"^```[a-z]*\n?", "", chunk)
+            body = body[:-3].strip("\n")
+            out.append("<pre>" + html.escape(body, quote=False) + "</pre>")
+            continue
+        safe = html.escape(chunk, quote=False)
+        safe = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", safe)
+        safe = _gfm_tables_to_pre(safe)
+        for part in re.split(r"(<pre>.*?</pre>)", safe, flags=re.S):
+            if part.startswith("<pre>") and part.endswith("</pre>"):
+                out.append(part)
+                continue
+            part = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", part, flags=re.S)
+            part = re.sub(r"__(.+?)__", r"<i>\1</i>", part, flags=re.S)
+            out.append(part.replace("**", "").replace("__", ""))
+    return "".join(out)
+
+def _gfm_tables_to_pre(t):
+    """Фолбэк для клиентов без rich: GFM-таблицу выравниваем пробелами в <pre>."""
+    out, buf = [], []
+    def flush():
+        if len(buf) >= 2 and re.match(r"^\s*\|?[\s:|-]+\|?\s*$", buf[1]):
+            rows = [[c.strip() for c in r.strip().strip("|").split("|")] for r in (buf[:1] + buf[2:])]
+            w = [max(len(r[i]) if i < len(r) else 0 for r in rows) for i in range(max(len(r) for r in rows))]
+            out.append("<pre>" + "\n".join("  ".join((r[i] if i < len(r) else "").ljust(w[i]) for i in range(len(w))).rstrip() for r in rows) + "</pre>")
+        else:
+            out.extend(buf)
+        buf.clear()
+    for ln in t.split("\n"):
+        if "|" in ln and ln.strip():
+            buf.append(ln)
+        else:
+            flush(); out.append(ln)
+    flush()
+    return "\n".join(out)
+
+def md_plain(text):
+    """Для мини-аппа: маркеры убираем, таблицы сводим к строкам — он рендерит плейн."""
+    if not text: return text
+    t = re.sub(r"```[a-z]*\n?(.*?)```", r"\1", str(text), flags=re.S)
+    t = re.sub(r"(?m)^#{1,6}\s*", "", t)
+    lines = []
+    for ln in t.split("\n"):
+        if re.match(r"^\s*\|?[\s:|-]+\|?\s*$", ln) and "|" in ln:
+            continue                                   # разделитель таблицы
+        if "|" in ln and ln.strip().startswith("|"):
+            cells = [c.strip() for c in ln.strip().strip("|").split("|") if c.strip()]
+            ln = "• " + ", ".join(cells)
+        lines.append(ln)
+    t = "\n".join(lines)
+    t = re.sub(r"(?m)^(\s*)-\s+", r"\1• ", t)          # в мини-аппе плейн: «- » -> «• »
+    return t.replace("**", "").replace("__", "")
 
 TG_MESSAGE_LIMIT = 4096
 # Leave room for Telegram entity parsing and for a short quoted question.
@@ -1373,10 +3364,21 @@ def _clip_tg(text, limit=TG_QUOTE_LIMIT):
     return text[:keep].rstrip() + "…"
 
 async def reply_long(message, text, reply_markup=None):
-    """Reply with every chunk; interactive buttons belong only to the final part."""
+    """Ответ с rich-форматированием; фолбэк — HTML по кускам. Кнопки только у последней части."""
+    text = guard_aiwa_reply(message.chat_id, text)
+    if RICH_OK:
+        try:
+            await send_rich(message.get_bot(), message.chat_id, text, reply_markup=reply_markup)
+            return
+        except Exception as _e:
+            log.info("rich fallback: %s", str(_e)[:120])
     parts = split_tg(text) or [str(text or "")]
     for i, part in enumerate(parts):
-        await message.reply_text(part, reply_markup=(reply_markup if i == len(parts) - 1 else None))
+        markup = reply_markup if i == len(parts) - 1 else None
+        try:
+            await message.reply_text(tg_rich(part), reply_markup=markup, parse_mode="HTML")
+        except BadRequest:
+            await message.reply_text(md_plain(part), reply_markup=markup)
 def chat_hint(cid):
     base = last_hint(cid) or ""
     u = row(cid)
@@ -1387,6 +3389,7 @@ def chat_hint(cid):
         except Exception: pass
     return base or None
 _VOICE_TURN = {}   # cid -> True, если текущий вопрос пришёл голосом: тогда ответ дублируем голосом
+_LAST_SPOKEN = {}  # cid -> содержательный текст для озвучки (rich-отправки не видны текстовому прокси)
 def _voice_reply_on():
     return os.environ.get("AIWA_VOICE_REPLY", "1") in ("1", "true", "True", "yes", "on")
 
@@ -1452,21 +3455,39 @@ async def _send_audio_fallback(context, cid, audio):
     await context.bot.send_audio(cid, buf, title="Ответ Айвы", performer="Айва")
 
 async def _send_voice_reply(context, cid, text):
-    """Озвучка ответа. Молча пропускаем, если синтез недоступен — текст уже отправлен."""
+    """Speak the complete answer in bounded requests; synthesize chunks in parallel but send in order."""
     try:
-        _ti = {}
-        audio = await llm_to_thread(cid, "tts", L.synthesize, text, _ti)
-        if not audio:
-            return
-        how = "tts:salute"
+        chunks = L.tts_chunks(text)
         try:
-            await context.bot.send_voice(cid, audio)
-        except Exception as e:
-            if "voice_messages_forbidden" not in str(e).lower():
-                raise
-            await _send_audio_fallback(context, cid, audio)   # у получателя закрыты голосовые
-            how = "tts:audio"
-        ev(cid, "tts", meta=how, ms=int(_ti.get("ms") or 0), n=int(_ti.get("chars") or 0), calls=1)
+            parallelism = int(os.environ.get("AIWA_TTS_PARALLELISM", "1"))
+        except (TypeError, ValueError):
+            parallelism = 1
+        parallelism = max(1, min(int(getattr(L, "_tts_provider_concurrency")()), parallelism))
+        gate = asyncio.Semaphore(parallelism)
+
+        async def synthesize_one(chunk):
+            info = {}
+            async with gate:
+                audio = await llm_to_thread(cid, "tts", L.synthesize, chunk, info)
+            return chunk, audio, info
+
+        results = await asyncio.gather(*(synthesize_one(chunk) for chunk in chunks))
+        total_ms = 0; total_chars = 0; calls = 0; how = "tts:salute"
+        for chunk, audio, info in results:
+            if not audio:
+                continue
+            calls += 1
+            total_ms += int(info.get("ms") or 0)
+            total_chars += int(info.get("chars") or len(chunk))
+            try:
+                await context.bot.send_voice(cid, audio)
+            except Exception as exc:
+                if "voice_messages_forbidden" not in str(exc).lower():
+                    raise
+                await _send_audio_fallback(context, cid, audio)
+                how = "tts:audio"
+        if calls:
+            ev(cid, "tts", meta=how, ms=total_ms, n=total_chars, calls=calls)
     except Exception as e:
         log.warning("voice reply: %s", e)
 
@@ -1500,16 +3521,44 @@ def _instrument_feedback_prompt(cid, answer, channel="bot"):
     answer_id = secrets.token_hex(8)
     sampled = _feedback_sampled(answer_id)
     if sampled:
-        ev(cid, "feedback_prompt", meta=f"{answer_id}|{channel}")
+        _register_feedback_prompt(cid, answer_id, channel)
     level = _safety_level(answer)
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|{channel}")
     return answer_id if sampled else None
 
+def _register_feedback_prompt(cid, answer_id, channel="bot"):
+    """Persist the button entitlement independently from analytics events."""
+    answer_id = re.sub(r"[^a-f0-9]", "", str(answer_id or ""))[:32]
+    if not answer_id:
+        return False
+    c = db()
+    try:
+        if not _user_write_allowed(cid, conn=c):
+            return False
+        cur = c.execute(
+            """INSERT OR IGNORE INTO feedback_requests
+               (chat_id,answer_id,channel,created_at) VALUES(?,?,?,?)""",
+            (cid, answer_id, str(channel or "bot")[:24], datetime.now(TZ).isoformat()),
+        )
+        c.commit()
+        created = cur.rowcount > 0
+    finally:
+        c.close()
+    if created:
+        ev(cid, "feedback_prompt", meta=f"{answer_id}|{channel}")
+    return True
+
 def _feedback_prompt_exists(cid, answer_id):
     """Accept feedback only for an answer actually shown to this user."""
     c = db()
     try:
+        if c.execute(
+            "SELECT 1 FROM feedback_requests WHERE chat_id=? AND answer_id=? LIMIT 1",
+            (cid, answer_id),
+        ).fetchone() is not None:
+            return True
+        # Compatibility with buttons sent before feedback_requests was introduced.
         return c.execute(
             "SELECT 1 FROM events WHERE chat_id=? AND action='feedback_prompt' AND meta LIKE ? LIMIT 1",
             (cid, answer_id + "|%"),
@@ -1517,31 +3566,101 @@ def _feedback_prompt_exists(cid, answer_id):
     finally:
         c.close()
 
+def _submit_feedback(cid, answer_id, rating, channel="bot"):
+    """Atomically save one rating; repeated taps are successful but do not duplicate analytics."""
+    answer_id = re.sub(r"[^a-f0-9]", "", str(answer_id or ""))[:32]
+    rating = str(rating or "")
+    if not answer_id or rating not in {"helpful", "unhelpful"}:
+        return "missing"
+    c = db()
+    saved_channel = str(channel or "bot")[:24]
+    try:
+        if not _user_write_allowed(cid, conn=c):
+            return "missing"
+        c.execute("BEGIN IMMEDIATE")
+        row_ = c.execute(
+            "SELECT channel,rating FROM feedback_requests WHERE chat_id=? AND answer_id=?",
+            (cid, answer_id),
+        ).fetchone()
+        if row_ is None:
+            # Migrate a still-visible legacy button on first click.
+            legacy = c.execute(
+                """SELECT meta FROM events
+                   WHERE chat_id=? AND action='feedback_prompt' AND meta LIKE ?
+                   ORDER BY id DESC LIMIT 1""",
+                (cid, answer_id + "|%"),
+            ).fetchone()
+            if legacy is None:
+                c.rollback()
+                return "missing"
+            if "|" in (legacy[0] or ""):
+                saved_channel = legacy[0].split("|", 1)[1][:24] or saved_channel
+            c.execute(
+                """INSERT INTO feedback_requests
+                   (chat_id,answer_id,channel,created_at) VALUES(?,?,?,?)""",
+                (cid, answer_id, saved_channel, datetime.now(TZ).isoformat()),
+            )
+            row_ = (saved_channel, None)
+        saved_channel = row_[0] or saved_channel
+        if row_[1] in {"helpful", "unhelpful"}:
+            c.commit()
+            return "duplicate"
+        c.execute(
+            """UPDATE feedback_requests SET rating=?,submitted_at=?
+               WHERE chat_id=? AND answer_id=? AND rating IS NULL""",
+            (rating, datetime.now(TZ).isoformat(), cid, answer_id),
+        )
+        c.commit()
+    finally:
+        c.close()
+    ev(cid, "feedback", meta=f"{rating}|{answer_id}|{saved_channel}")
+    return "saved"
+
 async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None):
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
     clean, sugg = sf(text) if sf else (text, [])
-    if len(sugg) < 2:
-        try:
-            for e in L.followups(st, basis_q, clean):
-                if e not in sugg and len(sugg) < 2: sugg.append(e)
-        except Exception: pass
+    clean = guard_aiwa_reply(cid, clean)
+    try:
+        topical = L.followups(st, basis_q, clean)
+        # For known product topics deterministic relevance wins over a model
+        # suggestion that may be well-formed but unrelated to the answer.
+        if topical:
+            sugg = topical
+    except Exception:
+        pass
     answer_id = secrets.token_hex(8)
     feedback_id = answer_id if _feedback_sampled(answer_id) else None
     kb = sugg_kb(cid, sugg, app_user=app_user, app_label=app_label, feedback_id=feedback_id)
     quote_text = _clip_tg(quote) if quote else None
-    first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
-    parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
-    for i, part in enumerate(parts):
-        last = i == len(parts) - 1
-        if i == 0 and quote_text:
-            body = f"<blockquote>{html.escape(quote_text)}</blockquote>\n{html.escape(part)}"
-            await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
-        else:
-            await context.bot.send_message(cid, part, reply_markup=(kb if last else None))
-    ev(cid, "assistant_message", meta="bot")
+    rich_sent = False
+    if RICH_OK:
+        try:
+            md = (("> " + quote_text.replace("\n", " ") + "\n\n") if quote_text else "") + clean
+            await send_rich(context.bot, cid, md, reply_markup=kb)
+            rich_sent = True
+        except Exception as _re_:
+            log.info("rich fallback: %s", str(_re_)[:120])
+    if not rich_sent:
+        first_limit = min(TG_TEXT_CHUNK, TG_MESSAGE_LIMIT - _tg_units(quote_text) - 1) if quote_text else TG_TEXT_CHUNK
+        parts = split_tg(clean, first_limit=max(256, first_limit)) or [clean]
+        for i, part in enumerate(parts):
+            last = i == len(parts) - 1
+            if i == 0 and quote_text:
+                body = f"<blockquote>{html.escape(quote_text)}</blockquote>\n{tg_rich(part)}"
+                try:
+                    await context.bot.send_message(cid, body, reply_markup=(kb if last else None), parse_mode="HTML")
+                except BadRequest:
+                    await context.bot.send_message(cid, quote_text + "\n\n" + md_plain(part),
+                                                   reply_markup=(kb if last else None))
+            else:
+                try:
+                    await context.bot.send_message(cid, tg_rich(part), reply_markup=(kb if last else None), parse_mode="HTML")
+                except BadRequest:
+                    await context.bot.send_message(cid, md_plain(part), reply_markup=(kb if last else None))
+    ev(cid, "assistant_message", meta="bot_rich" if rich_sent else "bot")
     if feedback_id:
-        ev(cid, "feedback_prompt", meta=f"{answer_id}|bot")
+        _register_feedback_prompt(cid, answer_id, "bot")
     level = _safety_level(clean)
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|bot")
@@ -1549,36 +3668,136 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
         await _send_voice_reply(context, cid, clean)
 
-async def push_general(context, cid, campaign=None):
-    u = row(cid); usage = []; _ds = dtoday().isoformat()
-    _key = (cid, _ds, "mode:" + str(u.get("mode")), str(log_get(cid, _ds) or ""))
-    body = _SUM_CACHE.get(_key)
-    if body is None:
-        body = await llm_to_thread(cid, "daily_summary", L.general_summary, profile_of(u), u.get("mode"), hint=chat_hint(cid), usage=usage)
-        if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
-    if not body:
-        body = "💛 Сводка на сегодня. Отметь самочувствие через Симптомы, и я подскажу, на что обратить внимание."
-    clean, extra = L.split_followups(body)
-    kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u,
-                 app_label=APP_BUTTON_TEXT, campaign=campaign)
-    await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
-        reply_markup=kb, parse_mode="HTML")
-    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
-    ev(cid, "goal", meta="summary")
-    if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
+async def _send_summary_text(context, cid, clean, kb):
+    """Use Telegram rich messages when available, with a safe HTML fallback."""
+    clean = guard_aiwa_reply(cid, clean)
+    if RICH_OK:
+        try:
+            await send_rich(context.bot, cid, clean, reply_markup=kb)
+            return
+        except Exception as exc:
+            log.info("rich summary fallback: %s", str(exc)[:120])
+    try:
+        await context.bot.send_message(
+            cid, tg_rich(clean) + "\n\n" + APP_CTA_HTML,
+            reply_markup=kb, parse_mode="HTML",
+        )
+    except BadRequest:
+        await context.bot.send_message(cid, md_plain(clean), reply_markup=kb)
+
+def _delivery_summary_fallback(u, st=None, pregnancy=None):
+    """Fast deterministic fallback used only when scheduled pre-generation missed."""
+    if st is not None:
+        return L.fallback_summary(st, u.get("modules") or ["phase", "general", "food", "training"])
+    mode = (u or {}).get("mode") or "none"
+    if mode == "preg":
+        term = ""
+        if pregnancy:
+            term = f"Сейчас ориентировочно {pregnancy['week']}-я неделя, {pregnancy['trimester']}-й триместр. "
+        return (
+            "### 💛 Сегодня\n"
+            f"- {term}Ориентируйся на самочувствие и назначения врача.\n"
+            "- При боли, кровянистых выделениях, выраженной слабости или резком ухудшении самочувствия свяжись с врачом.\n\n"
+            "### 🍽 Основа дня\n"
+            "- Регулярно ешь, пей достаточно воды и избегай продуктов, которые врач рекомендовал исключить.\n\n"
+            "### 🏋️ Нагрузка\n"
+            "- Выбирай только привычную комфортную активность без боли и перегрева."
+        )
+    if mode == "meno":
+        context_line = "при менопаузе"
+    elif mode == "irregular":
+        context_line = "при нерегулярном цикле"
+    else:
+        context_line = "без привязки к циклу"
+    return (
+        "### 💛 Сегодня\n"
+        f"- Это резервная сводка {context_line}: персональный текст не успел подготовиться заранее.\n"
+        "- Отметь энергию и симптомы, чтобы следующая сводка учитывала актуальное самочувствие.\n\n"
+        "### 🍽 Питание и нагрузка\n"
+        "- Выбирай обычный сбалансированный рацион и комфортную активность по самочувствию."
+    )
+
+async def push_general(context, cid, with_image=True, campaign=None):
+    u = row(cid)
+    if not u or not is_onboarded(u):
+        return False
+    if u.get("mode") == "male":
+        with_image = False   # мужская сводка — только текст, без инфографики
+    claimed = False; sent_any = False
+    if campaign:
+        claimed = _claim_push_delivery(cid, campaign)
+        if not claimed:
+            log.info("summary push skipped as duplicate: %s %s", cid, campaign)
+            return False
+    try:
+        generation = _user_generation(cid)
+        usage = []; day = dtoday().isoformat()
+        _, pregnancy = _summary_state_for_day(u, day)
+        key = _summary_key(cid, u, day, None, pregnancy)
+        value = _SUM_CACHE.get(key)
+        if value is None:
+            value = prepared_summary_get(cid, day, key)
+        body, facts = _summary_unpack(value)
+        if not body and not campaign:
+            hint = _summary_hint(cid, u, pregnancy)
+            body = await llm_to_thread(
+                cid, "daily_summary", L.general_summary,
+                profile_of(u), u.get("mode"), hint=hint, usage=usage,
+                user_generation=generation,
+            )
+            if u.get("mode") == "preg" and _user_write_allowed(cid, generation=generation):
+                facts = await llm_to_thread(
+                    cid, "summary_card_facts", L.summary_card_facts,
+                    "preg", None, pregnancy, hint, usage,
+                    user_generation=generation,
+                )
+            if body and _user_write_allowed(cid, generation=generation):
+                value = _summary_pack(body, facts)
+                _prune_day(_SUM_CACHE); _SUM_CACHE[key] = value
+                prepared_summary_put(cid, day, key, value, generation=generation)
+        if not body:
+            body = _delivery_summary_fallback(u, pregnancy=pregnancy)
+            ev(cid, "fallback", meta="static:summary_delivery_cache_miss")
+        clean, extra = L.split_followups(body)
+        kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u,
+                     app_label=APP_BUTTON_TEXT, campaign=campaign)
+        _png = (await _general_card_png(cid, u, summary=clean)) if (with_image and new_cards_on(cid)) else None
+        if _png is not None:
+            try:
+                await send_rich_with_photo(context.bot, cid, guard_aiwa_reply(cid, clean), _png, reply_markup=kb)
+            except Exception as _ce:
+                log.info("combined card fallback: %s", str(_ce)[:120])
+                ev(cid, "fallback", meta="static:combined_send_fail")
+                await send_daily_infographic(context.bot, cid, u, facts)
+                await _send_summary_text(context, cid, clean, kb)
+        else:
+            if with_image:
+                sent_any = await send_daily_infographic(context.bot, cid, u, facts)
+            await _send_summary_text(context, cid, clean, kb)
+        sent_any = True
+        if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
+        ev(cid, "goal", meta="summary")
+        if campaign:
+            _complete_push_delivery(cid, campaign)
+            ev(cid, "broadcast", meta="sent|" + campaign)
+        return True
+    except Exception:
+        if claimed and not sent_any:
+            _release_push_delivery(cid, campaign)
+        raise
 
 async def send_general(context, cid, key):
     u = row(cid); await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
     qmap = {"food": "Что мне есть сегодня под мой возраст и самочувствие? Дай конкретные продукты или меню на день.",
             "training": "Какая физическая активность мне сейчас подходит и почему? Дай конкретные варианты."}
     usage = []; q = qmap.get(key, key)
-    ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), q, hint=chat_hint(cid), usage=usage)
+    ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), q, hint=chat_hint(cid), usage=usage)
     _, st = status_of(cid)
     if key == "food":
-        ans += "\n\n📱 В приложении Айвы можно открыть питание и заменить блюдо кнопкой «Заменить»."
+        ans += "\n\nВ приложении Айвы можно открыть питание и заменить блюдо кнопкой «Заменить»."
         return await send_answer(context, cid, ans, st, q, usage=usage, app_user=u, app_label="Открыть питание")
     if key == "training":
-        ans += "\n\n📱 В приложении Айвы можно смотреть нагрузку рядом с календарём, симптомами и статистикой."
+        ans += "\n\nВ приложении Айвы можно смотреть нагрузку рядом с календарём, симптомами и статистикой."
         return await send_answer(context, cid, ans, st, q, usage=usage, app_user=u, app_label="Открыть нагрузку")
     await send_answer(context, cid, ans, st, q, usage=usage)
 
@@ -1617,8 +3836,9 @@ def cycle_text_analysis(cid):
     parts.append("\nПодробную выписку для врача можно собрать кнопкой ниже.")
     return "\n".join(parts)
 
-async def dispatch_intent(context, update, cid, u, intent, txt=""):
+async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None, user_generation=None):
     msg = update.message; general = not is_cycle(u); ev(cid, "manual", meta="intent_" + intent)
+    turn_generation = _user_generation(cid) if user_generation is None else int(user_generation)
     if intent == "analysis":
         return await msg.reply_text(cycle_text_analysis(cid),
             reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
@@ -1631,6 +3851,14 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
     if intent == "history":
         return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
     if intent == "phases":
+        _pu = []
+        _pa = None
+        try: _pa = await llm_to_thread(cid, "phases", L.answer_question, status_of(cid)[1], "Расскажи кратко про четыре фазы цикла: сколько длится каждая, какие гормоны ведут и как это отражается на самочувствии, питании и нагрузке.", llm_profile_of(row(cid)), None, usage=_pu)
+        except Exception: pass
+        if _pu: ev(cid, "tokens", sum(_pu), meta="answer", calls=len(_pu), usage=_pu)
+        if _pa:
+            return await reply_long(msg, L.split_followups(_pa)[0])
+        ev(cid, "fallback", meta="static:phases")
         return await msg.reply_text(PHASES_TEXT)
     if intent == "addcycles":
         return await addcycles_entry(context, cid, msg)
@@ -1638,17 +3866,12 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         upsert(cid, state="await_profile_edit")
         return await msg.reply_text("Обновим данные. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.")
     if intent == "period_end":
-        u2 = row(cid)
-        if not (is_cycle(u2) and u2.get("last_period")):
-            return await msg.reply_text("Сначала отметь начало последних месячных, тогда посчитаю их длину. Кнопка «Отметить месячные» в Меню.")
-        mdt = _DATE_RE.search(txt or "")
-        end = (parse_date(mdt.group(0)) if mdt else None) or dtoday()
-        ln = (end - date.fromisoformat(u2["last_period"])).days + 1
-        if 1 <= ln <= 10:
-            cyc_set_end(cid, u2["last_period"], end.isoformat())
-            upsert(cid, period_end=end.isoformat(), period_len=ln)
-            return await msg.reply_text(f"Записала: месячные длились {ln} дн. Учту это в прогнозе и выписке для врача.")
-        return await msg.reply_text("Поняла, месячные закончились. Чтобы посчитать длину, отметь ещё и дату их начала кнопкой «Отметить месячные».")
+        result = await log_period_end_action(
+            cid, u, txt,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            user_generation=turn_generation,
+        )
+        return await msg.reply_text(result["text"])
     if intent == "cyclelen":
         mnum = re.search(r"\b(1[5-9]|[2-5]\d|60)\b", txt or "")
         if mnum:
@@ -1665,12 +3888,114 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
         return await help_cmd(update, context)
     if intent == "partner":
         return await partner_entry(context, cid, msg)
+    if intent == "logperiod":
+        result = await log_period_action(
+            cid, u, txt, context=context,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            user_generation=turn_generation,
+        )
+        return await msg.reply_text(result["text"])
+    if intent == "logworkout":
+        await context.bot.send_chat_action(cid, "typing")
+        generation = turn_generation
+        result = await log_workout_action(
+            cid, u, txt, user_generation=generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_workout=((journal or {}).get("workout")),
+        )
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать тренировку", f"wdel:{result['record_id']}")])
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть нагрузку", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
+    if intent == "updateworkout":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await log_workout_update_action(
+            cid, u, txt, (journal or {}).get("target_id"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_workout=((journal or {}).get("workout")),
+        )
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать тренировку", f"wdel:{result['record_id']}")])
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть нагрузку", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
     if intent == "training":
         if general: return await send_general(context, cid, "training")
         _, st = status_of(cid); return await send_section(context, cid, st, "training")
     if intent == "logmeal":
         await context.bot.send_chat_action(cid, "typing")
-        return await msg.reply_text(await log_food_from_text(cid, u, txt))
+        generation = turn_generation
+        result = await log_food_action(
+            cid, u, txt, user_generation=generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_food_text=((journal or {}).get("food_text")),
+            preparsed_slot=((journal or {}).get("slot")),
+            preparsed_food_record=((journal or {}).get("food_record")),
+        )
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
+    if intent == "updatemeal":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await log_food_update_action(
+            cid, u, txt, (journal or {}).get("target_id"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_food_text=((journal or {}).get("food_text")),
+            preparsed_food_record=((journal or {}).get("food_record")),
+        )
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
+            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
+    if intent == "movemealslot":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await move_meal_slot_action(
+            cid, (journal or {}).get("target_id"), (journal or {}).get("slot"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+        )
+        return await msg.reply_text(result["text"])
+    if intent == "appendmealitem":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await append_meal_item_action(
+            cid, u, (journal or {}).get("target_id"), (journal or {}).get("food_text"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            preparsed_food_record=((journal or {}).get("food_record")),
+        )
+        return await msg.reply_text(result["text"])
+    if intent == "journalreplay":
+        result = journal_replay_result(cid, journal)
+        return await msg.reply_text(result["text"])
+    if intent == "journalunavailable":
+        return await msg.reply_text(
+            "Сейчас не получилось достаточно быстро и надёжно разобрать изменение дневника, "
+            "поэтому я ничего не меняла. Попробуй повторить одной фразой через минуту."
+        )
+    if intent == "clarifymeal":
+        return await msg.reply_text(
+            "Не уверена, какую именно запись еды изменить, поэтому ничего не меняла. "
+            "Напиши название и новое количество, например: «чипсы — 100 г»."
+        )
+    if intent == "clarifyworkout":
+        return await msg.reply_text(
+            "Не уверена, какую именно тренировку изменить, поэтому ничего не меняла. "
+            "Напиши её название и исправление, например: «приседания — 3 подхода по 12»."
+        )
     if intent == "diary":
         await context.bot.send_chat_action(cid, "typing"); usage = []
         t = await answer_diary(cid, usage); ev(cid, "tokens", sum(usage), meta="diary_reco", calls=len(usage), usage=usage)
@@ -1689,27 +4014,73 @@ async def dispatch_intent(context, update, cid, u, intent, txt=""):
 
 async def push_summary(context, cid, with_image=True, campaign=None):
     u0 = row(cid)
-    if u0 and not is_cycle(u0): return await push_general(context, cid, campaign=campaign)
+    if u0 and not is_cycle(u0):
+        return await push_general(context, cid, with_image=with_image, campaign=campaign)
     u, st = status_of(cid)
     if not st: return
-    if st["status"] != "normal": return await send_delay(context, cid, st, campaign=campaign)
-    if with_image: await send_infographic(context.bot, cid)
-    usage = []; _ds = dtoday().isoformat()
-    _key = (cid, _ds, st.get("phase"), str(log_get(cid, _ds) or ""))
-    body = _SUM_CACHE.get(_key)
-    if body is None:
-        body = await llm_to_thread(cid, "daily_summary", L.generate_summary, st, u["modules"], hint=chat_hint(cid), usage=usage)
-        if body: _prune_day(_SUM_CACHE); _SUM_CACHE[_key] = body
-    if not body:
-        body = "💛 Сводка на сегодня готова. Открой приложение, чтобы посмотреть календарь, симптомы, питание и нагрузку."
-    clean, extra = L.split_followups(body)
-    kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u,
-                 app_label=APP_BUTTON_TEXT, campaign=campaign)
-    await context.bot.send_message(cid, html.escape(clean) + "\n\n" + APP_CTA_HTML,
-        reply_markup=kb, parse_mode="HTML")
-    if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
-    ev(cid, "goal", meta="summary")
-    if campaign: ev(cid, "broadcast", meta="sent|" + campaign)
+    if st["status"] != "normal":
+        return await send_delay(context, cid, st, campaign=campaign)
+    claimed = False; sent_any = False
+    if campaign:
+        claimed = _claim_push_delivery(cid, campaign)
+        if not claimed:
+            log.info("summary push skipped as duplicate: %s %s", cid, campaign)
+            return False
+    try:
+        generation = _user_generation(cid)
+        usage = []; day = dtoday().isoformat()
+        key = _summary_key(cid, u, day, st, None)
+        value = _SUM_CACHE.get(key)
+        if value is None:
+            value = prepared_summary_get(cid, day, key)
+        body, facts = _summary_unpack(value)
+        if not body and not campaign:
+            hint = _summary_hint(cid, u)
+            body = await llm_to_thread(
+                cid, "daily_summary", L.generate_summary,
+                st, u["modules"], hint=hint, usage=usage,
+                user_generation=generation,
+            )
+            if _user_write_allowed(cid, generation=generation):
+                facts = await llm_to_thread(
+                    cid, "summary_card_facts", L.summary_card_facts,
+                    "cycle", st, None, hint, usage,
+                    user_generation=generation,
+                )
+            if body and _user_write_allowed(cid, generation=generation):
+                value = _summary_pack(body, facts)
+                _prune_day(_SUM_CACHE); _SUM_CACHE[key] = value
+                prepared_summary_put(cid, day, key, value, generation=generation)
+        if not body:
+            body = _delivery_summary_fallback(u, st=st)
+            ev(cid, "fallback", meta="static:summary_delivery_cache_miss")
+        clean, extra = L.split_followups(body)
+        kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u,
+                     app_label=APP_BUTTON_TEXT, campaign=campaign)
+        _png = (await _cycle_card_png(cid, u, st, summary=clean)) if (with_image and new_cards_on(cid)) else None
+        if _png is not None:
+            try:
+                await send_rich_with_photo(context.bot, cid, guard_aiwa_reply(cid, clean), _png, reply_markup=kb)
+            except Exception as _ce:
+                log.info("combined card fallback: %s", str(_ce)[:120])
+                ev(cid, "fallback", meta="static:combined_send_fail")
+                await send_daily_infographic(context.bot, cid, u, facts, st)
+                await _send_summary_text(context, cid, clean, kb)
+        else:
+            if with_image:
+                sent_any = await send_daily_infographic(context.bot, cid, u, facts, st)
+            await _send_summary_text(context, cid, clean, kb)
+        sent_any = True
+        if usage: ev(cid, "tokens", sum(usage), meta="summary", calls=len(usage), usage=usage)
+        ev(cid, "goal", meta="summary")
+        if campaign:
+            _complete_push_delivery(cid, campaign)
+            ev(cid, "broadcast", meta="sent|" + campaign)
+        return True
+    except Exception:
+        if claimed and not sent_any:
+            _release_push_delivery(cid, campaign)
+        raise
 
 async def push_checkin(context, cid, campaign=None):
     """После утренней сводки — быстрый чек-ин. Переиспользует существующий поток ci:* (энергия→настроение→симптомы)."""
@@ -1736,6 +4107,8 @@ async def push_checkin(context, cid, campaign=None):
         if claimed and not delivered:
             try: _release_push_delivery(cid, campaign)
             except Exception as release_error: log.warning("checkin claim release %s: %s", cid, release_error)
+        if campaign:
+            _record_push_failure(cid, campaign, e)
         log.warning("checkin push %s: %s", cid, e)
         return False
 
@@ -1961,9 +4334,10 @@ async def proactive_job(context, slot):
             if r:
                 n += 1
                 await asyncio.sleep(delay)
-        except Forbidden:
-            pass
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("proactive"), exc)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("proactive"), e)
             log.warning("proactive_job(%s): %s", slot, e)
     log.info("proactive %s: %s (%s)", slot, n, "shadow" if shadow else "sent")
 
@@ -2027,23 +4401,142 @@ async def proactive_cmd(update, context):
         except Exception:
             pass
 
+def _remove_daily_jobs(app, cid):
+    for name in (str(cid), f"prepare:{cid}"):
+        for job in app.job_queue.get_jobs_by_name(name):
+            job.schedule_removal()
+
 def schedule_daily(app, cid, hhmm):
     if os.environ.get("AIWA_ENABLE_DISTRIBUTED_ROLES") == "1":
         return
-    for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+    _remove_daily_jobs(app, cid)
     actual, _, _ = scheduled_hhmm(cid, hhmm)
+    prepare_at = summary_prepare_hhmm(cid, actual)
+    ph, pm = map(int, prepare_at.split(":"))
     h, m = map(int, actual.split(":"))
+    app.job_queue.run_daily(
+        summary_prepare_job,
+        time=dtime(ph, pm, tzinfo=TZ),
+        chat_id=cid,
+        name=f"prepare:{cid}",
+        data={"delivery_hhmm": actual},
+    )
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
 
-def db_mark_period(cid, iso):
-    """Записывает старт месячных в БД и включает трекинг цикла. Без планировщика, безопасно из веб-обработчика."""
-    u = row(cid) or {}; cl = u.get("cycle_len") or 28
-    cyc_add(cid, iso)
-    latest = max(cycles_of(cid) or [iso])
-    upsert(cid, last_period=latest, cycle_len=cl, mode="cycle", state=None)
-def mark_period(context, cid, iso):
-    db_mark_period(cid, iso)
+def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=False, enforce_spacing=False,
+                              mutation_key=None, args_hash=None):
+    """Одна транзакция для cycles + users, включая проверку lifecycle и текущего режима."""
+    event_date = date.fromisoformat(iso)
+    c = db(); c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close(); return {"status": "stale"}
+    if mutation_key:
+        prior = c.execute(
+            "SELECT kind,record_id,args_hash,result_json FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            status = "mismatch" if prior[0] != "period_start" or (prior[2] or "") != (args_hash or "") else "duplicate"
+            try: saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError): saved_data = {}
+            return {"status": status, "date": saved_data.get("date") or prior[1]}
+    user = c.execute("SELECT cycle_len,mode FROM users WHERE chat_id=?", (cid,)).fetchone()
+    if not user:
+        c.close(); return {"status": "stale"}
+    mode = user[1] or "cycle"
+    if protect_modes and mode in ("preg", "meno"):
+        c.commit(); c.close(); return {"status": "protected", "mode": mode}
+    starts = [x[0] for x in c.execute(
+        "SELECT start_date FROM cycles WHERE chat_id=? ORDER BY start_date", (cid,)
+    ).fetchall()]
+    if iso in starts:
+        if mutation_key:
+            c.execute(
+                """INSERT INTO chat_mutations
+                   (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (cid, mutation_key, int(user_generation), "period_start", iso, args_hash or "",
+                 json.dumps({"date": iso}), datetime.now(TZ).isoformat()),
+            )
+        c.commit(); c.close(); return {"status": "duplicate", "date": iso}
+    if enforce_spacing:
+        close = [x for x in starts if 0 < abs((event_date - date.fromisoformat(x)).days) <= 10]
+        if close:
+            c.commit(); c.close(); return {"status": "conflict", "date": max(close)}
+    c.execute("INSERT INTO cycles(chat_id,start_date) VALUES(?,?)", (cid, iso))
+    latest = max(starts + [iso])
+    if latest == iso:
+        c.execute(
+            """UPDATE users SET last_period=?,cycle_len=?,mode='cycle',state=NULL,
+               period_end=NULL,period_len=NULL WHERE chat_id=?""",
+            (latest, user[0] or 28, cid),
+        )
+    else:
+        c.execute(
+            "UPDATE users SET last_period=?,cycle_len=?,mode='cycle',state=NULL WHERE chat_id=?",
+            (latest, user[0] or 28, cid),
+        )
+    if mutation_key:
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (cid, mutation_key, int(user_generation), "period_start", iso, args_hash or "",
+             json.dumps({"date": iso}), datetime.now(TZ).isoformat()),
+        )
+    c.commit(); c.close()
+    return {"status": "created", "date": iso}
+
+def _save_period_end_atomic(cid, end_iso, user_generation=None, mutation_key=None, args_hash=None):
+    event_date = date.fromisoformat(end_iso)
+    c = db(); c.execute("BEGIN IMMEDIATE")
+    if not _user_write_allowed(cid, user_generation, conn=c):
+        c.close(); return {"status": "stale"}
+    if mutation_key:
+        prior = c.execute(
+            "SELECT kind,record_id,args_hash,result_json FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+            (cid, mutation_key),
+        ).fetchone()
+        if prior:
+            c.commit(); c.close()
+            status = "mismatch" if prior[0] != "period_end" or (prior[2] or "") != (args_hash or "") else "duplicate"
+            try: saved_data = json.loads(prior[3] or "{}")
+            except (TypeError, ValueError): saved_data = {}
+            return dict(saved_data, status=status)
+    user = c.execute("SELECT last_period,mode FROM users WHERE chat_id=?", (cid,)).fetchone()
+    if not user or (user[1] or "cycle") in ("irregular", "none", "meno", "preg", "male") or not user[0]:
+        c.commit(); c.close(); return {"status": "missing"}
+    start_iso = user[0]
+    length = (event_date - date.fromisoformat(start_iso)).days + 1
+    if not 1 <= length <= 10:
+        c.commit(); c.close(); return {"status": "invalid"}
+    c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end_iso, cid, start_iso))
+    c.execute("UPDATE users SET period_end=?,period_len=? WHERE chat_id=?", (end_iso, length, cid))
+    if mutation_key:
+        result = {"start": start_iso, "end": end_iso, "length": length}
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (cid, mutation_key, int(user_generation), "period_end", end_iso, args_hash or "",
+             json.dumps(result), datetime.now(TZ).isoformat()),
+        )
+    c.commit(); c.close()
+    return {"status": "saved", "start": start_iso, "end": end_iso, "length": length}
+
+def db_mark_period(cid, iso, user_generation=None):
+    """Записывает старт месячных атомарно. Без планировщика, безопасно из веб-обработчика."""
+    return _save_period_start_atomic(cid, iso, user_generation=user_generation).get("status") in (
+        "created", "duplicate",
+    )
+def mark_period(context, cid, iso, user_generation=None):
+    if not db_mark_period(cid, iso, user_generation=user_generation):
+        return False
+    if user_generation is not None and not _user_write_allowed(cid, user_generation):
+        return False
     schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
+    return True
 async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
     request_id = kwargs.pop("_request_id", None) or TR.current_trace_id()
@@ -2061,40 +4554,64 @@ async def think_llm(context, cid, fn, *args, **kwargs):
 class _BCtx:
     def __init__(self, app): self.bot = app.bot; self.application = app
 
+async def summary_prepare_job(context: ContextTypes.DEFAULT_TYPE):
+    cid = context.job.chat_id
+    try:
+        actual = ((context.job.data or {}).get("delivery_hhmm")
+                  if getattr(context.job, "data", None) is not None else None)
+        target = dtoday()
+        if actual:
+            ah, am = map(int, actual.split(":"))
+            prepare_at = summary_prepare_hhmm(cid, actual)
+            ph, pm = map(int, prepare_at.split(":"))
+            if ph * 60 + pm > ah * 60 + am:
+                target += timedelta(days=1)
+        await prepare_daily_summary(cid, target.isoformat())
+    except Exception as exc:
+        # Delivery still runs at the selected time and can generate on demand or
+        # fall back, so preparation failure must never cancel the send job.
+        log.warning("summary prepare %s: %s", cid, exc)
+
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     cid = context.job.chat_id
+    if (row(cid) or {}).get("push_suppressed_at"):
+        _remove_daily_jobs(context.application, cid)
+        return
     if BCAST_Q is not None:
         return await enqueue_broadcast(cid)    # в очередь, обработает воркер с паузами
     try:
-        await push_summary(context, cid, campaign=campaign_id("daily_summary")); await push_partner(context, cid)
+        sent = await push_summary(context, cid, campaign=campaign_id("daily_summary"))
+        if sent:
+            await push_partner(context, cid)
         await push_checkin(context, cid, campaign=campaign_id("daily_checkin"))
-    except Forbidden:
-        ev(cid, "broadcast", meta=f"blocked|{campaign_id('daily_summary')}")
+    except Forbidden as exc:
+        _record_push_failure(cid, campaign_id("daily_summary"), exc)
         try:
-            for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+            _remove_daily_jobs(context.application, cid)
         except Exception: pass
     except Exception as e:
-        ev(cid, "broadcast", meta=f"error|{campaign_id('daily_summary')}")
+        _record_push_failure(cid, campaign_id("daily_summary"), e)
         raise
 
 async def broadcast_worker(app):
     """Один из нескольких параллельных воркеров рассылки. Реальный лимит GigaChat держит семафор в llm._call, поэтому большая пауза не нужна."""
-    delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "0.3"))
+    delay = float(os.environ.get("AIWA_BROADCAST_DELAY", "0.05"))
     while True:
         cid = await BCAST_Q.get()
         try:
             ctx = _BCtx(app)
-            await push_summary(ctx, cid, campaign=campaign_id("daily_summary"))
-            await push_partner(ctx, cid)
+            sent = await push_summary(ctx, cid, campaign=campaign_id("daily_summary"))
+            if sent:
+                await push_partner(ctx, cid)
             await push_checkin(ctx, cid, campaign=campaign_id("daily_checkin"))
-        except Forbidden:
+        except Forbidden as exc:
             try:
-                ev(cid, "broadcast", meta=f"blocked|{campaign_id('daily_summary')}")
-                for j in app.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+                _record_push_failure(cid, campaign_id("daily_summary"), exc)
+                _remove_daily_jobs(app, cid)
             except Exception: pass
             log.info("broadcast %s: заблокирован пользователем, снял с рассылки", cid)
         except Exception as e:
-            try: ev(cid, "broadcast", meta=f"error|{campaign_id('daily_summary')}")
+            try: _record_push_failure(cid, campaign_id("daily_summary"), e)
             except Exception: pass
             log.warning("broadcast %s: %s", cid, e)
         finally:
@@ -2150,9 +4667,11 @@ async def train_worker(app):
         cid = await TRAIN_Q.get()
         try:
             await push_train_reminder(_BCtx(app), cid)
-        except Forbidden:
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("train_reminder"), exc)
             log.info("train reminder %s: заблокирован", cid)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("train_reminder"), e)
             log.warning("train reminder %s: %s", cid, e)
         finally:
             TRAIN_PENDING.discard(cid)
@@ -2221,9 +4740,10 @@ async def phase_transition_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(cid, txt, reply_markup=kb)
             ev(cid, "broadcast", meta="sent|" + campaign); sent += 1
             await asyncio.sleep(delay)
-        except Forbidden:
-            pass
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("phase_transition"), exc)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("phase_transition"), e)
             log.warning("phase push %s: %s", cid, e)
     log.info("phase transition pushes: %d", sent)
 
@@ -2263,9 +4783,10 @@ async def reactivation_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(cid, txt, reply_markup=kb)
             ev(cid, "broadcast", meta="sent|" + campaign); sent += 1
             await asyncio.sleep(delay)
-        except Forbidden:
-            pass
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("reactivation"), exc)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("reactivation"), e)
             log.warning("reactivation %s: %s", cid, e)
     log.info("reactivation pushes: %d", sent)
 
@@ -2275,9 +4796,11 @@ async def food_worker(app):
         cid = await FOOD_Q.get()
         try:
             await push_food_reminder(_BCtx(app), cid)
-        except Forbidden:
+        except Forbidden as exc:
+            _record_push_failure(cid, campaign_id("food_reminder"), exc)
             log.info("food reminder %s: заблокирован", cid)
         except Exception as e:
+            _record_push_failure(cid, campaign_id("food_reminder"), e)
             log.warning("food reminder %s: %s", cid, e)
         finally:
             FOOD_PENDING.discard(cid)
@@ -2298,10 +4821,23 @@ def finish_onboarding(context, cid, last_period_iso, n):
     cyc_add(cid, last_period_iso); schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 
 async def welcome_finish(context, cid, msg):
-    ev(cid, "onboarding_completed", meta=(row(cid).get("mode") or "cycle"))
-    await msg.reply_text("Готово. " + schedule_text(cid, "08:00") + "\n\nИсторию прошлых циклов можно добавить позже командой /addcycles.",
-        reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
-    await push_summary(context, cid)
+    u = row(cid)
+    male = (u.get("mode") == "male")
+    ev(cid, "onboarding_completed", meta=(u.get("mode") or "cycle"))
+    text = ("Готово. " + schedule_text(cid, "08:00") +
+            ("" if male else "\n\nИсторию прошлых циклов можно добавить позже командой /addcycles.") +
+            "\n\nКалендарь, питание и тренировки — в приложении по кнопке ниже. "
+            "А здесь, в чате, задай любой вопрос или опиши блюдо или тренировку — текстом или голосом, разберу и запишу. "
+            + ("Например: «яичница и кофе на завтрак» или «пожал 60 кг, запиши тренировку»." if male
+               else "Например: «овсянка с ягодами на завтрак» или «пробежала 5 км, запиши»."))
+    kb_rows = []
+    if AIWA_WEBAPP_URL:
+        kb_rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
+    await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(kb_rows) if kb_rows else None)
+    # Первая сводка — сразу после настройки, но не дублируем при повторном
+    # прохождении онбординга в тот же день.
+    if not summary_sent_today(cid):
+        await push_summary(context, cid)
 
 async def send_report(context, cid, period):
     u = row(cid)
@@ -2440,6 +4976,15 @@ def preg_fruit(w):
         w -= 1
     return PREG_FRUIT.get(w, ("малыш", "растёт", "🌸"))
 
+def _fruit_label(week):
+    """Человеческая строка для карточки: «маковое зёрнышко (~2 мм)», а не сырой кортеж."""
+    try:
+        f = preg_fruit(week)
+        name, size = str(f[0]), (str(f[1]) if len(f) > 1 else "")
+        return f"{name} ({size})" if size and any(ch.isdigit() for ch in size) else name
+    except Exception:
+        return None
+
 def partner_preg_text(preg, hint):
     week = int(preg.get("week") or 0)
     day = int(preg.get("day") or 0)
@@ -2486,7 +5031,17 @@ async def push_partner(context, woman_cid):
     hint = last_hint(woman_cid)
     if u and u.get("mode") == "preg" and u.get("last_period"):
         try:
-            return await context.bot.send_message(pid, partner_preg_text(C.preg_status(u["last_period"]), hint))
+            _preg = C.preg_status(u["last_period"]); _pu = []
+            text = None
+            try: text = await llm_to_thread(woman_cid, "partner_brief", L.partner_preg_brief, _preg, hint, _pu)
+            except Exception as e: log.warning("partner_preg_brief: %s", e)
+            if _pu: ev(woman_cid, "tokens", sum(_pu), meta="partner_brief", calls=len(_pu))
+            if not text: text = partner_preg_text(_preg, hint)
+            try:
+                await send_rich(context.bot, pid, text)
+            except Exception:
+                await context.bot.send_message(pid, tg_rich(text), parse_mode="HTML")
+            return
         except Exception as e:
             return log.warning("partner preg push: %s", e)
     u, st = status_of(woman_cid)
@@ -2502,7 +5057,10 @@ async def push_partner(context, woman_cid):
     if _pu: ev(woman_cid, "tokens", sum(_pu), meta="partner_brief", calls=len(_pu))
     if not text: text = partner_text(st, hint)
     try:
-        await context.bot.send_message(pid, text)
+        try:
+            await send_rich(context.bot, pid, text)
+        except Exception:
+            await context.bot.send_message(pid, tg_rich(text), parse_mode="HTML")
     except Exception as e:
         log.warning("partner push: %s", e)
 
@@ -2548,6 +5106,7 @@ async def start(update, context):
     # /start is the only operation that begins a fresh lifecycle after /stop.
     # Incrementing the generation keeps older in-flight tasks permanently stale.
     _activate_user(cid)
+    _sync_telegram_identity(update, allow_create=True)
     if context.args and context.args[0].startswith("p_"):
         return await partner_join(context, cid, update.message, context.args[0][2:])
     if context.args and context.args[0] and not context.args[0].startswith("p_"):
@@ -2555,11 +5114,16 @@ async def start(update, context):
         if _src:
             _ref_touch(cid, _src); ev(cid, "ref", meta="src:" + _src)
     if is_partner(cid) and not is_onboarded(row(cid)):
-        return await update.message.reply_text(PARTNER_INFO)
+        # Партнёр может завести и собственный профиль (например, мужской режим) —
+        # партнёрские сводки при этом продолжают приходить.
+        await update.message.reply_text(PARTNER_INFO)
+        return await update.message.reply_text(
+            "Кстати, Айва может вести и твои питание, тренировки и сводки — параллельно с партнёрской сводкой.",
+            reply_markup=InlineKeyboardMarkup([[B("Настроить мой профиль", "go_start", KBS.PRIMARY)]]))
     ev(cid, "command", meta="start")
     if is_onboarded(row(cid)):
         return await update.message.reply_text(
-            "У тебя уже настроен цикл, данные на месте. Продолжить или начать настройку заново?",
+            "У тебя уже всё настроено, данные на месте. Продолжить или начать настройку заново?",
             reply_markup=InlineKeyboardMarkup([[B("Продолжить", "keep", KBS.PRIMARY)], [B("Начать заново", "go_start", KBS.DANGER)]]))
     await begin_onboard(cid, update.message)
 async def today(update, context):
@@ -2648,11 +5212,11 @@ async def app_cmd(update, context):
     url = webapp_url(u)
     if not url:
         return await update.message.reply_text("Приложение скоро подключим.")
-    await update.message.reply_text("📱 Приложение Айвы:",
+    await update.message.reply_text("Приложение Айвы:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=url))]]))
 async def stop(update, context):
     cid = update.effective_chat.id
-    for j in context.application.job_queue.get_jobs_by_name(str(cid)): j.schedule_removal()
+    _remove_daily_jobs(context.application, cid)
     del_user(cid); await update.message.reply_text("Отключила сводки и удалила данные. Вернуться: /start")
 async def help_cmd(update, context):
     await update.message.reply_text(
@@ -2709,6 +5273,23 @@ def aggregate_stats():
     L.append("Латентность p50 " + str(qd["p50"]) + " / p95 " + str(qd["p95"]) + " мс")
     L.append("Токены " + str(qd["tokens"]) + ", оценка $" + str(qd["cost_usd"]))
     return "\n".join(L)
+
+async def ui_cmd(update, context):
+    """Диагностика редизайна: что видит флаг и какой URL получают кнопки этого пользователя."""
+    cid = update.effective_chat.id
+    u = row(cid)
+    url = webapp_url(u) or "(нет AIWA_WEBAPP_URL)"
+    lines = ["Диагностика мини-аппа:",
+             f"твой id: {cid}",
+             f"redesign включён для тебя: {'ДА' if redesign_on(cid) else 'НЕТ'}",
+             f"id в списке AIWA_REDESIGN_IDS: {len(_REDESIGN_IDS)} шт",
+             f"URL кнопок: {url}",
+             "", "Кнопка ниже ведёт на новый фронт напрямую. Если по ней открывается старый экран — пришли скрин."]
+    kb = None
+    if AIWA_WEBAPP_URL:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Новый апп (прямая ссылка)",
+              web_app=WebAppInfo(url=AIWA_WEBAPP_URL))]])
+    await update.message.reply_text("\n".join(lines), reply_markup=kb)
 
 async def voicetest_cmd(update, context):
     """Диагностика голоса: авторизация Сбера, синтез, отправка тестового голосового."""
@@ -2863,7 +5444,7 @@ async def meno_update_cmd(update, context):
             await asyncio.sleep(0.25)
         except Exception as e:
             failed += 1
-            ev(uid, "broadcast", meta="error|" + campaign)
+            _record_push_failure(uid, campaign, e)
             log.warning("meno update %s: %s", uid, e)
     await update.message.reply_text(f"Пуш про мено-экран отправлен.\n\nУшло: {sent}\nОшибок: {failed}")
 
@@ -2883,10 +5464,10 @@ async def _announce_capture(update, context, cid):
                                            reply_markup=summary_kb(row(uid), campaign=campaign))
             ev(uid, "broadcast", meta="sent|" + campaign); sent += 1
             await asyncio.sleep(0.25)
-        except Forbidden:
-            failed += 1; ev(uid, "broadcast", meta="blocked|" + campaign)
+        except Forbidden as exc:
+            failed += 1; _record_push_failure(uid, campaign, exc)
         except Exception as e:
-            failed += 1; ev(uid, "broadcast", meta="error|" + campaign); log.warning("announce %s: %s", uid, e)
+            failed += 1; _record_push_failure(uid, campaign, e); log.warning("announce %s: %s", uid, e)
     await msg.reply_text(f"Готово. Ушло: {sent}, ошибок: {failed}.")
 
 async def announce_cmd(update, context):
@@ -2911,8 +5492,7 @@ async def on_text(update, context):
         log.exception("text handler failed for %s", cid)
         ev(cid, "error", meta=type(e).__name__)
         await update.message.reply_text(
-            "Я вижу сообщение, но сейчас не смогла собрать ответ. Попробуй ещё раз через минуту или открой Меню.",
-            reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
+            "Я вижу сообщение, но сейчас не смогла собрать ответ. Попробуй ещё раз через минуту.")
 
 async def on_voice(update, context):
     cid = update.effective_chat.id; txt = None; _sti = {}
@@ -2944,8 +5524,8 @@ async def on_voice(update, context):
         # Free-form AI answers speak inside send_answer(). Intent/state branches
         # often reply directly, so duplicate their final visible text here too.
         if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
-            spoken = _voice_plain_text(sent_texts[-1] if sent_texts else
-                                       "Готово. Результат отправила в чат.")
+            spoken = _voice_plain_text(_LAST_SPOKEN.pop(cid, None) or (sent_texts[-1] if sent_texts else
+                                       "Готово. Результат отправила в чат."))
             if spoken:
                 await _send_voice_reply(context, cid, spoken)
     finally:
@@ -2971,7 +5551,7 @@ async def on_photo(update, context):
     if not is_onboarded(u):
         return await update.message.reply_text("Сначала настрой Айву: /start.")
     generation = _user_generation(cid)
-    ev(cid, "flow_start", meta="food")
+    ev(cid, "flow_start", meta="food", user_generation=generation)
     await context.bot.send_chat_action(cid, "typing")
     try:
         ph = update.message.photo
@@ -2999,7 +5579,7 @@ async def on_photo(update, context):
     mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
     rows = [[B("🗑 Убрать из дневника", f"mdel:{mid}")]]
     wu = webapp_url(u) or AIWA_WEBAPP_URL
-    if wu: rows.append([InlineKeyboardButton("📱 Открыть дневник", web_app=WebAppInfo(url=wu))])
+    if wu: rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
     await update.message.reply_text(food_card(rec), reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
 
 async def handle_text(update, context, txt):
@@ -3026,7 +5606,7 @@ async def handle_text(update, context, txt):
     if state in VALUE_STATES and is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
         _, _qst = status_of(cid)
-        a = await think_llm(context, cid, L.answer_question, _qst, txt, profile_of(u), None)
+        a = await think_llm(context, cid, L.answer_question, _qst, txt, llm_profile_of(u), None)
         await reply_long(update.message, L.split_followups(a)[0])
         return await update.message.reply_text("А теперь вернёмся к настройке. " + VALUE_STATES[state])
 
@@ -3052,7 +5632,7 @@ async def handle_text(update, context, txt):
         d = parse_date(txt)
         if not d:
             if is_question_like(txt):
-                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши дату начала последних месячных, например 25.05.2026. Потом даты можно редактировать в приложении.")
             return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
@@ -3066,7 +5646,7 @@ async def handle_text(update, context, txt):
             n = int(txt); assert 20 <= n <= 60
         except (ValueError, AssertionError):
             if is_question_like(txt):
-                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? Обычно это 21-35 дней, но у многих бывает иначе.")
             return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь точно, напиши примерное значение, потом его можно поправить. Если цикл нерегулярный, можно начать заново через /start и выбрать «Нет регулярного цикла».")
@@ -3080,9 +5660,12 @@ async def handle_text(update, context, txt):
             "Напиши через пробел рост, вес и возраст — например: 168 60 30.\nПо ним я рассчитаю калории и подберу питание.", reply_markup=SKIP_KB)
 
     if state == "await_diet":
-        upsert(cid, diet_note=txt[:200])
-        sel = set((row(cid).get("diet") or "").split(",")) - {""}
-        return await update.message.reply_text("Записала: " + txt[:200] + ". Можно отметить ещё кнопками или нажать Готово.", reply_markup=diet_kb(sel))
+        _clean = txt.strip().lower()
+        if _clean in ("нет", "нету", "не", "no", "ограничений нет", "нет ограничений", "-", "пропустить"):
+            upsert(cid, diet="", diet_note="", state=None)
+        else:
+            upsert(cid, diet="", diet_note=txt[:200], state=None)
+        return await welcome_finish(context, cid, update.message)
 
     if state == "await_profile_edit":
         nums = [p for p in re.split(r"[ ,;/]+", txt) if p]
@@ -3100,7 +5683,7 @@ async def handle_text(update, context, txt):
             assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80
         except Exception:
             if is_question_like(txt):
-                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
@@ -3209,16 +5792,33 @@ async def handle_text(update, context, txt):
         return await update.message.reply_text("Не поняла запрос. Напиши вопрос словами, например: «почему тянет на сладкое» или «какая тренировка сегодня».")
 
     if is_onboarded(u):
+        _turn_generation = _user_generation(cid)
         _intent = match_intent(txt)
+        _journal = None
+        if _intent not in _JOURNAL_MUTATION_INTENTS:
+            _telegram_mutation_key = chat_mutation_key(
+                "telegram", getattr(update, "update_id", None),
+            )
+            _journal = chat_mutation_route_preflight(cid, _telegram_mutation_key)
+            if not _journal:
+                _journal = await resolve_semantic_journal_action(
+                    cid, txt, user_generation=_turn_generation,
+                )
+            if _journal:
+                _intent = _journal["intent"]
         if _intent:
-            return await dispatch_intent(context, update, cid, u, _intent, txt)
+            return await dispatch_intent(
+                context, update, cid, u, _intent, txt, journal=_journal,
+                user_generation=_turn_generation,
+            )
 
     if is_onboarded(u) and not is_cycle(u):
         if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
+        ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
         ev(cid, "answered", meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
+        ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, None, txt, usage=usage, quote=txt)
     if is_onboarded(u):
@@ -3227,13 +5827,14 @@ async def handle_text(update, context, txt):
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.answer_question, st, txt, profile_of(u), hist_get(cid), usage=usage)
+        ans = await think_llm(context, cid, L.answer_question, st, txt, llm_profile_of(u), hist_get(cid), usage=usage)
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
+        ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt)
     if is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
-        _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, profile_of(u), None, usage=_oq)
+        _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
         ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
         await reply_long(update.message, L.split_followups(a)[0])
     await need_onboard(update.message)
@@ -3249,10 +5850,13 @@ async def on_cb(update, context):
         parts = data.split(":", 2)
         rating = parts[1] if len(parts) > 1 else ""
         answer_id = re.sub(r"[^a-f0-9]", "", parts[2] if len(parts) > 2 else "")[:32]
-        if rating not in {"helpful", "unhelpful"} or not answer_id or not _feedback_prompt_exists(cid, answer_id):
+        feedback_result = _submit_feedback(cid, answer_id, rating, "bot")
+        if feedback_result == "missing":
             return await q.answer("Не получилось сохранить оценку")
-        ev(cid, "feedback", meta=f"{rating}|{answer_id}|bot")
-        await q.answer("Спасибо, это помогает улучшать Айву 💛")
+        if feedback_result == "duplicate":
+            await q.answer("Оценка уже сохранена 💛")
+        else:
+            await q.answer("Спасибо, это помогает улучшать Айву 💛")
         rows = []
         for row_buttons in (getattr(q.message.reply_markup, "inline_keyboard", None) or []):
             if any(str(getattr(button, "callback_data", "") or "").startswith("fb:") for button in row_buttons):
@@ -3294,6 +5898,8 @@ async def on_cb(update, context):
     if data == "keep":
         u_keep = row(cid)
         return await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u_keep, not is_cycle(u_keep)))
+    if data == "onb_female":
+        return await q.message.reply_text(FEMALE_START_TEXT, reply_markup=FEMALE_ONB_KB)
     if data == "onb_cycle":
         upsert(cid, state="await_date", pending_date=None)
         return await q.message.reply_text(
@@ -3304,7 +5910,7 @@ async def on_cb(update, context):
     if data.startswith("act:"):
         upsert(cid, activity=int(data.split(":")[1]), state="await_diet")
         upsert(cid, state="await_diet")
-        return await q.message.reply_text("Есть ограничения в еде? Отметь варианты или напиши своё текстом, например «без свинины, без сахара». Если ограничений нет, нажми «Ограничений нет».", reply_markup=diet_kb(set()))
+        return await q.message.reply_text("Есть ограничения или предпочтения в еде? Напиши свободным текстом — например «без свинины, аллергия на орехи, не ем молочку». Если ограничений нет, напиши «нет».")
     if data.startswith("diet:s:"):
         code = data.split(":")[2]; cur = set((row(cid).get("diet") or "").split(",")) - {""}
         cur.symmetric_difference_update({code}); upsert(cid, diet=",".join(sorted(cur)))
@@ -3320,11 +5926,19 @@ async def on_cb(update, context):
             "Айва работает и без регулярного цикла: при нерегулярных месячных, беременности и менопаузе.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
         m = data.split(":")[1]; upsert(cid, mode=m)
+        _evict_today_cache(cid); _evict_week_food_cache(cid); menu_cache_clear(cid); dc_del(cid); prepared_summary_clear(cid)
+        if m == "male":
+            # тестовые/старые аккаунты: дата цикла от прежнего профиля не должна
+            # включать циклическую логику в ответах и сводках
+            upsert(cid, last_period=None)
         schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
         if m == "preg":
             upsert(cid, state="await_preg_date")
             return await q.message.reply_text("Поздравляю! \U0001F930 Чтобы Айва считала срок, ПДР и неделю беременности, напиши дату начала последних месячных. Например: 25.05.2026. Если знаешь ПДР, напиши дату и добавь слово ПДР.")
         upsert(cid, state="await_profile")
+        if m == "male":
+            return await q.message.reply_text(
+                "Принято. Напиши рост, вес и возраст через пробел — так рекомендации по питанию и нагрузке будут точнее. Например: 180 80 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
         return await q.message.reply_text(
             "Поняла. Айва не будет считать стандартные фазы цикла, но всё равно сможет давать персональные рекомендации по самочувствию, питанию и движению.\n\n"
             "Чтобы советы были точнее, напиши рост, вес и возраст через пробел. Например: 168 60 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
@@ -3334,7 +5948,12 @@ async def on_cb(update, context):
     general = st is None
     today_s = dtoday().isoformat()
     if data == "menu":
-        await q.message.reply_text("О чём рассказать сегодня?", reply_markup=menu_kb_for(u, general))
+        _rows = []
+        if AIWA_WEBAPP_URL:
+            _rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(u) or AIWA_WEBAPP_URL))])
+        await q.message.reply_text(
+            "Всё управление — в приложении по кнопке ниже. А здесь просто напиши или скажи, что нужно: вопрос, блюдо или тренировку.",
+            reply_markup=InlineKeyboardMarkup(_rows) if _rows else None)
     elif data == "today":
         await push_summary(context, cid)
     elif data == "more":
@@ -3397,16 +6016,20 @@ async def on_cb(update, context):
         try:
             meal_del(cid, int(data.split(":")[1])); await safe_edit(q, "🗑 Убрала из дневника.")
         except Exception: pass
+    elif data.startswith("wdel:"):
+        try:
+            workout_del(cid, int(data.split(":")[1])); await safe_edit(q, "🗑 Убрала тренировку.")
+        except Exception: pass
     elif data.startswith("q:"):
         question = get_sugg(int(data.split(":")[1])) or "Дай рекомендацию"
         ev(cid, "user_message", meta="suggest", n=len(question))
         await context.bot.send_chat_action(cid, "typing")
         if general:
-            usage = []; ans = await think_llm(context, cid, L.general_answer, profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, None, question, usage=usage, quote=question)
         else:
-            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, profile_of(u), hist_get(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, llm_profile_of(u), hist_get(cid), usage=usage)
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, st, question, usage=usage, quote=question)
 
@@ -3437,8 +6060,7 @@ async def on_error(update, context):
         if isinstance(update, Update) and update.effective_chat:
             ev(update.effective_chat.id, "error", meta=type(err).__name__)
             await context.bot.send_message(update.effective_chat.id,
-                "Упс, что-то пошло не так. Попробуй ещё раз.",
-                reply_markup=InlineKeyboardMarkup([[B("Меню", "menu", KBS.PRIMARY)]]))
+                "Упс, что-то пошло не так. Попробуй ещё раз.")
         await admin_alert(context.application, "handler_error",
             f"⚠️ Ошибка обработчика: {type(err).__name__}\nПроверь Railway logs.")
     except Exception: pass
@@ -3550,13 +6172,19 @@ async def on_startup(app):
         log.warning("executor: %s", e)
     if AIWA_WEBAPP_URL:
         try:
-            await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT, web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
+            await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT, web_app=WebAppInfo(url=webapp_url(None) or AIWA_WEBAPP_URL)))
         except Exception as e:
             log.warning("menu button: %s", e)
+        # редизайн раскатан: персональные кнопки тест-группы возвращаем на общий URL
+        for _rid in _REDESIGN_IDS:
+            try:
+                await app.bot.set_chat_menu_button(chat_id=int(_rid),
+                    menu_button=MenuButtonWebApp(text=APP_MENU_BUTTON_TEXT, web_app=WebAppInfo(url=AIWA_WEBAPP_URL)))
+            except Exception as e:
+                log.warning("redesign menu button %s: %s", _rid, e)
     try:
         await app.bot.set_my_commands([
             BotCommand("start", "Старт"),
-            BotCommand("menu", "Меню"),
             BotCommand("today", "Сводка за день"),
             BotCommand("app", "Приложение"),
             BotCommand("report", "Выписка для врача"),
@@ -3574,7 +6202,7 @@ async def on_startup(app):
         log.info("distributed roles enabled: Telegram background scheduling is disabled")
         return
     BCAST_Q = asyncio.Queue()
-    _bw = max(1, min(20, int(os.environ.get("AIWA_BROADCAST_WORKERS", "6"))))
+    _bw = max(1, min(20, int(os.environ.get("AIWA_BROADCAST_WORKERS", "10"))))
     for _ in range(_bw):
         asyncio.create_task(broadcast_worker(app))
     log.info("broadcast workers started: %d", _bw)
@@ -3628,6 +6256,7 @@ async def on_startup(app):
     asyncio.create_task(load_logger(app))
     asyncio.create_task(model_probe(app))
     asyncio.create_task(traction_worker())
+    _backfill_push_suppressions()
     n = catchup = 0
     for cid in all_users():
         u = row(cid) or {}
@@ -3655,7 +6284,14 @@ def _verify_init(init_data):
         if not auth_date or auth_date < now - max_age or auth_date > now + 60:
             return None
         import json as _j
-        return _j.loads(pairs.get("user", "{}")).get("id")
+        telegram_user = _j.loads(pairs.get("user", "{}"))
+        cid = telegram_user.get("id") if isinstance(telegram_user, dict) else None
+        if cid is not None:
+            # The whole user object is covered by Telegram's signature. Its
+            # display name is still user-controlled, so storage/prompt helpers
+            # sanitize and delimit it before use.
+            _store_telegram_first_name(cid, telegram_user.get("first_name"))
+        return cid
     except Exception as e:
         log.warning("init verify: %s", e); return None
 def _cors(resp):
@@ -3665,7 +6301,6 @@ def _cors(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
     return resp
-
 def _loadtest_user_id_allowed(cid):
     try:
         lower = int(os.environ.get("AIWA_LOADTEST_USER_ID_MIN", "8100000000"))
@@ -3702,7 +6337,26 @@ async def _api_loadtest_bootstrap(request):
         return _cors(web.json_response({"ok": False, "error": "bootstrap_failed"}, status=500))
     return _cors(web.json_response({"ok": True, "onboarded": True}))
 
+_REDESIGN_IDS = set(x.strip().strip('"').strip("'") for x in (os.environ.get("AIWA_REDESIGN_IDS", "") or "").split(",") if x.strip())
+def redesign_on(cid):
+    """Редизайн раскатан на всех; AIWA_REDESIGN=0 вернёт старый апп всем (аварийный откат)."""
+    if os.environ.get("AIWA_REDESIGN", "1") in ("0", "false", "False", "off"): return False
+    return True
+
+async def _serve_index2(request):
+    BD = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(BD, "webapp2", "index.html")
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as fh: html_text = fh.read()
+        return web.Response(text=html_text, content_type="text/html",
+                            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
+    return web.Response(text="redesign webapp not found", status=404)
+
 async def _serve_index(request):
+    # Редизайн раскатан на всех: базовый URL — новый мини-апп.
+    # Старый фронт остаётся на ?ui=1 как аварийный откат.
+    if request.query.get("ui") != "1":
+        return await _serve_index2(request)
     BD = os.path.dirname(os.path.abspath(__file__))
     for p in (os.path.join(WEB_DIR, "index.html"), os.path.join(BD, "index.html"),
               os.path.join(BD, "webapp.html"), os.path.join(BD, "aiwa_webapp.html")):
@@ -3719,12 +6373,187 @@ def _api_data_reads(cid, today_iso):
         periods_of(cid), streak_of(cid),
     )
 
+async def _prewarm_today(cid):
+    """Прогрев сводки дня при открытии аппа: к моменту запроса /api/today кэш тёплый."""
+    try:
+        u = row(cid)
+        if not is_onboarded(u): return
+        ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
+        if _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or ""): return
+        _, st = status_of(cid)
+        usage = []
+        note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), usage)
+        if usage: ev(cid, "tokens", sum(usage), meta="today_note", calls=len(usage), usage=usage)
+        if isinstance(note, dict) and (note.get("summary") or "").strip():
+            if st:
+                note.setdefault("day", st.get("day"))
+                note.setdefault("phase", (st.get("phase_ru") or ""))
+            _TODAY_CACHE[ck] = note
+            dc_put(cid, "today", note, u.get("mode") or "")
+    except Exception as e:
+        log.info("today prewarm %s: %s", cid, e)
+
+async def _api_log_history(request):
+    """История журнала: непустые записи симптомов/энергии/настроения для главной."""
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    c = db()
+    rows = c.execute(
+        "SELECT log_date,energy,mood,symptoms FROM logs WHERE chat_id=? "
+        "AND (COALESCE(symptoms,'')!='' OR energy IS NOT NULL OR mood IS NOT NULL) "
+        "ORDER BY log_date DESC LIMIT 60", (cid,)).fetchall()
+    c.close()
+    items = [{"d": r[0], "energy": r[1], "mood": r[2],
+              "symptoms": (r[3].split(",") if r[3] else [])} for r in rows]
+    ev(cid, "button", meta="web_log_history")
+    return _cors(web.json_response({"items": items}))
+
+# Недельный разбор питания: кэш на день, собирается из дневника за 7 дней.
+_WEEK_FOOD_CACHE = {}
+
+def _evict_today_cache(cid):
+    """Сводка дня зависит от чек-ина, циклов и профиля — сбрасываем при их изменении."""
+    for k in [k for k in _TODAY_CACHE if k[0] == cid]:
+        _TODAY_CACHE.pop(k, None)
+    dc_del(cid, "today")
+
+def _evict_week_food_cache(cid):
+    for k in [k for k in _WEEK_FOOD_CACHE if k[0] == cid]:
+        _WEEK_FOOD_CACHE.pop(k, None)
+    dc_del(cid, "week_food")
+
+async def _api_week_food_review(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    ck = (cid, dtoday().isoformat(), "v2")
+    hit = _WEEK_FOOD_CACHE.get(ck) or dc_get(cid, "week_food")
+    if hit:
+        _WEEK_FOOD_CACHE[ck] = hit
+        return _cors(web.json_response({"ok": True, "review": hit}))
+    lines = []
+    for off in range(6, -1, -1):
+        d = (dtoday() - timedelta(days=off)).isoformat()
+        meals = meals_of(cid, d); tot = diary_totals(cid, d)
+        if not meals: continue
+        dishes = ", ".join(f"{m.get('title')} ({round(m.get('kcal') or 0)} ккал)" for m in meals[:8])
+        lines.append(f"{d}: {dishes}; итог {round(tot.get('kcal') or 0)} ккал, Б{round(tot.get('protein') or 0)} Ж{round(tot.get('fat') or 0)} У{round(tot.get('carbs') or 0)}")
+    if not lines:
+        return _cors(web.json_response({"ok": False, "text": "За неделю в дневнике пусто — добавь приёмы, и я сделаю разбор."}))
+    prof = profile_of(u) or {}
+    profile_line = f"цель {prof.get('kcal_goal') or profile_kcal(prof) or '—'} ккал/день" if prof else ""
+    try:
+        usage = []
+        review = await llm_to_thread(cid, "week_food_review", L.week_food_review, "\n".join(lines), profile_line, usage)
+        if usage: ev(cid, "tokens", sum(usage), meta="week_food", calls=len(usage), usage=usage)
+        if len(_WEEK_FOOD_CACHE) > 1000: _WEEK_FOOD_CACHE.clear()
+        _WEEK_FOOD_CACHE[ck] = review
+        dc_put(cid, "week_food", review)
+        return _cors(web.json_response({"ok": True, "review": review}))
+    except Exception as e:
+        log.warning("week food review %s: %s", cid, e)
+        ev(cid, "fallback", meta="static:week_food_fail")
+        return _cors(web.json_response({"ok": False, "text": "Не получилось собрать разбор, попробуй чуть позже."}, status=502))
+
+# Рецепты меню: кэш на день, чтобы повторный тап по блюду не жёг токены.
+_RECIPE_CACHE = {}
+
+async def _prewarm_recipes(cid, dishes):
+    """Фоновый прогрев рецептов для блюд меню — карточка открывается мгновенно."""
+    for dish in dishes[:4]:
+        dish = str(dish or "").strip()[:80]
+        if not dish: continue
+        ck = (dish.lower(), dtoday().isoformat(), "v2")
+        if _RECIPE_CACHE.get(ck) or dc_get(cid, "recipe", dish.lower()): continue
+        try:
+            usage = []
+            rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage)
+            if usage: ev(cid, "tokens", sum(usage), meta="recipe", calls=len(usage), usage=usage)
+            if len(_RECIPE_CACHE) > 300: _RECIPE_CACHE.clear()
+            _RECIPE_CACHE[ck] = rec
+            dc_put(cid, "recipe", rec, dish.lower())
+        except Exception as e:
+            log.info("recipe prewarm «%s»: %s", dish, e)
+
+async def _api_recipe(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    dish = str(body.get("dish") or "").strip()[:80]
+    if not dish: return _cors(web.json_response({"error": "no dish"}, status=400))
+    ck = (dish.lower(), dtoday().isoformat(), "v2")
+    hit = _RECIPE_CACHE.get(ck) or dc_get(cid, "recipe", dish.lower())
+    if hit:
+        _RECIPE_CACHE[ck] = hit
+        return _cors(web.json_response(hit))
+    try:
+        usage = []
+        rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage)
+        if usage: ev(cid, "tokens", sum(usage), meta="recipe", calls=len(usage), usage=usage)
+        if len(_RECIPE_CACHE) > 300: _RECIPE_CACHE.clear()
+        _RECIPE_CACHE[ck] = rec
+        dc_put(cid, "recipe", rec, dish.lower())
+        return _cors(web.json_response(rec))
+    except Exception as e:
+        log.warning("recipe %s «%s»: %s", cid, dish, e)
+        ev(cid, "fallback", meta="static:recipe_fail")
+        return _cors(web.json_response({"error": "generation"}, status=502))
+
+async def _api_food_prompt(request):
+    """Кнопка «Текстом» в питании: бот спрашивает в чате, что она ела — ответ запишется в дневник."""
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"ok": False}))
+    try:
+        ev(cid, "button", meta="web_food_prompt")
+        if BOT_APP:
+            await BOT_APP.bot.send_message(cid, "Что ты скушала? Напиши обычным текстом — например «200 г творога и банан» — я посчитаю КБЖУ и запишу в дневник.")
+        return _cors(web.json_response({"ok": True}))
+    except Exception as e:
+        log.warning("food_prompt %s: %s", cid, e)
+        return _cors(web.json_response({"ok": False}))
+
+async def _api_nudge(request):
+    """Новый фронт: перед переключением в чат бот присылает туда сообщение, чтобы чат не был пустым."""
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    u = row(cid)
+    if not is_onboarded(u): return _cors(web.json_response({"ok": False}))
+    topic = str(body.get("topic") or "")[:20]
+    cycle_user = is_cycle(u) and bool(u.get("last_period"))
+    ctx_word = "под фазу" if cycle_user else "под твою цель"
+    prompts = {"food": (f"Обсудим питание: могу разобрать твой дневник за сегодня, собрать меню {ctx_word} или ответить про конкретные продукты.",
+                        ["Разбери мой дневник", "Что съесть на ужин?"]),
+               "train": (f"Обсудим нагрузку: подберу тренировку {ctx_word} с учётом последних занятий или отвечу про восстановление.",
+                         ["Собери тренировку", "Что с восстановлением?"])}
+    if cycle_user:
+        default = ("Я здесь. Спрашивай про цикл, самочувствие, питание или нагрузку — отвечу с учётом твоих данных.",
+                   ["Что по циклу сегодня?", "Что съесть сегодня?"])
+    else:
+        default = ("Я здесь. Спрашивай про питание, тренировки и самочувствие — отвечу с учётом твоих данных.",
+                   ["Что съесть сегодня?", "Собери тренировку"])
+    text, suggs = prompts.get(topic, default)
+    try:
+        if BOT_APP:
+            kb = sugg_kb(cid, suggs, app_user=u)
+            await BOT_APP.bot.send_message(cid, text, reply_markup=kb)
+        ev(cid, "button", meta="web_nudge")
+        return _cors(web.json_response({"ok": True}))
+    except Exception as e:
+        log.warning("nudge %s: %s", cid, e)
+        return _cors(web.json_response({"ok": False}))
+
 async def _api_data(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = await asyncio.to_thread(row, cid)
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
     _queue_event(cid, "button", meta="app_open")
+    try:
+        asyncio.create_task(_prewarm_today(cid))
+    except Exception:
+        pass
     campaign = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(body.get("campaign") or ""))[:80]
     if campaign:
         _queue_event(cid, "push_open", meta=campaign)
@@ -3737,6 +6566,7 @@ async def _api_data(request):
     out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
            "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa, "chatlog": chatlog,
+           "bot_username": BOT_USERNAME,
            "partner_linked": bool(partner),
            "proactive_enabled": bool(u.get("proactive_enabled", True)),
            "today_log": today_log or {"symptoms": []},
@@ -3799,6 +6629,7 @@ async def _api_data(request):
 async def _api_period(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_today_cache(cid)
     action = body.get("action"); ds = body.get("date")
     try: d = date.fromisoformat(ds) if ds else dtoday()
     except Exception: d = dtoday()
@@ -3860,6 +6691,7 @@ async def _api_pa(request):
 async def _api_checkin(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_today_cache(cid)
     ds = body.get("date") or dtoday().isoformat()
     try: date.fromisoformat(ds)
     except Exception: ds = dtoday().isoformat()
@@ -3906,6 +6738,7 @@ async def _api_proactive(request):
 async def _api_profile(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_today_cache(cid)
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"error": "onboard"}, status=403))
@@ -4002,49 +6835,207 @@ def _recent_syms_text(cid):
     if n: out.append(f"симптомов отмечено: {n}")
     return ", ".join(out)
 
+_SECTION_CACHE = {}
+_SECTION_TASKS = {}
+_SECTION_FAST_WAIT_SECONDS = 0.75
+
+def section_cache_clear(cid):
+    for key in [key for key in list(_SECTION_CACHE) if key and key[0] == cid]:
+        _SECTION_CACHE.pop(key, None)
+    for key in [key for key in list(_SECTION_TASKS) if key and key[0] == cid]:
+        task = _SECTION_TASKS.pop(key, None)
+        if task and not task.done():
+            task.cancel()
+
+def _section_key(cid, kind, u, st):
+    """Cache generated Mini App sections by the data that can change their answer."""
+    profile = profile_of(u) or {}
+    snapshot = {
+        "mode": u.get("mode"),
+        "profile": {k: profile.get(k) for k in (
+            "height", "weight", "age", "activity", "diet", "diet_note", "kcal_goal"
+        )},
+        "cycle": ({k: st.get(k) for k in (
+            "day", "cycle_len", "phase", "subphase", "days_to_next", "status"
+        )} if st else None),
+    }
+    if kind == "training":
+        snapshot["recent"] = _recent_workouts_text(cid)
+        snapshot["checkin"] = log_get(cid, dtoday().isoformat()) or {}
+    raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)
+    return (cid, dtoday().isoformat(), kind, _hashlib.sha256(raw.encode("utf-8")).hexdigest())
+
+def _section_fallback(cid, kind, u, st):
+    """Fast deterministic response shown while the personal model result is prepared."""
+    prof = profile_of(u)
+    if kind == "training":
+        pregnancy = None
+        if u.get("mode") == "preg" and u.get("last_period"):
+            try:
+                pregnancy = C.preg_status(u["last_period"])
+            except Exception:
+                pregnancy = None
+        plan = (L.training_plan(st, prof) if st is not None
+                else L.general_training(prof, u.get("mode")))
+        # The pregnancy safety override is deterministic and must also apply
+        # before the background model call has completed.
+        if u.get("mode") == "preg":
+            checkin = log_get(cid, dtoday().isoformat()) or {}
+            symptoms = set(checkin.get("symptoms") or [])
+            if checkin.get("energy") == 1 or symptoms.intersection({"preg_cramp", "preg_swelling"}):
+                plan = L.training_today(
+                    None, prof, None, "preg", pregnancy=pregnancy, checkin=checkin
+                )
+        return {"text": plan.get("summary", ""), "training": plan}
+
+    target = profile_kcal(prof) if prof else None
+    if st is not None:
+        text = st["content"]["food"]
+        phase_key = st.get("phase") or "follicular"
+    else:
+        text = {
+            "meno": "В менопаузе важны белок, кальций, витамин D, омега-3 и стабильный сахар.",
+            "preg": "В беременности важны белок, фолаты, железо, кальций и безопасные продукты.",
+            "irregular": "Без чёткой фазы опирайся на белок, клетчатку, сложные углеводы и регулярность.",
+            "none": "Сбалансированная база на день: белок, овощи, сложные углеводы и вода.",
+        }.get(u.get("mode"), "Сбалансированная база на день: белок, овощи, сложные углеводы и вода.")
+        phase_key = "follicular"
+    restrictions = bool(prof and ((prof.get("diet") or "").strip() or (prof.get("diet_note") or "").strip()))
+    out = {"kcal": (target[0] if target else None), "text": text,
+           "suggestions": ["Что выбрать на завтрак?", "Как добрать белок?", "Что есть вечером?"]}
+    # A generic menu must never override explicit allergies/restrictions.
+    if not restrictions:
+        menu = json.loads(json.dumps(L.CURATED_MENU.get(
+            phase_key, L.CURATED_MENU["follicular"]
+        ), ensure_ascii=False))
+        out["menu"] = L._scale_menu(menu, target)
+    return out
+
+async def _generate_section(cid, kind, u, st, key):
+    """Generate one section once, then make it instantly reusable."""
+    generation = _user_generation(cid)
+    try:
+        prof = profile_of(u)
+        if kind == "food":
+            target = profile_kcal(prof) if prof else None
+            usage = []
+            menu = await llm_to_thread(
+                cid, "menu_generation", menu_cached, cid, st, prof, target,
+                (u.get("mode") if st is None else None), usage,
+                user_generation=generation,
+            )
+            if usage:
+                ev(cid, "tokens", sum(usage), meta="menu", calls=len(usage), usage=usage)
+            if target:
+                menu["macros"] = {
+                    "protein": f"{target[1]} г", "fat": f"{target[2]} г",
+                    "carbs": f"{target[3]} г",
+                }
+            text = (st["content"]["food"] if st is not None
+                    else _section_fallback(cid, "food", u, st)["text"])
+            sugg_usage = []
+            suggestions = await llm_to_thread(
+                cid, "food_suggestions", L.food_suggestions,
+                [m.get("dish", "") for m in (menu.get("meals") or [])],
+                _food_ctx(u, st), sugg_usage,
+                user_generation=generation,
+            )
+            if sugg_usage:
+                ev(cid, "tokens", sum(sugg_usage), meta="food_suggest",
+                   calls=len(sugg_usage), usage=sugg_usage)
+            payload = {"menu": menu, "kcal": (target[0] if target else None),
+                       "text": text, "suggestions": suggestions}
+            try:
+                asyncio.create_task(_prewarm_recipes(cid, [m.get("dish") for m in (menu.get("meals") or [])]))
+            except Exception:
+                pass
+        else:
+            pregnancy = None
+            if u.get("mode") == "preg" and u.get("last_period"):
+                try:
+                    pregnancy = C.preg_status(u["last_period"])
+                except Exception:
+                    pregnancy = None
+            usage = []
+            plan = await llm_to_thread(
+                cid, "training_recommendation", L.training_today,
+                st, prof, _recent_workouts_text(cid), u.get("mode"), usage,
+                pregnancy=pregnancy, checkin=log_get(cid, dtoday().isoformat()),
+                user_generation=generation,
+            )
+            if isinstance(plan, dict) and plan.pop("_fallback", None):
+                ev(cid, "fallback", meta="static:training_plan")
+            if usage:
+                ev(cid, "tokens", sum(usage), meta="training_today",
+                   calls=len(usage), usage=usage)
+            payload = {"text": plan.get("summary", ""), "training": plan}
+        if not _user_write_allowed(cid, generation=generation):
+            return _section_fallback(cid, kind, u, st)
+        _SECTION_CACHE[key] = payload
+        _prune_day(_SECTION_CACHE)
+        return payload
+    except Exception:
+        log.exception("miniapp section generation failed: cid=%s kind=%s", cid, kind)
+        return _section_fallback(cid, kind, u, st)
+    finally:
+        if _SECTION_TASKS.get(key) is asyncio.current_task():
+            _SECTION_TASKS.pop(key, None)
+
 async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    u = row(cid); _, st = status_of(cid); kind = body.get("kind", "food"); ev(cid, "button", meta="web_" + kind)
+    u = row(cid); _, st = status_of(cid); kind = body.get("kind", "food")
+    if kind not in ("food", "training"):
+        return _cors(web.json_response({"error": "bad_kind"}, status=400))
+    if not body.get("refresh"):
+        ev(cid, "button", meta="web_" + kind)
     if not is_onboarded(u):
         return _cors(web.json_response({"error": "onboard", "text": "Сначала настрой Айву в боте."}, status=403))
-    if st is None:
-        prof = profile_of(u); target = profile_kcal(prof) if prof else None
-        if kind == "food":
-            _usage = []; menu = await llm_to_thread(cid, "menu_generation", menu_cached, cid, None, prof, target, u.get("mode"), _usage)
-            if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage), usage=_usage)
-            if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
-            txt = {"meno": "В менопаузе на первый план выходят кости, сон и сердце. Делай упор на белок (рыба, яйца, творог, курица) и кальций с витамином D (молочное, сардины, зелень), добавляй магний и B6 (гречка, орехи, тёмный шоколад) для сна и приливов, и омега-3 из жирной рыбы. Меньше быстрых сахаров, кофеина и алкоголя — они усиливают приливы.",
-                   "preg": "В беременности важно закрыть потребность в фолиевой кислоте, железе, кальции и белке. Ешь зелень и бобовые (фолаты), красное мясо и гречку (железо), молочное (кальций), рыбу с омега-3 и белок в каждый приём. Избегай сырого мяса и рыбы, непастеризованного, печени в избытке, алкоголя и лишнего кофеина.",
-                   "irregular": "Без чёткого цикла опирайся на стабильный сахар и сытость. Белок в каждый приём (яйца, рыба, птица, творог), сложные углеводы (гречка, рис, овощи), магний и железо — это держит энергию и настроение ровными в течение дня.",
-                   "none": "Сбалансированно и просто: белок в каждый приём, овощи и зелень, сложные углеводы, полезные жиры (рыба, орехи) и достаточно воды. Меньше резких скачков сахара — стабильнее энергия и меньше тяги к перекусам."}.get(u.get("mode"), "Сбалансированное питание на день: белок, овощи, сложные углеводы и вода.")
-            _su = []; sugg = await llm_to_thread(cid, "food_suggestions", L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, None), _su)
-            if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
-            return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": txt, "suggestions": sugg}))
-        _su = []; plan = await llm_to_thread(cid, "training_recommendation", L.training_today, None, prof, _recent_workouts_text(cid), u.get("mode"), _su)
-        if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
-        return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
-    if kind == "food":
-        prof = profile_of(u); target = profile_kcal(prof) if prof else None
-        _usage = []; menu = await llm_to_thread(cid, "menu_generation", menu_cached, cid, st, prof, target, None, _usage)
-        if _usage: ev(cid, "tokens", sum(_usage), meta="menu", calls=len(_usage), usage=_usage)
-        if target: menu["macros"] = {"protein": f"{target[1]} г", "fat": f"{target[2]} г", "carbs": f"{target[3]} г"}
-        text = st["content"]["food"]
-        _su = []; sugg = await llm_to_thread(cid, "food_suggestions", L.food_suggestions, [m.get("dish", "") for m in (menu.get("meals") or [])], _food_ctx(u, st), _su)
-        if _su: ev(cid, "tokens", sum(_su), meta="food_suggest", calls=len(_su), usage=_su)
-        return _cors(web.json_response({"menu": menu, "kcal": (target[0] if target else None), "text": text, "suggestions": sugg}))
-    _su = []; plan = await llm_to_thread(cid, "training_recommendation", L.training_today, st, profile_of(u), _recent_workouts_text(cid), u.get("mode"), _su)
-    if _su: ev(cid, "tokens", sum(_su), meta="training_today", calls=len(_su), usage=_su)
-    return _cors(web.json_response({"text": plan.get("summary", ""), "training": plan}))
+    key = _section_key(cid, kind, u, st)
+    cached = _SECTION_CACHE.get(key)
+    if cached is not None:
+        return _cors(web.json_response(dict(cached, cached=True, refreshing=False)))
+    task = _SECTION_TASKS.get(key)
+    if task is None:
+        task = asyncio.create_task(_generate_section(cid, kind, u, st, key))
+        _SECTION_TASKS[key] = task
+    # A tab must never inherit the provider's 30-60 second timeout. Give a warm
+    # provider a short chance, otherwise return useful deterministic content
+    # while the single shared task keeps preparing the personal result.
+    try:
+        payload = await asyncio.wait_for(asyncio.shield(task), timeout=_SECTION_FAST_WAIT_SECONDS)
+        return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
+    except asyncio.TimeoutError:
+        payload = _section_fallback(cid, kind, u, st)
+        return _cors(web.json_response(dict(payload, cached=False, refreshing=True)))
+    except Exception:
+        payload = _section_fallback(cid, kind, u, st)
+        return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
+# Сводка дня в мини-аппе: кэш на день, чтобы апп открывался сразу, а не ждал модель.
+_TODAY_CACHE = {}
+
 async def _api_today(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
     _, st = status_of(cid); ev(cid, "button", meta="web_today")
+    ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
+    hit = _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or "")
+    if hit:
+        _TODAY_CACHE[ck] = hit
+        return _cors(web.json_response(hit))
     _su = []
     note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), _su)
     if _su: ev(cid, "tokens", sum(_su), meta="today_note", calls=len(_su), usage=_su)
+    if isinstance(note, dict):
+        if st:
+            note.setdefault("day", st.get("day"))
+            note.setdefault("phase", (st.get("phase_ru") or ""))
+        if (note.get("summary") or "").strip():
+            if len(_TODAY_CACHE) > 2000: _TODAY_CACHE.clear()
+            _TODAY_CACHE[ck] = note
+            dc_put(cid, "today", note, u.get("mode") or "")
     return _cors(web.json_response(note))
 
 async def _api_chat(request):
@@ -4060,7 +7051,12 @@ async def _api_chat(request):
     if addressed and not msg:
         return _cors(web.json_response({"answer": "Я тут. Напиши вопрос про цикл, питание, нагрузку или самочувствие.", "suggestions": ["Когда овуляция?", "Что есть сегодня?"]}))
     ev(cid, "user_message", meta="webapp", n=len(msg))
-    reply = await _chat_reply(cid, u, msg, user_generation=generation)
+    reply = await _chat_reply(
+        cid, u, msg, user_generation=generation,
+        mutation_key=chat_mutation_key("webchat", body.get("request_id")),
+        require_mutation_key=True,
+        channel="webapp",
+    )
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "assistant_message", meta="webapp")
@@ -4074,10 +7070,10 @@ async def _api_feedback(request):
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     rating = str(body.get("rating") or "")
     answer_id = re.sub(r"[^a-f0-9]", "", str(body.get("answer_id") or ""))[:32]
-    if rating not in {"helpful", "unhelpful"} or not answer_id or not _feedback_prompt_exists(cid, answer_id):
+    feedback_result = _submit_feedback(cid, answer_id, rating, "webapp")
+    if feedback_result == "missing":
         return _cors(web.json_response({"error": "bad_feedback"}, status=400))
-    ev(cid, "feedback", meta=f"{rating}|{answer_id}|webapp")
-    return _cors(web.json_response({"ok": True}))
+    return _cors(web.json_response({"ok": True, "duplicate": feedback_result == "duplicate"}))
 
 def _agent_tools_spec():
     return [
@@ -4122,9 +7118,19 @@ def _agent_exec(cid, name, args):
             return {"logs": out[-12:]}
         if name == "today_diary":
             dp = diary_payload(cid)
-            return {"totals": dp.get("totals"), "target": dp.get("target"), "meals_logged": len(dp.get("meals") or [])}
+            meals = dp.get("meals") or []
+            return {
+                "totals": dp.get("totals"), "target": dp.get("target"),
+                "meals_logged": len(meals),
+                "meals": [
+                    {"id": m.get("id"), "title": m.get("title"), "grams": m.get("grams"),
+                     "kcal": m.get("kcal"), "slot": m.get("slot")}
+                    for m in meals[-12:]
+                ],
+            }
         if name == "recent_workouts":
-            return {"recent": _recent_workouts_text(cid) or "нет записей"}
+            context = _journal_recent_context(cid, limit=8)
+            return {"recent": context.get("workouts") or []}
         if name == "user_profile":
             u = row(cid) or {}; p = profile_of(u) or {}
             return {"height": p.get("height"), "weight": p.get("weight"), "age": p.get("age"),
@@ -4139,23 +7145,39 @@ def _agent_exec(cid, name, args):
         return {"error": str(e)}
     return {"error": "unknown tool"}
 
-async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None):
+async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None, channel="bot"):
     """Агентный ответ в два этапа:
     1) модель через инструменты сама добывает реальные данные пользовательницы (реальные тул-колы);
     2) финальный ответ пишется прежним качественным промптом (answer_question/general_answer) с этими данными.
     Возвращает текст или None (тогда вызывающий откатывается к обычному ответу)."""
     plan_sys = ("Ты — планировщик ассистента по женскому здоровью. Реши, какие инструменты нужны, чтобы ответить "
                 "на вопрос пользовательницы по её РЕАЛЬНЫМ данным (цикл, симптомы, дневник еды, тренировки, профиль), и вызови их. "
+                "Если она спрашивает, сохранилась ли еда или что именно есть в дневнике, обязательно вызови today_diary. "
+                "Если спрашивает о сохранённой тренировке, обязательно вызови recent_workouts. "
                 "Если это приветствие, благодарность, болтовня или общий вопрос не про её здоровье и данные (фильмы, быт, отношения, работа) — НЕ вызывай НИКАКИЕ инструменты, включая cycle_status. "
                 "Если вопрос общий и данные не нужны — не вызывай инструменты. Сам развёрнутый ответ не пиши, только выбери инструменты.")
     messages = [{"role": "system", "content": plan_sys}, {"role": "user", "content": msg}]
     tools = _agent_tools_spec()
     gathered = []
+    successful_tools = 0
+
+    async def finish():
+        answer = await _agent_final(
+            cid, u, msg, gathered, usage, request_id, user_generation,
+        )
+        if successful_tools and answer and _user_write_allowed(cid, user_generation):
+            ev(
+                cid, "tool_outcome",
+                meta=f"success|tool_assisted_answer|{channel}",
+                request_id=request_id, user_generation=user_generation,
+            )
+        return answer
+
     for _r in range(2):
         m = await llm_to_thread(cid, "tool_plan", L.call_tools, messages, tools, usage, 0.2, 480,
                                 request_id=request_id, user_generation=user_generation)
         if not m:
-            return None if _r == 0 else await _agent_final(cid, u, msg, gathered, usage, request_id, user_generation)
+            return None if _r == 0 else await finish()
         tc = m.get("tool_calls")
         if not tc:
             break
@@ -4169,14 +7191,24 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None):
                 a = {}
             if not _user_write_allowed(cid, user_generation):
                 return None
+            tool_started = time.monotonic()
             res = _agent_exec(cid, nm, a)
+            tool_status = "error" if isinstance(res, dict) and res.get("error") else "success"
+            if tool_status == "success":
+                successful_tools += 1
+            ev(
+                cid, "tool_execution",
+                meta=f"{tool_status}|{nm}|{channel}",
+                ms=int((time.monotonic() - tool_started) * 1000),
+                request_id=request_id, user_generation=user_generation,
+            )
             gathered.append(nm + ": " + json.dumps(res, ensure_ascii=False))
             messages.append({"role": "tool", "tool_call_id": call.get("id"),
                              "content": json.dumps(res, ensure_ascii=False)})
-    return await _agent_final(cid, u, msg, gathered, usage, request_id, user_generation)
+    return await finish()
 
 async def _agent_final(cid, u, msg, gathered, usage, request_id, user_generation=None):
-    _, st = status_of(cid); prof = profile_of(u)
+    _, st = status_of(cid); prof = llm_profile_of(u)
     q = msg
     if gathered:
         q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про здоровье, цикл, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
@@ -4202,16 +7234,33 @@ async def _memory_learn(cid, umsg, amsg, user_generation=None):
     except Exception as e:
         log.warning("memory_learn: %s", e)
 
-async def _chat_reply(cid, u, msg, user_generation=None):
+async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
+                      require_mutation_key=False, channel="bot"):
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     intent = match_intent(msg)
+    journal = None
+    if intent not in _JOURNAL_MUTATION_INTENTS:
+        journal = chat_mutation_route_preflight(cid, mutation_key)
+        if not journal:
+            journal = await resolve_semantic_journal_action(
+                cid, msg, user_generation=generation,
+            )
+        if journal:
+            intent = journal["intent"]
     if intent == "phases":
-        chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", PHASES_TEXT)
-        return {"answer": PHASES_TEXT, "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}
+        _pu = []
+        _pa = None
+        try: _pa = await asyncio.to_thread(L.answer_question, status_of(cid)[1], "Расскажи кратко про четыре фазы цикла: сколько длится каждая, какие гормоны ведут и как это отражается на самочувствии, питании и нагрузке.", llm_profile_of(u), None, usage=_pu)
+        except Exception: pass
+        if _pu: ev(cid, "answered", tokens=sum(_pu), meta="webapp", calls=len(_pu), usage=_pu)
+        _txt = L.split_followups(_pa)[0] if _pa else PHASES_TEXT
+        if not _pa: ev(cid, "fallback", meta="static:phases")
+        chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", _txt)
+        return {"answer": md_plain(_txt), "suggestions": ["Что есть в мою фазу?", "Какая тренировка сейчас?"]}
     if intent in ("period", "addcycles", "profile", "cyclelen", "time", "wipe", "unlink", "partner", "checkin"):
         guide = {
-            "period": "Через чат я не меняю календарь, чтобы случайно не записать ошибку. Открой в приложении экран «Сегодня», нажми «Редактировать месячные», отметь нужные дни прямо на календаре и нажми «Сохранить». В боте можно ещё написать /period.",
+            "period": "Можно отметить начало прямо в чате: напиши «сегодня начались месячные» или «месячные начались 23 июля, запиши». Для редактирования нескольких дней открой календарь приложения.",
             "addcycles": "Историю циклов сейчас надёжнее добавлять через бота: /addcycles. Пришли даты начала месячных списком, и я заменю историю календаря.",
             "profile": "Рост, вес и возраст меняются в боте командой /profile или через Меню → Изменить данные.",
             "cyclelen": "Длину цикла меняй в боте: Меню → Изменить данные → Длина цикла.",
@@ -4223,18 +7272,148 @@ async def _chat_reply(cid, u, msg, user_generation=None):
         }[intent]
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", guide)
         return {"answer": guide, "suggestions": ["Что по циклу?", "Открыть питание"]}
+    if intent == "logperiod":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала менять календарь без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть календарь"]}
+        result = await log_period_action(
+            cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+        )
+        out = {"answer": result["text"], "suggestions": ["Что сейчас с циклом?", "Открыть календарь"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "period_end":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала менять календарь без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть календарь"]}
+        result = await log_period_end_action(
+            cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+        )
+        out = {"answer": result["text"], "suggestions": ["Что сейчас с циклом?", "Открыть календарь"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "logworkout":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала записывать без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть нагрузку"]}
+        result = await log_workout_action(
+            cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+            preparsed_workout=((journal or {}).get("workout")),
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть нагрузку", "Что делать завтра?"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "updateworkout":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала исправлять без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть нагрузку"]}
+        result = await log_workout_update_action(
+            cid, u, msg, (journal or {}).get("target_id"),
+            user_generation=generation, mutation_key=mutation_key,
+            preparsed_workout=((journal or {}).get("workout")),
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть нагрузку", "Что делать завтра?"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
     if intent == "logmeal":
-        _t = await log_food_from_text(cid, u, msg)
-        return {"answer": _t, "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала записывать без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть питание"]}
+        result = await log_food_action(
+            cid, u, msg, user_generation=generation, mutation_key=mutation_key,
+            preparsed_food_text=((journal or {}).get("food_text")),
+            preparsed_slot=((journal or {}).get("slot")),
+            preparsed_food_record=((journal or {}).get("food_record")),
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "updatemeal":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала исправлять без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть питание"]}
+        result = await log_food_update_action(
+            cid, u, msg, (journal or {}).get("target_id"),
+            user_generation=generation, mutation_key=mutation_key,
+            preparsed_food_text=((journal or {}).get("food_text")),
+            preparsed_food_record=((journal or {}).get("food_record")),
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "movemealslot":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала переносить запись без идентификатора запроса.",
+                    "suggestions": ["Открыть питание"]}
+        result = await move_meal_slot_action(
+            cid, (journal or {}).get("target_id"), (journal or {}).get("slot"),
+            user_generation=generation, mutation_key=mutation_key,
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "appendmealitem":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала дополнять запись без идентификатора запроса.",
+                    "suggestions": ["Открыть питание"]}
+        result = await append_meal_item_action(
+            cid, u, (journal or {}).get("target_id"), (journal or {}).get("food_text"),
+            user_generation=generation, mutation_key=mutation_key,
+            preparsed_food_record=((journal or {}).get("food_record")),
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "journalreplay":
+        result = journal_replay_result(cid, journal)
+        out = {"answer": result["text"], "suggestions": ["Открыть питание"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
+    if intent == "journalunavailable":
+        return {
+            "answer": (
+                "Сейчас не получилось достаточно быстро и надёжно разобрать изменение дневника, "
+                "поэтому я ничего не меняла. Попробуй повторить одной фразой через минуту."
+            ),
+            "suggestions": ["Открыть питание"],
+        }
+    if intent == "clarifymeal":
+        return {
+            "answer": (
+                "Не уверена, какую именно запись еды изменить, поэтому ничего не меняла. "
+                "Напиши название и новое количество, например: «чипсы — 100 г»."
+            ),
+            "suggestions": ["Открыть питание"],
+        }
+    if intent == "clarifyworkout":
+        return {
+            "answer": (
+                "Не уверена, какую именно тренировку изменить, поэтому ничего не меняла. "
+                "Напиши её название и исправление, например: «приседания — 3 подхода по 12»."
+            ),
+            "suggestions": ["Открыть нагрузку"],
+        }
     if intent == "diary":
         usage = []; txt = await answer_diary(cid, usage)
         if usage: ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage), usage=usage)
         return {"answer": txt, "suggestions": ["Открыть питание", "Что купить?"]}
-    _, st = status_of(cid); usage = []; prof = profile_of(u)
+    _, st = status_of(cid); usage = []; prof = llm_profile_of(u)
     request_id = TR.current_trace_id()
     ans = None
     try:
-        ans = await _agent_answer(cid, u, msg, usage, request_id, user_generation=generation)
+        ans = await _agent_answer(
+            cid, u, msg, usage, request_id,
+            user_generation=generation, channel=channel,
+        )
     except Exception as _ae:
         log.warning("agent fallback: %s", _ae); ans = None
     if not ans:
@@ -4256,14 +7435,16 @@ async def _chat_reply(cid, u, msg, user_generation=None):
             ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid), usage=usage,
                                       request_id=request_id, user_generation=generation)
     current = _user_write_allowed(cid, generation)
-    if current:
-        hist_push(cid, msg, ans)
     clean, sugg = L.split_followups(ans)
-    if st is not None and len(sugg) < 2:
-        try:
-            for e in L.followups(st, msg, clean):
-                if e not in sugg and len(sugg) < 2: sugg.append(e)
-        except Exception: pass
+    clean = guard_aiwa_reply(cid, clean)
+    if current:
+        hist_push(cid, msg, clean)
+    try:
+        topical = L.followups(st, msg, clean)
+        if topical:
+            sugg = topical
+    except Exception:
+        pass
     if current:
         ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage),
            request_id=request_id, usage=usage)
@@ -4271,7 +7452,7 @@ async def _chat_reply(cid, u, msg, user_generation=None):
             asyncio.create_task(_memory_learn(cid, msg, clean, generation))
         except Exception:
             pass
-    return {"answer": clean, "suggestions": sugg[:2]}
+    return {"answer": md_plain(clean), "suggestions": sugg[:2]}
 
 async def _api_voice(request):
     try:
@@ -4303,7 +7484,12 @@ async def _api_voice(request):
     ev(cid, "voice", n=len(txt))
     msg, _addr = strip_aiwa_address(txt.strip())
     if not msg: msg = txt.strip()
-    reply = await _chat_reply(cid, u, msg, user_generation=generation)
+    reply = await _chat_reply(
+        cid, u, msg, user_generation=generation,
+        mutation_key=chat_mutation_key("webvoice", data.get("request_id")),
+        require_mutation_key=True,
+        channel="webapp",
+    )
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "assistant_message", meta="webapp")
@@ -4312,10 +7498,10 @@ async def _api_voice(request):
     reply["transcript"] = txt.strip()
     return _cors(web.json_response(reply))
 
-def diary_payload(cid, prof=None):
+def diary_payload(cid, prof=None, d=None):
     prof = prof if prof is not None else profile_of(row(cid))
     tg = profile_kcal(prof) if prof else None
-    return {"meals": meals_of(cid), "totals": diary_totals(cid),
+    return {"meals": meals_of(cid, d), "totals": diary_totals(cid, d), "date": (d or dtoday().isoformat()),
             "target": ({"kcal": tg[0], "protein": tg[1], "fat": tg[2], "carbs": tg[3]} if tg else None)}
 
 def diary_reco_summary(cid):
@@ -4341,29 +7527,804 @@ async def answer_diary(cid, usage=None):
         return "За сегодня в дневнике пусто. Сфоткай еду или напиши, что съела — посчитаю калории и подскажу, чего добрать."
     return await llm_to_thread(cid, "diary_recommendation", L.diary_reco, summ, (usage if usage is not None else []))
 
-async def log_food_from_text(cid, u, text):
+def chat_mutation_key(channel, request_id):
+    raw = str(request_id or "").strip()
+    if not raw:
+        return None
+    digest = _hashlib.sha256((str(channel or "chat") + ":" + raw).encode("utf-8")).hexdigest()
+    return str(channel or "chat")[:12] + ":" + digest[:40]
+
+def chat_mutation_args_hash(kind, text):
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    return _hashlib.sha256((str(kind) + "\n" + normalized).encode("utf-8")).hexdigest()
+
+def chat_mutation_route_preflight(cid, mutation_key):
+    """Возвращает уже зафиксированный маршрут retry до повторного вызова классификатора."""
+    if not mutation_key:
+        return None
+    c = db()
+    prior = c.execute(
+        """SELECT kind,record_id,result_json,reversed_at
+           FROM chat_mutations WHERE chat_id=? AND mutation_key=?""",
+        (cid, mutation_key),
+    ).fetchone()
+    c.close()
+    if not prior:
+        return None
+    # An append retry no longer contains the model-produced item payload. Return
+    # the already verified result directly instead of calling the model again or
+    # trying to reconstruct mutation arguments from aggregate totals.
+    if prior[0] == "food_append":
+        try:
+            target_id = int(prior[1])
+        except (TypeError, ValueError):
+            target_id = None
+        return {
+            "intent": "journalreplay",
+            "mutation_kind": "food_append",
+            "target_id": target_id,
+            "reversed": bool(prior[3]),
+        }
+    intent = {
+        "food": "logmeal",
+        "food_update": "updatemeal",
+        "food_move_slot": "movemealslot",
+        "food_append": "appendmealitem",
+        "workout": "logworkout",
+        "workout_update": "updateworkout",
+        "period_start": "logperiod",
+        "period_end": "period_end",
+    }.get(prior[0])
+    if not intent:
+        return None
+    route = {"intent": intent, "replay": True}
+    try:
+        route["target_id"] = int(prior[1])
+    except (TypeError, ValueError):
+        pass
+    try:
+        saved = json.loads(prior[2] or "{}")
+    except (TypeError, ValueError):
+        saved = {}
+    if intent == "movemealslot" and saved.get("slot") in SLOT_RU:
+        route["slot"] = saved["slot"]
+    return route
+
+def journal_replay_result(cid, journal):
+    """Describe an idempotent semantic retry from current verified storage."""
+    target_id = (journal or {}).get("target_id")
+    if (journal or {}).get("reversed"):
+        return {
+            "ok": False,
+            "text": "Этот запрос уже применялся, но запись после этого удалили. Повторно её не создавала.",
+        }
+    if (journal or {}).get("mutation_kind") == "food_append":
+        verified = meal_get(cid, target_id)
+        if verified:
+            return {
+                "ok": True,
+                "text": (
+                    "Этот запрос уже применён. Проверила дневник: в "
+                    f"{SLOT_RU.get(verified.get('slot'), 'приёме пищи')} сейчас "
+                    f"{_meal_items_line(verified)}."
+                ),
+                "record_id": target_id,
+                "rec": verified,
+                "mutation": {
+                    "kind": "food_update",
+                    "date": verified.get("date") or dtoday().isoformat(),
+                },
+            }
+    return {
+        "ok": False,
+        "text": "Этот запрос уже обрабатывался, но сейчас не удалось подтвердить запись в дневнике.",
+    }
+
+def chat_mutation_preflight(cid, mutation_key, kind, args_hash):
+    if not mutation_key:
+        return None
+    c = db()
+    if not _user_write_allowed(cid, conn=c):
+        c.close(); return {"status": "stale"}
+    prior = c.execute(
+        """SELECT kind,record_id,args_hash,result_json,reversed_at
+           FROM chat_mutations WHERE chat_id=? AND mutation_key=?""",
+        (cid, mutation_key),
+    ).fetchone()
+    c.close()
+    if not prior:
+        return None
+    status = "mismatch" if prior[0] != kind or (prior[2] or "") != (args_hash or "") else (
+        "reversed" if prior[4] else "duplicate"
+    )
+    try: record_id = int(prior[1])
+    except (TypeError, ValueError): record_id = None
+    try: data = json.loads(prior[3] or "{}")
+    except (TypeError, ValueError): data = {}
+    return {"status": status, "id": record_id, "created": False, "data": data}
+
+def _food_action_success(rec, mid, event_date):
+    slot = rec.get("slot") or slot_for_now()
+    sm = SLOT_RU.get(slot, "приём")
+    grams = f", примерно {rec['grams']} г" if rec.get("grams") else ""
+    when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
+    title = _meal_items_line(rec) if rec.get("items") else rec["title"]
+    text_out = (
+        f"Записала{when} в {sm}: {title}{grams} — около {rec['kcal']} ккал "
+        f"(Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). "
+        "Порция и КБЖУ оценочные, запись уже видна в разделе «Питание»."
+    )
+    if rec.get("slot_guessed"):
+        text_out += (
+            f" Приём пищи определила по времени как «{sm}»; если это не так, "
+            "просто напиши, например «это был завтрак, а не обед»."
+        )
+    unparsed = [str(x).strip() for x in (rec.get("unparsed") or []) if str(x).strip()]
+    if unparsed:
+        text_out += (
+            " Не разобрала: «" + "», «".join(unparsed[:3])
+            + "». Напиши, что это было, и я дополню запись."
+        )
+    return {"ok": True, "text": text_out, "record_id": mid, "rec": rec,
+            "mutation": {"kind": "food", "date": event_date.isoformat()}}
+
+def _food_update_success(rec, mid, event_date):
+    grams = f", примерно {rec['grams']} г" if rec.get("grams") else ""
+    when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
+    text_out = (
+        f"Исправила запись{when}: {rec['title']}{grams} — около {rec['kcal']} ккал "
+        f"(Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). "
+        "Проверила сохранение — обновлённая запись уже в разделе «Питание»."
+    )
+    return {
+        "ok": True, "text": text_out, "record_id": mid, "rec": rec,
+        "mutation": {"kind": "food_update", "date": event_date.isoformat()},
+    }
+
+def _workout_action_success(rec, wid, event_date):
+    details = []
+    if rec.get("duration"):
+        details.append(rec["duration"])
+    if rec.get("rpe"):
+        details.append(rec["rpe"] + " нагрузка")
+    when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
+    suffix = " · " + ", ".join(details) if details else ""
+    kcal_note = f" · около {rec['kcal']} ккал" if rec.get("kcal") else ""
+    return {
+        "ok": True,
+        "text": f"Записала тренировку{when}: {rec['type']}{suffix}{kcal_note}. Она уже видна в разделе «Нагрузка».",
+        "record_id": wid,
+        "rec": rec,
+        "mutation": {"kind": "workout", "date": event_date.isoformat()},
+    }
+
+def _workout_update_success(rec, wid, event_date):
+    details = []
+    if rec.get("duration"):
+        details.append(rec["duration"])
+    if rec.get("rpe"):
+        details.append(rec["rpe"] + " нагрузка")
+    suffix = " · " + ", ".join(details) if details else ""
+    when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
+    return {
+        "ok": True,
+        "text": (
+            f"Исправила тренировку{when}: {rec['type']}{suffix}. "
+            "Проверила сохранение — обновление уже в разделе «Нагрузка»."
+        ),
+        "record_id": wid,
+        "rec": rec,
+        "mutation": {"kind": "workout_update", "date": event_date.isoformat()},
+    }
+
+_CHAT_DATE_RE = re.compile(
+    r"\b(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{4}-\d{2}-\d{2}|"
+    r"\d{1,2}\s+(?:январ\w*|феврал\w*|март\w*|апрел\w*|ма[йяе]|июн\w*|июл\w*|"
+    r"август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)(?:\s+\d{4})?)\b",
+    re.I,
+)
+
+def _parse_chat_absolute_date(raw):
+    value = str(raw or "").strip()
+    # Для журналирования дата без года означает текущий год. В отличие от
+    # прогнозного parse_date, будущий день нельзя молча переносить на прошлый год.
+    if re.fullmatch(r"\d{1,2}[./-]\d{1,2}", value):
+        sep = "." if "." in value else ("/" if "/" in value else "-")
+        return parse_date(value + sep + str(dtoday().year))
+    if re.fullmatch(
+        r"\d{1,2}\s+(?:январ\w*|феврал\w*|март\w*|апрел\w*|ма[йяе]|июн\w*|июл\w*|"
+        r"август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)",
+        value,
+        re.I,
+    ):
+        return parse_date(value + " " + str(dtoday().year))
+    return parse_date(value)
+
+def chat_event_date(text, max_past_days=366):
+    """Дата события из чата. Возвращает (date, error); без даты — сегодня по Москве."""
+    low = (text or "").lower()
+    today = dtoday()
+    if "позавчера" in low:
+        parsed = today - timedelta(days=2)
+    elif "вчера" in low:
+        parsed = today - timedelta(days=1)
+    elif "сегодня" in low:
+        parsed = today
+    elif "завтра" in low:
+        return None, "future"
+    else:
+        match = _CHAT_DATE_RE.search(text or "")
+        parsed = _parse_chat_absolute_date(match.group(0)) if match else today
+        if match and parsed is None:
+            return None, "invalid"
+    if parsed > today:
+        return None, "future"
+    if (today - parsed).days > max_past_days:
+        return None, "too_old"
+    return parsed, None
+
+def extract_food_log_text(text):
+    """Убирает только служебные слова команды, сохраняя продукт, количество и жирность."""
+    cleaned, _ = strip_aiwa_address(text)
+    cleaned = re.sub(r"(?i)^\s*можешь(?:\s+ли)?\s+", " ", cleaned)
+    cleaned = re.sub(
+        r"(?i)\b(запис\w*|запиш\w*|добав\w*|внес\w*|занес\w*|отмет\w*|зафиксир\w*|залогир\w*|логни)\b",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?i)\bпожалуйста\b", " ", cleaned)
+    cleaned = re.sub(
+        r"(?i)\b(?:я\s+)?(?:съел\w*|поел\w*|ел[аи]?|кушал\w*|скушал\w*|покушал\w*|выпил\w*)\b",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)\b(?:в\s+дневник(?:\s+(?:еды|питания))?|в\s+еду|в\s+при[её]м|"
+        r"на\s+(?:завтрак|обед|ужин|перекус|полдник)|в\s+(?:завтрак|обед|ужин|перекус))\b",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.:;—-\t")
+    return cleaned
+
+async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
+                          preparsed_food_text=None, preparsed_slot=None,
+                          preparsed_food_record=None):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
-    generation = _user_generation(cid)
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("food", text)
+    prior = chat_mutation_preflight(cid, mutation_key, "food", args_hash)
+    if prior:
+        if prior["status"] == "mismatch":
+            return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+        if prior["status"] == "reversed":
+            return {"ok": False, "text": "Эта запись уже была отменена и не добавлена повторно."}
+        if prior["status"] == "duplicate" and prior.get("data"):
+            saved_date = date.fromisoformat(prior["data"].get("date") or dtoday().isoformat())
+            return _food_action_success(prior["data"], prior.get("id"), saved_date)
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     ev(cid, "flow_start", meta="food")
-    slot = slot_from_text(text)
-    food = re.sub(r"(?i)^\s*(айва[,\s]*)?(добав\w*|запиш\w*|занес\w*|залогир\w*|логни|отмет\w*)\b", "", text)
-    food = re.sub(r"(?i)\b(в\s+дневник|в\s+еду|в\s+приём|что\s+я\s+(съел\w*|поел\w*|ел\w*)|на\s+(завтрак|обед|ужин|перекус|полдник)|в\s+(завтрак|обед|ужин|перекус))\b", " ", food)
-    food = food.strip(" ,.:—-\t")
+    slot = (
+        preparsed_slot
+        if preparsed_slot in {"breakfast", "lunch", "snack", "dinner"}
+        else slot_from_text(text)
+    )
+    event_date, date_error = chat_event_date(text, max_past_days=31)
+    if date_error:
+        return {"ok": False, "text": "Не стала записывать: укажи сегодняшнюю дату или один из последних 31 дней."}
+    food = str(preparsed_food_text or "").strip()[:500] or extract_food_log_text(text)
     if not food:
-        food = text
+        return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «съела 200 г творога, запиши»."}
     usage = []
-    parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, food, profile_of(u), usage,
-                                 user_generation=generation)
+    parsed = preparsed_food_record if isinstance(preparsed_food_record, dict) else None
+    if parsed is None:
+        parsed = await llm_to_thread(
+            cid, "food_text", L.analyze_food_text, food, profile_of(u), usage,
+            journal_v2_enabled(cid),
+            user_generation=generation,
+        )
     if not _user_write_allowed(cid, generation):
-        return "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."
-    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage)
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage,
+       user_generation=generation)
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec:
-        return "Не поняла, что добавить. Напиши, например «добавь на завтрак рисовую кашу»."
+        return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «съела 200 г творога 5%, запиши»."}
     rec["slot"] = slot or slot_for_now()
-    meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
-    sm = {"breakfast": "завтрак", "lunch": "обед", "snack": "перекус", "dinner": "ужин"}.get(rec["slot"], "приём")
-    return f"Добавила в {sm}: {rec['title']} — {rec['kcal']} ккал (Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). Итоги дня — в разделе «Питание»."
+    rec["slot_guessed"] = not bool(slot)
+    saved = meal_add(
+        cid, rec, d=event_date.isoformat(), user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    if not saved or saved.get("status") == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved.get("status") == "reversed":
+        return {"ok": False, "text": "Эта запись уже была отменена и не добавлена повторно."}
+    mid = saved.get("id")
+    if not mid:
+        return {"ok": False, "text": "Не получилось сохранить запись. Попробуй ещё раз."}
+    verified = meal_get(cid, mid)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="food|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Запись отправилась на сохранение, но я не смогла проверить её в дневнике. Попробуй ещё раз."}
+    # Parsing diagnostics do not belong to the meal row, but must survive the
+    # verify-after-write boundary so silent omissions become visible.
+    rec = dict(verified, unparsed=rec.get("unparsed") or [])
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if saved.get("created"):
+        ev(cid, "goal", meta="food_log", user_generation=generation)
+        ev(cid, "manual", meta="food_log", user_generation=generation)
+        ev(cid, "journal_mutation_executed", meta="create|food", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|create_meal|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="create|food", user_generation=generation)
+    return _food_action_success(rec, mid, date.fromisoformat(rec.get("date") or event_date.isoformat()))
+
+async def log_food_from_text(cid, u, text, user_generation=None, mutation_key=None):
+    result = await log_food_action(cid, u, text, user_generation=user_generation, mutation_key=mutation_key)
+    return result["text"]
+
+SLOT_RU = {
+    "breakfast": "завтрак",
+    "lunch": "обед",
+    "snack": "перекус",
+    "dinner": "ужин",
+}
+
+def _items_or_synthetic(rec):
+    """Legacy aggregate rows become one item when an item-level edit is needed."""
+    items = [dict(x) for x in (rec.get("items") or []) if isinstance(x, dict)]
+    if items:
+        return items
+    return [{
+        "name": rec.get("title") or "Приём пищи",
+        "grams": rec.get("grams") or 0,
+        "kcal": rec.get("kcal") or 0,
+        "protein": rec.get("protein") or 0,
+        "fat": rec.get("fat") or 0,
+        "carbs": rec.get("carbs") or 0,
+    }]
+
+def _meal_items_line(rec):
+    names = [str(x.get("name") or "").strip() for x in (rec.get("items") or [])]
+    names = [x for x in names if x]
+    return ", ".join(names[:5]) or rec.get("title") or "приём пищи"
+
+def _same_food_item(left, right):
+    def canonical(value):
+        return re.sub(r"[^а-яёa-z0-9]+", "", str(value or "").casefold())[:80]
+    a, b = canonical(left), canonical(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    contained = min(len(a), len(b)) >= 5 and (a in b or b in a)
+    return contained or SequenceMatcher(None, a, b).ratio() >= 0.78
+
+async def move_meal_slot_action(cid, meal_id, slot, user_generation=None, mutation_key=None):
+    """Move an owned meal and acknowledge only the verified DB state."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    if slot not in SLOT_RU:
+        return {"ok": False, "text": "Не поняла, куда перенести запись: в завтрак, обед, перекус или ужин."}
+    current = meal_get(cid, meal_id)
+    if not current:
+        return {"ok": False, "text": "Не нашла эту запись в дневнике. Уточни, какой приём пищи нужно исправить."}
+    if current.get("slot") == slot and not current.get("slot_guessed"):
+        return {
+            "ok": True,
+            "text": f"Эта запись уже находится в разделе «{SLOT_RU[slot]}» — ничего не меняла.",
+            "record_id": current["id"],
+            "rec": current,
+            "mutation": {"kind": "food_update", "date": current.get("date") or dtoday().isoformat()},
+        }
+    args_hash = chat_mutation_args_hash("food_update", f"{meal_id}\nslot={slot}")
+    rec = dict(current, slot=slot, slot_guessed=False)
+    saved = meal_update(
+        cid, meal_id, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, mutation_kind="food_move_slot", return_status=True,
+    )
+    if not saved or saved.get("status") not in {"updated", "duplicate"}:
+        ev(cid, "journal_mutation_failed", meta=f"move_slot|{(saved or {}).get('status', 'failed')}",
+           user_generation=generation)
+        return {"ok": False, "text": "Не получилось перенести запись. Дневник не меняла — попробуй ещё раз."}
+    verified = meal_get(cid, meal_id)
+    if not verified or verified.get("slot") != slot or verified.get("slot_guessed"):
+        ev(cid, "journal_mutation_failed", meta="move_slot|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить перенос в дневнике. Попробуй ещё раз."}
+    if saved.get("updated"):
+        ev(cid, "journal_mutation_executed", meta="move_slot|food", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|move_meal_slot|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="move_slot|food", user_generation=generation)
+    return {
+        "ok": True,
+        "text": (
+            f"Перенесла в {SLOT_RU[slot]}: {_meal_items_line(verified)}. "
+            "Проверила — запись уже обновлена в разделе «Питание»."
+        ),
+        "record_id": meal_id,
+        "rec": verified,
+        "mutation": {"kind": "food_update", "date": verified.get("date") or dtoday().isoformat()},
+    }
+
+async def append_meal_item_action(cid, u, meal_id, food_text, user_generation=None,
+                                  mutation_key=None, preparsed_food_record=None):
+    """Append one omitted item, recompute totals in code, and verify the update."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    current = meal_get(cid, meal_id)
+    if not current:
+        return {"ok": False, "text": "Не нашла запись, куда добавить продукт. Уточни нужный приём пищи."}
+    addition = str(food_text or "").strip()[:500]
+    if not addition:
+        return {"ok": False, "text": "Не поняла, какой продукт пропущен. Напиши название и количество."}
+    args_hash = chat_mutation_args_hash("food_update", f"{meal_id}\nappend={addition}")
+    prior = chat_mutation_preflight(cid, mutation_key, "food_append", args_hash)
+    if prior:
+        if prior["status"] == "duplicate" and prior.get("data"):
+            verified = meal_get(cid, meal_id) or prior["data"]
+            return {
+                "ok": True,
+                "text": (
+                    f"Эта позиция уже добавлена в {SLOT_RU.get(verified.get('slot'), 'приём пищи')}: "
+                    f"{_meal_items_line(verified)}."
+                ),
+                "record_id": meal_id,
+                "rec": verified,
+                "mutation": {"kind": "food_update", "date": verified.get("date") or dtoday().isoformat()},
+            }
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+        return {"ok": False, "text": "Не стала повторять дополнение: идентификатор запроса уже использован."}
+    usage = []
+    parsed = preparsed_food_record if isinstance(preparsed_food_record, dict) else None
+    if parsed is None:
+        parsed = await llm_to_thread(
+            cid, "food_text", L.analyze_food_text, addition, profile_of(u), usage,
+            journal_v2_enabled(cid),
+            user_generation=generation,
+        )
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage,
+           user_generation=generation)
+    extra = normalize_food(parsed, "text") if parsed else None
+    if not extra or not _items_or_synthetic(extra):
+        return {"ok": False, "text": "Не смогла разобрать пропущенный продукт. Уточни название и количество."}
+    current_items = _items_or_synthetic(current)
+    extra_items = _items_or_synthetic(extra)
+    if all(
+        any(_same_food_item(add.get("name"), old.get("name")) for old in current_items)
+        for add in extra_items
+    ):
+        return {
+            "ok": True,
+            "text": (
+                f"Проверила дневник: {_meal_items_line(extra)} уже есть в "
+                f"{SLOT_RU.get(current.get('slot'), 'этом приёме пищи')}. Ничего не дублировала."
+            ),
+            "record_id": meal_id,
+            "rec": current,
+            "mutation": {"kind": "food_update", "date": current.get("date") or dtoday().isoformat()},
+        }
+    merged = current_items + extra_items
+    rec = {
+        "title": ", ".join(str(x.get("name") or "") for x in merged[:4])[:80] or current["title"],
+        "items": merged,
+        "source": "text",
+        "slot": current.get("slot"),
+        "slot_guessed": bool(current.get("slot_guessed")),
+        "fclass": current.get("fclass"),
+        "kcal": sum(int(x.get("kcal") or 0) for x in merged),
+        "protein": round(sum(float(x.get("protein") or 0) for x in merged), 1),
+        "fat": round(sum(float(x.get("fat") or 0) for x in merged), 1),
+        "carbs": round(sum(float(x.get("carbs") or 0) for x in merged), 1),
+        "grams": sum(int(x.get("grams") or 0) for x in merged) or None,
+    }
+    saved = meal_update(
+        cid, meal_id, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, mutation_kind="food_append", return_status=True,
+    )
+    if not saved or saved.get("status") not in {"updated", "duplicate"}:
+        ev(cid, "journal_mutation_failed", meta=f"append|{(saved or {}).get('status', 'failed')}",
+           user_generation=generation)
+        return {"ok": False, "text": "Не получилось дополнить запись. Дневник не меняла — попробуй ещё раз."}
+    verified = meal_get(cid, meal_id)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="append|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить дополнение в дневнике. Попробуй ещё раз."}
+    if saved.get("updated"):
+        ev(cid, "journal_mutation_executed", meta="append|food", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|append_meal_item|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="append|food", user_generation=generation)
+    return {
+        "ok": True,
+        "text": (
+            f"Проверила: этой позиции не было. Добавила в {SLOT_RU.get(verified.get('slot'), 'приём пищи')}: "
+            f"{_meal_items_line(extra)}. Итог записи — около {verified['kcal']} ккал "
+            f"(Б{round(verified['protein'])} Ж{round(verified['fat'])} У{round(verified['carbs'])})."
+        ),
+        "record_id": meal_id,
+        "rec": verified,
+        "mutation": {"kind": "food_update", "date": verified.get("date") or dtoday().isoformat()},
+    }
+
+async def log_food_update_action(cid, u, text, target_id, user_generation=None,
+                                 mutation_key=None, preparsed_food_text=None,
+                                 preparsed_food_record=None):
+    """Update one explicit owned meal, then acknowledge only the verified DB row."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("food_update", f"{target_id}\n{text}")
+    prior = chat_mutation_preflight(cid, mutation_key, "food_update", args_hash)
+    if prior:
+        if prior["status"] == "duplicate" and prior.get("data"):
+            saved_date = date.fromisoformat(prior["data"].get("date") or dtoday().isoformat())
+            return _food_update_success(prior["data"], prior.get("id"), saved_date)
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+        return {"ok": False, "text": "Не стала повторять исправление: идентификатор запроса уже использован."}
+    current = meal_get(cid, target_id)
+    if not current:
+        return {"ok": False, "text": "Не нашла запись, которую нужно исправить. Открой дневник и уточни приём пищи."}
+    ev(cid, "journal_action_planned", meta="update|food", user_generation=generation)
+    correction = str(preparsed_food_text or "").strip()[:500]
+    grams_match = re.search(r"\b(\d{1,4})\s*(?:г|гр|грамм\w*)\b", text or "", re.I)
+    if not correction:
+        correction = (
+            f"{current['title']}, {grams_match.group(1)} г"
+            if grams_match else f"{current['title']}. Уточнение пользовательницы: {text}"
+        )
+    usage = []
+    parsed = preparsed_food_record if isinstance(preparsed_food_record, dict) else None
+    if parsed is None:
+        parsed = await llm_to_thread(
+            cid, "food_update", L.analyze_food_text, correction, profile_of(u), usage,
+            journal_v2_enabled(cid),
+            user_generation=generation,
+        )
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="food_update", calls=len(usage), usage=usage,
+           user_generation=generation)
+    rec = normalize_food(parsed, "text") if parsed else None
+    if not rec and grams_match and current.get("grams"):
+        new_grams = int(grams_match.group(1))
+        ratio = new_grams / float(current["grams"])
+        rec = dict(current)
+        rec.update({
+            "grams": new_grams,
+            "kcal": int(round(current["kcal"] * ratio)),
+            "protein": round(current["protein"] * ratio, 1),
+            "fat": round(current["fat"] * ratio, 1),
+            "carbs": round(current["carbs"] * ratio, 1),
+            "source": "text",
+        })
+    if not rec:
+        return {"ok": False, "text": "Не поняла исправление. Уточни продукт и новое количество, например «чипсов было 100 г»."}
+    rec["slot"] = current.get("slot") or slot_for_now()
+    saved = meal_update(
+        cid, target_id, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    if not saved or saved.get("status") not in {"updated", "duplicate"}:
+        ev(cid, "journal_mutation_failed", meta=f"food_update|{(saved or {}).get('status', 'failed')}",
+           user_generation=generation)
+        return {"ok": False, "text": "Не получилось исправить запись. Ничего не меняла — попробуй ещё раз."}
+    verified = meal_get(cid, target_id)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="food_update|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить исправление в дневнике. Попробуй ещё раз."}
+    if saved.get("updated"):
+        ev(cid, "journal_mutation_executed", meta="update|food", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|update_meal|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="update|food", user_generation=generation)
+    return _food_update_success(
+        verified, target_id, date.fromisoformat(verified.get("date") or dtoday().isoformat()),
+    )
+
+async def log_workout_action(cid, u, text, user_generation=None, mutation_key=None, preparsed_workout=None):
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("workout", text)
+    prior = chat_mutation_preflight(cid, mutation_key, "workout", args_hash)
+    if prior:
+        if prior["status"] == "mismatch":
+            return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+        if prior["status"] == "reversed":
+            return {"ok": False, "text": "Эта тренировка уже была отменена и не добавлена повторно."}
+        if prior["status"] == "duplicate" and prior.get("data"):
+            saved_date = date.fromisoformat(prior["data"].get("date") or dtoday().isoformat())
+            return _workout_action_success(prior["data"], prior.get("id"), saved_date)
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    event_date, date_error = chat_event_date(text, max_past_days=90)
+    if date_error:
+        return {"ok": False, "text": "Не стала записывать: тренировка должна быть сегодня или в последние 90 дней."}
+    ev(cid, "flow_start", meta="workout", user_generation=generation)
+    usage = []
+    parsed = preparsed_workout if isinstance(preparsed_workout, dict) else None
+    if parsed is None:
+        try:
+            parsed = await llm_to_thread(
+                cid, "workout_text", L.analyze_workout_text, text, usage,
+                user_generation=generation,
+            )
+        except Exception as exc:
+            log.warning("workout text analyze %s: %s", cid, exc)
+            parsed = None
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="workout_text", calls=len(usage), usage=usage,
+           user_generation=generation)
+    rec = normalize_workout(parsed or basic_workout_from_text(text), text)
+    if not rec:
+        return {"ok": False, "text": "Не поняла, какую тренировку записать. Напиши, например «бегала 30 минут, запиши тренировку»."}
+    prof = profile_of(u) or {}
+    # Не выдумываем длительность: без неё расход калорий достоверно не оценить.
+    rec["kcal"] = (
+        workout_calories(rec["type"], rec["duration"], rec.get("rpe"), prof.get("weight"))
+        if rec.get("duration") else 0
+    )
+    saved = workout_add(
+        cid, rec, d=event_date.isoformat(), user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    if not saved or saved.get("status") == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved.get("status") == "reversed":
+        return {"ok": False, "text": "Эта тренировка уже была отменена и не добавлена повторно."}
+    wid = saved.get("id")
+    if not wid:
+        return {"ok": False, "text": "Не получилось сохранить тренировку. Попробуй ещё раз."}
+    verified = workout_get(cid, wid)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="workout|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Тренировка отправилась на сохранение, но я не смогла проверить её в дневнике. Попробуй ещё раз."}
+    rec = verified
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if saved.get("created"):
+        ev(cid, "goal", meta="workout", user_generation=generation)
+        ev(cid, "manual", meta="workout", user_generation=generation)
+        ev(cid, "journal_mutation_executed", meta="create|workout", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|create_workout|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="create|workout", user_generation=generation)
+    return _workout_action_success(rec, wid, date.fromisoformat(rec.get("date") or event_date.isoformat()))
+
+async def log_workout_update_action(cid, u, text, target_id, user_generation=None,
+                                    mutation_key=None, preparsed_workout=None):
+    """Update one explicit owned workout and confirm only its verified DB state."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("workout_update", f"{target_id}\n{text}")
+    prior = chat_mutation_preflight(cid, mutation_key, "workout_update", args_hash)
+    if prior:
+        if prior["status"] == "duplicate" and prior.get("data"):
+            saved_date = date.fromisoformat(prior["data"].get("date") or dtoday().isoformat())
+            return _workout_update_success(prior["data"], prior.get("id"), saved_date)
+        if prior["status"] == "stale":
+            return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+        return {"ok": False, "text": "Не стала повторять исправление: идентификатор запроса уже использован."}
+    current = workout_get(cid, target_id)
+    if not current:
+        return {"ok": False, "text": "Не нашла тренировку, которую нужно исправить. Открой раздел «Нагрузка» и уточни запись."}
+    ev(cid, "journal_action_planned", meta="update|workout", user_generation=generation)
+    usage = []
+    parsed = preparsed_workout if isinstance(preparsed_workout, dict) else None
+    if parsed is None:
+        parsed = await llm_to_thread(
+            cid, "workout_update", L.analyze_workout_text,
+            f"{current['type']} {current.get('note') or ''}. Уточнение: {text}", usage,
+            user_generation=generation,
+        )
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="workout_update", calls=len(usage), usage=usage,
+           user_generation=generation)
+    rec = normalize_workout(parsed, text) if parsed else None
+    if not rec:
+        return {"ok": False, "text": "Не поняла исправление тренировки. Уточни длительность, упражнение или количество повторов."}
+    for field in ("type", "duration", "rpe", "note", "review", "muscles"):
+        if not rec.get(field) and current.get(field):
+            rec[field] = current[field]
+    if not rec.get("items") and current.get("items"):
+        rec["items"] = current["items"]
+    prof = profile_of(u) or {}
+    # Не выдумываем длительность: без неё расход калорий достоверно не оценить.
+    rec["kcal"] = (
+        workout_calories(rec["type"], rec["duration"], rec.get("rpe"), prof.get("weight"))
+        if rec.get("duration") else 0
+    )
+    saved = workout_update(
+        cid, target_id, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    if not saved or saved.get("status") not in {"updated", "duplicate"}:
+        ev(cid, "journal_mutation_failed", meta=f"workout_update|{(saved or {}).get('status', 'failed')}",
+           user_generation=generation)
+        return {"ok": False, "text": "Не получилось исправить тренировку. Ничего не меняла — попробуй ещё раз."}
+    verified = workout_get(cid, target_id)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="workout_update|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить исправление тренировки. Попробуй ещё раз."}
+    if saved.get("updated"):
+        ev(cid, "journal_mutation_executed", meta="update|workout", user_generation=generation)
+        ev(cid, "tool_execution", meta="success|update_workout|journal", user_generation=generation)
+    ev(cid, "journal_mutation_verified", meta="update|workout", user_generation=generation)
+    return _workout_update_success(
+        verified, target_id, date.fromisoformat(verified.get("date") or dtoday().isoformat()),
+    )
+
+async def log_period_action(cid, u, text, context=None, user_generation=None, mutation_key=None):
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("period_start", text)
+    event_date, date_error = chat_event_date(text, max_past_days=366)
+    if date_error:
+        return {"ok": False, "text": "Не стала менять календарь: дата не должна быть в будущем и старше одного года."}
+    iso = event_date.isoformat()
+    saved = _save_period_start_atomic(
+        cid, iso, user_generation=generation, protect_modes=True, enforce_spacing=True,
+        mutation_key=mutation_key, args_hash=args_hash,
+    )
+    if saved["status"] == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved["status"] == "protected":
+        label = "беременности" if saved.get("mode") == "preg" else "менопаузы"
+        return {"ok": False, "text": f"Сейчас включён режим {label}, поэтому я не стала менять календарь автоматически. Сначала переключи режим в приложении, если это неактуально."}
+    if saved["status"] == "duplicate":
+        saved_iso = saved.get("date") or iso
+        return {"ok": True, "text": f"Начало месячных {date.fromisoformat(saved_iso).strftime('%d.%m.%Y')} уже отмечено в календаре.",
+                "mutation": {"kind": "period", "date": saved_iso}}
+    if saved["status"] == "conflict":
+        return {"ok": False, "text": f"В календаре уже есть начало {date.fromisoformat(saved['date']).strftime('%d.%m.%Y')}. Не стала создавать новый цикл так близко — проверь даты в календаре приложения."}
+    if saved["status"] != "created":
+        return {"ok": False, "text": "Не получилось сохранить дату. Попробуй ещё раз."}
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    if context is not None:
+        current = row(cid)
+        if current and _user_write_allowed(cid, generation):
+            schedule_daily(context.application, cid, current["send_time"] or "08:00")
+    ev(cid, "goal", meta="period", user_generation=generation)
+    ev(cid, "manual", meta="period_chat", user_generation=generation)
+    return {"ok": True,
+            "text": f"Отметила начало месячных: {event_date.strftime('%d.%m.%Y')}. Прогноз цикла обновлён, дата уже видна в календаре приложения.",
+            "mutation": {"kind": "period", "date": iso}}
+
+async def log_period_end_action(cid, u, text, user_generation=None, mutation_key=None):
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    args_hash = chat_mutation_args_hash("period_end", text)
+    event_date, date_error = chat_event_date(text, max_past_days=31)
+    if date_error:
+        return {"ok": False, "text": "Не стала менять календарь: дата окончания должна быть сегодня или в последние 31 день."}
+    saved = _save_period_end_atomic(
+        cid, event_date.isoformat(), user_generation=generation,
+        mutation_key=mutation_key, args_hash=args_hash,
+    )
+    if saved["status"] == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved["status"] == "duplicate":
+        saved_end = date.fromisoformat(saved.get("end") or event_date.isoformat())
+        return {
+            "ok": True,
+            "text": f"Окончание месячных {saved_end.strftime('%d.%m.%Y')} уже записано. Длительность — {saved.get('length')} дн.",
+            "mutation": {"kind": "period", "date": saved.get("start"), "end": saved_end.isoformat()},
+        }
+    if saved["status"] == "missing":
+        return {"ok": False, "text": "Сначала отметь начало последних месячных, тогда я смогу записать окончание."}
+    if saved["status"] == "invalid":
+        return {"ok": False, "text": "Дата не сходится с последним началом месячных. Проверь начало и окончание в календаре приложения."}
+    if saved["status"] != "saved":
+        return {"ok": False, "text": "Не получилось сохранить окончание месячных. Попробуй ещё раз."}
+    if not _user_write_allowed(cid, generation):
+        return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    ev(cid, "manual", meta="period_end_chat", user_generation=generation)
+    return {
+        "ok": True,
+        "text": f"Записала окончание месячных: {event_date.strftime('%d.%m.%Y')}. Длительность — {saved['length']} дн., календарь приложения обновлён.",
+        "mutation": {"kind": "period", "date": saved["start"], "end": event_date.isoformat()},
+    }
 
 def _read_upload(field):
     if field is None: return b"", "food.jpg"
@@ -4616,6 +8577,7 @@ async def _api_food_photo(request):
         return _cors(web.json_response({"ok": False, "message": "Не получила фото."}, status=400))
     cid = _verify_init(data.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     generation = await _prepare_food_photo_request_async(cid)
     if generation is None:
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте: /start."}, status=403))
@@ -4669,6 +8631,7 @@ async def _api_food_photo_status(request):
 async def _api_food_text(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте."}, status=403))
@@ -4678,7 +8641,9 @@ async def _api_food_text(request):
     ev(cid, "flow_start", meta="food")
     prof = profile_of(u); usage = []
     try:
-        parsed = await llm_to_thread(cid, "food_text", L.analyze_food_text, txt, prof, usage,
+        parsed = await llm_to_thread(
+            cid, "food_text", L.analyze_food_text, txt, prof, usage,
+            journal_v2_enabled(cid),
                                      user_generation=generation)
     except Exception as e:
         log.warning("food_text analyze %s: %s", cid, e); parsed = None
@@ -4711,6 +8676,19 @@ async def _api_track(request):
     if flow in {"food", "workout"} and onboarded:
         ev(cid, "flow_start", meta=flow)
     return _cors(web.json_response({"ok": True}))
+
+async def _api_train_day(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    d = str(body.get("d") or "")[:10]
+    try:
+        dd = date.fromisoformat(d)
+        if dd > dtoday() or (dtoday() - dd).days > 92: raise ValueError
+    except Exception:
+        return _cors(web.json_response({"error": "bad date"}, status=400))
+    ev(cid, "button", meta="web_train_day")
+    return _cors(web.json_response({"ok": True, "d": d, "workouts": workouts_of(cid, d)}))
 
 async def _api_train(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -4797,11 +8775,18 @@ async def _api_diary(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     if not is_onboarded(await asyncio.to_thread(row, cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     _queue_event(cid, "button", meta="web_diary")
-    return _cors(web.json_response(await asyncio.to_thread(diary_payload, cid)))
+    _d = str(body.get("d") or "")[:10] or None
+    if _d:
+        try:
+            _dd = date.fromisoformat(_d)
+            if _dd > dtoday() or (dtoday() - _dd).days > 92: _d = None
+        except Exception: _d = None
+    return _cors(web.json_response(await asyncio.to_thread(diary_payload, cid, d=_d)))
 
 async def _api_diary_del(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     try: meal_del(cid, int(body.get("id")))
     except Exception: pass
@@ -4811,6 +8796,7 @@ async def _api_diary_del(request):
 async def _api_diary_scale(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     try: meal_scale(cid, int(body.get("id")), int(body.get("grams")))
     except Exception: pass
@@ -4820,6 +8806,7 @@ async def _api_diary_scale(request):
 async def _api_diary_slot(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     try: meal_set_slot(cid, int(body.get("id")), body.get("slot"))
     except Exception: pass
@@ -4829,6 +8816,7 @@ async def _api_diary_slot(request):
 async def _api_diary_edit(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     kw = {}
     if body.get("title") is not None: kw["title"] = str(body["title"]).strip()[:80]
@@ -4847,6 +8835,7 @@ async def _api_diary_edit(request):
 async def _api_food_manual(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_week_food_cache(cid)
     if not is_onboarded(await asyncio.to_thread(row, cid)): return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву."}, status=403))
     _queue_event(cid, "flow_start", meta="food")
     title = (body.get("title") or "").strip()[:80]
@@ -4895,6 +8884,7 @@ async def _api_mode(request):
 async def _api_prefs(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    _evict_today_cache(cid)
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     note = (body.get("diet_note") or "").strip()[:300]
     upsert(cid, diet_note=note)
@@ -4947,46 +8937,6 @@ async def _api_report(request):
 
 async def _api_opts(request): return _cors(web.Response())
 
-_ADMIN_COOKIE = "aiwa_admin_session"
-_ADMIN_SESSION_SECONDS = int(os.environ.get("AIWA_ADMIN_SESSION_SECONDS", str(7 * 24 * 3600)))
-_ADMIN_KEY_WARNING_SHOWN = False
-def _admin_http_secret():
-    """Compatibility bridge: prefer a separate HTTP key, keep the current admin id working."""
-    global _ADMIN_KEY_WARNING_SHOWN
-    expected = os.environ.get("AIWA_ADMIN_KEY") or AIWA_ADMIN or ""
-    if expected and len(expected) < 32 and not _ADMIN_KEY_WARNING_SHOWN:
-        log.warning("AIWA admin dashboard uses a short legacy key; rotate AIWA_ADMIN_KEY when possible")
-        _ADMIN_KEY_WARNING_SHOWN = True
-    return str(expected)
-
-def _admin_key_ok(request):
-    # Prefer a separate HTTP secret; the Telegram admin id remains a temporary
-    # compatibility fallback until AIWA_ADMIN_KEY is configured.
-    expected = _admin_http_secret()
-    if not expected:
-        return False
-    header_key = request.headers.get("X-Admin-Key") or ""
-    cookie = request.cookies.get(_ADMIN_COOKIE) or ""
-    session = _admin_session_value(expected)
-    return (_hmac.compare_digest(str(header_key), str(expected)) or
-            _hmac.compare_digest(str(cookie), str(session)))
-
-def _admin_session_value(expected=None):
-    """One-way session token: the admin key itself is never stored in the cookie."""
-    secret = str(expected if expected is not None else _admin_http_secret())
-    return _hmac.new(secret.encode(), b"aiwa-admin-session-v1", _hashlib.sha256).hexdigest() if secret else ""
-
-def _set_admin_session(response):
-    response.set_cookie(_ADMIN_COOKIE, _admin_session_value(), max_age=_ADMIN_SESSION_SECONDS,
-                        httponly=True, secure=True, samesite="Strict", path="/")
-    return response
-
-def _refresh_admin_session(request, response):
-    """Sliding expiration: every authenticated dashboard request renews the week."""
-    if request.cookies.get(_ADMIN_COOKIE) and _admin_key_ok(request):
-        _set_admin_session(response)
-    return response
-
 _EV_LBL = {
     "start": "Начала настройку", "onboarding_completed": "Завершила настройку",
     "app_open": "Открыла приложение", "web_food": "Открыла меню", "web_diary": "Открыла дневник",
@@ -4996,7 +8946,7 @@ _EV_LBL = {
     "web_diary_edit": "Правка в дневнике", "web_diary_scale": "Граммовка в дневнике", "web_diary_slot": "Перенос приёма",
     "web_today": "Открыла «Сегодня»", "food_suggest": "Идеи по питанию", "training_today": "Разбор нагрузки", "today_note": "Сводка дня",
     "proactive_compose": "Проактив-сообщение", "partner_brief": "Партнёрский пуш", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
-    "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа", "tts:audio": "Озвучка (файлом)",
+    "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа", "tts:audio": "Озвучка (файлом)", "static:menu_pool": "Фолбэк: меню из пула", "static:training_plan": "Фолбэк: план нагрузки", "static:phases": "Фолбэк: текст фаз", "static:card_caps_empty": "Карточка: строки не собрались", "static:combined_send_fail": "Карточка: сбой объединённой отправки",
     "food_log": "Записала еду", "workout": "Отметила тренировку", "summary": "Открыла сводку", "checkin": "Чек-ин",
     "answer": "Вопрос в чате", "general": "Вопрос в чате", "webapp": "Вопрос в приложении", "command": "Команда бота", "voice": "Голосовое", "fallback": "Не поняла",
     "menu_replace": "Замена блюда", "summary_intent": "Запрос сводки", "custom_symptom": "Свой симптом",
@@ -5020,7 +8970,7 @@ _TC_LBL = {"summary": "Сводки (утро)", "answer": "Ответы в ча
            "food_text": "Еда текстом", "meal": "Замена блюда", "workout": "Разбор тренировки", "diary_reco": "Совет по дневнику",
            "webapp": "Чат в приложении", "training_section": "Разбор нагрузки", "partner_q": "Ответ партнёру",
            "today_note": "Сводка дня (ИИ)", "food_suggest": "Идеи по питанию", "training_today": "Нагрузка (ИИ)", "proactive_compose": "Проактив-сообщение", "memory_learn": "Память: запись (ИИ)", "menu": "Меню питания",
-           "partner_brief": "Партнёрский пуш (ИИ)", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон",
+           "partner_brief": "Партнёрский пуш (ИИ)", "onboard_q": "Вопрос в онбординге", "proactive_preview": "Проактив: сухой прогон", "card": "Карточка сводки (ИИ)",
            "auto": "Память: запись (ИИ)",
            "stt:salute": "Расшифровка (SaluteSpeech)", "stt:groq": "Расшифровка (Groq)", "stt:none": "Расшифровка: сбой", "tts:salute": "Озвучка ответа", "tts:audio": "Озвучка (файлом)"}
 def _tc_lbl(m): return _TC_LBL.get(m, m or "прочее")
@@ -5030,7 +8980,7 @@ def _tc_src(m):
     if m and (str(m).startswith("stt:") or str(m).startswith("tts:")): return "stt"
     if m in _TC_APP: return "app"
     if m in _TC_CHAT: return "chat"
-    if m in ("summary", "proactive_compose", "proactive_preview", "today_note", "memory_learn", "auto", "partner_brief"): return "auto"
+    if m in ("summary", "proactive_compose", "proactive_preview", "today_note", "memory_learn", "auto", "partner_brief", "card"): return "auto"
     return "other"
 
 def _feat_of(action, meta):
@@ -5294,209 +9244,12 @@ def analytics_data(days=7, frm=None, to=None):
         "series": series,
     }
 
-async def _admin_stats(request):
-    if not _admin_key_ok(request):
-        return web.json_response({"error": "forbidden"}, status=403)
-    qp = request.query
-    d = await asyncio.to_thread(analytics_data, qp.get("days", 7), qp.get("from"), qp.get("to"))
-    return web.json_response(d)
-
-async def _admin_page(request):
-    if not _admin_key_ok(request):
-        login = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AIWA · Вход</title><style>body{font:16px system-ui;background:#f6f8fa;margin:0;display:grid;place-items:center;min-height:100vh}.c{background:#fff;padding:28px;border-radius:18px;box-shadow:0 12px 40px #0001;width:min(420px,calc(100% - 40px))}h1{font-size:20px}.old{background:#fff7ed;border:1px solid #f1d2ad;border-radius:12px;padding:13px 14px;color:#7a4518;font-size:13px;line-height:1.45}.old p{margin:5px 0}.old a{color:#9a4d0b;font-weight:750}input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:10px;margin-top:10px}input{border:1px solid #ddd}button{border:0;background:#14181f;color:#fff;font-weight:700}</style>
-<div class="c"><div class="old"><strong>Эта админка устарела</strong><p>Новая продуктовая аналитика уже доступна отдельно. Здесь оставлен временный доступ для сверки старых данных.</p><a href="https://stats.multitool.works/#/p/aiwa" target="_blank" rel="noopener noreferrer">Открыть новую аналитику →</a></div><form method="post" action="/admin/login"><h1>AIWA · старая аналитика</h1><input type="password" name="key" autocomplete="current-password" placeholder="Admin key" required><button type="submit">Войти</button></form></div>"""
-        return web.Response(text=login, content_type="text/html", headers={"Cache-Control": "no-store"})
-    html_text = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AIWA · Аналитика</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<style>
-:root{--bg:#F6F8FA;--card:#fff;--ink:#14181F;--mut:#6B7280;--faint:#9AA3AF;--line:#E9ECF1;--blue:#2F6BED;--green:#1E9E54;--amber:#E8912A;--red:#DC5A5A;--violet:#7C5CD0}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,Inter,"Segoe UI",Arial,sans-serif}
-.wrap{max-width:1180px;margin:0 auto;padding:20px 20px 70px}
-.head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
-h1{font-size:20px;margin:0}
-.per{color:var(--mut);font-size:12.5px}
-.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:14px 0 4px}
-.bar button,.bar input{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 11px;font-size:13px;cursor:pointer;color:var(--ink)}
-.bar input{cursor:text;width:140px}
-.bar button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
-.bar .sp{flex:1}
-.tabs{display:flex;gap:6px;margin:16px 0 18px;flex-wrap:wrap}
-.tabs button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 16px;font-size:13.5px;font-weight:600;cursor:pointer;color:var(--mut)}
-.tabs button.on{background:var(--blue);color:#fff;border-color:var(--blue)}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin-bottom:16px}
-.mc{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 15px}
-.ml{font-size:12px;color:var(--mut);font-weight:600;display:flex;align-items:center;gap:5px}
-.mv{font-size:26px;font-weight:800;margin-top:5px;letter-spacing:-.02em;display:flex;align-items:baseline;gap:8px}
-.ms{font-size:11.5px;color:var(--faint);margin-top:3px}
-.chip{font-size:11px;font-weight:800;padding:2px 7px;border-radius:999px}
-.chip.up{color:#0E7A3A;background:#E4F5EC}.chip.dn{color:#B33636;background:#FBE7E7}.chip.zero{color:var(--mut);background:var(--line)}
-.ic{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:var(--line);color:var(--mut);font-size:10px;font-style:italic;cursor:pointer;font-weight:800;user-select:none}
-.chartcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:16px}
-.ct{font-size:13px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px}
-.tb{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:16px}
-.tb th{background:#FAFBFC;text-align:left;font-size:11px;color:var(--mut);font-weight:700;padding:9px 12px;text-transform:uppercase;letter-spacing:.03em}
-.tb td{padding:9px 12px;font-size:13px;border-top:1px solid var(--line)}
-.tb td:last-child,.tb th:last-child{text-align:right;font-variant-numeric:tabular-nums}
-.sec-h{font-size:14px;font-weight:800;margin:22px 0 10px;display:flex;align-items:center;gap:6px}
-.loading{color:var(--mut);padding:50px;text-align:center}
-#defpop{position:absolute;display:none;max-width:300px;background:#111827;color:#fff;font-size:12px;line-height:1.5;padding:10px 12px;border-radius:10px;z-index:99;box-shadow:0 8px 24px rgba(0,0,0,.2)}
-.deprecated{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:14px 0;padding:12px 14px;background:#FFF7ED;border:1px solid #F1D2AD;border-radius:11px;color:#7A4518;font-size:12px;line-height:1.45}.deprecated strong{display:block;font-size:13px}.deprecated a{flex:0 0 auto;color:#9A4D0B;font-weight:800;text-decoration:none;background:#fff;border:1px solid #E8BE91;border-radius:8px;padding:8px 10px}@media(max-width:640px){.deprecated{align-items:flex-start;flex-direction:column}.deprecated a{width:100%;text-align:center}}
-</style>
-<div class="wrap">
- <div class="head"><h1>AIWA · Аналитика</h1><span class="per" id="per"></span></div>
- <div class="deprecated"><div><strong>Старая аналитика — только для сверки</strong>Новые метрики, точный слой v2 и восстановленная история находятся в Disrupt Analytics. Эту страницу планируем удалить после переходного периода.</div><a href="https://stats.multitool.works/#/p/aiwa" target="_blank" rel="noopener noreferrer">Открыть новую аналитику →</a></div>
- <div class="bar" id="bar">
-   <button data-d="7">7 дней</button><button data-d="30">30 дней</button><button data-d="90">90 дней</button>
-   <button id="yday">Вчера</button>
-   <span style="color:var(--mut);font-size:12px">c</span><input type="date" id="from"><span style="color:var(--mut);font-size:12px">по</span><input type="date" id="to"><button id="apply">Применить</button>
-   <span class="sp"></span><button id="csv">Excel (CSV)</button><button id="rl">Обновить</button>
- </div>
- <div class="tabs" id="tabs"></div>
- <div id="view" class="loading">Загрузка…</div>
-</div>
-<div id="defpop"></div>
-<script>
-var q=new URLSearchParams(location.search), DAYS=Number(q.get('days'))||7, FROM=q.get('from')||'', TO=q.get('to')||'', D=null, TAB='aud', CH=[];
-var C={dau:'#2F6BED',wau:'#1E9E54',mau:'#E8912A',stick:'#7C5CD0',ev:'#2F6BED',tc:'#7C5CD0',ans:'#1E9E54',err:'#DC5A5A'};
-var DEF={
- ever:"Уникальные пользователи, совершившие хотя бы одно действие за всё время. Созданная запись без использования продукта не считается.",
- dau:"Уникальные активные за день. Активный = минимум одно действие пользователя (кнопки, команды, ответы, голос, ручной ввод) в чате или приложении. Получение пуша активностью НЕ считается.",
- avgdau:"Средний DAU = сумма дневных DAU за период / число дней. Показатель за весь период, не за сегодня.",
- wau:"Уникальные активные за последние 7 дней (скользящее окно).",
- mau:"Уникальные активные за последние 30 дней (скользящее окно).",
- stick:"Липкость = DAU / MAU × 100%. Доля месячной аудитории, заходящей в конкретный день.",
- ret:"Rolling retention D_N: доля новых пользователей, кто был активен на N-й день после первого ИЛИ позже. Считается по когортам возрастом от N до 90 дней.",
- evdau:"Событий на DAU = все действия пользователя (чат + приложение) за период / активные·дни.",
- tcdau:"Tools / DAU = все вызовы моделей и AI-инструментов за период / активные пользовательские дни. Для одного дня это буквально вызовы / DAU.",
- sessionsdau:"Sessions / DAU = все сессии за период / активные пользовательские дни. Новая сессия начинается после перерыва больше 30 минут. Для одного дня это буквально сессии / DAU.",
- aud:"Активные·дни = сумма по дням числа активных пользователей за период (человеко-дни). Это знаменатель метрик «на DAU».",
- evtot:"Все пользовательские действия за период (чат + приложение).",
- tctot:"Все вызовы модели за период = сумма поля calls по всем событиям.",
- tcsrc:"Откуда пришли вызовы модели: приложение (меню, фото/текст еды, тренировки), чат (ответы), авто (утренние сводки).",
- succ:"Успешность = answered / (answered + fallback + errors) × 100%.",
- lat:"Латентность ответа модели: p50 (медиана) и p95 (почти худшее) по времени ответа.",
- push:"Конверсия пуш→открытие = доля отправленных пушей, после которых пользователь сделал действие в тот же день.",
- tok:"Токены модели за период и оценка стоимости по цене за 1M токенов.",
- tokin:"Токены на входе — системный промпт, контекст цикла, история диалога и память. Обычно дороже всего по объёму.",
- tokout:"Токены на выходе — то, что модель написала в ответ. Тарифицируются дороже входных.",
- costsplit:"Стоимость с раздельными ценами: AIWA_PRICE_IN_USD за миллион входных и AIWA_PRICE_OUT_USD за миллион выходных.",
- grow:"WoW = рост относительно предыдущего периода такой же длины."
-};
-function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
-function ic(d){return d?"<span class='ic' data-def=\""+esc(d)+"\">i</span>":"";}
-function chip(g){if(g==null)return '';var c=g>0?'up':(g<0?'dn':'zero');var ar=g>0?'▲':(g<0?'▼':'■');return "<span class='chip "+c+"' title='WoW'>"+ar+" "+Math.abs(g)+"%</span>";}
-function card(label,val,sub,def,growth){return "<div class='mc'><div class='ml'>"+label+ic(def)+"</div><div class='mv'>"+(val==null?'—':val)+(growth!==undefined?chip(growth):'')+"</div>"+(sub?"<div class='ms'>"+sub+"</div>":"")+"</div>";}
-function tbl(head,rows){if(!rows||!rows.length)return "<div class='ms' style='margin-bottom:16px'>нет данных за период</div>";return "<table class='tb'><tr>"+head.map(function(h){return "<th>"+h+"</th>";}).join('')+"</tr>"+rows.map(function(r){return "<tr>"+r.map(function(c){return "<td>"+c+"</td>";}).join('')+"</tr>";}).join('')+"</table>";}
-function chartCard(id,title,def){return "<div class='chartcard'><div class='ct'>"+title+ic(def)+"</div><div style='height:230px'><canvas id='"+id+"'></canvas></div></div>";}
-function mkLine(id,keys){var el=document.getElementById(id);if(!el)return;if(!window.Chart){el.parentNode.innerHTML="<div class='ms'>График не отрисовался: не загрузился Chart.js с CDN. Все цифры выше корректны.</div>";return;}var labels=D.series.map(function(p){return p.date;});
- var ds=keys.map(function(k){return {label:k.label,data:D.series.map(function(p){return p[k.key]||0;}),borderColor:k.color,backgroundColor:k.color,tension:.3,pointRadius:3,pointHoverRadius:6,borderWidth:2,fill:false};});
- CH.push(new Chart(el,{type:'line',data:{labels:labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}},tooltip:{enabled:true}},scales:{y:{beginAtZero:true,grid:{color:'#EEF1F5'},ticks:{font:{size:11}}},x:{grid:{display:false},ticks:{font:{size:11},maxRotation:0,autoSkip:true,maxTicksLimit:9}}}}}));}
-function clearCharts(){CH.forEach(function(c){try{c.destroy();}catch(e){}});CH=[];}
-function pctv(x){return x==null?'—':x+'%';}
-function bLbl(k){var M={'sent':'Утренняя сводка','queued':'Поставлено в очередь','blocked':'Бот заблокирован','checkin_push':'Пуш чек-ина','food_reminder_sent':'Пуш про питание','train_reminder_sent':'Пуш про тренировку','phase_push':'Смена фазы','reactivation_sent':'Реактивация','announce_sent':'Анонс','meno_update_sent':'Мено-дайджест'};if(M[k])return M[k];
- if(k&&k.indexOf('proactive:')===0){var S={'pms_soon':'скоро ПМС','no_move':'нет движения','low_energy':'мало энергии','felt_bad':'плохое самочувствие','low_protein':'мало белка','practice_eve':'вечерняя практика'};var s=k.slice(10);if(S[s])return 'Проактив: '+S[s];if(s.indexOf('streak_')===0)return 'Проактив: стрик '+s.slice(7)+' дн.';return 'Проактив: '+s;}
- return k;}
-function render(){
- clearCharts();var v=document.getElementById('view');if(!D){v.textContent='нет данных';return;}v.className='';
- var g=D.growth||{};
- if(TAB==='aud'){
-  var a=D.audience,e=D.engagement,ss=e.sessions,h='';
-  h+="<div class='sec-h'>Traction</div>";
-  h+="<div class='grid'>"+
-   card('Ever used',a.ever_used,'за всё время',DEF.ever)+
-   card('DAU',a.dau,'на '+D.until,DEF.dau)+
-   card('WAU',a.wau,'7 дней',DEF.wau)+
-   card('MAU',a.mau,'30 дней',DEF.mau)+
-   card('Sessions / DAU',e.sessions_per_dau,ss.count+' сессий / '+e.active_user_days+' акт·дн',DEF.sessionsdau)+
-   card('Tools / DAU',e.tools_per_dau,e.toolcalls_total+' вызовов / '+e.active_user_days+' акт·дн',DEF.tcdau,g.toolcalls)+"</div>";
-  h+="<div class='grid'>"+
-   card('Средний DAU',a.avg_dau,'за период',DEF.avgdau,g.avg_dau)+
-   card('Stickiness',a.stickiness+'%','DAU/MAU',DEF.stick)+
-   card('Новых за период',a.new_users,'из '+a.users_total+' записей',null)+"</div>";
-  h+=chartCard('cAud','Аудитория по дням',DEF.dau);
-  h+=chartCard('cStick','Липкость по дням, %',DEF.stick);
-  var r=a.retention;
-  h+="<div class='sec-h'>Rolling retention"+ic(DEF.ret)+"</div>";
-  h+="<div class='grid'>"+card('D1',pctv(r.roll_d1),'вернулись на 1-й день+',DEF.ret)+card('D7',pctv(r.roll_d7),'на 7-й день+',DEF.ret)+card('D30',pctv(r.roll_d30),'на 30-й день+',DEF.ret)+"</div>";
-  h+="<div class='sec-h'>Сегменты по режиму</div>";
-  h+=tbl(['Режим','Всего','Активных','Ср. DAU'],a.segments.map(function(s){return [s.mode,s.users,s.active,s.avg_dau];}));
-  h+="<div class='grid'>"+card('Партнёров',a.partners.connected,'у '+a.partners.women+' женщин',null)+card('Активных за период',a.active_period,'уникальных',null)+"</div>";
-  v.innerHTML=h;mkLine('cAud',[{key:'dau',label:'DAU',color:C.dau},{key:'wau',label:'WAU',color:C.wau},{key:'mau',label:'MAU',color:C.mau}]);mkLine('cStick',[{key:'stick',label:'Stickiness %',color:C.stick}]);
- } else if(TAB==='eng'){
-  var e=D.engagement,ts=D.toolcalls_by_source||{},h='';
-  h+="<div class='grid'>"+
-   card('Событий на DAU',e.events_per_dau,e.events_total+' соб / '+e.active_user_days+' акт·дн',DEF.evdau,g.events)+
-   card('Всего событий',e.events_total,'за период',DEF.evtot,g.events)+
-   card('Активные·дни',e.active_user_days,'знаменатель «на DAU»',DEF.aud)+"</div>";
-  h+=chartCard('cEng','События по дням',DEF.evtot);
-  h+="<div class='sec-h'>Разделы: сколько людей пользуются"+ic('Уникальные пользователи за выбранный период, которые совершали действия в каждом разделе. Один человек может быть в нескольких разделах.')+"</div>";
-  h+=tbl(['Раздел','Людей','Из активных','Событий'],(e.features||[]).map(function(x){var ap=D.audience&&D.audience.active_period;return [x.name,x.users,(ap?Math.round(x.users/ap*100)+'%':'—'),x.events];}));
-  h+="<div class='sec-h'>События по источнику"+ic('Приложение vs чат — где пользователи совершают действия.')+"</div>";
-  h+=tbl(['Источник','Событий'],[['Приложение',e.by_source.app],['Чат',e.by_source.chat]]);
-  h+="<div class='sec-h'>Тул-коллы (вызовы модели)"+ic('Все обращения к модели: шаги агента (инструменты) + финальный ответ. Растут с агентными ответами.')+"</div>";
-  h+="<div class='grid'>"+card('Tools / DAU',e.tools_per_dau,e.toolcalls_total+' вызовов',DEF.tcdau,g.toolcalls)+card('Всего тул-коллов',e.toolcalls_total,'за период',null,g.toolcalls)+"</div>";
-  h+=tbl(['Источник','Тул-коллов'],[['Приложение',ts.app||0],['Чат',ts.chat||0],['Авто/пуши',ts.auto||0],['Голос: расшифровка и озвучка',ts.stt||0],['Прочее',ts.other||0]]);
-  h+="<div class='sec-h'>Тул-коллы по фиче</div>";
-  h+=tbl(['Фича','Вызовов'],(e.toolcalls_by_meta||[]).map(function(x){return [x[0],x[1]];}));
-  h+="<div class='sec-h'>Топ действий</div>";
-  h+=tbl(['Действие','Кол-во'],e.actions_top.map(function(x){return [x[0],x[1]];}));
-  var ss=e.sessions;
-  h+="<div class='sec-h'>Сессии <span style='font-weight:600;color:var(--mut);font-size:12px'>(за период "+D.since+" → "+D.until+")</span></div>";
-  h+="<div class='grid'>"+card('Сессий всего',ss.count,'',null)+card('Sessions / DAU',e.sessions_per_dau,'',DEF.sessionsdau)+card('Средняя длина',ss.avg_len_min+' мин','',null)+card('Действий/сессия',ss.events_per,'',null)+"</div>";
-  v.innerHTML=h;mkLine('cEng',[{key:'events',label:'События',color:C.ev}]);
- } else if(TAB==='prod'){
-  var pr=D.product,po=pr.push_open,h='';
-  h+="<div class='grid'>"+card('Конверсия пуш→открытие',po.rate+'%',po.opened+' из '+po.sent+' пушей',DEF.push)+card('Отправлено пушей',po.sent,'за период',null)+"</div>";
-  h+="<div class='sec-h'>Источники переходов"+ic('Реферальные метки из ссылок вида t.me/бот?start=МЕТКА. Первое касание: пользовательница закрепляется за той меткой, по которой пришла впервые. «Перешли» и «Настроили» — за всё время, «Новых» — за выбранный период.')+"</div>";
-  h+=tbl(['Метка','Перешли','Настроили','Конверсия','Новых за период'],(pr.referrals||[]).map(function(r){return [esc(r.src),r.total,r.onboarded,r.conv+'%',r.new_period];}));
-  h+="<div class='sec-h'>Рассылки по типам</div>";
-  h+=tbl(['Тип','Кол-во'],Object.keys(pr.broadcasts).sort(function(a,b){return pr.broadcasts[b]-pr.broadcasts[a];}).map(function(k){return [bLbl(k),pr.broadcasts[k]];}));
-  var f=pr.funnel;
-  h+="<div class='sec-h'>Воронка за период"+ic('Все этапы считаются в выбранном периоде: новые пользователи → кто совершал действия → кто открывал сводку → кто записал еду → кто отметил тренировку.')+"</div>";
-  h+=tbl(['Этап','Пользователей'],[['Новые за период',f.new_users],['Активные за период',f.onboarded],['Открывали сводку',f.got_summary],['Записали еду',f.logged_food],['Отметили тренировку',f.logged_workout]]);
-  v.innerHTML=h;
- } else {
-  var qd=D.quality,q2=D.quality_v2||{},h='';
-  if(q2.available){h+="<div class='sec-h'>AI-вызовы · точный учёт v2</div><div class='grid'>"+card('Provider calls',q2.calls,q2.requests+' пользовательских запросов',null)+card('Успешность вызовов',q2.success_rate+'%',q2.successful+' успешных',DEF.succ)+card('Input tokens',q2.input_tokens,'cached '+q2.cached_tokens,DEF.tok)+card('Output tokens',q2.output_tokens,'всего '+q2.total_tokens,DEF.tok)+card('Reported cost',q2.reported_cost,(q2.cost_units||[]).join(', ')||'провайдер не вернул стоимость',DEF.tok)+card('Латентность',q2.p50+' / '+q2.p95+' мс','p50 / p95',DEF.lat)+"</div>";h+=tbl(['Провайдер / модель','Вызовов','Успешных','Input','Output'],(q2.providers||[]).map(function(x){return [esc(x.name),x.calls,x.success,x.input_tokens,x.output_tokens];}));}
-  h+="<div class='sec-h'>Legacy-метрики</div>";
-  h+="<div class='grid'>"+card('Успешность ответов',qd.success_rate+'%',qd.answered+' ответов',DEF.succ)+card('Фолбэки',qd.fallback,qd.fallback_rate+'% от попыток',null)+card('Ошибки',qd.errors,qd.error_rate+'% от попыток',null)+card('Латентность',qd.p50+' / '+qd.p95+' мс','p50 / p95',DEF.lat)+"</div>";
-  h+="<div class='grid'>"+card('Токены всего',qd.tokens,'≈ $'+qd.cost_usd,DEF.tok)+card('Вход (промпты)',qd.tokens_in||'—',(qd.tokens?Math.round((qd.tokens_in||0)/qd.tokens*100)+'% от всего':''),DEF.tokin)+card('Выход (ответы)',qd.tokens_out||'—',(qd.tokens?Math.round((qd.tokens_out||0)/qd.tokens*100)+'% от всего':''),DEF.tokout)+card('Стоимость по факту',(qd.cost_split_usd!=null?('$'+qd.cost_split_usd):'—'),'вход и выход по своим ценам',DEF.costsplit)+"</div>";
-  h+="<div class='sec-h'>По моделям"+ic('Расход и скорость в разрезе моделей. Появляется после перехода на провайдера, который сообщает имя модели — так видно, что реально изменил переезд.')+"</div>";
-  h+=tbl(['Модель','Токенов','Вход','Выход','Вызовов','Ср. время'],(D.models||[]).map(function(m){return [esc(m.model),m.tokens,m.tok_in,m.tok_out,m.calls,(m.avg_ms?m.avg_ms+' мс':'—')];}));
-  h+=chartCard('cQ','Ответы и ошибки по дням',DEF.succ);
-  v.innerHTML=h;mkLine('cQ',[{key:'answered',label:'Ответы',color:C.ans},{key:'errors',label:'Ошибки',color:C.err}]);
- }
-}
-function tabsBar(){var t=[['aud','Аудитория'],['eng','Вовлечённость'],['prod','Продукт'],['qual','Качество']];document.getElementById('tabs').innerHTML=t.map(function(x){return "<button data-t='"+x[0]+"' class='"+(TAB===x[0]?'on':'')+"'>"+x[1]+"</button>";}).join('');document.querySelectorAll('#tabs button').forEach(function(b){b.onclick=function(){TAB=b.dataset.t;tabsBar();render();};});}
-function bar(){
- document.querySelectorAll('#bar button[data-d]').forEach(function(b){b.classList.toggle('on',!FROM&&Number(b.dataset.d)===DAYS);b.onclick=function(){DAYS=Number(b.dataset.d);FROM='';TO='';q.set('days',DAYS);q.delete('from');q.delete('to');upURL();load();};});
- var fy=document.getElementById('from'),ty=document.getElementById('to');fy.value=FROM;ty.value=TO;
- document.getElementById('apply').onclick=function(){var a=fy.value,z=ty.value;if(a&&z){FROM=a;TO=z;q.set('from',a);q.set('to',z);q.delete('days');upURL();load();}else alert('Выбери обе даты');};
- document.getElementById('yday').onclick=function(){var y=new Date(Date.now()-864e5).toISOString().slice(0,10);FROM=y;TO=y;q.set('from',y);q.set('to',y);q.delete('days');upURL();load();};
- document.getElementById('rl').onclick=load;document.getElementById('csv').onclick=toCSV;
-}
-function upURL(){history.replaceState(null,'','?'+q.toString());}
-function toCSV(){if(!D)return;var head=['date','dau','wau','mau','events','toolcalls','answered','errors','new','stickiness_pct'];var lines=[head.join(',')];D.series.forEach(function(p){lines.push([p.full,p.dau,p.wau,p.mau,p.events,p.toolcalls,p.answered,p.errors,p.new,p.stick].join(','));});var blob=new Blob(['﻿'+lines.join('\n')],{type:'text/csv;charset=utf-8'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='aiwa_analytics_'+D.since+'_'+D.until+'.csv';document.body.appendChild(a);a.click();a.remove();}
-document.addEventListener('click',function(e){var pp=document.getElementById('defpop');if(e.target&&e.target.classList&&e.target.classList.contains('ic')){var r=e.target.getBoundingClientRect();pp.textContent=e.target.getAttribute('data-def')||'';pp.style.display='block';pp.style.left=Math.max(8,Math.min(window.innerWidth-312,r.left-140))+'px';pp.style.top=(r.bottom+window.scrollY+7)+'px';e.stopPropagation();}else{pp.style.display='none';}});
-async function load(){var v=document.getElementById('view');v.className='loading';v.textContent='Собираю аналитику…';bar();tabsBar();try{var u='/api/admin_stats?'+(FROM&&TO?('from='+FROM+'&to='+TO):('days='+DAYS));var r=await fetch(u,{credentials:'same-origin'});var d=await r.json();if(d.error){v.textContent='Нет доступа';return;}D=d;var span=d.span;document.getElementById('per').textContent='Период: '+d.since+' → '+d.until+' ('+span+' дн.) · обновлено '+d.updated;render();}catch(e){v.className='loading';v.textContent='Ошибка загрузки: '+e.message;}}
-load();
-</script>"""
-    return web.Response(text=html_text, content_type="text/html")
-
-async def _admin_login(request):
-    expected = _admin_http_secret()
-    try:
-        data = await request.post()
-        got = str(data.get("key") or "")
-    except Exception:
-        got = ""
-    if not expected or not _hmac.compare_digest(got, expected):
-        await asyncio.sleep(0.25)
-        return web.Response(text="forbidden", status=403)
-    resp = web.HTTPFound("/admin")
-    return _set_admin_session(resp)
+async def _legacy_admin_removed(request):
+    return web.Response(
+        status=410,
+        text="Legacy AIWA analytics has been removed.",
+        headers={"Cache-Control": "no-store"},
+    )
 
 @web.middleware
 async def _trace_request(request, handler):
@@ -5528,11 +9281,20 @@ async def _database_overload(request, handler):
 @web.middleware
 async def _security_headers(request, handler):
     response = await handler(request)
-    if request.path == "/admin" or request.path.startswith("/api/admin_"):
-        _refresh_admin_session(request, response)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
-    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    if request.path == "/":
+        # Telegram Web renders Mini Apps in an iframe owned by web.telegram.org.
+        # X-Frame-Options cannot express that allow-list, so use CSP for the
+        # only embeddable HTML route and keep every API/admin route same-origin.
+        response.headers.pop("X-Frame-Options", None)
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "frame-ancestors 'self' https://web.telegram.org "
+            "https://telegram.org https://*.telegram.org",
+        )
+    else:
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     origin = request.headers.get("Origin")
     configured = {x.strip().rstrip("/") for x in os.environ.get("AIWA_ALLOWED_ORIGINS", "").split(",") if x.strip()}
     if AIWA_WEBAPP_URL:
@@ -5552,10 +9314,19 @@ def build_web():
     aio = web.Application(client_max_size=20 * 1024 * 1024,
                           middlewares=[_database_overload, _trace_request, _security_headers])  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
+    aio.router.add_get("/app2", _serve_index2)
+    aio.router.add_post("/api/nudge", _api_nudge)
+    aio.router.add_post("/api/food_prompt", _api_food_prompt)
+    aio.router.add_post("/api/recipe", _api_recipe)
+    aio.router.add_post("/api/log_history", _api_log_history)
+    aio.router.add_post("/api/week_food_review", _api_week_food_review)
+    _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
+    if os.path.isdir(_bd2):
+        aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды
     aio.router.add_get("/health", _health)
-    aio.router.add_get("/admin", _admin_page)
-    aio.router.add_post("/admin/login", _admin_login)
-    aio.router.add_get("/api/admin_stats", _admin_stats)
+    aio.router.add_route("*", "/admin", _legacy_admin_removed)
+    aio.router.add_route("*", "/admin/login", _legacy_admin_removed)
+    aio.router.add_route("*", "/api/admin_stats", _legacy_admin_removed)
     aio.router.add_post("/api/loadtest/bootstrap", _api_loadtest_bootstrap)
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
@@ -5568,6 +9339,7 @@ def build_web():
     aio.router.add_post("/api/food_text", _api_food_text)
     aio.router.add_post("/api/track", _api_track)
     aio.router.add_post("/api/train", _api_train)
+    aio.router.add_post("/api/train_day", _api_train_day)
     aio.router.add_post("/api/workout", _api_workout)
     aio.router.add_post("/api/train_profile", _api_train_profile)
     aio.router.add_post("/api/diary", _api_diary)
@@ -5599,10 +9371,12 @@ def build_web():
 
 def build_telegram_application():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).concurrent_updates(True).build()
+    global BOT_APP; BOT_APP = app
     app.add_handler(TypeHandler(Update, bind_update_trace), group=-1)
+    app.add_handler(TypeHandler(Update, sync_telegram_identity), group=0)
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
-                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd), ("voicetest", voicetest_cmd)):
+                    ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd), ("voicetest", voicetest_cmd), ("ui", ui_cmd)):
         app.add_handler(CommandHandler(cmd, fn))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))

@@ -593,7 +593,7 @@ function syncMarks(){
   });
   (D.cycles||[]).forEach(function(x){CYCLE_SET[x]=true;if(!PERIOD_DAY[x]){PERIOD_DAY[x]=x;PERIOD_START[x]=true;PERIOD_END[x]=true;}});
 }
-async function reloadAfterEdit(){var d=await api("/api/data",{name:NAME});if(d&&d.onboarded){D=d;loadedFood=false;loadedTrain=false;syncMarks();renderToday();go("today");}}
+async function reloadAfterEdit(){var d=await api("/api/data",{name:NAME});if(d&&d.onboarded){D=d;invalidateFoodSection();invalidateTrainSection();syncMarks();renderToday();go("today");}}
 var UNDO_PERIOD=null,TOAST_TIMER=null;
 function toast(msg,action){
   var el=document.getElementById("toast");clearTimeout(TOAST_TIMER);
@@ -704,7 +704,9 @@ function drawCal(){
   hint.textContent=EDIT_PERIODS?'выбирай все дни месячных · повторный тап удаляет день · затем Сохранить':'нажми на день, чтобы отметить близость';
 }
 function ayvaCard(text){return "<div class='ayva'><div class='ayva-top'><span class='blossom' id='sl'></span><div style='flex:1'><div class='ayva-lab'>Айва</div><div class='ayva-txt'>"+esc(text||"")+"</div></div></div></div>";}
-var loadedFood=false,loadedTrain=false,FOOD_DATA=null;
+var loadedFood=false,loadedTrain=false,FOOD_DATA=null,foodSectionSeq=0,trainSectionSeq=0;
+function invalidateFoodSection(){loadedFood=false;foodSectionSeq++;}
+function invalidateTrainSection(){loadedTrain=false;trainSectionSeq++;}
 async function addReco(btn,i){
   var mm=FOOD_DATA&&FOOD_DATA.menu&&FOOD_DATA.menu.meals?FOOD_DATA.menu.meals[i]:null;
   if(!mm||!mm.dish){toast('Нет блюда');return;}
@@ -717,11 +719,14 @@ async function addReco(btn,i){
   if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.title)||mm.dish)+' · '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}
   else toast((r&&r.message)||'Не получилось добавить');
 }
-async function renderFood(){
-  var el=document.getElementById('scr-food');if(loadedFood)return;
-  el.innerHTML="<div class='h'>Питание</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва собирает меню")+"</div><div class='card'><div class='skel' style='width:52%;height:20px'></div><div class='skel' style='width:90%;margin-top:12px'></div><div class='skel' style='width:74%;margin-top:8px'></div></div>";
-  var r=await api('/api/section',{kind:'food'});
-  if(!(r&&r.menu&&r.menu.meals)){r=(!INIT||r&&r.error==='net')?{menu:DEMO_MENU,kcal:1850,text:DEMO_FOODT}:{text:(r&&r.text)||"Выбираем простую еду с белком в каждом приёме и нормальной сытостью."};}
+function instantFoodData(){
+  var p=(D&&D.profile)||{},restricted=!!((p.diet||"").trim()||(p.diet_note||"").trim());
+  return {menu:restricted?null:JSON.parse(JSON.stringify(DEMO_MENU)),kcal:(D&&D.kcal_base)||null,
+    text:restricted?"Учитываю твои пищевые ограничения. Персональное меню обновится автоматически.":"Белок в каждом приёме, овощи и сложные углеводы дают сытость и более ровную энергию."};
+}
+function paintFood(r){
+  var el=document.getElementById('scr-food');
+  r=r||instantFoodData();
   FOOD_DATA=r;
   var hasCycle=!!(D&&D.cycle&&(!D.mode||D.mode==="cycle"));
   var ph=hasCycle?((D&&D.phase)?({menstrual:"men",follicular:"fol",ovulation:"ovu",luteal:"lut"}[D.phase]||"fol"):"fol"):null;
@@ -739,8 +744,18 @@ async function renderFood(){
   }
   html+="<div id='diarybox'></div>";
   html+="<div class='foot'>Меню рассчитывается каждый день с учётом фазы цикла, твоих пожеланий, пищевых ограничений и медицинских рекомендаций.</div>";
-  el.innerHTML=html;loadedFood=true;
-  loadDiary();
+  el.innerHTML=html;
+  if(DIARY)renderDiaryBox();else loadDiary();
+}
+async function refreshFoodSection(seq,attempt){
+  var r=await api('/api/section',{kind:'food',refresh:attempt>0});
+  if(seq!==foodSectionSeq)return;
+  if(r&&!r.error)paintFood(r);
+  if(r&&r.refreshing&&attempt<5)setTimeout(function(){refreshFoodSection(seq,attempt+1);},[1200,2500,5000,9000,15000][attempt]||15000);
+}
+function renderFood(){
+  if(loadedFood){if(DIARY)renderDiaryBox();else loadDiary();return;}
+  loadedFood=true;var seq=++foodSectionSeq;paintFood(instantFoodData());refreshFoodSection(seq,0);
 }
 var DIARY=null;
 async function loadDiary(){try{var r=await api('/api/diary',{});if(r&&!r.error){DIARY=r;}}catch(e){}renderDiaryBox();resumeFoodPhotoJob();}
@@ -822,7 +837,10 @@ async function sendFoodText(){var i=document.getElementById('foodtextin');var t=
 async function delMeal(id){var r=await api('/api/diary_del',{id:id});if(_applyDiary(r))haptic('selection');}
 async function diaryReco(){var box=document.getElementById('diarreco');if(box)box.innerHTML=thinkHTML('Айва смотрит дневник');var r=await api('/api/diary_reco',{});if(box)box.textContent=(r&&r.text)||'Не получилось, попробуй позже.';}
 (function(){var f=document.getElementById('foodfile');if(f)f.addEventListener('change',onFoodFile);})();
-async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",hormones:["Без данных о цикле Айва не делает выводы о фазе.","Главные ориентиры: боль, кровотечение, слабость, сон и восстановление.","При беременности, сильной боли, головокружении или обильном кровотечении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли, рывков и глубокого пресса"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости, боли или обильного кровотечения",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка",suggestions:["Мало сил сегодня?","Что после нагрузки?","Можно при боли?"]};}
+function instantTrainingPlan(){return{level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:"Ориентируйся на сон, энергию, боль, кровотечение и общее состояние.",options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза",how:"20-40 мин в ровном темпе"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее",how:"10-20 мин, медленно и без боли"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости и боли",how:"25-35 мин, лёгкий вес, запас 2-3 повтора"}],suggestions:["Мало сил сегодня?","Что после нагрузки?","Можно при боли?"]};}
+function paintTraining(p){
+  var el=document.getElementById('scr-train'),old=document.getElementById('trLog'),oldHtml=old?old.innerHTML:"";
+  p=p||instantTrainingPlan();
   var html="<div class='h'>Нагрузка</div>";
   html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trainBlossom'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+esc(p.level)+"</div><div class='pmeta'>"+esc(p.duration)+(p.day?(" · день "+esc(p.day)+" из "+esc(p.cycle_len)):"")+"</div><div class='ayva-txt' style='margin-top:9px'>"+esc(p.summary||"")+"</div>"+(p.why?("<div class='ayva-txt' style='margin-top:8px'>"+esc(p.why)+"</div>"):"")+"</div></div></div>";
   html+="<div id='trLog'></div>";
@@ -831,7 +849,19 @@ async function renderTrain(){var el=document.getElementById('scr-train');if(load
   html+="</div>";
   html+=suggChips(p.suggestions);
   html+="<div class='foot'>Нагрузка подбирается по фазе цикла и самочувствию. При боли, слабости, беременности или обильном кровотечении лучше снизить интенсивность и обсудить активность с врачом.</div>";
-  el.innerHTML=html;blossom(document.getElementById('trainBlossom'),34);loadedTrain=true;try{renderTrainLog();}catch(e){}}
+  el.innerHTML=html;blossom(document.getElementById('trainBlossom'),34);
+  if(oldHtml)document.getElementById('trLog').innerHTML=oldHtml;else try{renderTrainLog();}catch(e){}
+}
+async function refreshTrainingSection(seq,attempt){
+  var r=await api('/api/section',{kind:'training',refresh:attempt>0});
+  if(seq!==trainSectionSeq)return;
+  if(r&&r.training)paintTraining(r.training);
+  if(r&&r.refreshing&&attempt<5)setTimeout(function(){refreshTrainingSection(seq,attempt+1);},[1200,2500,5000,9000,15000][attempt]||15000);
+}
+function renderTrain(){
+  if(loadedTrain)return;
+  loadedTrain=true;var seq=++trainSectionSeq;paintTraining(instantTrainingPlan());refreshTrainingSection(seq,0);
+}
 var TREX={
  'Силовая':{w:true,groups:{
   'Ноги':[['Присед',40],['Жим ногами',80],['Выпады',16],['Болгарские',14],['Румынская тяга',40],['Разгибания',30],['Сгибания',25],['Икры',40]],
@@ -1030,7 +1060,7 @@ async function saveProfileApp(){
   var _cy=parseInt(String(document.getElementById("profCycle")&&document.getElementById("profCycle").value||""),10);
   var _b={height:h,weight:w,age:a};if(_cy>=15&&_cy<=60)_b.cycle_len=_cy;
   var r=await api("/api/profile",_b);
-  if(r&&r.ok){D.profile=r.profile;if(r.cycle_len)D.cycle_len=r.cycle_len;loadedFood=false;loadedTrain=false;toast("Данные обновлены");renderStats();}
+  if(r&&r.ok){D.profile=r.profile;if(r.cycle_len)D.cycle_len=r.cycle_len;invalidateFoodSection();invalidateTrainSection();toast("Данные обновлены");renderStats();}
   else toast("Не получилось сохранить");
 }
 function renderStats(){
@@ -1066,7 +1096,17 @@ var chatInited=false;
 function bubbleAI(text){var d=document.createElement('div');d.className='msg ai';d.textContent=text;document.getElementById('chatlog').appendChild(d);return d;}
 function bubbleMe(text){var d=document.createElement('div');d.className='msg me';d.textContent=text;document.getElementById('chatlog').appendChild(d);return d;}
 function scrollBottom(){var c=document.getElementById('chatlog');if(c){c.scrollTop=c.scrollHeight;}else{window.scrollTo(0,document.body.scrollHeight);}}
-async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML("Айва думает");scrollBottom();var r=await api('/api/chat',{message:text});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+"…":s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}scrollBottom();}
+function chatRequestId(){try{return crypto.randomUUID();}catch(e){return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);}}
+async function applyChatMutation(m){
+  if(!m)return;
+  if(m.kind==='food'){invalidateFoodSection();DIARY=null;}
+  if(m.kind==='workout'){invalidateTrainSection();}
+  if(m.kind==='period'){
+    try{var d=await api('/api/data',{});if(d&&d.onboarded){D=d;invalidateFoodSection();invalidateTrainSection();syncMarks();renderToday();}}catch(e){}
+  }
+}
+document.addEventListener('visibilitychange',function(){if(!document.hidden){if(loadedFood)loadDiary();if(loadedTrain)renderTrainLog();}});
+async function send(text){text=(text||document.getElementById('cin').value).trim();if(!text)return;document.getElementById('cin').value='';bubbleMe(text);var t=bubbleAI('');t.innerHTML=thinkHTML("Айва думает");scrollBottom();var r=await api('/api/chat',{message:text,request_id:chatRequestId()});t.textContent=r.answer||"Не получилось ответить, попробуй ещё раз.";if(r.mutation)await applyChatMutation(r.mutation);if(r.suggestions&&r.suggestions.length){var c=document.createElement('div');c.className='chips';r.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+"…":s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}scrollBottom();}
 function initChat(){
   if(chatInited)return;chatInited=true;var log=(D&&D.chatlog)||[];
   if(log.length){log.forEach(function(m){if(m.role==="user")bubbleMe(m.text);else bubbleAI(m.text);});scrollBottom();}
@@ -1096,10 +1136,11 @@ async function sendVoice(blob,type){
   var me=bubbleMe('🎤 …');var t=bubbleAI('');t.innerHTML=thinkHTML('Слушаю');scrollBottom();
   try{
     var ext=(type&&type.indexOf('mp4')>=0)?'mp4':'webm';
-    var fd=new FormData();fd.append('initData',INIT);fd.append('audio',blob,'voice.'+ext);
+    var fd=new FormData();fd.append('initData',INIT);fd.append('request_id',chatRequestId());fd.append('audio',blob,'voice.'+ext);
     var r=await fetch('/api/voice',{method:'POST',body:fd});var d=await r.json();
     me.textContent=(d&&d.transcript)?d.transcript:'🎤 (не расслышала)';
     t.textContent=(d&&d.answer)||'Не получилось ответить, попробуй ещё раз.';
+    if(d&&d.mutation)await applyChatMutation(d.mutation);
     if(d&&d.suggestions&&d.suggestions.length){var c=document.createElement('div');c.className='chips';d.suggestions.forEach(function(s){var b=document.createElement('button');b.className='chip';b.textContent=(s&&s.length>34)?s.slice(0,32).trim()+'…':s;b.onclick=function(){send(s);};c.appendChild(b);});t.appendChild(c);}
   }catch(e){t.textContent='Не получилось распознать голос, попробуй ещё раз.';}
   scrollBottom();
@@ -1163,8 +1204,8 @@ function renderHub(){
 }
 async function chooseMode(m){var r=await api('/api/mode',{mode:m});if(r&&r.ok){toast("Режим: "+modeLabel(m));closeHub();await reloadAfterEdit();}else{toast((r&&r.text)||"Не получилось сменить режим");}}
 function switchPreg(){chooseMode('preg');}
-async function saveHubPrefs(){var t=(document.getElementById('hubPrefs').value||"").trim();var _kc=(document.getElementById('hubKcal')&&document.getElementById('hubKcal').value||"").trim();var r=await api('/api/prefs',{diet_note:t,kcal_goal:_kc});if(r&&r.ok){D.profile=D.profile||{};D.profile.diet_note=r.diet_note;if('kcal_goal' in r)D.profile.kcal_goal=r.kcal_goal;if(r.kcal_base)D.kcal_base=r.kcal_base;loadedFood=false;toast(_kc&&r.kcal_goal?("Цель: "+r.kcal_goal+" ккал"):"Сохранила предпочтения");renderHub();}else toast("Не получилось сохранить");}
-async function saveHubProfile(){var h=parseFloat(String(document.getElementById('hubH').value||"").replace(",","."));var w=parseFloat(String(document.getElementById('hubW').value||"").replace(",","."));var a=parseInt(String(document.getElementById('hubA').value||""),10);if(!(h>120&&h<220&&w>30&&w<250&&a>10&&a<80)){toast("Проверь рост, вес и возраст");return;}var _cy=parseInt(String(document.getElementById('hubCycle')&&document.getElementById('hubCycle').value||''),10);var _body={height:h,weight:w,age:a};if(_cy>=15&&_cy<=60)_body.cycle_len=_cy;var r=await api('/api/profile',_body);if(r&&r.ok){D.profile=Object.assign(D.profile||{},r.profile);if(r.kcal_base)D.kcal_base=r.kcal_base;if(r.cycle_len)D.cycle_len=r.cycle_len;loadedFood=false;loadedTrain=false;toast("Данные обновлены");renderHub();}else toast((r&&r.text)||"Не получилось сохранить");}
+async function saveHubPrefs(){var t=(document.getElementById('hubPrefs').value||"").trim();var _kc=(document.getElementById('hubKcal')&&document.getElementById('hubKcal').value||"").trim();var r=await api('/api/prefs',{diet_note:t,kcal_goal:_kc});if(r&&r.ok){D.profile=D.profile||{};D.profile.diet_note=r.diet_note;if('kcal_goal' in r)D.profile.kcal_goal=r.kcal_goal;if(r.kcal_base)D.kcal_base=r.kcal_base;invalidateFoodSection();toast(_kc&&r.kcal_goal?("Цель: "+r.kcal_goal+" ккал"):"Сохранила предпочтения");renderHub();}else toast("Не получилось сохранить");}
+async function saveHubProfile(){var h=parseFloat(String(document.getElementById('hubH').value||"").replace(",","."));var w=parseFloat(String(document.getElementById('hubW').value||"").replace(",","."));var a=parseInt(String(document.getElementById('hubA').value||""),10);if(!(h>120&&h<220&&w>30&&w<250&&a>10&&a<80)){toast("Проверь рост, вес и возраст");return;}var _cy=parseInt(String(document.getElementById('hubCycle')&&document.getElementById('hubCycle').value||''),10);var _body={height:h,weight:w,age:a};if(_cy>=15&&_cy<=60)_body.cycle_len=_cy;var r=await api('/api/profile',_body);if(r&&r.ok){D.profile=Object.assign(D.profile||{},r.profile);if(r.kcal_base)D.kcal_base=r.kcal_base;if(r.cycle_len)D.cycle_len=r.cycle_len;invalidateFoodSection();invalidateTrainSection();toast("Данные обновлены");renderHub();}else toast((r&&r.text)||"Не получилось сохранить");}
 function setKcalPreset(m){var b=(D&&D.kcal_base)||0;if(!b){toast('Заполни рост, вес и возраст');return;}var el=document.getElementById('hubKcal');if(el)el.value=Math.round(b*m/10)*10;}
 async function saveHubTime(){var t=(document.getElementById('hubTime').value||"").trim();var r=await api('/api/settime',{time:t});if(r&&r.ok){D.send_time=r.send_time;toast("Сводка в "+r.send_time);renderHub();}else toast((r&&r.text)||"Время в формате 09:00");}
 function getReport(){

@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from collections import Counter, defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -42,7 +43,8 @@ SAFE_PROPERTIES = {
     "estimated_cost_usd", "feature", "provenance", "confidence", "source_schema",
     "payload_version", "app_version", "migration_batch", "token_precision",
     "answer_id", "rating", "safety_level", "campaign_id", "campaign_type",
-    "delivery_status",
+    "delivery_status", "failure_class", "retryable", "platform", "tool_name",
+    "outcome_type",
 }
 NUMERIC_PROPERTIES = {
     "calls", "retry_index", "latency_ms", "input_tokens", "output_tokens",
@@ -58,6 +60,7 @@ SYSTEM_NAMES = {
     "legacy_error", "legacy_tokens", "legacy_broadcast", "push_sent", "push_queued", "push_shadowed",
     "push_failed", "push_opened", "answer_feedback_prompted",
     "answer_feedback_submitted", "safety_guidance_shown", "summary_delivered",
+    "tool_execution_completed", "tool_outcome_completed",
 }
 SUCCESS = {"success", "ok", "completed"}
 RESPONSE_NAMES = {"assistant_message_sent", "assistant_response_received"}
@@ -104,16 +107,100 @@ def _push_target_label(targets: set[str]) -> str:
     }
     return ", ".join(labels.get(name, name) for name in sorted(targets))
 
+def _push_failure_label(name: str) -> str:
+    return {
+        "blocked": "Пользователь заблокировал бота",
+        "chat_not_found": "Чат не найден",
+        "user_deactivated": "Telegram-аккаунт удалён",
+        "rate_limit": "Лимит Telegram",
+        "timeout": "Таймаут",
+        "network": "Сетевая ошибка",
+        "bad_request": "Некорректный запрос Telegram",
+        "internal_or_unknown": "Внутренняя / неизвестная",
+    }.get(name, name or "Не классифицировано")
+
+def _push_failure_action(name: str) -> str:
+    return {
+        "blocked": "Исключён из фоновых очередей; входящее сообщение восстановит доставку",
+        "chat_not_found": "Исключён из фоновых очередей до нового входящего сообщения",
+        "user_deactivated": "Исключён из фоновых очередей",
+        "rate_limit": "Временная: повторять по retry_after и следить за лимитом",
+        "timeout": "Временная: ограниченный retry с backoff",
+        "network": "Временная: ограниченный retry с backoff",
+        "bad_request": "Проверить payload и формат конкретной кампании",
+        "internal_or_unknown": "Проверить логи и добавить точную классификацию",
+    }.get(name, "Проверить логи")
+
+def _event_surface(row: dict[str, Any]) -> str:
+    """Best available product surface; Telegram does not expose device OS here."""
+    props = row["properties"]
+    platform = str(props.get("platform") or "").lower()
+    channel = str(props.get("channel") or "").lower()
+    if platform == "webapp" or channel == "webapp" or props.get("screen"):
+        return "mini_app"
+    if platform == "bot" or channel in {"text", "voice", "food_photo", "food_text", "diary_reco"}:
+        return "telegram_bot"
+    # Reconstructed product events predate explicit platform tracking. Their
+    # legacy bot handlers are the safest coarse attribution.
+    if row["provenance"] != "observed":
+        return "telegram_bot"
+    return "unattributed"
+
 def _is_delivered_answer(row: dict[str, Any]) -> bool:
     """Prefer the post-send event; reconstructed history may only have the legacy response event."""
     return (row["name"] == "assistant_message_sent" or
             (row["name"] == "assistant_response_received" and row["provenance"] != "observed"))
 
 
+def _ai_failure_class(status: str) -> str:
+    """Collapse transport-specific statuses into stable operator-facing buckets."""
+    value = str(status or "unknown").strip().lower()
+    if value in {"http_401", "http_403"}:
+        return "auth"
+    if value == "http_429":
+        return "rate_limit"
+    if value.startswith("http_5"):
+        return "upstream_5xx"
+    if value in {"http_400", "http_404", "http_409", "http_422"}:
+        return "request_rejected"
+    if "timeout" in value or value in {"timed_out", "deadline_exceeded"}:
+        return "timeout"
+    if value in {"empty_response", "invalid_response", "invalid_json"}:
+        return "invalid_response"
+    if value in {"error", "network_error", "connection_error"}:
+        return "transport_or_unknown"
+    return value or "unknown"
+
+
 def _product_day(ts: float) -> str:
     return datetime.fromtimestamp(ts, PRODUCT_TZ).date().isoformat()
 
-app = FastAPI()
+
+def _period_starts(now: float, days: float) -> tuple[float, dict[str, float]]:
+    selected_days = max(1, min(int(math.ceil(float(days))), 365))
+    current = datetime.fromtimestamp(now, PRODUCT_TZ)
+    day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    return float(selected_days), {
+        "selected": (day_start - timedelta(days=selected_days - 1)).timestamp(),
+        "dau": day_start.timestamp(),
+        "wau": (day_start - timedelta(days=day_start.weekday())).timestamp(),
+        "mau": day_start.replace(day=1).timestamp(),
+    }
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Pay the SQLite cold-read cost during service startup, not on the first
+    # dashboard opened by a person. The function is resolved when startup runs,
+    # after the module has finished defining it.
+    try:
+        await run_in_threadpool(_cached_dashboard, 1, "mixed")
+    except Exception:
+        pass
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _db = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
 _db.execute("PRAGMA journal_mode=WAL")
@@ -139,10 +226,16 @@ _db.execute("CREATE INDEX IF NOT EXISTS ix_events_device_ts ON events(device_id,
 _db.execute("CREATE INDEX IF NOT EXISTS ix_events_name_ts ON events(name,ts)")
 _db.commit()
 DB_LOCK = threading.RLock()
+CACHE_LOCK = threading.RLock()
+_EVENT_ROWS_CACHE: dict[str, Any] = {"changes": -1, "rows": None}
+_DASHBOARD_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+DASHBOARD_CACHE_SECONDS = max(1.0, float(os.environ.get("STATS_DASHBOARD_CACHE_SECONDS", "15")))
 
 
-def _no_store(value: object, status: int = 200) -> JSONResponse:
-    return JSONResponse(value, status_code=status, headers={"Cache-Control": "no-store"})
+def _no_store(value: object, status: int = 200, headers: dict[str, str] | None = None) -> JSONResponse:
+    response_headers = {"Cache-Control": "no-store"}
+    response_headers.update(headers or {})
+    return JSONResponse(value, status_code=status, headers=response_headers)
 
 
 def _canonical(name: str) -> str:
@@ -182,6 +275,11 @@ def _safe_properties(raw: Any) -> dict[str, Any]:
 
 def _event_rows() -> list[dict[str, Any]]:
     with DB_LOCK:
+        changes = _db.total_changes
+        with CACHE_LOCK:
+            if (_EVENT_ROWS_CACHE["changes"] == changes and
+                    _EVENT_ROWS_CACHE["rows"] is not None):
+                return _EVENT_ROWS_CACHE["rows"]
         rows = _db.execute(
             "SELECT event_id,ts,device_id,name,properties,ingested_at,provenance,confidence,payload_version "
             "FROM events ORDER BY ts,event_id"
@@ -200,17 +298,26 @@ def _event_rows() -> list[dict[str, Any]]:
             "confidence": props.get("confidence") or confidence or "high",
             "payload_version": int(props.get("payload_version") or version or 1),
         })
+    with CACHE_LOCK:
+        _EVENT_ROWS_CACHE["changes"] = changes
+        _EVENT_ROWS_CACHE["rows"] = result
     return result
 
 
-def _active_ids(rows: list[dict[str, Any]], cutoff: float) -> set[str]:
-    return {r["device_id"] for r in rows if r["ts"] >= cutoff and _is_active(r["name"])}
+def _active_ids(rows: list[dict[str, Any]], cutoff: float, until: float) -> set[str]:
+    return {
+        r["device_id"]
+        for r in rows
+        if cutoff <= r["ts"] <= until and _is_active(r["name"])
+    }
 
 
-def _sessions(rows: list[dict[str, Any]], cutoff: float) -> tuple[int, list[float], list[int]]:
+def _sessions(
+    rows: list[dict[str, Any]], cutoff: float, until: float
+) -> tuple[int, list[float], list[int]]:
     by_user: dict[str, list[float]] = defaultdict(list)
     for row in rows:
-        if row["ts"] >= cutoff and _is_active(row["name"]):
+        if cutoff <= row["ts"] <= until and _is_active(row["name"]):
             by_user[row["device_id"]].append(row["ts"])
     count = 0; lengths: list[float] = []; events: list[int] = []
     for timestamps in by_user.values():
@@ -240,8 +347,8 @@ def _retention(rows: list[dict[str, Any]]) -> dict[str, Any]:
     active_days: dict[str, set[str]] = defaultdict(set)
     for row in rows:
         if _is_active(row["name"]):
-            active_days[row["device_id"]].add(datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat())
-    today = datetime.now(timezone.utc).date()
+            active_days[row["device_id"]].add(_product_day(row["ts"]))
+    today = datetime.now(PRODUCT_TZ).date()
     out: dict[str, Any] = {}
     for horizon in (1, 7, 30):
         eligible = 0; returned = 0
@@ -262,25 +369,30 @@ def _series(rows: list[dict[str, Any]], days: float, now: float, available_start
     if available_start is None:
         return result
     if days <= 1.1:
-        start = max(now - 24 * 3600, available_start)
+        _, starts = _period_starts(now, 1)
+        start = max(starts["dau"], available_start)
         start = math.floor(start / 3600) * 3600
         buckets = max(1, math.ceil((now - start) / 3600))
         for i in range(buckets):
             lo = start + i * 3600; hi = min(now + 1, lo + 3600)
             chunk = [r for r in rows if lo <= r["ts"] < hi]
             result.append({
-                "label": datetime.fromtimestamp(lo, timezone.utc).strftime("%H:00"),
+                "label": datetime.fromtimestamp(lo, PRODUCT_TZ).strftime("%H:00"),
                 "active": len({r["device_id"] for r in chunk if _is_active(r["name"])}),
                 "messages": sum(r["name"] == "user_message_sent" for r in chunk),
                 "ai_calls": sum(r["name"] == "ai_call" for r in chunk),
             })
         return result
     span = max(1, int(math.ceil(days)))
-    today = datetime.fromtimestamp(now, timezone.utc).date()
-    first = max(today - timedelta(days=span - 1), datetime.fromtimestamp(available_start, timezone.utc).date())
+    today = datetime.fromtimestamp(now, PRODUCT_TZ).date()
+    first = max(
+        today - timedelta(days=span - 1),
+        datetime.fromtimestamp(available_start, PRODUCT_TZ).date(),
+    )
     day = first
     while day <= today:
-        lo = datetime.combine(day, datetime.min.time(), timezone.utc).timestamp(); hi = lo + 86400
+        lo = datetime.combine(day, datetime.min.time(), PRODUCT_TZ).timestamp()
+        hi = datetime.combine(day + timedelta(days=1), datetime.min.time(), PRODUCT_TZ).timestamp()
         chunk = [r for r in rows if lo <= r["ts"] < hi]
         result.append({
             "label": day.strftime("%d.%m"),
@@ -293,29 +405,33 @@ def _series(rows: list[dict[str, Any]], days: float, now: float, available_start
 
 
 def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any]:
-    window_days = max(0.04, min(float(days), 365.0)); now = time.time(); since = now - window_days * 86400
+    now = time.time()
+    window_days, period_starts = _period_starts(now, days)
+    since = period_starts["selected"]
     source_mode = "observed" if str(source).lower() == "observed" else "mixed"
     all_rows = _event_rows()
     rows = ([r for r in all_rows if r["provenance"] == "observed"]
             if source_mode == "observed" else all_rows)
-    selected = [r for r in rows if r["ts"] >= since]
+    selected = [r for r in rows if since <= r["ts"] <= now]
     data_start = min((r["ts"] for r in rows), default=None)
     available_start = max(since, data_start) if data_start is not None else None
     requested_days = max(1, int(math.ceil(window_days)))
     available_days = (min(requested_days,
-                          (datetime.fromtimestamp(now, timezone.utc).date() -
-                           datetime.fromtimestamp(available_start, timezone.utc).date()).days + 1)
+                          (datetime.fromtimestamp(now, PRODUCT_TZ).date() -
+                           datetime.fromtimestamp(available_start, PRODUCT_TZ).date()).days + 1)
                       if available_start is not None else 0)
     active_selected = [r for r in selected if _is_active(r["name"])]
     ever_ids = {r["device_id"] for r in rows if _is_active(r["name"])}
     selected_ids = {r["device_id"] for r in active_selected}
-    dau_ids = _active_ids(rows, now - 86400); wau_ids = _active_ids(rows, now - 7 * 86400); mau_ids = _active_ids(rows, now - 30 * 86400)
+    dau_ids = _active_ids(rows, period_starts["dau"], now)
+    wau_ids = _active_ids(rows, period_starts["wau"], now)
+    mau_ids = _active_ids(rows, period_starts["mau"], now)
 
     daily_users: dict[str, set[str]] = defaultdict(set)
     for row in active_selected:
-        daily_users[datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()].add(row["device_id"])
+        daily_users[_product_day(row["ts"])].add(row["device_id"])
     active_user_days = sum(len(v) for v in daily_users.values())
-    sessions, session_lengths, session_events = _sessions(rows, since)
+    sessions, session_lengths, session_events = _sessions(rows, since, now)
     messages = sum(r["name"] == "user_message_sent" for r in selected)
     responses = sum(_is_delivered_answer(r) for r in selected)
 
@@ -352,7 +468,39 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     failed_requests = len(requests) - successful_requests
     fallback_requests = sum(len({str(r["properties"].get("provider") or "") for r in rr}) > 1 or
                             any(int(r["properties"].get("retry_index") or 0) > 0 for r in rr) for rr in requests.values())
-    failed_attempts = sum(str(r["properties"].get("status") or "") not in SUCCESS for r in ai_rows)
+    failed_ai_rows = [
+        r for r in ai_rows
+        if str(r["properties"].get("status") or "") not in SUCCESS
+    ]
+    failed_attempts = len(failed_ai_rows)
+    recovered_requests = sum(
+        any(str(r["properties"].get("status") or "") not in SUCCESS for r in rr)
+        and any(str(r["properties"].get("status") or "") in SUCCESS for r in rr)
+        for rr in requests.values()
+    )
+    clean_successful_requests = sum(
+        all(str(r["properties"].get("status") or "") in SUCCESS for r in rr)
+        for rr in requests.values()
+    )
+    failure_statuses: Counter = Counter()
+    failure_classes: Counter = Counter()
+    failure_routes: Counter = Counter()
+    purpose_attempts: Counter = Counter()
+    purpose_failures: Counter = Counter()
+    for row in ai_rows:
+        props = row["properties"]
+        purpose = str(props.get("purpose") or "unknown")
+        purpose_attempts[purpose] += 1
+    for row in failed_ai_rows:
+        props = row["properties"]
+        status = str(props.get("status") or "unknown")
+        provider = str(props.get("provider") or "unknown")
+        model = str(props.get("model") or "unknown")
+        purpose = str(props.get("purpose") or "unknown")
+        failure_statuses[status] += 1
+        failure_classes[_ai_failure_class(status)] += 1
+        failure_routes[(provider, model, status)] += 1
+        purpose_failures[purpose] += 1
     explicit_errors = sum(r["name"] in {"error", "legacy_error"} for r in selected)
     pushes = [r for r in selected if r["name"] in {"push_sent", "legacy_broadcast"}]
     all_checkins = [r for r in selected if r["name"] == "checkin_completed"]
@@ -369,6 +517,31 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     features = sorted(({"name": name, "users": len(users), "events": feature_events[name],
                         "adoption": _percent(len(users), len(selected_ids))}
                        for name, users in feature_users.items()), key=lambda x: (-x["users"], x["name"]))
+    surface_users: dict[str, set[str]] = defaultdict(set)
+    surface_user_days: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    surface_events: Counter = Counter()
+    for item in active_selected:
+        surface = _event_surface(item)
+        surface_users[surface].add(item["device_id"])
+        surface_user_days[surface].add((item["device_id"], _product_day(item["ts"])))
+        surface_events[surface] += 1
+    surface_labels = {
+        "telegram_bot": "Telegram-бот",
+        "mini_app": "Mini App",
+        "unattributed": "Не определено",
+    }
+    platform_breakdown = [
+        {
+            "id": surface,
+            "name": surface_labels[surface],
+            "users": len(surface_users[surface]),
+            "user_days": len(surface_user_days[surface]),
+            "events": surface_events[surface],
+            "share": _percent(len(surface_users[surface]), len(selected_ids)),
+        }
+        for surface in ("telegram_bot", "mini_app", "unattributed")
+        if surface_events[surface]
+    ]
 
     def _feature_funnel(label: str, start_names: set[str], done_names: set[str], help_text: str,
                         done_predicate=None) -> dict[str, Any]:
@@ -435,6 +608,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
 
     sent_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     opened_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    failed_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     events_by_user: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in selected:
         events_by_user[item["device_id"]].append(item)
@@ -447,6 +621,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                 sent_by_key[key] = item
         elif item["name"] == "push_opened":
             opened_by_key[key].append(item)
+        elif item["name"] == "push_failed":
+            failed_by_key[key].append(item)
     push_campaigns: dict[str, Counter] = defaultdict(Counter)
     push_campaign_labels: dict[str, str] = {}
     push_campaign_targets: dict[str, set[str]] = defaultdict(set)
@@ -491,9 +667,60 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         elif targets:
             push_action_pending += 1
             push_campaigns[family]["action_pending"] += 1
-    push_failed = sum(item["name"] == "push_failed" for item in selected)
+    push_failure_attempts = sum(len(items) for items in failed_by_key.values())
+    terminal_failure_keys: set[tuple[str, str]] = set()
+    recovered_failure_keys: set[tuple[str, str]] = set()
+    failure_attempt_classes: Counter = Counter()
+    failure_delivery_classes: Counter = Counter()
+    for key, failures in failed_by_key.items():
+        latest_failure = max(item["ts"] for item in failures)
+        sent_item = sent_by_key.get(key)
+        if sent_item and sent_item["ts"] >= latest_failure:
+            recovered_failure_keys.add(key)
+        else:
+            terminal_failure_keys.add(key)
+        for item in failures:
+            props = item["properties"]
+            failure_class = str(props.get("failure_class") or "")
+            if not failure_class:
+                failure_class = ("blocked" if props.get("delivery_status") == "blocked"
+                                 else "internal_or_unknown")
+            failure_attempt_classes[failure_class] += 1
+        if key in terminal_failure_keys:
+            latest = max(failures, key=lambda item: item["ts"])
+            props = latest["properties"]
+            failure_class = str(props.get("failure_class") or "")
+            if not failure_class:
+                failure_class = ("blocked" if props.get("delivery_status") == "blocked"
+                                 else "internal_or_unknown")
+            failure_delivery_classes[failure_class] += 1
+            campaign_type = str(
+                props.get("campaign_type") or key[1].split(":", 1)[0] or "unknown"
+            )
+            family, family_label = _push_family(campaign_type)
+            push_campaign_labels[family] = family_label
+            push_campaigns[family]["failed"] += 1
+    failed_recipients = {key[0] for key in terminal_failure_keys}
     push_funnel = {
-        "sent": len(sent_by_key), "opened": push_opened, "acted": push_acted, "failed": push_failed,
+        "sent": len(sent_by_key), "opened": push_opened, "acted": push_acted,
+        "failed": len(terminal_failure_keys),
+        "failed_attempts": push_failure_attempts,
+        "failed_recipients": len(failed_recipients),
+        "recovered": len(recovered_failure_keys),
+        "attempts_per_failed_delivery": (
+            round(push_failure_attempts / len(failed_by_key), 2) if failed_by_key else 0
+        ),
+        "failure_classes": [
+            {"id": name, "name": _push_failure_label(name),
+             "deliveries": failure_delivery_classes[name],
+             "attempts": failure_attempt_classes[name],
+             "share": _percent(failure_delivery_classes[name], len(terminal_failure_keys)),
+             "action": _push_failure_action(name)}
+            for name in sorted(
+                failure_delivery_classes,
+                key=lambda value: (-failure_delivery_classes[value], value),
+            )
+        ],
         "open_eligible": push_open_eligible, "open_pending": push_open_pending,
         "open_rate": _percent(push_opened, push_open_eligible) if push_open_eligible else None,
         "action_eligible": push_action_eligible, "action_pending": push_action_pending,
@@ -503,7 +730,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                                   if push_campaign_targets[name]
                                   else "только открытие; целевое действие не задано"),
                        "sent": values["sent"], "opened": values["opened"],
-                       "acted": values["acted"],
+                       "acted": values["acted"], "failed": values["failed"],
                        "open_eligible": values["open_eligible"],
                        "open_pending": values["open_pending"],
                        "open_rate": (_percent(values["opened"], values["open_eligible"])
@@ -649,8 +876,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     active_days_by_user: dict[str, set[str]] = defaultdict(set)
     feature_set_by_user: dict[str, set[str]] = defaultdict(set)
     for row in active_selected:
-        active_days_by_user[row["device_id"]].add(
-            datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat())
+        active_days_by_user[row["device_id"]].add(_product_day(row["ts"]))
         feature = _feature(row)
         if feature: feature_set_by_user[row["device_id"]].add(feature)
     returning_users = sum(len(days_set) >= 2 for days_set in active_days_by_user.values())
@@ -712,7 +938,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     avg_dau = (len(dau_ids) if window_days <= 1.1 else
                (sum(point["active"] for point in series_data) / len(series_data)
                 if series_data else 0))
-    avg_dau_note = ("rolling 24 часа" if window_days <= 1.1 else
+    avg_dau_note = ("с 00:00 текущей московской даты" if window_days <= 1.1 else
                     f"по {len(series_data)} календарным дням с данными")
     per_active_day = lambda n: round(n / active_user_days, 2) if active_user_days else 0
     per_active_day_or_none = lambda n: round(n / active_user_days, 2) if active_user_days else None
@@ -729,16 +955,36 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     exact_active_days: dict[str, set[str]] = defaultdict(set)
     for row in active_selected:
         if row["provenance"] == "observed":
-            day = datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()
+            day = _product_day(row["ts"])
             exact_active_days[day].add(row["device_id"])
     exact_active_user_days = sum(len(users) for users in exact_active_days.values())
     per_exact_active_day = lambda n: (round(n / exact_active_user_days, 2)
                                       if exact_active_user_days else None)
     exact_request_coverage = _percent(exact_request_covered, len(exact_ai_rows))
     exact_request_ready = bool(exact_ai_rows) and exact_request_coverage >= 80
+    exact_tool_rows = [
+        r for r in selected
+        if r["provenance"] == "observed" and r["name"] == "tool_execution_completed"
+    ]
+    successful_tool_rows = [
+        r for r in exact_tool_rows
+        if str(r["properties"].get("status") or "") in SUCCESS
+    ]
+    exact_tool_outcomes = [
+        r for r in selected
+        if r["provenance"] == "observed"
+        and r["name"] == "tool_outcome_completed"
+        and str(r["properties"].get("status") or "") in SUCCESS
+    ]
+    tool_counts: dict[str, Counter] = defaultdict(Counter)
+    for tool_row in exact_tool_rows:
+        tool_name = str(tool_row["properties"].get("tool_name") or "unknown")
+        tool_counts[tool_name]["executions"] += 1
+        if str(tool_row["properties"].get("status") or "") in SUCCESS:
+            tool_counts[tool_name]["successful"] += 1
     product_actions = sum(r["name"] in PRODUCT_ACTION_NAMES for r in selected)
     response_user_days = {
-        (r["device_id"], datetime.fromtimestamp(r["ts"], timezone.utc).date().isoformat())
+        (r["device_id"], _product_day(r["ts"]))
         for r in selected if _is_delivered_answer(r)
     }
     value_actions = len(response_user_days)
@@ -746,47 +992,57 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     for row in active_selected:
         feature = _feature(row)
         if feature:
-            day = datetime.fromtimestamp(row["ts"], timezone.utc).date().isoformat()
+            day = _product_day(row["ts"])
             feature_days[(row["device_id"], day)].add(feature)
     distinct_feature_uses = sum(len(feature_set) for feature_set in feature_days.values())
 
-    trailing_cutoff = now - 86400
-    trailing_sessions, _, _ = _sessions(rows, trailing_cutoff)
-    trailing_ai_attempts = sum(r["name"] == "ai_call" and r["ts"] >= trailing_cutoff and
-                               r["provenance"] == "observed" for r in rows)
+    calendar_day_start = period_starts["dau"]
+    day_sessions, _, _ = _sessions(rows, calendar_day_start, now)
+    day_ai_attempts = sum(
+        r["name"] == "ai_call"
+        and calendar_day_start <= r["ts"] <= now
+        and r["provenance"] == "observed"
+        for r in rows
+    )
+    day_successful_tool_executions = sum(
+        r["name"] == "tool_execution_completed"
+        and str(r["properties"].get("status") or "") in SUCCESS
+        and calendar_day_start <= r["ts"] <= now
+        and r["provenance"] == "observed"
+        for r in rows
+    )
     per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
-    overview_tools_per_dau = per_dau(trailing_ai_attempts)
-    overview_tool_denominator = ("rolling DAU всей доступной истории" if source_mode == "mixed"
-                                 else "rolling DAU точного v2-слоя")
+    # AIWA's product-defined Tool is one actual AI-provider invocation. This
+    # preserves the original Traction contract and mirrors MultiTool's volume
+    # semantics: completed and failed attempts both count as usage, while
+    # quality is reported separately. Structured function calls remain a
+    # narrower diagnostic and are not added here, otherwise one agent hop would
+    # be counted both as its model invocation and its local function.
+    overview_tools_per_dau = per_dau(day_ai_attempts)
+    overview_tool_denominator = (
+        "DAU текущей московской даты всей доступной истории"
+        if source_mode == "mixed"
+        else "DAU текущей московской даты точного v2-слоя"
+    )
     overview_tool_help = (
-        "Текущая legacy-compatible формула общей страницы: точно записанные AI-попытки "
-        "за 24 часа делятся на общий rolling DAU, включая восстановленных пользователей. "
-        "Она сохраняет непрерывность метрики, но может занижать техническую интенсивность, "
-        "потому что старые AI-вызовы восстановлены неполно."
-        if source_mode == "mixed" else
-        "Та же формула рассчитана только на точном v2-слое: точно записанные AI-попытки "
-        "за 24 часа делятся на rolling DAU без восстановленных пользователей. Поэтому "
-        "значение может отличаться от общей страницы, которая по умолчанию показывает всю историю."
+        "Все фактические AI-вызовы AIWA с 00:00 МСК, делённые на DAU той же "
+        "московской даты. Каждый вызов модели, STT/TTS и другая AI-подоперация "
+        "считается отдельно независимо от результата; retry и fallback тоже "
+        "являются отдельными попытками. Ошибки не вычитаются из объёма, а "
+        "показываются рядом в Attempt errors и Terminal failures. Структурированные "
+        "function calls показаны отдельной более узкой метрикой."
     )
 
     tool_definitions = [
-        {"id": "overview_ai_attempts_mixed_dau", "label": "Overview: AI-попытки / DAU",
-         "value": overview_tools_per_dau, "numerator": trailing_ai_attempts,
-         "numerator_label": "точных AI-попыток за 24 часа",
+        {"id": "ai_provider_attempts", "label": "AI provider attempts / DAU",
+         "value": per_dau(day_ai_attempts), "numerator": day_ai_attempts,
+         "numerator_label": "точных AI-попыток с 00:00 МСК",
          "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
-         "status": ("no_data" if not trailing_ai_attempts else
+         "status": ("no_data" if not day_ai_attempts else
                     "no_active_users" if not dau_ids else "ok"),
          "selected_for_overview": True,
          "help": overview_tool_help},
-        {"id": "ai_provider_attempts", "label": "AI-попытки / точный user-day",
-         "value": per_exact_active_day(len(exact_ai_rows)), "numerator": len(exact_ai_rows),
-         "numerator_label": "AI-попыток",
-         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
-         "status": ("no_data" if not exact_ai_rows else
-                    "no_active_users" if not exact_active_user_days else "ok"),
-         "selected_for_overview": False,
-         "help": "Все точно записанные обращения к AI-провайдерам, включая retry и fallback, нормализованные только на user-days точного v2-слоя. Это сопоставимые числитель и знаменатель, но показатель отражает техническую нагрузку, а не число использованных функций."},
-        {"id": "logical_ai_requests", "label": "AI-запросы / user-day",
+        {"id": "logical_ai_requests", "label": "Logical AI requests / DAU",
          "value": (per_exact_active_day(logical_ai_requests) if exact_request_ready else None),
          "numerator": (logical_ai_requests if exact_request_ready else None),
          "numerator_label": "AI-запросов",
@@ -797,47 +1053,52 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                     "no_active_users" if not exact_active_user_days else "ok"),
          "selected_for_overview": False,
          "help": "Логические AI-запросы после объединения retry и fallback по request_id. Попытки без request_id считаются отдельными запросами, поэтому метрика зависит от полноты трассировки."},
-        {"id": "product_actions", "label": "Действия в функциях / user-day",
-         "value": per_active_day_or_none(product_actions), "numerator": product_actions,
-         "numerator_label": "действий",
-         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
-         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
-         "help": "Явные действия пользователя в чате, чек-ине, питании и нагрузке. Простые открытия экранов и технические AI-попытки не считаются."},
-        {"id": "feature_breadth", "label": "Разные функции / user-day",
-         "value": per_active_day_or_none(distinct_feature_uses), "numerator": distinct_feature_uses,
-         "numerator_label": "использований разных функций",
-         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
-         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
-         "help": "Среднее число разных продуктовых зон, которыми человек воспользовался за активный день. Повторное использование одной зоны в тот же день не увеличивает показатель."},
-        {"id": "value_actions", "label": "Дни с ответом AIWA / user-day",
-         "value": per_active_day_or_none(value_actions), "numerator": value_actions,
-         "numerator_label": "user-days с ответом AIWA",
-         "denominator": active_user_days, "denominator_label": "активных пользовательских дней",
-         "status": "ok" if active_user_days else "no_active_users", "selected_for_overview": False,
-         "help": "Доля активных пользовательских дней, в которые AIWA успешно отправила хотя бы один ответ. Несколько ответов за день не раздувают показатель."},
+        {"id": "actual_tool_executions", "label": "Actual tool executions / DAU",
+         "value": per_exact_active_day(len(exact_tool_rows)),
+         "numerator": len(exact_tool_rows), "numerator_label": "tool executions",
+         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
+         "status": ("no_active_users" if not exact_active_user_days else "ok"),
+         "selected_for_overview": False,
+         "help": "Более узкая диагностика function calls модели за выбранный период: cycle_status, recent_symptoms, today_diary, recent_workouts, user_profile, recall и remember. Учитываются успешные и завершившиеся ошибкой исполнения. Аргументы и результаты в аналитику не передаются."},
+        {"id": "successful_tool_executions", "label": "Successful tool executions / DAU",
+         "value": per_dau(day_successful_tool_executions),
+         "numerator": day_successful_tool_executions,
+         "numerator_label": "успешных tool executions с 00:00 МСК",
+         "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
+         "status": ("no_active_users" if not dau_ids else "ok"),
+         "selected_for_overview": False,
+         "help": "Только успешно завершённые структурированные function calls с 00:00 МСК. Это диагностическая подметрика, а не общий Tools / DAU: неуспешный вызов всё равно является фактической попыткой использования инструмента."},
+        {"id": "useful_tool_outcomes", "label": "Useful outcomes after tool / DAU",
+         "value": per_exact_active_day(len(exact_tool_outcomes)),
+         "numerator": len(exact_tool_outcomes),
+         "numerator_label": "успешных tool-assisted ответов",
+         "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
+         "status": ("no_active_users" if not exact_active_user_days else "ok"),
+         "selected_for_overview": False,
+         "help": "Запросы, в которых хотя бы один инструмент успешно вернул данные и AIWA затем сформировала итоговый ответ. Это технически подтверждённый tool-assisted outcome, но не пользовательская оценка «Полезно»."},
     ]
 
     overview = {
         "ever_used": len(ever_ids), "dau": len(dau_ids), "wau": len(wau_ids), "mau": len(mau_ids),
-        "sessions_per_dau": per_dau(trailing_sessions),
+        "sessions_per_dau": per_dau(day_sessions),
     }
     if overview_tools_per_dau is not None:
         overview["tools_per_dau"] = overview_tools_per_dau
     primary = [
         {"label": "Ever used", "value": len(ever_ids), "note": "уникальные пользователи · всё время",
          "help": "Уникальные псевдонимные пользователи, у которых было хотя бы одно продуктовое действие за всю доступную историю."},
-        {"label": "DAU", "value": len(dau_ids), "note": "активные за последние 24 часа",
-         "help": "Уникальные пользователи с продуктовой активностью за последние 24 часа. Технические AI-попытки и push-отправки не считаются активностью."},
-        {"label": "WAU", "value": len(wau_ids), "note": "активные за последние 7 дней",
-         "help": "Уникальные пользователи с продуктовой активностью за последние 7 суток. Это скользящее окно, а не календарная неделя."},
-        {"label": "MAU", "value": len(mau_ids), "note": "активные за последние 30 дней",
-         "help": "Уникальные пользователи с продуктовой активностью за последние 30 суток. Системные AI-попытки и push-отправки не считаются активностью."},
+        {"label": "DAU", "value": len(dau_ids), "note": "с 00:00 текущей даты МСК",
+         "help": "Уникальные пользователи с продуктовой активностью в текущую московскую календарную дату. Технические AI-попытки и push-отправки не считаются активностью."},
+        {"label": "WAU", "value": len(wau_ids), "note": "текущая ISO-неделя МСК",
+         "help": "Уникальные пользователи с продуктовой активностью с понедельника 00:00 МСК."},
+        {"label": "MAU", "value": len(mau_ids), "note": "текущий месяц МСК",
+         "help": "Уникальные пользователи с продуктовой активностью с первого числа текущего московского месяца."},
         {"label": "Sessions / DAU", "value": overview["sessions_per_dau"],
-         "note": "сессии за 24 ч / rolling DAU",
-         "help": "Та же формула, что в общей сводке: сессии за последние 24 часа, делённые на уникальных активных пользователей за эти же 24 часа. Новая сессия начинается после 30 минут без продуктовых событий."},
+         "note": "сессии сегодня МСК / DAU сегодня",
+         "help": "Сессии с 00:00 МСК, делённые на уникальных активных пользователей той же календарной даты. Новая сессия начинается после 30 минут без продуктовых событий."},
         {"label": "Tools / DAU", "value": overview_tools_per_dau,
-         "note": f"точные AI-попытки за 24 ч / {'общий' if source_mode == 'mixed' else 'точный'} DAU",
-         "help": overview_tool_help + " Точная и продуктовые альтернативы показаны ниже."},
+         "note": f"все AI-вызовы сегодня МСК / {'общий' if source_mode == 'mixed' else 'точный'} DAU",
+         "help": overview_tool_help},
     ]
 
     classified_active = sum(_feature(r) is not None for r in active_selected)
@@ -848,7 +1109,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     diagnostics = [
         {"label": "Avg DAU", "value": round(avg_dau, 1), "unit": "number",
          "note": avg_dau_note,
-         "help": "Для окна 1 день это rolling DAU за последние 24 часа. Для 7/30 дней — среднее число активных пользователей по доступным календарным дням; дни до начала сбора не входят в знаменатель."},
+         "help": "Для окна 1 день это DAU текущей московской даты. Для 7/30 дней — среднее число активных пользователей по доступным московским календарным датам; дни до начала сбора не входят в знаменатель."},
         {"label": "Сессии / user-day", "value": per_active_day_or_none(sessions), "unit": "number",
          "note": f"{sessions} сессий / {active_user_days} user-days",
          "help": "Периодная глубина использования. В отличие от верхнего Sessions / DAU, учитывает каждый активный user-day выбранного окна."},
@@ -900,6 +1161,16 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                        "events_per_session": round(sum(session_events) / len(session_events), 1) if session_events else 0,
                        "features": features,
                        "pushes_sent": len(pushes), "checkins_completed": len(all_checkins)},
+        "platforms": {
+            "items": platform_breakdown,
+            "help": (
+                "Разбивка по поверхности продукта: диалог с Telegram-ботом и Mini App внутри "
+                "Telegram. Один человек может использовать обе поверхности и попадёт в обе "
+                "строки, поэтому доли пользователей не обязаны суммироваться до 100%. "
+                "iOS/Android/Desktop надёжно не показываются: Telegram Web App не передаёт "
+                "операционную систему в текущую privacy-safe аналитику."
+            ),
+        },
         "tool_definitions": tool_definitions,
         "diagnostics": diagnostics,
         "funnel": funnel, "value_delivery": value_delivery, "feature_funnels": feature_funnels,
@@ -909,6 +1180,22 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         "ai": {"attempts": len(ai_rows), "requests": len(requests), "untraced_attempts": len(ai_rows) - request_covered,
                "successful_requests": successful_requests,
                "failed_requests": failed_requests,
+               "recovered_requests": recovered_requests,
+               "clean_successful_requests": clean_successful_requests,
+               "tool_executions": len(exact_tool_rows),
+               "successful_tool_executions": len(successful_tool_rows),
+               "tool_execution_success_rate": _percent(len(successful_tool_rows), len(exact_tool_rows)),
+               "tool_outcomes": len(exact_tool_outcomes),
+               "tools": [
+                   {"name": name,
+                    "executions": int(counts["executions"]),
+                    "successful": int(counts["successful"]),
+                    "failed": int(counts["executions"] - counts["successful"])}
+                   for name, counts in sorted(
+                       tool_counts.items(),
+                       key=lambda item: (-item[1]["executions"], item[0]),
+                   )[:12]
+               ],
                "request_success_rate": (_percent(successful_requests, len(requests))
                                         if requests and _percent(request_covered, len(ai_rows)) >= 80 else None),
                "failed_attempts": failed_attempts, "attempt_error_rate": _percent(failed_attempts, len(ai_rows)),
@@ -919,7 +1206,28 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                "providers": [{"name": k, "calls": int(v["calls"]), "success": int(v["success"])}
                              for k, v in sorted(providers.items(), key=lambda kv: -kv[1]["calls"])],
                "models": [{"name": k, "calls": int(v["calls"]), "success": int(v["success"])}
-                          for k, v in sorted(models.items(), key=lambda kv: -kv[1]["calls"])]},
+                          for k, v in sorted(models.items(), key=lambda kv: -kv[1]["calls"])],
+               "failure_classes": [
+                   {"name": name, "attempts": int(count),
+                    "share": _percent(count, failed_attempts) if failed_attempts else 0}
+                   for name, count in failure_classes.most_common()
+               ],
+               "failure_statuses": [
+                   {"name": name, "attempts": int(count),
+                    "share": _percent(count, failed_attempts) if failed_attempts else 0}
+                   for name, count in failure_statuses.most_common()
+               ],
+               "failure_routes": [
+                   {"provider": provider, "model": model, "status": status,
+                    "attempts": int(count)}
+                   for (provider, model, status), count in failure_routes.most_common(12)
+               ],
+               "failure_purposes": [
+                   {"purpose": purpose, "failed": int(count),
+                    "attempts": int(purpose_attempts[purpose]),
+                    "failure_rate": _percent(count, purpose_attempts[purpose])}
+                   for purpose, count in purpose_failures.most_common(12)
+               ]},
         "data_quality": quality,
     }
 
@@ -1007,14 +1315,43 @@ async def delete_migration_batch(batch_id: str, request: Request) -> JSONRespons
     return _no_store({"ok": True, "batch": batch_id, "removed": removed})
 
 
+def _cached_dashboard(days: float, source: str) -> tuple[dict[str, Any], str, float]:
+    """Keep the live dashboard responsive while bounding staleness to a few seconds."""
+    key = (max(1, min(int(math.ceil(float(days))), 365)),
+           "observed" if str(source).lower() == "observed" else "mixed")
+    started = time.monotonic()
+    now_mono = started
+    with CACHE_LOCK:
+        cached = _DASHBOARD_CACHE.get(key)
+        if cached and cached[0] > now_mono:
+            return cached[1], "hit", (time.monotonic() - started) * 1000
+    value = compute_dashboard(key[0], key[1])
+    with CACHE_LOCK:
+        _DASHBOARD_CACHE[key] = (time.monotonic() + DASHBOARD_CACHE_SECONDS, value)
+    return value, "miss", (time.monotonic() - started) * 1000
+
+
+def _dashboard_response(days: float, source: str) -> JSONResponse:
+    value, cache_status, elapsed_ms = _cached_dashboard(days, source)
+    return _no_store(value, headers={
+        "Server-Timing": f'dashboard;dur={elapsed_ms:.1f};desc="{cache_status}"',
+        "X-Stats-Cache": cache_status,
+    })
+
+
 @app.get("/summary")
 def summary(days: float = 1.0, source: str = "mixed") -> JSONResponse:
-    return _no_store(compute_dashboard(days, source))
+    return _dashboard_response(days, source)
 
 
 @app.get("/dashboard")
 def dashboard_data(days: float = 1.0, source: str = "mixed") -> JSONResponse:
-    return _no_store(compute_dashboard(days, source))
+    return _dashboard_response(days, source)
+
+
+@app.get("/logo.png")
+def dashboard_logo() -> FileResponse:
+    return FileResponse(HERE / "logo.png", media_type="image/png")
 
 
 @app.get("/")

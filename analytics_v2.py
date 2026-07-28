@@ -236,6 +236,10 @@ def _legacy_event_name(action, meta):
         return "user_message_sent", None
     if action == "assistant_message":
         return "assistant_message_sent", None
+    if action == "tool_execution":
+        return "tool_execution_completed", None
+    if action == "tool_outcome":
+        return "tool_outcome_completed", None
     if action in {"manual", "suggest"}:
         return "legacy_message_interaction", None
     if action == "tokens":
@@ -307,7 +311,8 @@ def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_vers
         return None
     event_name, screen = _legacy_event_name(action, meta)
     text = str(meta or "")
-    props = {}
+    source = _source_for(action, meta)
+    props = {"platform": source}
     # Only coarse, explicitly safe dimensions are copied from legacy metadata.
     if meta in {"text", "voice", "webapp", "food_photo", "food_text", "diary_reco"}:
         props["channel"] = meta
@@ -322,6 +327,12 @@ def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_vers
             props["campaign_id"] = campaign
             props["campaign_type"] = campaign.split(":", 1)[0]
         props["delivery_status"] = status
+        if len(parts) > 2:
+            failure_class = safe_id(parts[2], 32)
+            if failure_class:
+                props["failure_class"] = failure_class
+        if len(parts) > 3:
+            props["retryable"] = parts[3] == "retryable"
     elif action == "push_open":
         campaign = safe_id(parts[0] if parts else "", 80)
         if campaign:
@@ -340,6 +351,20 @@ def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_vers
         answer_id = safe_id(parts[1] if len(parts) > 1 else "", 40)
         if level in {"disclaimer", "escalation", "emergency"}: props["safety_level"] = level
         if answer_id: props["answer_id"] = answer_id
+    elif action == "tool_execution":
+        status = safe_id(parts[0] if parts else "", 20)
+        tool_name = safe_id(parts[1] if len(parts) > 1 else "", 48)
+        if status in {"success", "error"}:
+            props["status"] = status
+        if tool_name:
+            props["tool_name"] = tool_name
+    elif action == "tool_outcome":
+        status = safe_id(parts[0] if parts else "", 20)
+        outcome_type = safe_id(parts[1] if len(parts) > 1 else "", 48)
+        if status in {"success", "error"}:
+            props["status"] = status
+        if outcome_type:
+            props["outcome_type"] = outcome_type
     event_id = str(uuid.uuid4())
     occurred = datetime.now(timezone.utc)
     key = user_key(chat_id)
@@ -348,7 +373,7 @@ def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_vers
                                   latency_ms,properties_json,app_version)
            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
         (event_id, occurred.isoformat(), key, event_name,
-         _source_for(action, meta), screen, request_id, "success", int(latency_ms or 0),
+         source, screen, request_id, "success", int(latency_ms or 0),
          json.dumps(props, ensure_ascii=False, separators=(",", ":")), app_version),
     )
     external_props = dict(props)

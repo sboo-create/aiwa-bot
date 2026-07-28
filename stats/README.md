@@ -16,22 +16,44 @@ cycle dates, photos and audio are never sent.
 
 The `overview` object intentionally keeps the six-field Disrupt Analytics
 contract: `ever_used`, `dau`, `wau`, `mau`, `sessions_per_dau` and
-`tools_per_dau`. Both ratios always use trailing-24-hour numerators regardless
-of the period selected on the detailed dashboard. For continuity with the
-existing Overview, sessions and tools use the selected history layer's rolling
-DAU. The tools numerator contains observed v2 AI attempts, so this
-legacy-compatible ratio is explicitly marked as potentially diluted by
-reconstructed users and is shown next to an observed-only alternative.
+`tools_per_dau`. DAU uses the current `Europe/Moscow` calendar date, WAU the
+current Moscow ISO week, and MAU the current Moscow calendar month. Both ratios
+use numerators from the same current Moscow date as their DAU denominator,
+regardless of the detailed-dashboard period. `tools_per_dau` uses AIWA's
+product-defined tool contract: every actual AI-provider invocation since
+00:00 Moscow time divided by DAU for the same date. Successful and failed
+invocations both count as usage; retries and fallback hops are separate
+attempts, matching MultiTool's volume semantics. Attempt quality and terminal
+request failures are reported separately.
 
-For backward compatibility, `tools_per_dau` currently means observed v2 AI
-provider attempts, including retry and fallback. If attempts exist without a
-rolling DAU denominator, the optional ratio key is omitted rather than
-publishing a misleading zero.
-The detailed dashboard exposes the
-top-level `tool_definitions` candidates with stable IDs, numerators,
-denominators and `selected_for_overview`. This makes the current choice
-explicit while product can compare logical AI requests, product actions,
-feature breadth and completed value proxies before changing the canonical KPI.
+The detailed dashboard exposes exactly five definitions: provider attempts,
+logical AI requests, actual tool executions, successful tool executions and
+tool-assisted outcomes. Tool lifecycle events contain only a safe tool name,
+status, request id, timing and product surface; arguments, returned profile
+data and medical context are never exported. Structured function executions
+are a narrower diagnostic and are not added to `tools_per_dau`, because their
+model hop is already counted as an AI invocation. A tool-assisted outcome
+means a tool succeeded and AIWA subsequently generated the final answer; it
+does not replace explicit user feedback.
+
+Dashboard responses are cached in-process for 15 seconds and include
+`Server-Timing` plus `X-Stats-Cache` diagnostics. Parsed SQLite rows are reused
+until the connection's change counter advances, and the one-day dashboard is
+prewarmed at service startup.
+
+## Platform and push delivery
+
+Platform means product surface, not device OS: `Telegram-бот` and `Mini App`.
+A user may appear in both rows. Telegram does not expose a trustworthy
+iOS/Android/Desktop field to the current privacy-safe analytics layer, so the
+dashboard does not infer one.
+
+Push success and failure use the same delivery identity: pseudonymous
+`user × campaign_id`. Raw Telegram API failures are reported separately as
+attempts. A failed campaign that later succeeds is recovered rather than left
+as a terminal failure. Permanent Telegram responses (`blocked`,
+`chat_not_found`, `user_deactivated`) suppress future background delivery;
+an inbound private update clears suppression and restores the user's schedule.
 
 ## Product decisions recorded on 2026-07-23
 

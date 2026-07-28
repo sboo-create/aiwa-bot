@@ -1,0 +1,22 @@
+{
+ "Силовая": "/assets/train/silovaya.png",
+ "Кардио": "/assets/train/kardio.png",
+ "Йога": "/assets/train/yoga.png",
+ "Ходьба": "/assets/train/hodba.png",
+ "Плавание": "/assets/train/plavanie.png",
+ "Ноги": "/assets/train/nogi.png",
+ "Спина": "/assets/train/spina.png",
+ "Грудь": "/assets/train/grud.png",
+ "Плечи": "/assets/train/plechi.png",
+ "Ягодицы": "/assets/train/yagoditsy.png",
+ "Руки": "/assets/train/ruki.png",
+ "Кор": "/assets/train/kor.png",
+ "Бег": "/assets/train/beg.png",
+ "Велотренажёр": "/assets/train/velotrenazher.png",
+ "Эллипс": "/assets/train/ellips.png",
+ "Гребля": "/assets/train/greblya.png",
+ "Скакалка": "/assets/train/skakalka.png",
+ "Растяжка": "/assets/train/rastyazhka.png",
+ "Прогулка": "/assets/train/progulka.png",
+ "Отдых": "/assets/train/otdyh.png"
+}
