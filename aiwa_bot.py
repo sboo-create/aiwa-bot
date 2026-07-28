@@ -6353,13 +6353,21 @@ async def traction_worker():
     """Durable, privacy-safe delivery to the external Disrupt Analytics module."""
     url = os.environ.get("AIWA_TRACTION_URL", "").strip()
     token = os.environ.get("AIWA_TRACTION_TOKEN", "").strip()
-    try:
-        await asyncio.to_thread(A2.seed_traction_outbox, DB)
-    except Exception as exc:
-        log.warning("traction seed failed: %s", exc)
     if not url:
         log.info("traction delivery disabled: AIWA_TRACTION_URL is not set")
         return
+    for attempt in range(5):
+        try:
+            await asyncio.to_thread(A2.seed_traction_outbox, DB)
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 4:
+                log.warning("traction seed failed: %s", exc)
+                break
+            await asyncio.sleep(0.25 * (attempt + 1))
+        except Exception as exc:
+            log.warning("traction seed failed: %s", exc)
+            break
     delay = 2
     while True:
         try:
