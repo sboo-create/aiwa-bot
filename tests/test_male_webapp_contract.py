@@ -16,7 +16,10 @@ import aiwa_bot as bot
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "deslop-main-BhPcPXDn.js"
+BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "deslop-main-aiwa-v162.js"
+WRAPPER = ROOT / "webapp2" / "assets" / "deslop" / "main.js"
+CHART_BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "AiwaWebUiChart-aiwa-v162.js"
+V162_CSS = ROOT / "webapp2" / "assets" / "deslop" / "aiwa-v162.css"
 INDEX = ROOT / "webapp2" / "index.html"
 
 
@@ -116,6 +119,29 @@ class MaleWebappStaticContractTests(unittest.TestCase):
 
         self.assertIn("const ii = Z.recent?.[Kt]", bundle)
         self.assertIn("S(ii);", bundle)
+
+    def test_telegram_gets_a_fresh_bundle_and_diary_cache_revalidates(self):
+        bundle = BUNDLE.read_text(encoding="utf-8")
+        wrapper = WRAPPER.read_text(encoding="utf-8")
+        chart_bundle = CHART_BUNDLE.read_text(encoding="utf-8")
+        index = INDEX.read_text(encoding="utf-8")
+
+        self.assertIn('deslop-main-aiwa-v162.js', wrapper)
+        self.assertIn('AiwaWebUiChart-aiwa-v162.js', bundle)
+        self.assertIn('deslop-main-aiwa-v162.js', chart_bundle)
+        self.assertIn('main.js?v=r14', index)
+        self.assertIn("aiwaCacheTs", bundle)
+        self.assertIn("maxAgeMs: l = 1500", bundle)
+        self.assertIn("Date.now() - (aiwaCacheTs.get(a) || 0) <= l", bundle)
+
+    def test_aiwa_art_stays_inside_telegram_safe_area(self):
+        css = V162_CSS.read_text(encoding="utf-8")
+        index = INDEX.read_text(encoding="utf-8")
+
+        self.assertIn("aiwa-v162.css", index)
+        self.assertIn(".aiwa-insight-content .aiwa-paper-ai-heading .aiwa-sequence", css)
+        self.assertIn("overflow: visible", css)
+        self.assertIn("env(safe-area-inset-bottom, 0px)", css)
 
     def test_food_and_training_use_telegram_photo_avatar(self):
         bundle = BUNDLE.read_text(encoding="utf-8")

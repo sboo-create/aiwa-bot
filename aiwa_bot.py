@@ -107,7 +107,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v161-staging-hotfix")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v162-staging-ui-journal")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 AIWA_TELEGRAM_API_ORIGIN = os.environ.get(
@@ -1512,7 +1512,7 @@ _JOURNAL_THIRD_PARTY_EVENT_RE = (
 _JOURNAL_NON_NAME_STARTERS = (
     r"Сегодня|Вчера|Позавчера|Сейчас|Позже|Потом|Затем|Утром|Днём|Днем|"
     r"Вечером|Ночью|Пожалуйста|Айва|После|Перед|Только|На|"
-    r"Ну|А|И|Ещё|Еще|Кстати|Короче|Вообще|Ладно|Нет|Да|"
+    r"Ну|Так|А|И|Ещё|Еще|Кстати|Короче|Вообще|Ладно|Нет|Да|"
     r"Как|Можешь|Запиши|Записать|Добавь|Добавить|Внеси|Внести|"
     r"Отметь|Отметить|Зафиксируй|Зафиксировать|"
     r"Месячные|Менструация|Тренировка|Тренировку|Тренировки|Кардио|"
@@ -1878,6 +1878,33 @@ def _journal_has_recent_mutation(context, max_minutes=180):
     except (TypeError, ValueError):
         return False
 
+def _journal_recent_meal_slot_followup(text, context, max_minutes=10):
+    """Resolve a narrow meal-slot correction without another model round-trip."""
+    match = re.fullmatch(
+        r"\s*(?:это|всё\s+это|все\s+это)\s+"
+        r"(?:было|была|были)\s+(?:на\s+)?"
+        r"(завтрак|обед|ужин|перекус)(?:е|ом)?\s*[.!]?\s*",
+        str(text or ""),
+        re.I,
+    )
+    if not match or not _journal_has_recent_mutation(context, max_minutes=max_minutes):
+        return None
+    last = (context or {}).get("last_mutation") or {}
+    if not str(last.get("kind") or "").startswith("food"):
+        return None
+    target_id = last.get("record_id")
+    if str(target_id) not in {
+        str(meal.get("id")) for meal in ((context or {}).get("meals") or [])
+    }:
+        return None
+    slot = {
+        "завтрак": "breakfast",
+        "обед": "lunch",
+        "ужин": "dinner",
+        "перекус": "snack",
+    }[match.group(1).lower()]
+    return {"intent": "movemealslot", "target_id": int(target_id), "slot": slot}
+
 _JOURNAL_MEAL_HEADING_RE = re.compile(
     r"(?i)(?<![а-яёa-z0-9])(?:(?:сегодня|вчера|позавчера)\s+)?(?:на\s+)?"
     r"(завтрак\w*|обед\w*|перекус\w*|полдник\w*|ужин\w*)"
@@ -1944,7 +1971,11 @@ def _semantic_journal_candidate(text, context=None, enable_v2=False):
         return False
     # V2 validates the model-selected evidence fragments independently below.
     # Whole-message rejection would incorrectly drop mixed self/other reports.
-    if _journal_third_party_source(raw) and not enable_v2:
+    if (
+        _journal_third_party_source(raw)
+        and not _journal_explicit_first_person_event(raw)
+        and not enable_v2
+    ):
         return False
     domain_hint = bool(_JOURNAL_SEMANTIC_CANDIDATE_RE.search(raw))
     contextual_repair = bool(
@@ -2474,6 +2505,10 @@ async def resolve_semantic_journal_action(cid, text, user_generation=None):
     """Распознаёт естественное журналирование без привязки к порядку конкретных слов."""
     context = _journal_recent_context(cid)
     v2 = journal_v2_enabled(cid)
+    slot_followup = _journal_recent_meal_slot_followup(text, context)
+    if slot_followup:
+        ev(cid, "journal_action_planned", meta="movemealslot_fastpath")
+        return slot_followup
     mixed = _journal_mixed_segments(
         text, male=(row(cid) or {}).get("mode") == "male",
     )

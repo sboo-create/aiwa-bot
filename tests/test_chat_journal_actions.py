@@ -464,6 +464,62 @@ class ChatJournalActionTests(unittest.TestCase):
         self.assertEqual(result["mutation"]["kind"], "food")
         self.assertEqual(len(bot.meals_of(self.cid)), 1)
 
+    def test_sentence_starter_food_report_and_short_slot_followup(self):
+        text = "Так я поел Солёных огурцов. С картошкой и грибами."
+        classified = {
+            "action": "food",
+            "subject": "self",
+            "status": "completed",
+            "polarity": "positive",
+            "certainty": "certain",
+            "primary_purpose": "journal",
+            "confidence": 0.98,
+            "evidence_span": text,
+            "food_text": "солёные огурцы с картошкой и грибами",
+            "workout": {},
+        }
+        parsed_food = {
+            "title": "Солёные огурцы, картошка и грибы",
+            "grams": 400,
+            "kcal": 330,
+            "protein": 8,
+            "fat": 9,
+            "carbs": 54,
+        }
+
+        self.assertFalse(bot._journal_third_party_source(text))
+        self.assertTrue(bot._semantic_journal_candidate(text))
+        with (
+            mock.patch.object(bot.L, "classify_journal_event", return_value=classified),
+            mock.patch.object(bot.L, "analyze_food_text", return_value=parsed_food),
+        ):
+            first = asyncio.run(bot._chat_reply(
+                self.cid,
+                bot.row(self.cid),
+                text,
+                mutation_key=bot.chat_mutation_key("webchat", "pickles-potatoes"),
+                require_mutation_key=True,
+            ))
+
+        self.assertEqual(first["mutation"]["kind"], "food")
+        self.assertNotEqual(bot.meals_of(self.cid)[0]["slot"], "lunch")
+
+        with mock.patch.object(
+            bot.L,
+            "classify_journal_event",
+            side_effect=AssertionError("short slot follow-up must not call the model"),
+        ):
+            moved = asyncio.run(bot._chat_reply(
+                self.cid,
+                bot.row(self.cid),
+                "Это было на обед.",
+                mutation_key=bot.chat_mutation_key("webchat", "pickles-slot"),
+                require_mutation_key=True,
+            ))
+
+        self.assertEqual(moved["mutation"]["kind"], "food_update")
+        self.assertEqual(bot.meals_of(self.cid)[0]["slot"], "lunch")
+
     def test_multiturn_food_followup_and_correction_update_the_verified_record(self):
         blueberry_route = {
             "action": "food", "target_id": None, "subject": "self",

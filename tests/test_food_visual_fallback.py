@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUNDLE = ROOT / "webapp2/assets/deslop/deslop-main-BhPcPXDn.js"
+BUNDLE = ROOT / "webapp2/assets/deslop/deslop-main-aiwa-v162.js"
 
 
 class FoodVisualFallbackTests(unittest.TestCase):

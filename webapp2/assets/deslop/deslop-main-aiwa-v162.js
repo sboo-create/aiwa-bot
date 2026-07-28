@@ -19695,7 +19695,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-sx8eqQoP.js").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v162.js").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -21057,14 +21057,13 @@ const mx = {
   diary: () => qt("/api/diary", {}),
   trainingSection: () => qt("/api/section", { kind: "training" }),
   train: () => qt("/api/train", {})
-}, Zi = /* @__PURE__ */ new Map(), sr = /* @__PURE__ */ new Map(), or = (a) => Object.fromEntries(a.map((e) => [e, Zi.get(e) ?? null])), Od = (a, { force: e = !1 } = {}) => {
-  if (!e) {
-    if (Zi.has(a)) return Promise.resolve(Zi.get(a));
-    const s = sr.get(a);
-    if (s) return s;
-  }
-  const l = mx[a]().catch(() => null).then((s) => (s && Zi.set(a, s), sr.get(a) === l && sr.delete(a), Zi.get(a) ?? null));
-  return sr.set(a, l), l;
+}, Zi = /* @__PURE__ */ new Map(), sr = /* @__PURE__ */ new Map(), aiwaCacheTs = /* @__PURE__ */ new Map(), or = (a) => Object.fromEntries(a.map((e) => [e, Zi.get(e) ?? null])), Od = (a, { force: e = !1, maxAgeMs: l = 1500 } = {}) => {
+  const s = sr.get(a);
+  if (s) return s;
+  if (!e && Zi.has(a) && Date.now() - (aiwaCacheTs.get(a) || 0) <= l)
+    return Promise.resolve(Zi.get(a));
+  const r = mx[a]().catch(() => null).then((c) => (c && (Zi.set(a, c), aiwaCacheTs.set(a, Date.now())), sr.get(a) === r && sr.delete(a), Zi.get(a) ?? null));
+  return sr.set(a, r), r;
 }, sA = () => {
   Object.keys(mx).forEach((a) => {
     Od(a);
@@ -21075,7 +21074,7 @@ function px(a, e) {
     const y = h.length ? h : a;
     await Promise.all(y.map((p) => Od(p, { force: !0 }))), s(or(a));
   }, [a]), f = E.useCallback((h, y) => {
-    Zi.set(h, y), s(or(a));
+    Zi.set(h, y), aiwaCacheTs.set(h, Date.now()), s(or(a));
   }, [a]);
   return E.useEffect(() => {
     let h = !0;

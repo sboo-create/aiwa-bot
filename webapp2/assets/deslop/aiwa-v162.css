@@ -1,0 +1,23 @@
+.aiwa-insight-content .aiwa-paper-ai-heading .aiwa-sequence {
+  top: 2px;
+  left: 2px;
+  width: 52px;
+  height: 52px;
+  overflow: visible;
+  border-radius: 0;
+  transform: rotate(-7.81deg);
+  transform-origin: center;
+}
+
+.aiwa-insight-content .aiwa-paper-ai-heading > div {
+  left: 60px;
+}
+
+.aiwa-nav-mascot {
+  bottom: calc(var(--bottom-clearance, 18px) + env(safe-area-inset-bottom, 0px));
+}
+
+.aiwa-nav-mascot .aiwa-sequence {
+  overflow: visible;
+  border-radius: 0;
+}
