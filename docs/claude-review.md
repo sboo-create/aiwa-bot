@@ -23,7 +23,10 @@ The review job:
   usage is not billed;
 - ignores draft pull requests, forks, and authors outside
   `OWNER`/`MEMBER`/`COLLABORATOR`;
-- uses a pinned Claude Code Action commit and a read-only checkout;
+- sends the bounded PR diff in one forced-schema model request instead of running an
+  open-ended coding agent;
+- treats the pull-request title and diff as untrusted data;
+- uses a read-only checkout and never executes code from the review step;
 - can post PR comments but cannot write repository contents;
 - reaches LiteLLM through an SSH tunnel with a pinned server host key;
 - uses a dedicated SSH key restricted to forwarding `127.0.0.1:4000`;
@@ -46,15 +49,16 @@ Set the variable back to `false` for an immediate reviewer kill switch.
 
 ## Spend visibility
 
-Every run publishes the model, estimated cost, turn count, permission denials, and result
-in two places:
+Every run publishes the model, request count, input/output tokens, and estimated cost in
+two places:
 
 - the GitHub Actions run summary;
 - a short usage comment on the pull request.
 
-The per-run value comes from Claude Code's `total_cost_usd` result and is an estimate.
-LiteLLM enforces the dedicated `$25 / 30d` key budget; the OpenRouter billing dashboard
-is authoritative for the provider charge.
+The reviewer fetches current public OpenRouter token prices for the estimate and falls
+back to configured prices if that lookup fails. LiteLLM enforces the dedicated
+`$25 / 30d` key budget; the OpenRouter billing dashboard is authoritative for the
+provider charge.
 
 For a strict pre-merge gate, require both `test` and `Claude review` in the `main` branch
 ruleset. The reviewer reports findings; a human still decides whether they block merge.
