@@ -7,8 +7,9 @@ immediately.
 ## Model policy
 
 - `aiwa-review-sonnet-5` (Claude Sonnet 5) with high effort is the default reviewer.
-- When an allow-listed maintainer adds `claude-deep-review`, a separate check runs
-  three bounded `aiwa-review-opus-5` (Claude Opus 5) specialist agents in parallel:
+- When a repository maintainer adds `claude-deep-review` to any pull request targeting
+  `main`, a separate check runs three bounded `aiwa-review-opus-5` (Claude Opus 5)
+  specialist agents in parallel:
   correctness/data, security/privacy/infrastructure, and product/medical/tests.
 - The specialist results are combined deterministically into one PR comment; there is
   no fourth synthesis request and no open-ended coding-agent loop.
@@ -26,8 +27,8 @@ The review job:
 - runs on GitHub-hosted `ubuntu-latest`; this repository is public, so standard runner
   usage is not billed;
 - runs only for pull requests targeting `main`;
-- ignores draft pull requests, forks, and authors outside
-  `OWNER`/`MEMBER`/`COLLABORATOR`;
+- can be manually triggered on any pull request targeting `main`, including drafts
+  and forks; GitHub label permissions are the authorization boundary;
 - sends the bounded PR diff in one forced-schema request for ordinary review or three
   parallel forced-schema requests for deep review instead of an open-ended agent loop;
 - treats the pull-request title and diff as untrusted data;
@@ -38,9 +39,10 @@ The review job:
 - uses a dedicated LiteLLM virtual key restricted to the two review aliases, at most
   four parallel requests, and a `$25` budget per 30 days.
 - skips duplicate ordinary or deep-review calls for an already reviewed commit SHA.
-- waits for a successful `test` check on the exact head SHA before spending on Opus;
-  it does not rerun the test suite merely because a label was added, and it waits
-  before opening the LiteLLM tunnel or exposing the model key to a step.
+- does not require or rerun the test suite merely because a label was added;
+- runs the label-triggered workflow from trusted `main`, checks out only the trusted
+  base revision, downloads the pull-request diff as untrusted text, and never executes
+  code from the pull-request branch;
 - queues repeated label events and rechecks the revision marker before retrying a
   possibly accepted comment, avoiding cancellation-driven duplicate model spend.
 - preserves and publishes successful specialist results when one agent fails, marks the
@@ -56,7 +58,6 @@ An administrator must add:
 | Actions secret | `AIWA_REVIEW_LITELLM_KEY` | Dedicated budget-limited LiteLLM virtual key |
 | Actions secret | `AIWA_REVIEW_REPORT_SSH_KEY` | Forced-command key that can read aggregate reviewer spend only |
 | Actions variable | `AIWA_CLAUDE_REVIEW_ENABLED` | `true` after both secrets are present |
-| Actions variable | `AIWA_CLAUDE_DEEP_REVIEW_ACTORS` | Comma-separated GitHub logins allowed to trigger Opus |
 | Actions variable | `AIWA_CLAUDE_SPEND_ISSUE` | Issue number used as the aggregate spend dashboard |
 
 Keep the variable unset or set to `false` until both credentials and both model aliases
@@ -91,8 +92,9 @@ ruleset. The reviewer reports findings; a human still decides whether they block
 1. Develop and test in a feature branch.
 2. Open a pull request; CI runs without touching Railway production.
 3. After tests pass, Claude reviews the same PR revision.
-4. For high-risk changes, add `claude-deep-review` and exercise the exact commit in
-   staging. Expect roughly three times the Opus token spend of a single-model review.
+4. Whenever a deeper pass is useful, add `claude-deep-review`; this manual review does
+   not depend on the test status. Expect roughly three times the Opus token spend of a
+   single-model review.
 5. Merge only after CI, review, and the relevant staging checks are complete.
 6. Treat the resulting Railway deployment as production and keep a rollback commit or
    release available.
