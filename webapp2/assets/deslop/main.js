@@ -1,1 +1,1 @@
-import "./deslop-main-aiwa-v162.js?v=mascot-static-1";
+import "./deslop-main-aiwa-v162.js";
