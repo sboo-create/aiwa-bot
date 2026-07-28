@@ -120,6 +120,8 @@ jobs:
 
           install -m 600 /dev/null "$key_file"
           printf '%s\n' "$AIWA_REVIEW_REPORT_SSH_KEY" > "$key_file"
+          # LiteLLM persists spend asynchronously after returning the model response.
+          sleep 30
           ssh \
             -o BatchMode=yes \
             -o ConnectTimeout=10 \
