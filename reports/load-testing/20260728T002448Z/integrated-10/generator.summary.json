@@ -1,0 +1,226 @@
+{
+  "run_id": "20260728T005017Z",
+  "target": "https://aiwa-staging-167.158-160-163-167.sslip.io",
+  "target_version": "2026-07-27-v146-summary-dedup-i167-staging",
+  "scenario": "integrated",
+  "users": 10,
+  "ramp_seconds": 30.0,
+  "hold_seconds": 180.0,
+  "duration_seconds": 319.656,
+  "iterations": 216,
+  "completed_users": 10,
+  "achieved_rps": 0.676,
+  "overall": {
+    "requests": 216,
+    "ok": 213,
+    "errors": 3,
+    "success_rate": 0.986111,
+    "latency_ms": {
+      "p50": 44.62,
+      "p90": 96.95,
+      "p95": 19278.49,
+      "p99": 57950.99,
+      "max": 60585.02,
+      "mean": 2630.37
+    },
+    "statuses": {
+      "0": 3,
+      "200": 213
+    },
+    "errors_by_class": {
+      "timeout": 3
+    }
+  },
+  "by_category": {
+    "ai_e2e": {
+      "requests": 19,
+      "ok": 16,
+      "errors": 3,
+      "success_rate": 0.842105,
+      "latency_ms": {
+        "p50": 20243.51,
+        "p90": 60195.67,
+        "p95": 60314.45,
+        "p99": 60530.91,
+        "max": 60585.02,
+        "mean": 29411.13
+      },
+      "statuses": {
+        "0": 3,
+        "200": 16
+      },
+      "errors_by_class": {
+        "timeout": 3
+      }
+    },
+    "core": {
+      "requests": 197,
+      "ok": 197,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 43.71,
+        "p90": 65.81,
+        "p95": 72.86,
+        "p99": 99.36,
+        "max": 122.25,
+        "mean": 47.46
+      },
+      "statuses": {
+        "200": 197
+      },
+      "errors_by_class": {}
+    }
+  },
+  "by_route": {
+    "/api/chat": {
+      "requests": 19,
+      "ok": 16,
+      "errors": 3,
+      "success_rate": 0.842105,
+      "latency_ms": {
+        "p50": 20243.51,
+        "p90": 60195.67,
+        "p95": 60314.45,
+        "p99": 60530.91,
+        "max": 60585.02,
+        "mean": 29411.13
+      },
+      "statuses": {
+        "0": 3,
+        "200": 16
+      },
+      "errors_by_class": {
+        "timeout": 3
+      }
+    },
+    "/api/checkin": {
+      "requests": 21,
+      "ok": 21,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 69.2,
+        "p90": 86.23,
+        "p95": 86.42,
+        "p99": 88.79,
+        "max": 89.38,
+        "mean": 68.85
+      },
+      "statuses": {
+        "200": 21
+      },
+      "errors_by_class": {}
+    },
+    "/api/diary": {
+      "requests": 39,
+      "ok": 39,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 44.05,
+        "p90": 51.3,
+        "p95": 53.07,
+        "p99": 80.0,
+        "max": 94.82,
+        "mean": 45.54
+      },
+      "statuses": {
+        "200": 39
+      },
+      "errors_by_class": {}
+    },
+    "/api/log_history": {
+      "requests": 43,
+      "ok": 43,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 39.19,
+        "p90": 46.22,
+        "p95": 47.93,
+        "p99": 52.42,
+        "max": 55.29,
+        "mean": 40.26
+      },
+      "statuses": {
+        "200": 43
+      },
+      "errors_by_class": {}
+    },
+    "/api/track": {
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 39.47,
+        "p90": 48.65,
+        "p95": 65.61,
+        "p99": 97.94,
+        "max": 106.02,
+        "mean": 44.37
+      },
+      "statuses": {
+        "200": 16
+      },
+      "errors_by_class": {}
+    },
+    "/api/train": {
+      "requests": 37,
+      "ok": 37,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 49.19,
+        "p90": 57.44,
+        "p95": 65.98,
+        "p99": 88.84,
+        "max": 99.09,
+        "mean": 51.51
+      },
+      "statuses": {
+        "200": 37
+      },
+      "errors_by_class": {}
+    },
+    "/api/train_day": {
+      "requests": 41,
+      "ok": 41,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 40.06,
+        "p90": 48.9,
+        "p95": 52.66,
+        "p99": 108.05,
+        "max": 122.25,
+        "mean": 43.42
+      },
+      "statuses": {
+        "200": 41
+      },
+      "errors_by_class": {}
+    }
+  },
+  "generator": {
+    "hostname": "nsushko-local-judges-0",
+    "python": "3.10.12",
+    "loadavg": [
+      63.2724609375,
+      62.67333984375,
+      63.48193359375
+    ],
+    "max_rss_kib": 35664,
+    "loop_drift_ms": {
+      "p95": 1.35,
+      "p99": 2.03,
+      "max": 2.36
+    }
+  },
+  "ai_controls": {
+    "share": 0.08,
+    "client_concurrency": 2,
+    "provider_metrics_source": "target SQLite llm_calls + LOAD/60s logs"
+  }
+}

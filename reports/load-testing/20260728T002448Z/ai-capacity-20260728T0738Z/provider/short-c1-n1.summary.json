@@ -1,0 +1,40 @@
+{
+  "captured_at": "2026-07-28T07:38:51.359716+00:00",
+  "profile": "short",
+  "requested_model": "openrouter/deepseek/deepseek-v4-flash",
+  "concurrency": 1,
+  "requests": 1,
+  "success": 0,
+  "errors": 1,
+  "success_rate": 0.0,
+  "wall_seconds": 2.691,
+  "throughput_rps": 0.0,
+  "latency_ms_all": {
+    "mean": 2691.13,
+    "p50": 2691.13,
+    "p95": 2691.13,
+    "p99": 2691.13,
+    "max": 2691.13
+  },
+  "latency_ms_success": {
+    "mean": null,
+    "p50": null,
+    "p95": null,
+    "max": null
+  },
+  "statuses": {
+    "200": 1
+  },
+  "errors_by_class": {
+    "empty_response": 1
+  },
+  "providers": {},
+  "models": {},
+  "tokens": {
+    "prompt": 28,
+    "completion": 16
+  },
+  "reported_cost_usd": 2.25e-05,
+  "calls_with_cost": 1,
+  "cost_complete": true
+}

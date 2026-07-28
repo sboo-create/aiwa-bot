@@ -105,6 +105,61 @@ class SecurityAnalyticsTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_today_jobs_are_durable_and_deduplicated(self):
+        cid = 910
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        user = bot.row(cid)
+
+        first = bot._enqueue_today_job(cid, user, None)
+        second = bot._enqueue_today_job(cid, user, None)
+
+        self.assertEqual(first["job_id"], second["job_id"])
+        conn = sqlite3.connect(bot.DB)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM ai_jobs WHERE chat_id=? AND kind='today_note'",
+                (cid,),
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
+    def test_today_job_queue_recovers_running_work_after_restart(self):
+        cid = 911
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        queued = bot._enqueue_today_job(cid, bot.row(cid), None)
+        claimed = bot._claim_ai_job()
+        self.assertEqual(claimed["job_id"], queued["job_id"])
+
+        bot._recover_ai_jobs()
+
+        conn = sqlite3.connect(bot.DB)
+        status = conn.execute(
+            "SELECT status FROM ai_jobs WHERE job_id=?", (queued["job_id"],)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(status, "queued")
+
+    def test_today_queue_limit_returns_fast_capacity_fallback(self):
+        cid = 912
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="irregular")
+        first = bot._enqueue_today_job(cid, bot.row(cid), None)
+        self.assertEqual(first["status"], "queued")
+
+        other = 913
+        bot._activate_user(other)
+        bot.upsert(other, mode="irregular")
+        with mock.patch.object(bot, "_AI_TODAY_QUEUE_MAX", 1):
+            rejected = bot._enqueue_today_job(other, bot.row(other), None)
+        fallback = bot._today_job_fallback(None, rejected)
+
+        self.assertEqual(rejected, {"status": "rejected", "reason": "queue_full"})
+        self.assertTrue(fallback["capacity_limited"])
+        self.assertFalse(fallback["refreshing"])
+
     def test_webapp_url_never_contains_health_data(self):
         old = bot.AIWA_WEBAPP_URL
         bot.AIWA_WEBAPP_URL = "https://example.test/app?source=telegram"
@@ -173,8 +228,9 @@ class SecurityAnalyticsTests(unittest.TestCase):
             (101, answer_id),
         ).fetchone()
         feedback_events = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE chat_id=? AND action='feedback'",
-            (101,),
+            """SELECT COUNT(*) FROM events_v2
+               WHERE user_key=? AND event_name='answer_feedback_submitted'""",
+            (a2.user_key(101),),
         ).fetchone()[0]
         conn.close()
         self.assertEqual(request[:2], ("bot", "helpful"))
@@ -206,13 +262,14 @@ class SecurityAnalyticsTests(unittest.TestCase):
         )
         actions = [
             row[0] for row in conn.execute(
-                "SELECT action FROM events WHERE chat_id=? ORDER BY id",
-                (cid,),
+                """SELECT event_name FROM events_v2
+                   WHERE user_key=? ORDER BY rowid""",
+                (a2.user_key(cid),),
             ).fetchall()
         ]
         conn.close()
-        self.assertIn("feedback_prompt", actions)
-        self.assertIn("tokens", actions)
+        self.assertIn("answer_feedback_prompted", actions)
+        self.assertIn("ai_usage_recorded", actions)
 
     def test_feedback_sampling_can_be_disabled_or_enabled_for_all_answers(self):
         with mock.patch.dict(os.environ, {"AIWA_FEEDBACK_SAMPLE_RATE": "0"}):
@@ -234,10 +291,10 @@ class SecurityAnalyticsTests(unittest.TestCase):
         tampered = signed_init_data(42).replace("%3A42", "%3A43")
         self.assertIsNone(bot._verify_init(tampered))
 
-    def test_legacy_event_dual_writes_without_raw_user_id(self):
+    def test_events_write_to_v2_only_without_raw_user_id(self):
         bot.ev(987654321, "button", meta="view_food")
         conn = sqlite3.connect(bot.DB)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
         row = conn.execute("SELECT user_key,event_name,source,screen,properties_json FROM events_v2").fetchone()
         conn.close()
         self.assertEqual(row[1:4], ("screen_viewed", "webapp", "food"))
@@ -333,13 +390,16 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(answer, "Готовый ответ")
         conn = sqlite3.connect(bot.DB)
         actions = conn.execute(
-            "SELECT action,meta FROM events WHERE chat_id=? ORDER BY id", (789,)
+            """SELECT event_name,properties_json FROM events_v2
+               WHERE user_key=? ORDER BY rowid""",
+            (a2.user_key(789),),
         ).fetchall()
         conn.close()
-        self.assertEqual(actions, [
-            ("tool_execution", "success|cycle_status|webapp"),
-            ("tool_outcome", "success|tool_assisted_answer|webapp"),
+        self.assertEqual([row[0] for row in actions], [
+            "tool_execution_completed", "tool_outcome_completed",
         ])
+        self.assertEqual(json.loads(actions[0][1])["tool_name"], "cycle_status")
+        self.assertEqual(json.loads(actions[1][1])["outcome_type"], "tool_assisted_answer")
 
     def test_daily_checkin_push_is_sent_once_per_campaign(self):
         cid = 123
@@ -482,8 +542,8 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn = sqlite3.connect(bot.DB)
         self.assertEqual(
             conn.execute(
-                """SELECT COUNT(*) FROM events
-                   WHERE action='fallback' AND meta='static:summary_delivery_cache_miss'"""
+                """SELECT COUNT(*) FROM events_v2
+                   WHERE event_name='fallback_served'"""
             ).fetchone()[0],
             2,
         )
@@ -549,7 +609,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
                         (chat_id,mutation_key,generation,kind,record_id,created_at)
                         VALUES(?,?,?,?,?,?)""", (cid, "telegram:test", 1, "food", "1", "now"))
         conn.execute("INSERT INTO partners(partner_id,woman_id,created) VALUES(?,?,?)", (88, cid, "now"))
-        a2.insert_legacy_event(conn, cid, "manual", meta="text")
+        a2.insert_event_v2(conn, cid, "manual", meta="text")
         conn.commit(); conn.close()
         bot.CHAT_HIST[cid] = ["private"]
 
@@ -928,6 +988,23 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(captured[0]["reported_cost"], 0.012)
         self.assertEqual(captured[0]["cost_unit"], "usd")
 
+    def test_synthetic_load_users_are_excluded_only_from_background_audiences(self):
+        regular_id = 501
+        synthetic_id = 790_000_000_501
+        for user_id in (regular_id, synthetic_id):
+            bot._activate_user(user_id)
+            bot.upsert(user_id, mode="none")
+        with mock.patch.dict(
+            os.environ,
+            {"AIWA_SYNTHETIC_USER_ID_MIN": "790000000000"},
+            clear=False,
+        ):
+            self.assertEqual(bot.all_users(), [regular_id])
+            self.assertEqual(
+                sorted(bot.all_users(include_synthetic=True)),
+                [regular_id, synthetic_id],
+            )
+
     def test_food_photo_uses_separate_openrouter_vision_model(self):
         old_key = llm._OPENROUTER_KEY
         old_model = llm.OPENROUTER_VISION_MODEL
@@ -978,6 +1055,45 @@ class SecurityAnalyticsTests(unittest.TestCase):
             config = llm._proxy_configs()[0]
         self.assertEqual(config["name"], "litellm")
         self.assertEqual(config["cost_unit"], "usd")
+
+    def test_litellm_cost_header_is_persisted_when_usage_has_no_cost(self):
+        captured = []
+        old_sink = llm._USAGE_SINK
+        response = mock.Mock(
+            status_code=200,
+            headers={"x-litellm-response-cost": "0.00125"},
+        )
+        response.json.return_value = {
+            "provider": "test-provider",
+            "model": "test-model",
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        }
+        config = {
+            "name": "litellm",
+            "url": "https://proxy.test/v1/chat/completions",
+            "model": "openrouter/test-model",
+            "key": "test-key",
+            "cost_unit": "usd",
+        }
+        llm.set_usage_sink(captured.append)
+        llm._ROUTE_CIRCUITS.clear()
+        try:
+            with mock.patch.object(llm._HTTP, "post", return_value=response):
+                answer = llm._call_proxy_one(
+                    config,
+                    [{"role": "user", "content": "hello"}],
+                    20,
+                    0.2,
+                    [],
+                    attempts=1,
+                )
+        finally:
+            llm.set_usage_sink(old_sink)
+            llm._ROUTE_CIRCUITS.clear()
+        self.assertEqual(answer, "ok")
+        self.assertEqual(captured[0]["reported_cost"], 0.00125)
+        self.assertEqual(captured[0]["cost_unit"], "usd")
 
     def test_llm_route_circuit_opens_immediately_for_auth_failure(self):
         cfg = {"name": "broken", "url": "https://proxy.test/v1/chat/completions", "model": "m"}

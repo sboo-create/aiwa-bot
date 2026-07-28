@@ -1,0 +1,30 @@
+{
+  "currency": "USD",
+  "source_of_truth": "LiteLLM spend ledger filtered to the AIWA virtual key and exact experiment windows",
+  "shared_key_background_exclusion": {
+    "core_10": {
+      "excluded_rows": 1,
+      "excluded_cost_usd": 0.00000851,
+      "reason": "periodic 47-token shared-key call not present in staging llm_calls"
+    },
+    "integrated_10": {
+      "excluded_rows": 1,
+      "excluded_cost_usd": 0.000004368,
+      "reason": "periodic 35-token shared-key call not present in staging llm_calls"
+    }
+  },
+  "load_experiments": {
+    "core_10_discovery_usd": 0.010652291,
+    "integrated_10_usd": 0.021963014,
+    "non_ai_experiments_usd": 0.0,
+    "total_usd": 0.032615305
+  },
+  "pre_test_smoke": {
+    "usd": 0.00116287,
+    "note": "three chat-chain calls plus one today-note call used to verify the secure LiteLLM path"
+  },
+  "staging_total_usd": 0.033778175,
+  "application_header_total_for_load_experiments_usd": 0.019627232,
+  "header_understatement_usd": 0.012988073,
+  "header_understatement_rate": 0.661737376
+}

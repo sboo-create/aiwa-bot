@@ -1,0 +1,46 @@
+{
+  "captured_at": "2026-07-28T07:46:33.506720+00:00",
+  "profile": "today-note",
+  "requested_model": "openrouter/deepseek/deepseek-v4-flash",
+  "concurrency": 8,
+  "requests": 16,
+  "success": 16,
+  "errors": 0,
+  "success_rate": 1.0,
+  "wall_seconds": 23.296,
+  "throughput_rps": 0.6868,
+  "latency_ms_all": {
+    "mean": 6051.48,
+    "p50": 4926.05,
+    "p95": 14686.72,
+    "p99": 17686.56,
+    "max": 18436.52
+  },
+  "latency_ms_success": {
+    "mean": 6051.48,
+    "p50": 4926.05,
+    "p95": 14686.72,
+    "max": 18436.52
+  },
+  "statuses": {
+    "200": 16
+  },
+  "errors_by_class": {},
+  "providers": {
+    "DeepInfra": 12,
+    "StreamLake": 1,
+    "GMICloud": 1,
+    "AtlasCloud": 1,
+    "CoreWeave": 1
+  },
+  "models": {
+    "openrouter/deepseek/deepseek-v4-flash": 16
+  },
+  "tokens": {
+    "prompt": 2624,
+    "completion": 3478
+  },
+  "reported_cost_usd": 0.000891843,
+  "calls_with_cost": 16,
+  "cost_complete": true
+}

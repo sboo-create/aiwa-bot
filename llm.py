@@ -534,9 +534,16 @@ def _chat_completions_url(base_url):
 _PROXY_BASE = (os.environ.get("LITELLM_URL") or os.environ.get("OPENROUTER_BASE_URL")
                or ("https://openrouter.ai/api/v1" if _OPENROUTER_KEY else ""))
 PROXY_URL = _chat_completions_url(_PROXY_BASE)
-if PROXY_URL.startswith("http://") and not _env_bool("AIWA_ALLOW_INSECURE_LLM_HTTP", False):
-    print("LLM proxy disabled: plain HTTP would expose API keys and health data; configure HTTPS")
-    PROXY_URL = ""
+if PROXY_URL.startswith("http://"):
+    from urllib.parse import urlsplit as _urlsplit
+    proxy_host = (_urlsplit(PROXY_URL).hostname or "").lower()
+    insecure_loopback_allowed = (
+        proxy_host in {"127.0.0.1", "::1", "localhost"}
+        and _env_bool("AIWA_ALLOW_INSECURE_LLM_HTTP", False)
+    )
+    if not insecure_loopback_allowed:
+        print("LLM proxy disabled: plain HTTP would expose API keys and health data; configure HTTPS")
+        PROXY_URL = ""
 PROXY_MODEL = (os.environ.get("LITELLM_MODEL") or os.environ.get("OPENROUTER_TEXT_MODEL")
                or os.environ.get("OPENROUTER_MODEL") or (None if _OPENROUTER_KEY else "gigachat-3-ultra"))
 OPENROUTER_VISION_MODEL = os.environ.get("OPENROUTER_VISION_MODEL")
@@ -740,6 +747,17 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
                 if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
                 return None
             data = r.json()
+            # LiteLLM commonly reports spend in a response header instead of
+            # the OpenAI-compatible JSON usage object. Normalize it so the
+            # existing privacy-safe llm_calls sink records real test cost.
+            response_cost = r.headers.get("x-litellm-response-cost")
+            if response_cost is not None and isinstance(data, dict):
+                usage_data = data.setdefault("usage", {})
+                if isinstance(usage_data, dict) and usage_data.get("cost") is None:
+                    try:
+                        usage_data["cost"] = float(response_cost)
+                    except (TypeError, ValueError):
+                        pass
             actual_provider = data.get("provider") or cfg.get("name") or "litellm"
             actual_model = data.get("model") or cfg.get("model")
             txt = _response_text(data)
@@ -892,7 +910,7 @@ def _compact_messages(messages):
 # --- метрики нагрузки: считаем вызовы модели и латентность за интервал ---
 STATS = {"calls": 0, "ms": 0, "err": 0, "wait_ms": 0, "queued": 0}
 # семафор: не больше N одновременных обращений к модели, остальные ждут в очереди
-_LLM_SEM = threading.Semaphore(int(os.environ.get("AIWA_LLM_CONCURRENCY", "10")))
+_LLM_SEM = threading.Semaphore(int(os.environ.get("AIWA_LLM_CONCURRENCY", "8")))
 def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2):
     import time as _tt
     t0 = _tt.time(); STATS["calls"] += 1

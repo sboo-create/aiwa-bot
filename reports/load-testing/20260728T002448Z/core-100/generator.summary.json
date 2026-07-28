@@ -1,0 +1,181 @@
+{
+  "run_id": "20260728T010827Z",
+  "target": "https://aiwa-staging-167.158-160-163-167.sslip.io",
+  "target_version": "2026-07-27-v146-summary-dedup-i167-staging",
+  "scenario": "core",
+  "users": 100,
+  "ramp_seconds": 30.0,
+  "hold_seconds": 180.0,
+  "duration_seconds": 215.613,
+  "iterations": 4808,
+  "completed_users": 100,
+  "achieved_rps": 22.299,
+  "overall": {
+    "requests": 4808,
+    "ok": 4808,
+    "errors": 0,
+    "success_rate": 1.0,
+    "latency_ms": {
+      "p50": 52.71,
+      "p90": 113.02,
+      "p95": 142.85,
+      "p99": 252.69,
+      "max": 549.4,
+      "mean": 66.78
+    },
+    "statuses": {
+      "200": 4808
+    },
+    "errors_by_class": {}
+  },
+  "by_category": {
+    "core": {
+      "requests": 4808,
+      "ok": 4808,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 52.71,
+        "p90": 113.02,
+        "p95": 142.85,
+        "p99": 252.69,
+        "max": 549.4,
+        "mean": 66.78
+      },
+      "statuses": {
+        "200": 4808
+      },
+      "errors_by_class": {}
+    }
+  },
+  "by_route": {
+    "/api/checkin": {
+      "requests": 458,
+      "ok": 458,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 77.53,
+        "p90": 144.6,
+        "p95": 190.83,
+        "p99": 297.65,
+        "max": 543.68,
+        "mean": 93.58
+      },
+      "statuses": {
+        "200": 458
+      },
+      "errors_by_class": {}
+    },
+    "/api/diary": {
+      "requests": 1281,
+      "ok": 1281,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 49.75,
+        "p90": 106.97,
+        "p95": 137.65,
+        "p99": 236.34,
+        "max": 549.4,
+        "mean": 63.22
+      },
+      "statuses": {
+        "200": 1281
+      },
+      "errors_by_class": {}
+    },
+    "/api/log_history": {
+      "requests": 842,
+      "ok": 842,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 47.16,
+        "p90": 101.31,
+        "p95": 139.66,
+        "p99": 256.19,
+        "max": 523.42,
+        "mean": 62.35
+      },
+      "statuses": {
+        "200": 842
+      },
+      "errors_by_class": {}
+    },
+    "/api/track": {
+      "requests": 509,
+      "ok": 509,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 46.86,
+        "p90": 115.81,
+        "p95": 141.61,
+        "p99": 290.82,
+        "max": 403.8,
+        "mean": 63.98
+      },
+      "statuses": {
+        "200": 509
+      },
+      "errors_by_class": {}
+    },
+    "/api/train": {
+      "requests": 875,
+      "ok": 875,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 55.33,
+        "p90": 109.06,
+        "p95": 139.84,
+        "p99": 214.65,
+        "max": 338.65,
+        "mean": 68.41
+      },
+      "statuses": {
+        "200": 875
+      },
+      "errors_by_class": {}
+    },
+    "/api/train_day": {
+      "requests": 843,
+      "ok": 843,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 47.91,
+        "p90": 105.06,
+        "p95": 131.44,
+        "p99": 233.27,
+        "max": 307.7,
+        "mean": 62.09
+      },
+      "statuses": {
+        "200": 843
+      },
+      "errors_by_class": {}
+    }
+  },
+  "generator": {
+    "hostname": "nsushko-local-judges-0",
+    "python": "3.10.12",
+    "loadavg": [
+      62.85302734375,
+      65.16748046875,
+      65.1826171875
+    ],
+    "max_rss_kib": 37320,
+    "loop_drift_ms": {
+      "p95": 1.55,
+      "p99": 1.86,
+      "max": 2.04
+    }
+  },
+  "ai_controls": {
+    "share": 0,
+    "client_concurrency": 0,
+    "provider_metrics_source": "target SQLite llm_calls + LOAD/60s logs"
+  }
+}

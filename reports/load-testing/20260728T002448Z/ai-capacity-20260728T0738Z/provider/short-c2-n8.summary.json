@@ -1,0 +1,48 @@
+{
+  "captured_at": "2026-07-28T07:40:37.414293+00:00",
+  "profile": "short",
+  "requested_model": "openrouter/deepseek/deepseek-v4-flash",
+  "concurrency": 2,
+  "requests": 8,
+  "success": 8,
+  "errors": 0,
+  "success_rate": 1.0,
+  "wall_seconds": 8.4,
+  "throughput_rps": 0.9524,
+  "latency_ms_all": {
+    "mean": 2082.84,
+    "p50": 1940.9,
+    "p95": 3442.7,
+    "p99": 3461.73,
+    "max": 3466.49
+  },
+  "latency_ms_success": {
+    "mean": 2082.84,
+    "p50": 1940.9,
+    "p95": 3442.7,
+    "max": 3466.49
+  },
+  "statuses": {
+    "200": 8
+  },
+  "errors_by_class": {},
+  "providers": {
+    "AtlasCloud": 1,
+    "Cloudflare": 1,
+    "Alibaba": 1,
+    "Novita": 1,
+    "Morph": 1,
+    "DigitalOcean": 1,
+    "DeepInfra": 2
+  },
+  "models": {
+    "openrouter/deepseek/deepseek-v4-flash": 8
+  },
+  "tokens": {
+    "prompt": 224,
+    "completion": 174
+  },
+  "reported_cost_usd": 7.3246e-05,
+  "calls_with_cost": 8,
+  "cost_complete": true
+}

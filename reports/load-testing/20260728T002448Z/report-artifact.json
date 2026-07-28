@@ -1,0 +1,434 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "AIWA staging: пределы текущей non-Postgres архитектуры",
+    "description": "Технический отчёт по нагрузочным ступеням 0, 10, 50, 100 и 300 VU на изолированном staging.",
+    "generatedAt": "2026-07-28T01:30:00Z",
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# AIWA staging: пределы текущей non-Postgres архитектуры"
+      },
+      {
+        "id": "technical-summary",
+        "type": "markdown",
+        "body": "## Технический итог\n\nТекущая версия **не готова к 1 000 одновременно активным пользователям**. Core-профиль проходит 100 VU при 22.3 RPS и p95 143 мс, но на 300 VU p95 растёт до 3.58 с, а внешняя доступность `/health` падает до 89.8%. Write-heavy профиль проваливает performance-порог уже на 100 VU (p95 1.22 с). AI-контур провален на 10 VU: успешны 16 из 19 `/api/chat`, p95 60.3 с.\n\nСерверные лимиты не исчерпаны: на core-300 приложение использовало в среднем 0.37 CPU и максимум около 145 МиБ RAM. Предел формируют синхронный SQLite в event loop, dual-write аналитики и отсутствие backpressure/singleflight в AI-prewarm."
+      },
+      {
+        "id": "headline-strip",
+        "type": "metric-strip",
+        "cardIds": [
+          "card-core-capacity",
+          "card-core-failure",
+          "card-ai-quality",
+          "card-cost"
+        ]
+      },
+      {
+        "id": "latency-finding",
+        "type": "markdown",
+        "body": "## Задержка ломается раньше, чем заканчиваются CPU и RAM\n\nДо 100 VU core масштабируется почти линейно. Между core-100 и core-300 активность растёт втрое, но throughput — только с 22.3 до 43.1 RPS, тогда как p95 увеличивается в 25 раз. Write-профиль показывает тот же перелом раньше: 190 мс на 50 VU и 1.22 с на 100 VU. Это согласуется с общей очередью синхронных SQLite-операций, а не с ресурсным насыщением."
+      },
+      {
+        "id": "latency-chart-block",
+        "type": "chart",
+        "chartId": "latency-chart"
+      },
+      {
+        "id": "experiment-table-block",
+        "type": "table",
+        "tableId": "experiment-table"
+      },
+      {
+        "id": "ai-finding",
+        "type": "markdown",
+        "body": "## AI-контур — отдельный stop-сигнал уже на 10 VU\n\nIntegrated-тест дал 84.2% успешных AI-запросов и p95 60.3 с при лимите всего в два одновременных `/api/chat`. Discovery-прогон дополнительно показал скрытую нагрузку: повторные `/api/data` от 10 пользователей породили 60 `today_note` вызовов. `_api_data()` запускает `_prewarm_today()` через `create_task` без per-user singleflight и глобального лимита, поэтому массовое открытие mini app способно создать сотни или тысячи фоновых provider-запросов."
+      },
+      {
+        "id": "scope",
+        "type": "markdown",
+        "body": "## Что именно измерялось\n\n**VU** — непрерывно активный пользователь, выполняющий действие каждые 2–6 секунд. **Success rate** — доля HTTP-запросов с успешным транспортным и бизнес-ответом. **p95/p99** — перцентили end-to-end задержки с генератора на 8gpu-008 до HTTPS staging на i167. Отдельно измерялись внешний и локальный `/health`, CPU/RAM/cgroup, SQLite DB/WAL, рестарты, внутренние `llm_calls` и LiteLLM spend ledger.\n\nCore после discovery не повторяет открытие приложения; cold-open с реальным `today_note` отделён от core. Writes изолирует SQLite-записи. Integrated смешивает core с реальным `/api/chat`, ограниченным двумя клиентскими AI-запросами."
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "body": "## Методика и контроль безопасности\n\nКаждая ступень имела before/after snapshot SQLite, внешний health-probe, cgroup-monitor i167 и read-only monitor LiteLLM/i196. Ступени запускались последовательно с правилом stop/go. Railway staging был остановлен, production не затрагивался; staging-бот, БД и HTTPS изолированы. На i196 не менялись процессы или конфигурация LiteLLM, AI concurrency не превышала 2."
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## Ограничения и проверки устойчивости\n\nCore-10 не является сопоставимой точкой масштабной кривой: исходный генератор нереалистично повторял `/api/data`; этот прогон сохранён как discovery evidence. 300 VU функционально завершили запросы, но health availability и latency нарушили stop-порог, поэтому 1 000 VU и write-300 намеренно не запускались. Staging использует общий AIWA virtual key; стоимость атрибутирована по точным временным окнам и сверке количества `llm_calls`, с исключением двух отдельных малых периодических вызовов."
+      },
+      {
+        "id": "recommendations",
+        "type": "markdown",
+        "body": "## P0 до мероприятия\n\n1. Вынести schema migration из `db()` в startup/deploy и убрать синхронные SQLite-операции из asyncio event loop.\n2. Ввести один writer queue или `aiosqlite`; пакетировать analytics и убрать синхронный dual-write с hot path.\n3. Добавить для `today_note` per-user singleflight, глобальный semaphore/queue, дедупликацию и быстрый deterministic fallback.\n4. Добавить для `/api/chat` circuit breaker, server-side deadline и управляемую очередь с быстрым ответом «занято».\n5. Выдать staging отдельный LiteLLM key и передавать run-id/tag в spend ledger.\n6. После исправлений повторить cold-open 10/50/100/300, core и writes 100/300, integrated 10/50; только затем проводить 1 000-user arrival/burst."
+      },
+      {
+        "id": "further-questions",
+        "type": "markdown",
+        "body": "## Что нужно уточнить для финального go/no-go\n\nНужен ожидаемый arrival profile мероприятия: сколько людей откроют mini app в одну минуту, какая доля отправит AI-сообщение и какая доля сделает запись. 1 000 присутствующих с редкими действиями и 1 000 одновременных открытий — принципиально разные нагрузки; текущая версия небезопасна именно для второго режима."
+      }
+    ],
+    "cards": [
+      {
+        "id": "card-core-capacity",
+        "description": "Максимальная core-ступень без нарушения latency/availability stop-порогов.",
+        "dataset": "headline",
+        "metrics": [
+          {
+            "label": "VU",
+            "field": "safe_core_vu",
+            "format": "number"
+          },
+          {
+            "label": "p95, мс",
+            "field": "safe_core_p95_ms",
+            "format": "number"
+          }
+        ],
+        "sourceId": "load-results"
+      },
+      {
+        "id": "card-core-failure",
+        "description": "Доля успешных внешних health probes во время core-300.",
+        "dataset": "headline",
+        "metrics": [
+          {
+            "label": "Availability",
+            "field": "core_300_health_availability",
+            "format": "percent"
+          },
+          {
+            "label": "p95, мс",
+            "field": "core_300_p95_ms",
+            "format": "number"
+          }
+        ],
+        "sourceId": "load-results"
+      },
+      {
+        "id": "card-ai-quality",
+        "description": "Успешность реального `/api/chat` при client concurrency 2.",
+        "dataset": "headline",
+        "metrics": [
+          {
+            "label": "Успех",
+            "field": "ai_success_rate",
+            "format": "percent"
+          },
+          {
+            "label": "p95, мс",
+            "field": "ai_p95_ms",
+            "format": "number"
+          }
+        ],
+        "sourceId": "load-results"
+      },
+      {
+        "id": "card-cost",
+        "description": "LiteLLM ledger, только атрибутированные staging-вызовы.",
+        "dataset": "headline",
+        "metrics": [
+          {
+            "label": "USD",
+            "field": "load_cost_usd",
+            "format": "currency"
+          },
+          {
+            "label": "Со smoke, USD",
+            "field": "staging_total_cost_usd",
+            "format": "currency"
+          }
+        ],
+        "sourceId": "cost-ledger"
+      }
+    ],
+    "charts": [
+      {
+        "id": "latency-chart",
+        "title": "p95 задержки по нагрузочным ступеням",
+        "description": "Writes-100 и core-300 пересекают секундный UX-порог.",
+        "type": "bar",
+        "dataset": "latency_stages",
+        "encodings": {
+          "x": {
+            "field": "stage",
+            "type": "nominal",
+            "title": "Ступень"
+          },
+          "y": {
+            "field": "p95_ms",
+            "type": "quantitative",
+            "title": "p95, мс"
+          }
+        },
+        "options": {
+          "orientation": "vertical",
+          "grouping": "single"
+        },
+        "sourceId": "load-results"
+      }
+    ],
+    "tables": [
+      {
+        "id": "experiment-table",
+        "title": "Результаты ступеней",
+        "description": "End-to-end запросы; exact lookup по сохранённым summary.json.",
+        "dataset": "experiment_results",
+        "columns": [
+          {
+            "field": "stage",
+            "label": "Ступень",
+            "type": "text"
+          },
+          {
+            "field": "virtual_users",
+            "label": "VU",
+            "type": "number"
+          },
+          {
+            "field": "achieved_rps",
+            "label": "RPS",
+            "type": "number"
+          },
+          {
+            "field": "success_rate",
+            "label": "Успех",
+            "type": "percent"
+          },
+          {
+            "field": "request_p95_ms",
+            "label": "p95, мс",
+            "type": "number"
+          },
+          {
+            "field": "request_p99_ms",
+            "label": "p99, мс",
+            "type": "number"
+          },
+          {
+            "field": "decision",
+            "label": "Решение",
+            "type": "text"
+          }
+        ],
+        "defaultSort": {
+          "field": "virtual_users",
+          "direction": "asc"
+        },
+        "sourceId": "load-results"
+      }
+    ],
+    "sources": [
+      {
+        "id": "load-results",
+        "label": "AIWA staging load-test summaries",
+        "path": "reports/load-testing/20260728T002448Z/analysis.sqlite",
+        "query": {
+          "description": "Reviewed experiment-stage metrics materialized from generator, health, host-monitor and before/after snapshot artifacts.",
+          "engine": "SQLite",
+          "language": "sql",
+          "executed_at": "2026-07-28T01:30:00Z",
+          "sql": "SELECT stage, scenario, virtual_users, requests, achieved_rps, success_rate, request_p95_ms, request_p99_ms, external_health_availability, service_cpu_average_cores, service_memory_max_bytes, database_growth_bytes, llm_calls, ledger_cost_usd, decision FROM loadtest_experiments ORDER BY virtual_users, stage;",
+          "tables_used": [
+            "loadtest_experiments"
+          ],
+          "filters": [
+            "Target version 2026-07-27-v146-summary-dedup-i167-staging",
+            "Synthetic users only",
+            "Stages stopped when availability or latency criteria failed"
+          ],
+          "metric_definitions": [
+            "success_rate = successful measured HTTP requests / all measured HTTP requests",
+            "request_p95_ms and request_p99_ms = percentiles of end-to-end request latency observed from 8gpu-008",
+            "achieved_rps = measured requests / actual experiment duration",
+            "service_cpu_average_cores = cgroup CPU usage delta / wall-clock duration"
+          ]
+        }
+      },
+      {
+        "id": "cost-ledger",
+        "label": "AIWA staging LiteLLM cost reconciliation",
+        "path": "reports/load-testing/20260728T002448Z/analysis.sqlite",
+        "query": {
+          "description": "LiteLLM ledger spend attributed to staging experiment windows and reconciled against staging llm_calls counts.",
+          "engine": "SQLite",
+          "language": "sql",
+          "executed_at": "2026-07-28T01:30:00Z",
+          "sql": "SELECT load_cost_usd, pre_test_smoke_usd, staging_total_cost_usd, application_header_total_usd, header_understatement_rate FROM cost_reconciliation;",
+          "tables_used": [
+            "cost_reconciliation"
+          ],
+          "filters": [
+            "Only 2026-07-28 staging experiment windows",
+            "Excluded one 47-token and one 35-token periodic shared-key call absent from staging llm_calls"
+          ],
+          "metric_definitions": [
+            "load_cost_usd = sum of attributed LiteLLM spend rows for core-10 discovery and integrated-10",
+            "staging_total_cost_usd = load_cost_usd + secure-path smoke cost"
+          ]
+        }
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "status": "ready",
+    "generatedAt": "2026-07-28T01:30:00Z",
+    "datasets": {
+      "headline": [
+        {
+          "safe_core_vu": 100,
+          "safe_core_p95_ms": 142.85,
+          "core_300_health_availability": 0.89781,
+          "core_300_p95_ms": 3578.21,
+          "ai_success_rate": 0.842105,
+          "ai_p95_ms": 60314.45,
+          "load_cost_usd": 0.032615305,
+          "staging_total_cost_usd": 0.033778175
+        }
+      ],
+      "latency_stages": [
+        {
+          "stage": "Writes 10",
+          "scenario": "writes",
+          "virtual_users": 10,
+          "p95_ms": 97.13,
+          "p99_ms": 120.58,
+          "achieved_rps": 2.302,
+          "success_rate": 1.0,
+          "decision": "PASS"
+        },
+        {
+          "stage": "Writes 50",
+          "scenario": "writes",
+          "virtual_users": 50,
+          "p95_ms": 190.11,
+          "p99_ms": 317.91,
+          "achieved_rps": 11.233,
+          "success_rate": 1.0,
+          "decision": "PASS with degradation"
+        },
+        {
+          "stage": "Core 50",
+          "scenario": "core",
+          "virtual_users": 50,
+          "p95_ms": 84.23,
+          "p99_ms": 122.53,
+          "achieved_rps": 11.301,
+          "success_rate": 1.0,
+          "decision": "PASS"
+        },
+        {
+          "stage": "Writes 100",
+          "scenario": "writes",
+          "virtual_users": 100,
+          "p95_ms": 1218.16,
+          "p99_ms": 1786.97,
+          "achieved_rps": 20.973,
+          "success_rate": 1.0,
+          "decision": "FAIL"
+        },
+        {
+          "stage": "Core 100",
+          "scenario": "core",
+          "virtual_users": 100,
+          "p95_ms": 142.85,
+          "p99_ms": 252.69,
+          "achieved_rps": 22.299,
+          "success_rate": 1.0,
+          "decision": "PASS"
+        },
+        {
+          "stage": "Core 300",
+          "scenario": "core",
+          "virtual_users": 300,
+          "p95_ms": 3578.21,
+          "p99_ms": 6839.83,
+          "achieved_rps": 43.108,
+          "success_rate": 1.0,
+          "decision": "FAIL"
+        },
+        {
+          "stage": "AI e2e 10",
+          "scenario": "integrated AI",
+          "virtual_users": 10,
+          "p95_ms": 60314.45,
+          "p99_ms": 60530.91,
+          "achieved_rps": 0.059,
+          "success_rate": 0.842105,
+          "decision": "FAIL"
+        }
+      ],
+      "experiment_results": [
+        {
+          "stage": "Core 50",
+          "virtual_users": 50,
+          "achieved_rps": 11.301,
+          "success_rate": 1.0,
+          "request_p95_ms": 84.23,
+          "request_p99_ms": 122.53,
+          "decision": "PASS"
+        },
+        {
+          "stage": "Core 100",
+          "virtual_users": 100,
+          "achieved_rps": 22.299,
+          "success_rate": 1.0,
+          "request_p95_ms": 142.85,
+          "request_p99_ms": 252.69,
+          "decision": "PASS"
+        },
+        {
+          "stage": "Core 300",
+          "virtual_users": 300,
+          "achieved_rps": 43.108,
+          "success_rate": 1.0,
+          "request_p95_ms": 3578.21,
+          "request_p99_ms": 6839.83,
+          "decision": "FAIL"
+        },
+        {
+          "stage": "Writes 10",
+          "virtual_users": 10,
+          "achieved_rps": 2.302,
+          "success_rate": 1.0,
+          "request_p95_ms": 97.13,
+          "request_p99_ms": 120.58,
+          "decision": "PASS"
+        },
+        {
+          "stage": "Writes 50",
+          "virtual_users": 50,
+          "achieved_rps": 11.233,
+          "success_rate": 1.0,
+          "request_p95_ms": 190.11,
+          "request_p99_ms": 317.91,
+          "decision": "PASS (degrading)"
+        },
+        {
+          "stage": "Writes 100",
+          "virtual_users": 100,
+          "achieved_rps": 20.973,
+          "success_rate": 1.0,
+          "request_p95_ms": 1218.16,
+          "request_p99_ms": 1786.97,
+          "decision": "FAIL"
+        },
+        {
+          "stage": "AI e2e 10",
+          "virtual_users": 10,
+          "achieved_rps": 0.059,
+          "success_rate": 0.842105,
+          "request_p95_ms": 60314.45,
+          "request_p99_ms": 60530.91,
+          "decision": "FAIL"
+        }
+      ]
+    }
+  }
+}

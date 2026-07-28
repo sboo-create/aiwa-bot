@@ -1,0 +1,145 @@
+{
+  "run_id": "20260728T004516Z",
+  "target": "https://aiwa-staging-167.158-160-163-167.sslip.io",
+  "target_version": "2026-07-27-v146-summary-dedup-i167-staging",
+  "scenario": "writes",
+  "users": 10,
+  "ramp_seconds": 30.0,
+  "hold_seconds": 180.0,
+  "duration_seconds": 215.075,
+  "iterations": 495,
+  "completed_users": 10,
+  "achieved_rps": 2.302,
+  "overall": {
+    "requests": 495,
+    "ok": 495,
+    "errors": 0,
+    "success_rate": 1.0,
+    "latency_ms": {
+      "p50": 59.57,
+      "p90": 86.97,
+      "p95": 97.13,
+      "p99": 120.58,
+      "max": 144.45,
+      "mean": 60.14
+    },
+    "statuses": {
+      "200": 495
+    },
+    "errors_by_class": {}
+  },
+  "by_category": {
+    "core_write": {
+      "requests": 495,
+      "ok": 495,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 59.57,
+        "p90": 86.97,
+        "p95": 97.13,
+        "p99": 120.58,
+        "max": 144.45,
+        "mean": 60.14
+      },
+      "statuses": {
+        "200": 495
+      },
+      "errors_by_class": {}
+    }
+  },
+  "by_route": {
+    "/api/checkin": {
+      "requests": 255,
+      "ok": 255,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 66.56,
+        "p90": 90.22,
+        "p95": 98.77,
+        "p99": 125.01,
+        "max": 128.04,
+        "mean": 70.45
+      },
+      "statuses": {
+        "200": 255
+      },
+      "errors_by_class": {}
+    },
+    "/api/food_manual": {
+      "requests": 48,
+      "ok": 48,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 73.28,
+        "p90": 100.55,
+        "p95": 108.51,
+        "p99": 129.83,
+        "max": 144.45,
+        "mean": 78.86
+      },
+      "statuses": {
+        "200": 48
+      },
+      "errors_by_class": {}
+    },
+    "/api/prefs": {
+      "requests": 78,
+      "ok": 78,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 42.02,
+        "p90": 53.71,
+        "p95": 57.15,
+        "p99": 66.85,
+        "max": 72.49,
+        "mean": 44.03
+      },
+      "statuses": {
+        "200": 78
+      },
+      "errors_by_class": {}
+    },
+    "/api/track": {
+      "requests": 114,
+      "ok": 114,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 37.62,
+        "p90": 47.48,
+        "p95": 56.06,
+        "p99": 86.09,
+        "max": 116.04,
+        "mean": 40.21
+      },
+      "statuses": {
+        "200": 114
+      },
+      "errors_by_class": {}
+    }
+  },
+  "generator": {
+    "hostname": "nsushko-local-judges-0",
+    "python": "3.10.12",
+    "loadavg": [
+      60.99462890625,
+      63.10888671875,
+      64.3037109375
+    ],
+    "max_rss_kib": 35524,
+    "loop_drift_ms": {
+      "p95": 1.64,
+      "p99": 2.17,
+      "max": 2.42
+    }
+  },
+  "ai_controls": {
+    "share": 0,
+    "client_concurrency": 0,
+    "provider_metrics_source": "target SQLite llm_calls + LOAD/60s logs"
+  }
+}

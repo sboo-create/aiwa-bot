@@ -1,0 +1,199 @@
+{
+  "run_id": "20260728T003713Z",
+  "target": "https://aiwa-staging-167.158-160-163-167.sslip.io",
+  "target_version": "2026-07-27-v146-summary-dedup-i167-staging",
+  "scenario": "core",
+  "users": 10,
+  "ramp_seconds": 30.0,
+  "hold_seconds": 180.0,
+  "duration_seconds": 213.785,
+  "iterations": 484,
+  "completed_users": 10,
+  "achieved_rps": 2.264,
+  "overall": {
+    "requests": 484,
+    "ok": 484,
+    "errors": 0,
+    "success_rate": 1.0,
+    "latency_ms": {
+      "p50": 45.52,
+      "p90": 59.71,
+      "p95": 69.52,
+      "p99": 100.17,
+      "max": 302.26,
+      "mean": 48.58
+    },
+    "statuses": {
+      "200": 484
+    },
+    "errors_by_class": {}
+  },
+  "by_category": {
+    "core": {
+      "requests": 484,
+      "ok": 484,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 45.52,
+        "p90": 59.71,
+        "p95": 69.52,
+        "p99": 100.17,
+        "max": 302.26,
+        "mean": 48.58
+      },
+      "statuses": {
+        "200": 484
+      },
+      "errors_by_class": {}
+    }
+  },
+  "by_route": {
+    "/api/checkin": {
+      "requests": 21,
+      "ok": 21,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 69.67,
+        "p90": 100.94,
+        "p95": 114.52,
+        "p99": 117.96,
+        "max": 118.82,
+        "mean": 73.94
+      },
+      "statuses": {
+        "200": 21
+      },
+      "errors_by_class": {}
+    },
+    "/api/data": {
+      "requests": 205,
+      "ok": 205,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 46.57,
+        "p90": 56.23,
+        "p95": 62.1,
+        "p99": 69.29,
+        "max": 302.26,
+        "mean": 49.66
+      },
+      "statuses": {
+        "200": 205
+      },
+      "errors_by_class": {}
+    },
+    "/api/diary": {
+      "requests": 88,
+      "ok": 88,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 42.14,
+        "p90": 58.48,
+        "p95": 67.05,
+        "p99": 75.22,
+        "max": 76.97,
+        "mean": 45.19
+      },
+      "statuses": {
+        "200": 88
+      },
+      "errors_by_class": {}
+    },
+    "/api/log_history": {
+      "requests": 43,
+      "ok": 43,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 40.27,
+        "p90": 54.99,
+        "p95": 69.36,
+        "p99": 87.41,
+        "max": 93.93,
+        "mean": 44.7
+      },
+      "statuses": {
+        "200": 43
+      },
+      "errors_by_class": {}
+    },
+    "/api/track": {
+      "requests": 27,
+      "ok": 27,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 39.74,
+        "p90": 49.01,
+        "p95": 55.04,
+        "p99": 62.07,
+        "max": 64.19,
+        "mean": 41.68
+      },
+      "statuses": {
+        "200": 27
+      },
+      "errors_by_class": {}
+    },
+    "/api/train": {
+      "requests": 53,
+      "ok": 53,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 49.49,
+        "p90": 62.36,
+        "p95": 76.39,
+        "p99": 93.82,
+        "max": 105.24,
+        "mean": 53.05
+      },
+      "statuses": {
+        "200": 53
+      },
+      "errors_by_class": {}
+    },
+    "/api/train_day": {
+      "requests": 47,
+      "ok": 47,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 38.98,
+        "p90": 51.77,
+        "p95": 56.08,
+        "p99": 59.49,
+        "max": 59.75,
+        "mean": 41.37
+      },
+      "statuses": {
+        "200": 47
+      },
+      "errors_by_class": {}
+    }
+  },
+  "generator": {
+    "hostname": "nsushko-local-judges-0",
+    "python": "3.10.12",
+    "loadavg": [
+      62.40087890625,
+      64.34375,
+      65.111328125
+    ],
+    "max_rss_kib": 35764,
+    "loop_drift_ms": {
+      "p95": 1.85,
+      "p99": 2.21,
+      "max": 2.43
+    }
+  },
+  "ai_controls": {
+    "share": 0,
+    "client_concurrency": 0,
+    "provider_metrics_source": "target SQLite llm_calls + LOAD/60s logs"
+  }
+}

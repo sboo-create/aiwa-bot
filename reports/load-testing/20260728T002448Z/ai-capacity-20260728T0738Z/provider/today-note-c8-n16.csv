@@ -1,0 +1,17 @@
+started_at,request_index,status,ok,latency_ms,error,provider,model,prompt_tokens,completion_tokens,reported_cost_usd
+2026-07-28T07:46:10.210553+00:00,0,200,True,4573.37,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,171,4.0932e-05
+2026-07-28T07:46:10.211012+00:00,1,200,True,5707.6,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,145,3.6252e-05
+2026-07-28T07:46:10.211298+00:00,2,200,True,5570.5,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,141,3.5532e-05
+2026-07-28T07:46:10.211497+00:00,3,200,True,2869.52,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,121,3.1932e-05
+2026-07-28T07:46:10.211823+00:00,4,200,True,4858.01,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,150,3.7152e-05
+2026-07-28T07:46:10.212005+00:00,5,200,True,6899.04,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,134,3.4272e-05
+2026-07-28T07:46:10.212246+00:00,6,200,True,5842.82,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,173,4.1292e-05
+2026-07-28T07:46:10.212445+00:00,7,200,True,4994.09,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,170,4.0752e-05
+2026-07-28T07:46:13.081069+00:00,8,200,True,13436.79,,StreamLake,openrouter/deepseek/deepseek-v4-flash,164,442,9.5368e-05
+2026-07-28T07:46:14.783961+00:00,9,200,True,3302.02,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,141,3.5532e-05
+2026-07-28T07:46:15.069874+00:00,10,200,True,18436.52,,GMICloud,openrouter/deepseek/deepseek-v4-flash,164,601,0.0001281308
+2026-07-28T07:46:15.206572+00:00,11,200,True,3508.28,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,154,3.7872e-05
+2026-07-28T07:46:15.781840+00:00,12,200,True,4567.84,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,178,4.2192e-05
+2026-07-28T07:46:15.918646+00:00,13,200,True,3663.01,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,134,3.4272e-05
+2026-07-28T07:46:16.055109+00:00,14,200,True,5388.84,,AtlasCloud,openrouter/deepseek/deepseek-v4-flash,164,465,0.00015316
+2026-07-28T07:46:17.111080+00:00,15,200,True,3205.47,,CoreWeave,openrouter/deepseek/deepseek-v4-flash,164,158,6.72e-05

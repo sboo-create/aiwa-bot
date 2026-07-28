@@ -1,0 +1,4 @@
+started_at,request_index,status,ok,latency_ms,error,provider,model,prompt_tokens,completion_tokens,reported_cost_usd
+2026-07-28T07:39:30.996521+00:00,0,200,True,2895.93,,DigitalOcean,openrouter/deepseek/deepseek-v4-flash,28,5,4.256e-06
+2026-07-28T07:39:30.997060+00:00,1,200,True,5369.96,,StreamLake,openrouter/deepseek/deepseek-v4-flash,28,56,1.274e-05
+2026-07-28T07:39:30.997083+00:00,2,200,True,6628.88,,CoreWeave,openrouter/deepseek/deepseek-v4-flash,28,5,5.32e-06

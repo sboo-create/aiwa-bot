@@ -1,0 +1,55 @@
+{
+  "route": "i167 -> LiteLLM i196 -> OpenRouter -> openrouter/deepseek/deepseek-v4-flash",
+  "tested_at_utc": {
+    "from": "2026-07-28T07:38:00Z",
+    "to": "2026-07-28T07:50:30Z"
+  },
+  "recommended_limits": {
+    "aiwa_total_concurrency": 8,
+    "chat_reserved": 2,
+    "today_note_background": 6
+  },
+  "today_note": {
+    "requests": 124,
+    "success": 122,
+    "cost_usd": 0.008732057,
+    "sustained_c8": {
+      "requests": 40,
+      "success_rate": 1.0,
+      "throughput_rps": 1.0516,
+      "latency_ms_p50": 6063.57,
+      "latency_ms_p95": 9987.16,
+      "latency_ms_max": 12488.11
+    },
+    "c12": {
+      "requests": 24,
+      "success_rate": 1.0,
+      "throughput_rps": 0.8983
+    },
+    "c16": {
+      "requests": 24,
+      "success_rate": 0.916667,
+      "throughput_rps": 0.4072,
+      "errors": {
+        "empty_response": 2
+      }
+    }
+  },
+  "queue_1000_estimate_minutes": {
+    "all_8_slots": 15.85,
+    "6_background_slots_estimate": 18.0
+  },
+  "litellm": {
+    "bottleneck_observed": false,
+    "restarts": 0,
+    "realistic_stage_cpu_average_cores_max": 0.05,
+    "realistic_stage_memory_max_bytes": 252174336,
+    "realistic_stage_readiness_p95_ms_max": 16.887
+  },
+  "cost": {
+    "all_calls_usd": 0.009768143,
+    "all_calls": 296,
+    "calls_with_cost": 296,
+    "cost_complete": true
+  }
+}

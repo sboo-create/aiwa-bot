@@ -1,0 +1,17 @@
+started_at,request_index,status,ok,latency_ms,error,provider,model,prompt_tokens,completion_tokens,reported_cost_usd
+2026-07-28T07:41:11.316154+00:00,0,200,True,1945.5,,Morph,openrouter/deepseek/deepseek-v4-flash,28,5,5.282e-06
+2026-07-28T07:41:11.316740+00:00,1,200,True,2978.12,,StreamLake,openrouter/deepseek/deepseek-v4-flash,28,52,1.2012e-05
+2026-07-28T07:41:11.317118+00:00,2,200,True,3113.41,,GMICloud,openrouter/deepseek/deepseek-v4-flash,28,51,1.2194e-05
+2026-07-28T07:41:11.317421+00:00,3,200,True,994.26,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,28,5,2.844e-06
+2026-07-28T07:41:12.311728+00:00,4,200,True,1138.99,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,28,5,2.844e-06
+2026-07-28T07:41:13.261701+00:00,5,200,True,4699.27,,DigitalOcean,openrouter/deepseek/deepseek-v4-flash,28,5,4.256e-06
+2026-07-28T07:41:13.450762+00:00,6,200,True,450.33,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,28,5,2.844e-06
+2026-07-28T07:41:13.901137+00:00,7,200,True,505.35,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,28,5,2.844e-06
+2026-07-28T07:41:14.294904+00:00,8,200,True,1897.81,,StreamLake,openrouter/deepseek/deepseek-v4-flash,28,51,1.183e-05
+2026-07-28T07:41:14.406525+00:00,9,200,True,1088.89,,Venice,openrouter/deepseek/deepseek-v4-flash,28,52,1.8164e-05
+2026-07-28T07:41:14.430575+00:00,10,200,True,666.14,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,28,5,2.844e-06
+2026-07-28T07:41:15.096758+00:00,11,200,True,1788.45,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,28,5,2.844e-06
+2026-07-28T07:41:15.495464+00:00,12,200,True,2670.41,,Venice,openrouter/deepseek/deepseek-v4-flash,28,53,1.8439e-05
+2026-07-28T07:41:16.192756+00:00,13,200,True,1043.68,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,28,5,2.844e-06
+2026-07-28T07:41:16.885290+00:00,14,200,True,580.86,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,28,5,2.844e-06
+2026-07-28T07:41:17.236477+00:00,15,200,True,589.27,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,28,5,2.844e-06

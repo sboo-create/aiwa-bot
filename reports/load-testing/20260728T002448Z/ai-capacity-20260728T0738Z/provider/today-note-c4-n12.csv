@@ -1,0 +1,13 @@
+started_at,request_index,status,ok,latency_ms,error,provider,model,prompt_tokens,completion_tokens,reported_cost_usd
+2026-07-28T07:45:15.227384+00:00,0,200,True,3540.14,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,141,3.5532e-05
+2026-07-28T07:45:15.227922+00:00,1,200,True,5675.18,,Morph,openrouter/deepseek/deepseek-v4-flash,164,156,6.6164e-05
+2026-07-28T07:45:15.228314+00:00,2,200,True,3505.56,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,121,3.1932e-05
+2026-07-28T07:45:15.228578+00:00,3,200,True,14907.21,,StreamLake,openrouter/deepseek/deepseek-v4-flash,164,499,0.000105742
+2026-07-28T07:45:18.733915+00:00,4,200,True,3809.95,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,148,3.6792e-05
+2026-07-28T07:45:18.767576+00:00,5,200,True,6048.37,,GMICloud,openrouter/deepseek/deepseek-v4-flash,164,468,0.00010318
+2026-07-28T07:45:20.903144+00:00,6,200,True,3132.56,,CoreWeave,openrouter/deepseek/deepseek-v4-flash,164,120,5.656e-05
+2026-07-28T07:45:22.543905+00:00,7,200,True,16133.46,,SiliconFlow,openrouter/deepseek/deepseek-v4-flash,243,805,0.00025699
+2026-07-28T07:45:24.035745+00:00,8,200,True,11768.75,,StreamLake,openrouter/deepseek/deepseek-v4-flash,164,415,9.0454e-05
+2026-07-28T07:45:24.815985+00:00,9,200,True,5937.75,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,142,3.5712e-05
+2026-07-28T07:45:30.135827+00:00,10,200,True,16754.65,,Venice,openrouter/deepseek/deepseek-v4-flash,164,370,0.000124382
+2026-07-28T07:45:30.753775+00:00,11,200,True,6854.94,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,163,3.9492e-05

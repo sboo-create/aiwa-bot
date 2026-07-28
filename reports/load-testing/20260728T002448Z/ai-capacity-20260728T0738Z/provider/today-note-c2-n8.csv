@@ -1,0 +1,9 @@
+started_at,request_index,status,ok,latency_ms,error,provider,model,prompt_tokens,completion_tokens,reported_cost_usd
+2026-07-28T07:43:32.815705+00:00,0,200,True,9290.82,,Fireworks,openrouter/deepseek/deepseek-v4-flash,164,535,0.00017276
+2026-07-28T07:43:32.816202+00:00,1,200,True,7164.28,,GMICloud,openrouter/deepseek/deepseek-v4-flash,164,354,8.17936e-05
+2026-07-28T07:43:39.980532+00:00,2,200,True,6766.42,,Alibaba,openrouter/deepseek/deepseek-v4-flash,164,546,0.000168304
+2026-07-28T07:43:42.106562+00:00,3,200,True,17703.05,,StreamLake,openrouter/deepseek/deepseek-v4-flash,164,486,0.000103376
+2026-07-28T07:43:46.746999+00:00,4,200,True,16058.63,,DeepInfra,openrouter/deepseek/deepseek-v4-flash,164,153,3.7692e-05
+2026-07-28T07:43:59.809657+00:00,5,200,True,23592.16,,GMICloud,openrouter/deepseek/deepseek-v4-flash,164,565,0.0001213772
+2026-07-28T07:44:02.805670+00:00,6,200,True,11455.52,,Venice,openrouter/deepseek/deepseek-v4-flash,164,561,0.000176907
+2026-07-28T07:44:14.261276+00:00,7,200,True,2882.09,,Fireworks,openrouter/deepseek/deepseek-v4-flash,164,389,0.00013188

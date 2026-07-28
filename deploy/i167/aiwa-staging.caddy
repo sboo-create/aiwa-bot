@@ -1,0 +1,4 @@
+aiwa-staging-167.158-160-163-167.sslip.io {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:9910
+}

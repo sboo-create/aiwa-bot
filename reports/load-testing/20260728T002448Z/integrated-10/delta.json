@@ -1,0 +1,29 @@
+{
+  "before_at": "2026-07-28T00:50:00.747713+00:00",
+  "after_at": "2026-07-28T00:57:09.059048+00:00",
+  "rows": {
+    "users": 0,
+    "synthetic_users": 0,
+    "events": 313,
+    "events_v2": 313,
+    "meals": 0,
+    "workouts": 0
+  },
+  "llm": {
+    "calls": 79,
+    "success": 69,
+    "input_tokens": 93911,
+    "output_tokens": 18085,
+    "cached_tokens": 15552,
+    "total_tokens": 111996,
+    "reported_cost_usd": 0.015485018,
+    "calls_without_cost": 10
+  },
+  "file_bytes": {
+    "db": 471040,
+    "-wal": 0,
+    "-shm": 0
+  },
+  "cost_complete": false,
+  "cost_note": "some calls did not report cost; do not interpret missing cost as zero"
+}
