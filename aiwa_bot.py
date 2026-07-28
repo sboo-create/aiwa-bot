@@ -9372,8 +9372,8 @@ def build_web():
 def build_telegram_application():
     app = Application.builder().token(os.environ["BOT_TOKEN"]).concurrent_updates(True).build()
     global BOT_APP; BOT_APP = app
+    app.add_handler(TypeHandler(Update, sync_telegram_identity), group=-2)
     app.add_handler(TypeHandler(Update, bind_update_trace), group=-1)
-    app.add_handler(TypeHandler(Update, sync_telegram_identity), group=0)
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
                     ("period", period_cmd), ("menu", menu), ("time", set_time_cmd), ("mode", mode_cmd), ("menutoday", menutoday_cmd),
                     ("profile", profile_cmd), ("guide", guide_cmd), ("about", about_cmd), ("report", report_cmd), ("partner", partner_cmd), ("unlink", unlink_cmd), ("addcycles", addcycles_cmd), ("app", app_cmd), ("stop", stop), ("help", help_cmd), ("stats", stats_cmd), ("probe", probe_cmd), ("broadcast_today", broadcast_today_cmd), ("meno_update", meno_update_cmd), ("announce", announce_cmd), ("proactive", proactive_cmd), ("refs", refs_cmd), ("voicetest", voicetest_cmd), ("ui", ui_cmd)):
