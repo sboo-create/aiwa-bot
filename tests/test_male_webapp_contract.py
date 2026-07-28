@@ -166,9 +166,9 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn('deslop-main-aiwa-v162.js', wrapper)
         self.assertIn('AiwaWebUiChart-aiwa-v162.js', bundle)
         self.assertIn('deslop-main-aiwa-v162.js', chart_bundle)
-        self.assertIn('main.js?v=r15', index)
+        self.assertIn('main.js?v=r16', index)
         self.assertIn(
-            'import "./deslop-main-aiwa-v162.js?v=mascot-static-1";',
+            'import "./deslop-main-aiwa-v162.js";',
             wrapper,
         )
         self.assertIn("aiwaCacheTs", bundle)
