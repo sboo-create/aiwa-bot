@@ -589,7 +589,7 @@ class ChatJournalActionTests(unittest.TestCase):
         self.assertIn("отменена", replay["text"])
         self.assertEqual(bot.meals_of(self.cid), [])
 
-    def test_workout_is_saved_without_inventing_duration(self):
+    def test_workout_without_duration_keeps_it_blank_and_estimates_calories(self):
         parsed = {
             "type": "Йога",
             "duration_minutes": None,
@@ -610,7 +610,11 @@ class ChatJournalActionTests(unittest.TestCase):
         workout = bot.workouts_of(self.cid)[0]
         self.assertEqual(workout["type"], "Йога")
         self.assertEqual(workout["duration"], "")
-        self.assertEqual(workout["kcal"], 0)
+        profile = bot.profile_of(bot.row(self.cid)) or {}
+        self.assertEqual(
+            workout["kcal"],
+            bot.workout_calories("Йога", "40 мин", "лёгкая", profile.get("weight")),
+        )
         self.assertEqual(result["mutation"]["kind"], "workout")
 
     def test_workout_falls_back_to_deterministic_parser(self):
