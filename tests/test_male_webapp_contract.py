@@ -17,10 +17,10 @@ import llm
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "deslop-main-aiwa-v162.js"
+BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "deslop-main-aiwa-v163.js"
 WRAPPER = ROOT / "webapp2" / "assets" / "deslop" / "main.js"
-CHART_BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "AiwaWebUiChart-aiwa-v162.js"
-V162_CSS = ROOT / "webapp2" / "assets" / "deslop" / "aiwa-v162.css"
+CHART_BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "AiwaWebUiChart-aiwa-v163.js"
+V163_CSS = ROOT / "webapp2" / "assets" / "deslop" / "aiwa-v163.css"
 INDEX = ROOT / "webapp2" / "index.html"
 
 
@@ -63,6 +63,8 @@ class MaleWebappContractTests(unittest.TestCase):
         self.assertIsNone(payload["last_period"])
         self.assertIsNone(payload["cycle_len"])
         self.assertIsNone(payload["profile"]["age"])
+        self.assertEqual(payload["today"], bot.dtoday().isoformat())
+        self.assertEqual(payload["timezone"], str(bot.TZ))
 
     def test_male_profile_ignores_forged_cycle_length(self):
         request = FakeJsonRequest({
@@ -243,7 +245,7 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         )
 
     def test_mascot_has_an_unclipped_layout_contract(self):
-        css = V162_CSS.read_text(encoding="utf-8")
+        css = V163_CSS.read_text(encoding="utf-8")
 
         self.assertIn("grid-template-columns: 52px minmax(0, 1fr)", css)
         self.assertIn("height: 58px", css)
@@ -257,18 +259,29 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn("const ii = Z.recent?.[Kt]", bundle)
         self.assertIn("S(ii);", bundle)
 
+    def test_webapp_uses_server_moscow_day_instead_of_utc_day(self):
+        bundle = BUNDLE.read_text(encoding="utf-8")
+        index = INDEX.read_text(encoding="utf-8")
+
+        self.assertIn("const aiwaTodayIso", bundle)
+        self.assertIn("Europe/Moscow", bundle)
+        self.assertNotIn("toISOString().slice(0, 10)", bundle)
+        self.assertIn("applyCanonicalToday()", index)
+        self.assertIn("installDayRollover()", index)
+        self.assertIn('moscowDateIso()!==D.today', index)
+
     def test_telegram_gets_a_fresh_bundle_and_diary_cache_revalidates(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
         wrapper = WRAPPER.read_text(encoding="utf-8")
         chart_bundle = CHART_BUNDLE.read_text(encoding="utf-8")
         index = INDEX.read_text(encoding="utf-8")
 
-        self.assertIn('deslop-main-aiwa-v162.js', wrapper)
-        self.assertIn('AiwaWebUiChart-aiwa-v162.js', bundle)
-        self.assertIn('deslop-main-aiwa-v162.js', chart_bundle)
-        self.assertIn('main.js?v=r17', index)
+        self.assertIn('deslop-main-aiwa-v163.js', wrapper)
+        self.assertIn('AiwaWebUiChart-aiwa-v163.js', bundle)
+        self.assertIn('deslop-main-aiwa-v163.js', chart_bundle)
+        self.assertIn('main.js?v=r18', index)
         self.assertIn(
-            'import "./deslop-main-aiwa-v162.js";',
+            'import "./deslop-main-aiwa-v163.js";',
             wrapper,
         )
         self.assertIn("aiwaCacheTs", bundle)
@@ -286,10 +299,10 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn('decoding: "sync"', component)
 
     def test_aiwa_art_stays_inside_telegram_safe_area(self):
-        css = V162_CSS.read_text(encoding="utf-8")
+        css = V163_CSS.read_text(encoding="utf-8")
         index = INDEX.read_text(encoding="utf-8")
 
-        self.assertIn("aiwa-v162.css", index)
+        self.assertIn("aiwa-v163.css", index)
         self.assertIn(".aiwa-insight-content .aiwa-paper-ai-heading .aiwa-sequence", css)
         self.assertIn("overflow: visible", css)
         self.assertIn("env(safe-area-inset-bottom, 0px)", css)

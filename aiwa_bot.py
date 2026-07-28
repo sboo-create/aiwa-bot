@@ -796,6 +796,23 @@ def normalize_food(data, source="photo"):
     title = str(data.get("title") or (items[0]["name"] if items else "Приём пищи")).strip()[:80]
     if not (kcal or items or has_title):
         return None
+    if source == "photo":
+        # Vision providers sometimes return a syntactically valid JSON object
+        # with a technical placeholder instead of food. Never persist such an
+        # object as a real diary entry, even when it has a non-empty title.
+        placeholder = re.sub(r"[^а-яёa-z0-9]+", " ", title.casefold()).strip()
+        invalid_titles = {
+            "нет данных", "чек", "не определено", "не удалось определить",
+            "не распознано", "не удалось распознать", "приём пищи", "прием пищи",
+        }
+        item_has_evidence = any(
+            str(item.get("name") or "").strip()
+            and any(_num(item.get(field)) > 0 for field in ("grams", "kcal", "protein", "fat", "carbs"))
+            for item in items
+        )
+        total_has_evidence = any(value > 0 for value in (grams or 0, kcal, protein, fat, carbs))
+        if placeholder in invalid_titles or not (has_title and (total_has_evidence or item_has_evidence)):
+            return None
     fclass = L.food_class_norm(data.get("fclass") or data.get("class") or data.get("category"), protein, fat, carbs)
     unparsed = [
         str(x).strip()[:120]
@@ -3407,8 +3424,13 @@ def sugg_kb(cid, items, app_user=None, app_label=None, feedback_id=None, campaig
     items = [(norm(t) if norm else t) for t in (items or []) if t]
     rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
     if app_user and AIWA_WEBAPP_URL:
+        app_tab = {
+            "Открыть дневник": "food",
+            "Открыть питание": "food",
+            "Открыть нагрузку": "train",
+        }.get(app_label)
         rows.append([InlineKeyboardButton(app_label or APP_BUTTON_TEXT,
-                     web_app=WebAppInfo(url=campaign_webapp_url(app_user, campaign)))])
+                     web_app=WebAppInfo(url=campaign_webapp_url(app_user, campaign, app_tab)))])
     if feedback_id:
         rows.append([B("👍 Полезно", f"fb:helpful:{feedback_id}"),
                      B("👎 Не помогло", f"fb:unhelpful:{feedback_id}")])
@@ -4760,7 +4782,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         rows = []
         if result.get("ok") and result.get("record_id"):
             rows.append([B("🗑 Убрать тренировку", f"wdel:{result['record_id']}")])
-            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            wu = campaign_webapp_url(u, tab="train")
             if wu:
                 rows.append([InlineKeyboardButton("Открыть нагрузку", web_app=WebAppInfo(url=wu))])
         return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
@@ -4775,7 +4797,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         rows = []
         if result.get("ok") and result.get("record_id"):
             rows.append([B("🗑 Убрать тренировку", f"wdel:{result['record_id']}")])
-            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            wu = campaign_webapp_url(u, tab="train")
             if wu:
                 rows.append([InlineKeyboardButton("Открыть нагрузку", web_app=WebAppInfo(url=wu))])
         return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
@@ -4795,7 +4817,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             [B("🗑 Убрать из дневника", f"mdel:{record_id}")]
             for record_id in result.get("record_ids", [])
         ]
-        wu = webapp_url(u) or AIWA_WEBAPP_URL
+        wu = campaign_webapp_url(u, tab="food")
         if wu and result.get("record_ids"):
             rows.append([
                 InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu)),
@@ -4817,7 +4839,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         rows = []
         if result.get("ok") and result.get("record_id"):
             rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
-            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            wu = campaign_webapp_url(u, tab="food")
             if wu:
                 rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
         return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
@@ -4833,7 +4855,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         rows = []
         if result.get("ok") and result.get("record_id"):
             rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
-            wu = webapp_url(u) or AIWA_WEBAPP_URL
+            wu = campaign_webapp_url(u, tab="food")
             if wu:
                 rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
         return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
@@ -6509,7 +6531,7 @@ async def _on_photo_bounded(update, context):
         return await update.message.reply_text("Не разобрала фото 🙈 Сфоткай ближе и светлее, либо напиши текстом." + (("\n\n⚙️ " + _e) if _e else ""))
     mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
     rows = [[B("🗑 Убрать из дневника", f"mdel:{mid}")]]
-    wu = webapp_url(u) or AIWA_WEBAPP_URL
+    wu = campaign_webapp_url(u, tab="food")
     if wu: rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
     await update.message.reply_text(food_card(rec), reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
 
@@ -7516,6 +7538,7 @@ def _api_data_sync(cid, body):
             ev(cid, "summary_open", meta="daily_summary")
     cycle_user = is_cycle(u)
     out = {"onboarded": True, "cycle": bool(cycle_user and u.get("last_period")),
+           "today": dtoday().isoformat(), "timezone": str(TZ),
            "last_period": (u.get("last_period") if cycle_user else None),
            "cycle_len": ((u.get("cycle_len") or 28) if cycle_user else None),
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),

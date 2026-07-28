@@ -634,6 +634,18 @@ class SecurityAnalyticsTests(unittest.TestCase):
         finally:
             bot.AIWA_WEBAPP_URL = old
 
+    def test_semantic_webapp_tabs_are_encoded_without_health_data(self):
+        old = bot.AIWA_WEBAPP_URL
+        bot.AIWA_WEBAPP_URL = "https://example.test/app"
+        try:
+            food = bot.campaign_webapp_url({"last_period": "2026-07-01"}, tab="food")
+            train = bot.campaign_webapp_url({"last_period": "2026-07-01"}, tab="train")
+            self.assertEqual(food, "https://example.test/app?tab=food")
+            self.assertEqual(train, "https://example.test/app?tab=train")
+            self.assertNotIn("last_period", food + train)
+        finally:
+            bot.AIWA_WEBAPP_URL = old
+
     def test_webapp_root_allows_telegram_frame_but_api_routes_do_not(self):
         async def handler(_request):
             return bot.web.Response(
