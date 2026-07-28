@@ -1,4 +1,5 @@
 import threading
+import tempfile
 import unittest
 from decimal import Decimal
 from unittest import mock
@@ -7,6 +8,14 @@ from scripts import claude_deep_review as deep
 
 
 class ClaudeDeepReviewTests(unittest.TestCase):
+    def test_diff_file_is_bounded(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as diff_file:
+            diff_file.write("x" * (deep.base.MAX_DIFF_CHARS + 10))
+            diff_file.flush()
+            diff, truncated = deep.pull_request_diff_file(diff_file.name)
+        self.assertTrue(truncated)
+        self.assertEqual(len(diff), deep.base.MAX_DIFF_CHARS)
+
     def test_deep_schema_bounds_each_agent_output(self):
         properties = deep.deep_review_tool()["input_schema"]["properties"]
         self.assertEqual(properties["findings"]["maxItems"], 5)
@@ -54,76 +63,6 @@ class ClaudeDeepReviewTests(unittest.TestCase):
                 )
             )
         self.assertEqual(get_json.call_count, 2)
-
-    def test_wait_for_test_success_ignores_skipped_label_check(self):
-        responses = [
-            {
-                "check_runs": [{
-                    "name": "test",
-                    "status": "completed",
-                    "conclusion": "skipped",
-                }]
-            },
-            {
-                "check_runs": [{
-                    "name": "test",
-                    "status": "completed",
-                    "conclusion": "success",
-                }]
-            },
-        ]
-        with (
-            mock.patch.object(deep.base, "get_json", side_effect=responses),
-            mock.patch.object(deep.time, "sleep") as sleep,
-        ):
-            deep.wait_for_test_success(
-                "owner/repo",
-                "a" * 40,
-                "token",
-                timeout=10,
-                poll_interval=1,
-            )
-        sleep.assert_called_once_with(1)
-
-    def test_wait_for_test_success_fails_immediately_on_failed_test(self):
-        response = {
-            "check_runs": [{
-                "name": "test",
-                "status": "completed",
-                "conclusion": "failure",
-            }]
-        }
-        with mock.patch.object(deep.base, "get_json", return_value=response):
-            with self.assertRaisesRegex(RuntimeError, "did not pass"):
-                deep.wait_for_test_success(
-                    "owner/repo",
-                    "a" * 40,
-                    "token",
-                    timeout=10,
-                    poll_interval=1,
-                )
-
-    def test_wait_for_test_success_bounds_missing_check_wait(self):
-        response = {
-            "check_runs": [{
-                "name": "test",
-                "status": "completed",
-                "conclusion": "skipped",
-            }]
-        }
-        with (
-            mock.patch.object(deep.base, "get_json", return_value=response),
-            mock.patch.object(deep.time, "monotonic", side_effect=[0, 181]),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "no non-skipped test"):
-                deep.wait_for_test_success(
-                    "owner/repo",
-                    "a" * 40,
-                    "token",
-                    timeout=900,
-                    poll_interval=1,
-                    missing_timeout=180,
-                )
 
     def test_agents_execute_in_parallel(self):
         barrier = threading.Barrier(len(deep.AGENTS))

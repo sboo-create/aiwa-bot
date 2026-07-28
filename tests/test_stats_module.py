@@ -381,12 +381,13 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual((reasons["timeout"]["deliveries"], reasons["timeout"]["attempts"]), (1, 1))
 
     def test_platform_breakdown_separates_bot_and_mini_app_without_claiming_os(self):
-        now = time.time()
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
         self.add("bot", "u1", "user_message_sent", {"platform": "bot", "channel": "text"}, now - 20)
         self.add("web", "u1", "screen_viewed", {"platform": "webapp", "screen": "food"}, now - 15)
         self.add("web2", "u2", "app_opened", {"platform": "webapp"}, now - 10)
 
-        platforms = self.module.compute_dashboard(1)["platforms"]
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            platforms = self.module.compute_dashboard(1)["platforms"]
         items = {item["id"]: item for item in platforms["items"]}
 
         self.assertEqual((items["telegram_bot"]["users"], items["telegram_bot"]["events"]), (1, 1))
@@ -415,7 +416,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIsNone(data["push_funnel"]["action_rate"])
 
     def test_activity_series_counts_user_messages_not_ai_messages(self):
-        now = time.time()
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
         rows = [
             {"event_id": "u", "ts": now - 20, "device_id": "u1", "name": "user_message_sent",
              "raw_name": "user_message_sent", "properties": {}, "ingested_at": now,
@@ -431,7 +432,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(sum(point["messages"] for point in series), 1)
 
     def test_observed_filter_recalculates_metrics_and_openrouter_credits_are_usd(self):
-        now = time.time()
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
         self.add("fresh-user", "u1", "app_opened", ts=now - 30)
         self.add("legacy-user", "u2", "legacy_button", ts=now - 20, provenance="reconstructed")
         self.add("priced-call", "u1", "ai_call", {
@@ -441,8 +442,9 @@ class StatsModuleTests(unittest.TestCase):
             "input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
         }, ts=now - 10)
 
-        mixed = self.module.compute_dashboard(1, "MIXED")
-        exact = self.module.compute_dashboard(1, "observed")
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            mixed = self.module.compute_dashboard(1, "MIXED")
+            exact = self.module.compute_dashboard(1, "observed")
 
         self.assertEqual(mixed["audience"]["ever_used"], 2)
         self.assertEqual(exact["audience"]["ever_used"], 1)

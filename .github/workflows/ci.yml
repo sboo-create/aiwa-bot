@@ -4,7 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    types: [opened, synchronize, reopened, ready_for_review]
+  # The workflow definition and credentials come from trusted main, while the
+  # pull-request diff is downloaded as untrusted data and is never executed.
+  pull_request_target:
+    types: [labeled]
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'labeled' && 'label' || 'code' }}
@@ -151,19 +155,14 @@ jobs:
   claude-deep-review:
     name: Claude deep review
     if: >-
-      github.event_name == 'pull_request' &&
+      github.event_name == 'pull_request_target' &&
       github.event.action == 'labeled' &&
       github.event.label.name == 'claude-deep-review' &&
       vars.AIWA_CLAUDE_REVIEW_ENABLED == 'true' &&
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) &&
-      contains(format(',{0},', vars.AIWA_CLAUDE_DEEP_REVIEW_ACTORS), format(',{0},', github.actor))
+      github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      checks: read
       contents: read
       issues: write
       pull-requests: write
@@ -172,14 +171,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Wait for tests on this exact revision
+      - name: Download untrusted pull request diff
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python -m scripts.claude_deep_review --wait-for-test
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: >-
+          gh api
+          -H "Accept: application/vnd.github.diff"
+          "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"
+          > "$RUNNER_TEMP/aiwa-deep-review.diff"
 
       - name: Open encrypted tunnel to AIWA LiteLLM
         env:
@@ -227,6 +231,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_DIFF_FILE: ${{ runner.temp }}/aiwa-deep-review.diff
         run: python -m scripts.claude_deep_review
 
       - name: Refresh aggregate spend dashboard
