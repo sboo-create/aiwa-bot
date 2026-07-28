@@ -237,9 +237,10 @@ class SecurityAnalyticsTests(unittest.TestCase):
         ):
             os.environ.pop("AIWA_TEST_SECRET", None)
             with self.assertRaisesRegex(
-                RuntimeError, "cannot read AIWA_TEST_SECRET_FILE"
-            ):
+                RuntimeError, "^cannot read AIWA_TEST_SECRET_FILE credential$"
+            ) as raised:
                 bot._load_secret_file("AIWA_TEST_SECRET")
+            self.assertNotIn("/definitely/missing", str(raised.exception))
 
     def test_event_writer_stop_drains_queued_events(self):
         original_queue = bot._EVENT_WRITE_Q

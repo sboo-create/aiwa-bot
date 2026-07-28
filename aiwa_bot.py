@@ -16,7 +16,7 @@ def _load_secret_file(env_name):
         with open(path, "r", encoding="utf-8") as secret_file:
             value = secret_file.read().strip()
     except OSError as exc:
-        raise RuntimeError(f"cannot read {env_name}_FILE at {path}") from exc
+        raise RuntimeError(f"cannot read {env_name}_FILE credential") from exc
     if value:
         os.environ[env_name] = value
 
