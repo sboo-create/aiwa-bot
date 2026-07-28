@@ -73,7 +73,20 @@ def already_deep_reviewed(
     token: str,
     head_sha: str,
 ) -> bool:
-    marker = deep_review_marker(head_sha)
+    return comment_marker_exists(
+        repo,
+        pr_number,
+        token,
+        deep_review_marker(head_sha),
+    )
+
+
+def comment_marker_exists(
+    repo: str,
+    pr_number: str,
+    token: str,
+    marker: str,
+) -> bool:
     for page in range(1, MAX_COMMENT_PAGES + 1):
         url = (
             f"https://api.github.com/repos/{repo}/issues/{int(pr_number)}/comments"
@@ -100,12 +113,14 @@ def wait_for_test_success(
     *,
     timeout: int = 900,
     poll_interval: int = 10,
+    missing_timeout: int = 180,
 ) -> None:
     url = (
         f"https://api.github.com/repos/{repo}/commits/{head_sha}/check-runs"
         "?per_page=100"
     )
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     while True:
         response = base.get_json(url, token)
         if not isinstance(response, dict):
@@ -133,7 +148,13 @@ def wait_for_test_success(
             raise RuntimeError(
                 f"test check did not pass for {head_sha[:12]}: {conclusions}"
             )
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if not test_runs and now - started >= missing_timeout:
+            raise RuntimeError(
+                f"no non-skipped test check appeared for {head_sha[:12]} "
+                f"within {missing_timeout}s"
+            )
+        if now >= deadline:
             raise RuntimeError(
                 f"timed out waiting for test check on {head_sha[:12]}"
             )
@@ -230,11 +251,16 @@ def run_agents(**kwargs) -> list[dict]:
             try:
                 results[agent_id] = future.result()
             except Exception as exc:
+                print(
+                    f"Deep-review agent {agent_id} failed: "
+                    f"{base.clean_text(exc, 500)}",
+                    file=sys.stderr,
+                )
                 results[agent_id] = {
                     "agent": agent,
                     "review": {},
                     "usage": {},
-                    "error": base.clean_text(exc, 500),
+                    "error": "The model request or response validation failed.",
                 }
     return [results[agent["id"]] for agent in AGENTS]
 
@@ -309,12 +335,12 @@ def render_comment(
         ])
         if result.get("error"):
             lines.extend([
-                f"**Agent failed:** {base.clean_text(result['error'], 500)}",
+                f"**Agent failed:** {base.clean_text(result['error'], 200)}",
                 "",
             ])
             continue
         lines.extend([
-            base.clean_text(review.get("summary")) or "Review completed.",
+            base.clean_text(review.get("summary"), 800) or "Review completed.",
             "",
         ])
         if findings:
@@ -327,11 +353,11 @@ def render_comment(
                     f"#### {item['severity']} · `{location}` · "
                     f"{base.clean_text(item.get('title'), 300)}",
                     "",
-                    f"**Scenario:** {base.clean_text(item.get('scenario'))}",
+                    f"**Scenario:** {base.clean_text(item.get('scenario'), 700)}",
                     "",
-                    f"**Evidence:** {base.clean_text(item.get('evidence'))}",
+                    f"**Evidence:** {base.clean_text(item.get('evidence'), 700)}",
                     "",
-                    f"**Smallest fix:** {base.clean_text(item.get('fix'))}",
+                    f"**Smallest fix:** {base.clean_text(item.get('fix'), 700)}",
                     "",
                     f"Confidence: `{base.clean_text(item.get('confidence'), 20)}`",
                     "",
@@ -348,9 +374,9 @@ def render_comment(
             ])
 
         test_gaps = [
-            base.clean_text(value)
+            base.clean_text(value, 500)
             for value in (review.get("test_gaps") or [])
-            if base.clean_text(value)
+            if base.clean_text(value, 500)
         ]
         if test_gaps:
             lines.extend([
@@ -415,6 +441,7 @@ def post_comment_with_retry(
     *,
     attempts: int = 3,
 ) -> None:
+    marker = body.splitlines()[0] if body.startswith("<!-- ") else ""
     last_error: Exception | None = None
     for attempt in range(attempts):
         try:
@@ -423,6 +450,21 @@ def post_comment_with_retry(
         except Exception as exc:
             last_error = exc
             if attempt + 1 < attempts:
+                if marker:
+                    try:
+                        if comment_marker_exists(
+                            repo,
+                            pr_number,
+                            token,
+                            marker,
+                        ):
+                            return
+                    except Exception as marker_exc:
+                        print(
+                            "Could not verify whether the failed comment request "
+                            f"was accepted: {base.clean_text(marker_exc, 300)}",
+                            file=sys.stderr,
+                        )
                 time.sleep(2 ** attempt)
     raise RuntimeError(
         f"could not publish deep-review comment after {attempts} attempts: "
@@ -481,6 +523,15 @@ def append_skipped_summary(head_sha: str) -> None:
         )
 
 
+def wait_main() -> int:
+    github_token = base.required_env("GITHUB_TOKEN")
+    repo = base.required_env("GITHUB_REPOSITORY")
+    head_sha = base.required_env("PR_HEAD_SHA")
+    wait_for_test_success(repo, head_sha, github_token)
+    print(f"Successful test check found for {head_sha[:12]}.")
+    return 0
+
+
 def main() -> int:
     base_url = base.required_env("AIWA_REVIEW_BASE_URL").rstrip("/")
     api_key = base.required_env("AIWA_REVIEW_LITELLM_KEY")
@@ -504,7 +555,6 @@ def main() -> int:
         )
         return 0
 
-    wait_for_test_success(repo, head_sha, github_token)
     diff, truncated = base.pull_request_diff(base_sha, head_sha)
     results = run_agents(
         base_url=base_url,
@@ -523,6 +573,12 @@ def main() -> int:
         pricing_source,
         truncated,
     )
+    append_step_summary(results, costs, pricing_source)
+    total_cost = sum(costs, Decimal())
+    print(
+        "::notice title=Claude deep review usage::"
+        f"{MODEL} · {len(results)} parallel requests · ${total_cost:.4f}"
+    )
     try:
         post_comment_with_retry(
             repo,
@@ -533,12 +589,6 @@ def main() -> int:
     except Exception:
         append_comment_fallback(comment)
         raise
-    append_step_summary(results, costs, pricing_source)
-    total_cost = sum(costs, Decimal())
-    print(
-        "::notice title=Claude deep review usage::"
-        f"{MODEL} · {len(results)} parallel requests · ${total_cost:.4f}"
-    )
     failed_agents = [
         result["agent"]["id"] for result in results if result.get("error")
     ]
@@ -552,7 +602,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(wait_main() if "--wait-for-test" in sys.argv[1:] else main())
     except Exception as exc:
         print(f"Claude deep review failed: {exc}", file=sys.stderr)
         sys.exit(1)

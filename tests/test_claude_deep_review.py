@@ -85,6 +85,46 @@ class ClaudeDeepReviewTests(unittest.TestCase):
             )
         sleep.assert_called_once_with(1)
 
+    def test_wait_for_test_success_fails_immediately_on_failed_test(self):
+        response = {
+            "check_runs": [{
+                "name": "test",
+                "status": "completed",
+                "conclusion": "failure",
+            }]
+        }
+        with mock.patch.object(deep.base, "get_json", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "did not pass"):
+                deep.wait_for_test_success(
+                    "owner/repo",
+                    "a" * 40,
+                    "token",
+                    timeout=10,
+                    poll_interval=1,
+                )
+
+    def test_wait_for_test_success_bounds_missing_check_wait(self):
+        response = {
+            "check_runs": [{
+                "name": "test",
+                "status": "completed",
+                "conclusion": "skipped",
+            }]
+        }
+        with (
+            mock.patch.object(deep.base, "get_json", return_value=response),
+            mock.patch.object(deep.time, "monotonic", side_effect=[0, 181]),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no non-skipped test"):
+                deep.wait_for_test_success(
+                    "owner/repo",
+                    "a" * 40,
+                    "token",
+                    timeout=900,
+                    poll_interval=1,
+                    missing_timeout=180,
+                )
+
     def test_agents_execute_in_parallel(self):
         barrier = threading.Barrier(len(deep.AGENTS))
 
@@ -257,6 +297,7 @@ class ClaudeDeepReviewTests(unittest.TestCase):
                 "post_github_comment",
                 side_effect=[RuntimeError("rate limit"), None],
             ) as post,
+            mock.patch.object(deep, "comment_marker_exists", return_value=False),
             mock.patch.object(deep.time, "sleep") as sleep,
         ):
             deep.post_comment_with_retry(
@@ -267,6 +308,26 @@ class ClaudeDeepReviewTests(unittest.TestCase):
             )
         self.assertEqual(post.call_count, 2)
         sleep.assert_called_once_with(1)
+
+    def test_comment_retry_does_not_duplicate_accepted_post(self):
+        body = deep.deep_review_marker("a" * 40) + "\nreview"
+        with (
+            mock.patch.object(
+                deep.base,
+                "post_github_comment",
+                side_effect=RuntimeError("connection reset after response"),
+            ) as post,
+            mock.patch.object(deep, "comment_marker_exists", return_value=True),
+            mock.patch.object(deep.time, "sleep") as sleep,
+        ):
+            deep.post_comment_with_retry(
+                "owner/repo",
+                "12",
+                "token",
+                body,
+            )
+        post.assert_called_once()
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

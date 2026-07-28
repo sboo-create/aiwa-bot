@@ -39,7 +39,10 @@ The review job:
   four parallel requests, and a `$25` budget per 30 days.
 - skips duplicate ordinary or deep-review calls for an already reviewed commit SHA.
 - waits for a successful `test` check on the exact head SHA before spending on Opus;
-  it does not rerun the test suite merely because a label was added.
+  it does not rerun the test suite merely because a label was added, and it waits
+  before opening the LiteLLM tunnel or exposing the model key to a step.
+- queues repeated label events and rechecks the revision marker before retrying a
+  possibly accepted comment, avoiding cancellation-driven duplicate model spend.
 - preserves and publishes successful specialist results when one agent fails, marks the
   check as incomplete, and allows a later label retry.
 

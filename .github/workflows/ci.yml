@@ -8,7 +8,9 @@ on:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'labeled' && 'label' || 'code' }}
-  cancel-in-progress: true
+  # Queue repeated manual deep-review triggers so an in-flight paid request is
+  # never cancelled and charged twice; normal code pushes still cancel stale CI.
+  cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 permissions:
   contents: read
@@ -172,6 +174,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Wait for tests on this exact revision
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -m scripts.claude_deep_review --wait-for-test
 
       - name: Open encrypted tunnel to AIWA LiteLLM
         env:
