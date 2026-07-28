@@ -1,0 +1,37 @@
+{
+  "samples": 25,
+  "duration_estimate_seconds": 48,
+  "host": {
+    "load1_max": 0.381,
+    "load5_max": 0.335,
+    "mem_available_min_bytes": 13272334336,
+    "swap_free_min_bytes": 0
+  },
+  "service": {
+    "cpu_average_cores": 0.012,
+    "memory_max_bytes": 116174848,
+    "memory_peak_max_bytes": 117293056,
+    "pids_max": 17,
+    "restarts_first": 0,
+    "restarts_last": 0
+  },
+  "process": {
+    "count_min": 0,
+    "rss_max_bytes": 0,
+    "cpu_ticks_delta": 0
+  },
+  "storage": {
+    "db_first_bytes": 43433984,
+    "db_last_bytes": 43528192,
+    "wal_max_bytes": 28872,
+    "shm_max_bytes": 32768
+  },
+  "health": {
+    "success": 25,
+    "total": 25,
+    "latency_ms_p50": 1.164,
+    "latency_ms_p95": 1.224,
+    "latency_ms_p99": 14.391,
+    "latency_ms_max": 18.549
+  }
+}

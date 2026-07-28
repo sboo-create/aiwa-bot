@@ -232,6 +232,11 @@ Guardrails:
 - `AIWA_TODAY_QUEUE_MAX=1500`;
 - `AIWA_ALERT_TODAY_Q=1200`.
 
+После stop-guard на реальном `cold-open-100` staging временно работает с
+`AIWA_TODAY_CONCURRENCY=2`. Возврат к 6 допускается только после решения
+этапа 5: текущий shared LiteLLM на i196 ушёл в swap, а OpenRouter upstream
+Novita дал массовые пустые ответы.
+
 Порядок rollout:
 
 1. i167 staging;

@@ -1,0 +1,15 @@
+active_jobs=90 i196_mem_available_kib=324336
+active_jobs=85 i196_mem_available_kib=325288
+active_jobs=80 i196_mem_available_kib=329852
+active_jobs=74 i196_mem_available_kib=330276
+active_jobs=69 i196_mem_available_kib=329308
+active_jobs=67 i196_mem_available_kib=329968
+active_jobs=62 i196_mem_available_kib=311188
+active_jobs=54 i196_mem_available_kib=310348
+active_jobs=51 i196_mem_available_kib=313876
+active_jobs=44 i196_mem_available_kib=321324
+active_jobs=39 i196_mem_available_kib=328668
+active_jobs=36 i196_mem_available_kib=334532
+active_jobs=5 i196_mem_available_kib=276464
+active_jobs=1 i196_mem_available_kib=107300
+STOP_GUARD i196 memory below 200MB

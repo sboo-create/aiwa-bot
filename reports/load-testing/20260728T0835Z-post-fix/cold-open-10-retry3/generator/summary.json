@@ -1,0 +1,199 @@
+{
+  "run_id": "20260728T084801Z",
+  "target": "https://aiwa-staging-167.158-160-163-167.sslip.io",
+  "target_version": "2026-07-28-v147-durable-ai-queue-i167-staging",
+  "scenario": "cold-open",
+  "users": 10,
+  "ramp_seconds": 5.0,
+  "hold_seconds": 1.0,
+  "duration_seconds": 5.187,
+  "iterations": 10,
+  "completed_users": 10,
+  "achieved_rps": 9.639,
+  "overall": {
+    "requests": 50,
+    "ok": 50,
+    "errors": 0,
+    "success_rate": 1.0,
+    "latency_ms": {
+      "p50": 44.25,
+      "p90": 60.86,
+      "p95": 64.78,
+      "p99": 87.11,
+      "max": 103.05,
+      "mean": 42.85
+    },
+    "statuses": {
+      "200": 50
+    },
+    "errors_by_class": {}
+  },
+  "by_category": {
+    "ai_enqueue": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 52.55,
+        "p90": 61.76,
+        "p95": 66.14,
+        "p99": 69.64,
+        "max": 70.52,
+        "mean": 54.03
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "core": {
+      "requests": 20,
+      "ok": 20,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 27.45,
+        "p90": 45.38,
+        "p95": 53.3,
+        "p99": 61.0,
+        "max": 62.93,
+        "mean": 35.98
+      },
+      "statuses": {
+        "200": 20
+      },
+      "errors_by_class": {}
+    },
+    "static": {
+      "requests": 20,
+      "ok": 20,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 53.73,
+        "p90": 61.93,
+        "p95": 68.13,
+        "p99": 96.06,
+        "max": 103.05,
+        "mean": 44.12
+      },
+      "statuses": {
+        "200": 20
+      },
+      "errors_by_class": {}
+    }
+  },
+  "by_route": {
+    "/": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 44.25,
+        "p90": 53.8,
+        "p95": 58.37,
+        "p99": 62.02,
+        "max": 62.93,
+        "mean": 45.23
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "/api/data": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 26.88,
+        "p90": 27.08,
+        "p95": 27.24,
+        "p99": 27.37,
+        "max": 27.41,
+        "mean": 26.74
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "/api/today": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 52.55,
+        "p90": 61.76,
+        "p95": 66.14,
+        "p99": 69.64,
+        "max": 70.52,
+        "mean": 54.03
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "/assets/deslop/main.css": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 57.74,
+        "p90": 65.61,
+        "p95": 84.33,
+        "p99": 99.3,
+        "max": 103.05,
+        "mean": 62.08
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "/assets/deslop/main.js": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 21.73,
+        "p90": 27.61,
+        "p95": 46.95,
+        "p99": 62.42,
+        "max": 66.29,
+        "mean": 26.16
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    }
+  },
+  "generator": {
+    "hostname": "nsushko-local-judges-0",
+    "python": "3.10.12",
+    "loadavg": [
+      83.85009765625,
+      84.28955078125,
+      84.70556640625
+    ],
+    "max_rss_kib": 39268,
+    "loop_drift_ms": {
+      "p95": 1.41,
+      "p99": 1.6,
+      "max": 1.65
+    }
+  },
+  "ai_controls": {
+    "share": 0,
+    "client_concurrency": 0,
+    "provider_metrics_source": "target SQLite llm_calls + LOAD/60s logs"
+  }
+}

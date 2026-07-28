@@ -1,0 +1,73 @@
+{
+  "before_at": "2026-07-28T08:53:31.092911+00:00",
+  "after_at": "2026-07-28T08:56:59.348222+00:00",
+  "rows": {
+    "users": 0,
+    "synthetic_users": 0,
+    "events": 0,
+    "events_v2": 473,
+    "meals": 0,
+    "workouts": 0
+  },
+  "llm": {
+    "calls": 111,
+    "success": 71,
+    "input_tokens": 39133,
+    "output_tokens": 19583,
+    "cached_tokens": 19520,
+    "total_tokens": 58716,
+    "reported_cost_usd": 0.008031118,
+    "calls_without_cost": 40
+  },
+  "file_bytes": {
+    "db": 741376,
+    "-wal": 0,
+    "-shm": 0
+  },
+  "ai_jobs_before": {
+    "total": 70,
+    "active": 0,
+    "queued": 0,
+    "running": 0,
+    "completed": 68,
+    "failed": 2,
+    "rejected_events": 0,
+    "accepted_events": 70,
+    "deduped_events": 0,
+    "oldest_queued_seconds": 0,
+    "completed_last_60s": 0,
+    "completed_last_300s": 53,
+    "by_status": {
+      "completed": 68,
+      "failed": 2
+    }
+  },
+  "ai_jobs_after": {
+    "total": 170,
+    "active": 0,
+    "queued": 0,
+    "running": 0,
+    "completed": 132,
+    "failed": 38,
+    "rejected_events": 0,
+    "accepted_events": 170,
+    "deduped_events": 0,
+    "oldest_queued_seconds": 0,
+    "completed_last_60s": 0,
+    "completed_last_300s": 64,
+    "by_status": {
+      "completed": 132,
+      "failed": 38
+    }
+  },
+  "ai_jobs_delta": {
+    "total": 100,
+    "completed": 64,
+    "failed": 36,
+    "accepted_events": 100,
+    "deduped_events": 0,
+    "rejected_events": 0
+  },
+  "cost_complete": false,
+  "cost_note": "some calls did not report cost; do not interpret missing cost as zero"
+}
