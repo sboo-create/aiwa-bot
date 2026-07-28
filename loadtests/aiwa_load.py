@@ -30,7 +30,7 @@ import aiohttp
 
 
 EXPECTED_HOST = "aiwa-staging-167.158-160-163-167.sslip.io"
-EXPECTED_VERSION = "2026-07-28-v151-sqlite-write-i167-staging"
+EXPECTED_VERSION = "2026-07-28-v159-load-safety-main"
 DEFAULT_USER_ID_BASE = 790_002_000_000
 
 
@@ -114,7 +114,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=f"https://{EXPECTED_HOST}")
     parser.add_argument("--confirm-staging-host", required=True)
     parser.add_argument("--expected-version", default=EXPECTED_VERSION)
-    parser.add_argument("--token-file", type=Path, default=Path(".secrets/bot-token"))
+    token_source = parser.add_mutually_exclusive_group()
+    token_source.add_argument(
+        "--token-file", type=Path, default=Path(".secrets/bot-token")
+    )
+    token_source.add_argument(
+        "--token-stdin",
+        action="store_true",
+        help="read the bot token from stdin without persisting it on the generator",
+    )
     parser.add_argument(
         "--scenario",
         choices=("smoke", "cold-open", "core", "writes", "integrated", "burst"),
@@ -154,7 +162,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--ai-concurrency must be between 1 and 20")
     if args.scenario != "integrated" and args.ai_share != 0.08:
         raise SystemExit("--ai-share applies only to the integrated scenario")
-    if not args.token_file.is_file():
+    if not args.token_stdin and not args.token_file.is_file():
         raise SystemExit(f"Token file not found: {args.token_file}")
 
 
@@ -427,9 +435,24 @@ class LoadRun:
         )
 
     async def ai_action(
-        self, session: aiohttp.ClientSession, user_index: int
+        self,
+        session: aiohttp.ClientSession,
+        user_index: int,
+        finish_at: float,
     ) -> None:
-        async with self.ai_gate:
+        remaining = finish_at - time.monotonic()
+        if remaining <= 0:
+            return
+        try:
+            await asyncio.wait_for(self.ai_gate.acquire(), timeout=remaining)
+        except asyncio.TimeoutError:
+            return
+        try:
+            # A request that already reached the provider may finish after the
+            # wall-clock deadline, but a waiter must never start new AI work
+            # after the experiment has ended.
+            if time.monotonic() >= finish_at:
+                return
             await self.request(
                 session,
                 "POST",
@@ -447,9 +470,14 @@ class LoadRun:
                     "request_id": f"lt-{self.run_id}-{uuid.uuid4().hex}",
                 },
             )
+        finally:
+            self.ai_gate.release()
 
     async def iteration(
-        self, session: aiohttp.ClientSession, user_index: int
+        self,
+        session: aiohttp.ClientSession,
+        user_index: int,
+        finish_at: float,
     ) -> None:
         scenario = self.args.scenario
         if scenario in ("smoke", "cold-open", "burst"):
@@ -460,7 +488,7 @@ class LoadRun:
             await self.write_action(session, user_index)
         elif scenario == "integrated":
             if random.random() < self.args.ai_share:
-                await self.ai_action(session, user_index)
+                await self.ai_action(session, user_index, finish_at)
             else:
                 await self.core_action(session, user_index)
         self.results.iterations += 1
@@ -477,11 +505,11 @@ class LoadRun:
         )
         await asyncio.sleep(max(0, start_at + ramp_delay - time.monotonic()))
         if self.args.scenario in ("smoke", "cold-open", "burst"):
-            await self.iteration(session, user_index)
+            await self.iteration(session, user_index, finish_at)
             self.results.completed_users.add(user_index)
             return
         while time.monotonic() < finish_at:
-            await self.iteration(session, user_index)
+            await self.iteration(session, user_index, finish_at)
             await asyncio.sleep(random.uniform(self.args.think_min, self.args.think_max))
         self.results.completed_users.add(user_index)
 
@@ -591,7 +619,11 @@ class LoadRun:
 
 
 async def async_main(args: argparse.Namespace) -> int:
-    token = args.token_file.read_text(encoding="utf-8").strip()
+    token = (
+        sys.stdin.read().strip()
+        if args.token_stdin
+        else args.token_file.read_text(encoding="utf-8").strip()
+    )
     if ":" not in token or len(token) < 20:
         raise SystemExit("Token file does not look like a Telegram bot token")
     run = LoadRun(args, token)

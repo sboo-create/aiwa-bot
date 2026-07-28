@@ -12,6 +12,8 @@ Safety properties:
 - raw request metrics contain no Telegram token, initData, prompts or responses.
 
 The Telegram token is stored only in `.secrets/bot-token` with mode `0600`.
+For an external generator, prefer `--token-stdin` and stream the token from the
+staging secret store; the token must not be copied to the generator filesystem.
 
 Preflight without load:
 
@@ -23,6 +25,18 @@ python3 aiwa_load.py \
   --preflight-only \
   --confirm-staging-host aiwa-staging-167.158-160-163-167.sslip.io
 ```
+
+The photo burst accepts valid image fixtures up to the application's 12 MiB
+boundary. Test small, medium and near-limit files separately before combining
+them into a burst; responses above the boundary belong in a rejection test, not
+in the success-rate denominator.
+
+`onboarding_gate.py` uses a fresh synthetic user id to verify over the public
+staging route that authenticated users who have not completed Telegram
+onboarding see `onboarded=false` and cannot call protected app/AI endpoints.
+The full happy-path onboarding state machine is covered by the unit suite;
+transport-level Telegram onboarding additionally requires an authorized test
+user session, not another bot.
 
 Example smoke run:
 

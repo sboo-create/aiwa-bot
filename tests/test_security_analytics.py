@@ -67,6 +67,58 @@ class SecurityAnalyticsTests(unittest.TestCase):
         bot.DB = self.old_db
         self.tmp.cleanup()
 
+    def test_regular_cycle_onboarding_completes_full_text_state_machine(self):
+        cid = 907
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="cycle", state="await_date")
+        message = types.SimpleNamespace(
+            entities=[],
+            reply_text=mock.AsyncMock(),
+        )
+        update = types.SimpleNamespace(
+            effective_chat=types.SimpleNamespace(id=cid),
+            message=message,
+        )
+        context = types.SimpleNamespace(
+            application=object(),
+            bot=types.SimpleNamespace(send_chat_action=mock.AsyncMock()),
+        )
+
+        async def scenario():
+            with (
+                mock.patch.object(bot, "schedule_daily"),
+                mock.patch.object(bot, "push_summary", new=mock.AsyncMock()),
+            ):
+                await bot.handle_text(update, context, "25.05.2026")
+                self.assertEqual(bot.row(cid)["state"], "await_len")
+                await bot.handle_text(update, context, "28")
+                self.assertEqual(bot.row(cid)["state"], "await_profile")
+                await bot.handle_text(update, context, "168 60 30")
+                self.assertEqual(bot.row(cid)["state"], "await_activity")
+                await bot.handle_text(update, context, "умеренная")
+                self.assertEqual(bot.row(cid)["state"], "await_diet")
+                await bot.handle_text(update, context, "нет")
+
+        asyncio.run(scenario())
+        user = bot.row(cid)
+        self.assertTrue(bot.is_onboarded(user))
+        self.assertEqual(user["last_period"], "2026-05-25")
+        self.assertEqual(user["cycle_len"], 28)
+        self.assertEqual(user["height"], 168)
+        self.assertEqual(user["weight"], 60.0)
+        self.assertEqual(user["age"], 30)
+        self.assertEqual(user["activity"], 3)
+        self.assertIsNone(user["state"])
+        conn = sqlite3.connect(bot.DB)
+        self.assertEqual(
+            conn.execute(
+                """SELECT COUNT(*) FROM events_v2
+                   WHERE event_name='onboarding_completed'"""
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
     def test_miniapp_section_is_fast_singleflight_and_then_cached(self):
         cid = 909
         bot._activate_user(cid)

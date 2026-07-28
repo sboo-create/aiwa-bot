@@ -10168,7 +10168,9 @@ async def run_all():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     runner = web.AppRunner(build_web()); await runner.setup()
     port = int(os.environ.get("PORT", "8080"))
-    bind_host = os.environ.get("AIWA_BIND_HOST", "0.0.0.0")
+    # Railway needs the default public container bind; hardened i167 explicitly
+    # sets AIWA_BIND_HOST=127.0.0.1 and exposes it only through Caddy.
+    bind_host = os.environ.get("AIWA_BIND_HOST", "0.0.0.0")  # nosec B104
     http_backlog = max(
         128, min(4096, int(os.environ.get("AIWA_HTTP_BACKLOG", "1024")))
     )

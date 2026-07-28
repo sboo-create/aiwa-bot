@@ -9,7 +9,9 @@ import hashlib
 import hmac
 import json
 import math
+import mimetypes
 import statistics
+import sys
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -57,7 +59,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=f"https://{EXPECTED_HOST}")
     parser.add_argument("--confirm-staging-host", required=True)
     parser.add_argument("--expected-version", required=True)
-    parser.add_argument("--token-file", type=Path, default=Path(".secrets/bot-token"))
+    token_source = parser.add_mutually_exclusive_group()
+    token_source.add_argument(
+        "--token-file", type=Path, default=Path(".secrets/bot-token")
+    )
+    token_source.add_argument(
+        "--token-stdin",
+        action="store_true",
+        help="read the bot token from stdin without persisting it on the generator",
+    )
     parser.add_argument("--photo", type=Path, required=True)
     parser.add_argument("--users", type=int, required=True)
     parser.add_argument("--ramp-seconds", type=float, default=0)
@@ -76,13 +86,19 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--ramp-seconds must be between 0 and 60")
     if not args.photo.is_file():
         raise SystemExit("Photo file not found")
-    if not 1 <= args.photo.stat().st_size <= 2 * 1024 * 1024:
-        raise SystemExit("Test photo must be between 1 byte and 2 MiB")
+    if not 1 <= args.photo.stat().st_size <= 12 * 1024 * 1024:
+        raise SystemExit("Test photo must be between 1 byte and 12 MiB")
+    if not args.token_stdin and not args.token_file.is_file():
+        raise SystemExit(f"Token file not found: {args.token_file}")
     return args
 
 
 async def main(args: argparse.Namespace) -> int:
-    token = args.token_file.read_text(encoding="utf-8").strip()
+    token = (
+        sys.stdin.read().strip()
+        if args.token_stdin
+        else args.token_file.read_text(encoding="utf-8").strip()
+    )
     if ":" not in token or len(token) < 20:
         raise SystemExit("Token file does not look like a Telegram bot token")
     photo = args.photo.read_bytes()
@@ -126,7 +142,7 @@ async def main(args: argparse.Namespace) -> int:
                 "photo",
                 photo,
                 filename=args.photo.name,
-                content_type="image/png",
+                content_type=mimetypes.guess_type(args.photo.name)[0] or "image/jpeg",
             )
             wall = datetime.now(timezone.utc).isoformat()
             began = time.monotonic()
