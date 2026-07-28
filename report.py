@@ -188,6 +188,14 @@ def _symptom_table(logs, w):
     return t
 
 
+def _report_context(meta):
+    """Male reports fail closed even if a caller passes stale cycle data."""
+    male = meta.get("mode") == "male"
+    st = None if male else meta.get("st")
+    cycles = [] if male else sorted(set(meta.get("cycles", [])))
+    return male, st, cycles
+
+
 def build_report(meta):
     """meta: cycles[list iso], logs[list], st, cycle_len, period_label"""
     _fonts()
@@ -195,7 +203,7 @@ def build_report(meta):
     W, H = A4; ml = 16*mm; fw = W - 2*ml
     doc = BaseDocTemplate(buf, pagesize=A4, leftMargin=ml, rightMargin=ml, topMargin=15*mm, bottomMargin=15*mm)
     frame = Frame(ml, 15*mm, fw, H-30*mm, id="f", leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
-    male = meta.get("mode") == "male"
+    male, st, cycles = _report_context(meta)
     def _bg(canvas, _doc):
         canvas.setFillColor(PAPER); canvas.rect(0, 0, W, H, fill=1, stroke=0)
         canvas.setFillColor(SOFT); canvas.setFont(_FONT, 8)
@@ -207,7 +215,7 @@ def build_report(meta):
     def H2(t): return Paragraph(t, ParagraphStyle("h2", fontName=_FONT, fontSize=12, textColor=ROSE, spaceBefore=2, spaceAfter=5, leading=15))
     def P(t): return Paragraph(t, ParagraphStyle("p", fontName=_FONT, fontSize=10, textColor=INK, leading=15))
 
-    st = meta["st"]; cycles = [] if male else sorted(set(meta.get("cycles", []))); logs = meta.get("logs", [])
+    logs = meta.get("logs", [])
     story = []
     story.append(Band(fw, ("Выписка по менструальному циклу" if st else "Выписка по самочувствию"), f"{meta['period_label']} · сформировано {_ru(date.today())}"))
     story.append(Spacer(1, 7*mm))

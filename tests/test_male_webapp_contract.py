@@ -86,6 +86,19 @@ class MaleWebappContractTests(unittest.TestCase):
         self.assertNotIn("гинеколог", (prompt + caption).lower())
         self.assertIn("терапевт", caption.lower())
 
+    def test_male_pdf_context_discards_stale_cycle_data(self):
+        stale_status = {"day": 12, "cycle_len": 28, "phase_ru": "Фолликулярная"}
+
+        male, status, cycles = bot.RPT._report_context({
+            "mode": "male",
+            "st": stale_status,
+            "cycles": ["2026-06-01", "2026-06-29"],
+        })
+
+        self.assertTrue(male)
+        self.assertIsNone(status)
+        self.assertEqual(cycles, [])
+
     def test_initial_diary_payload_prefetches_previous_week(self):
         yesterday = (bot.dtoday() - timedelta(days=1)).isoformat()
         bot.meal_add(
