@@ -36,8 +36,12 @@ The review job:
 - reaches LiteLLM through an SSH tunnel with a pinned server host key;
 - uses a dedicated SSH key restricted to forwarding `127.0.0.1:4000`;
 - uses a dedicated LiteLLM virtual key restricted to the two review aliases, at most
-  three parallel requests, and a `$25` budget per 30 days.
+  four parallel requests, and a `$25` budget per 30 days.
 - skips duplicate ordinary or deep-review calls for an already reviewed commit SHA.
+- waits for a successful `test` check on the exact head SHA before spending on Opus;
+  it does not rerun the test suite merely because a label was added.
+- preserves and publishes successful specialist results when one agent fails, marks the
+  check as incomplete, and allows a later label retry.
 
 ## Required repository configuration
 

@@ -161,6 +161,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      checks: read
       contents: read
       issues: write
       pull-requests: write
@@ -221,6 +222,7 @@ jobs:
         run: python -m scripts.claude_deep_review
 
       - name: Refresh aggregate spend dashboard
+        if: always()
         continue-on-error: true
         env:
           AIWA_REVIEW_REPORT_SSH_KEY: ${{ secrets.AIWA_REVIEW_REPORT_SSH_KEY }}

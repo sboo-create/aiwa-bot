@@ -7,6 +7,7 @@ import concurrent.futures
 import copy
 import os
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from scripts import claude_pr_review as base
 
 MODEL = "aiwa-review-opus-5"
 REVIEW_VERSION = "v1"
+MAX_COMMENT_PAGES = 10
 AGENTS = (
     {
         "id": "correctness-data",
@@ -50,6 +52,12 @@ def deep_review_marker(head_sha: str) -> str:
     return f"<!-- aiwa-claude-deep-review:{head_sha}:{REVIEW_VERSION} -->"
 
 
+def partial_review_marker(head_sha: str) -> str:
+    return (
+        f"<!-- aiwa-claude-deep-review-partial:{head_sha}:{REVIEW_VERSION} -->"
+    )
+
+
 def deep_review_tool() -> dict:
     tool = copy.deepcopy(base.review_tool())
     properties = tool["input_schema"]["properties"]
@@ -65,17 +73,71 @@ def already_deep_reviewed(
     token: str,
     head_sha: str,
 ) -> bool:
-    url = (
-        f"https://api.github.com/repos/{repo}/issues/{int(pr_number)}/comments"
-        "?per_page=100&sort=created&direction=desc"
-    )
-    comments = base.get_json(url, token)
     marker = deep_review_marker(head_sha)
-    return any(
-        marker in str(item.get("body") or "")
-        for item in comments
-        if isinstance(item, dict)
+    for page in range(1, MAX_COMMENT_PAGES + 1):
+        url = (
+            f"https://api.github.com/repos/{repo}/issues/{int(pr_number)}/comments"
+            f"?per_page=100&page={page}"
+        )
+        comments = base.get_json(url, token)
+        if not isinstance(comments, list):
+            raise RuntimeError("GitHub issue comments response is not a list")
+        if any(
+            marker in str(item.get("body") or "")
+            for item in comments
+            if isinstance(item, dict)
+        ):
+            return True
+        if len(comments) < 100:
+            return False
+    return False
+
+
+def wait_for_test_success(
+    repo: str,
+    head_sha: str,
+    token: str,
+    *,
+    timeout: int = 900,
+    poll_interval: int = 10,
+) -> None:
+    url = (
+        f"https://api.github.com/repos/{repo}/commits/{head_sha}/check-runs"
+        "?per_page=100"
     )
+    deadline = time.monotonic() + timeout
+    while True:
+        response = base.get_json(url, token)
+        if not isinstance(response, dict):
+            raise RuntimeError("GitHub check-runs response is not an object")
+        test_runs = [
+            item
+            for item in (response.get("check_runs") or [])
+            if isinstance(item, dict)
+            and item.get("name") == "test"
+            and item.get("conclusion") != "skipped"
+        ]
+        if any(item.get("conclusion") == "success" for item in test_runs):
+            return
+        if test_runs and all(
+            item.get("status") == "completed" for item in test_runs
+        ):
+            conclusions = ", ".join(
+                sorted(
+                    {
+                        str(item.get("conclusion") or "unknown")
+                        for item in test_runs
+                    }
+                )
+            )
+            raise RuntimeError(
+                f"test check did not pass for {head_sha[:12]}: {conclusions}"
+            )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"timed out waiting for test check on {head_sha[:12]}"
+            )
+        time.sleep(poll_interval)
 
 
 def agent_payload(
@@ -164,7 +226,16 @@ def run_agents(**kwargs) -> list[dict]:
         }
         for future in concurrent.futures.as_completed(futures):
             agent_id = futures[future]
-            results[agent_id] = future.result()
+            agent = next(item for item in AGENTS if item["id"] == agent_id)
+            try:
+                results[agent_id] = future.result()
+            except Exception as exc:
+                results[agent_id] = {
+                    "agent": agent,
+                    "review": {},
+                    "usage": {},
+                    "error": base.clean_text(exc, 500),
+                }
     return [results[agent["id"]] for agent in AGENTS]
 
 
@@ -193,6 +264,16 @@ def _valid_findings(review: dict) -> list[dict]:
     return findings
 
 
+def _invalid_finding_count(review: dict) -> int:
+    values = review.get("findings") or []
+    return sum(
+        1
+        for item in values
+        if not isinstance(item, dict)
+        or item.get("severity") not in {"P0", "P1", "P2"}
+    )
+
+
 def render_comment(
     head_sha: str,
     results: list[dict],
@@ -200,13 +281,19 @@ def render_comment(
     pricing_source: str,
     truncated: bool,
 ) -> str:
+    incomplete_agents = [result for result in results if result.get("error")]
     all_findings = [
         finding
         for result in results
-        for finding in _valid_findings(result["review"])
+        for finding in _valid_findings(result.get("review") or {})
     ]
+    invalid_findings = sum(
+        _invalid_finding_count(result.get("review") or {})
+        for result in results
+    )
+    complete = not incomplete_agents and invalid_findings == 0
     lines = [
-        deep_review_marker(head_sha),
+        deep_review_marker(head_sha) if complete else partial_review_marker(head_sha),
         "## Claude Opus 5 · deep review",
         "",
         "Three bounded specialist agents reviewed this revision in parallel.",
@@ -214,11 +301,19 @@ def render_comment(
     ]
     for result in results:
         agent = result["agent"]
-        review = result["review"]
+        review = result.get("review") or {}
         findings = _valid_findings(review)
         lines.extend([
             f"### {agent['title']}",
             "",
+        ])
+        if result.get("error"):
+            lines.extend([
+                f"**Agent failed:** {base.clean_text(result['error'], 500)}",
+                "",
+            ])
+            continue
+        lines.extend([
             base.clean_text(review.get("summary")) or "Review completed.",
             "",
         ])
@@ -244,6 +339,14 @@ def render_comment(
         else:
             lines.extend(["**No actionable findings in this focus area.**", ""])
 
+        invalid_count = _invalid_finding_count(review)
+        if invalid_count:
+            lines.extend([
+                f"**Incomplete output:** `{invalid_count}` malformed finding(s) "
+                "were omitted.",
+                "",
+            ])
+
         test_gaps = [
             base.clean_text(value)
             for value in (review.get("test_gaps") or [])
@@ -257,10 +360,15 @@ def render_comment(
                 "",
             ])
 
-    if not any(
+    if complete and not any(
         finding["severity"] in {"P0", "P1"} for finding in all_findings
     ):
         lines.extend(["**No blocking findings.**", ""])
+    elif not complete:
+        lines.extend([
+            "**Deep review is incomplete; do not treat it as a clean result.**",
+            "",
+        ])
 
     lines.extend([
         "<details>",
@@ -297,6 +405,41 @@ def render_comment(
         "</details>",
     ])
     return "\n".join(lines)
+
+
+def post_comment_with_retry(
+    repo: str,
+    pr_number: str,
+    token: str,
+    body: str,
+    *,
+    attempts: int = 3,
+) -> None:
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            base.post_github_comment(repo, pr_number, token, body)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(2 ** attempt)
+    raise RuntimeError(
+        f"could not publish deep-review comment after {attempts} attempts: "
+        f"{base.clean_text(last_error, 500)}"
+    )
+
+
+def append_comment_fallback(body: str) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    with Path(path).open("a", encoding="utf-8") as summary:
+        summary.write(
+            "### Deep-review comment fallback\n\n"
+            "GitHub comment publishing failed; the complete result follows.\n\n"
+            f"{body}\n"
+        )
 
 
 def append_step_summary(
@@ -361,6 +504,7 @@ def main() -> int:
         )
         return 0
 
+    wait_for_test_success(repo, head_sha, github_token)
     diff, truncated = base.pull_request_diff(base_sha, head_sha)
     results = run_agents(
         base_url=base_url,
@@ -379,13 +523,30 @@ def main() -> int:
         pricing_source,
         truncated,
     )
-    base.post_github_comment(repo, pr_number, github_token, comment)
+    try:
+        post_comment_with_retry(
+            repo,
+            pr_number,
+            github_token,
+            comment,
+        )
+    except Exception:
+        append_comment_fallback(comment)
+        raise
     append_step_summary(results, costs, pricing_source)
     total_cost = sum(costs, Decimal())
     print(
         "::notice title=Claude deep review usage::"
         f"{MODEL} · {len(results)} parallel requests · ${total_cost:.4f}"
     )
+    failed_agents = [
+        result["agent"]["id"] for result in results if result.get("error")
+    ]
+    if failed_agents:
+        raise RuntimeError(
+            "deep review was partial; failed agents: "
+            + ", ".join(failed_agents)
+        )
     return 0
 
 
