@@ -7,9 +7,11 @@ immediately.
 ## Model policy
 
 - `aiwa-review-sonnet-5` (Claude Sonnet 5) with high effort is the default reviewer.
-- Adding the `deep-review` label reruns CI and uses `aiwa-review-opus-5`
-  (Claude Opus 5) instead.
+- When an allow-listed maintainer adds the `deep-review` label, that label event reruns
+  CI and uses `aiwa-review-opus-5` (Claude Opus 5) instead.
 - A deep review replaces the Sonnet run for that event; it does not pay for both models.
+- Push and synchronize events always use Sonnet, even while the label remains. A new
+  Opus review therefore requires an explicit maintainer label action for that revision.
 
 The dedicated aliases are resolved by AIWA's LiteLLM gateway to OpenRouter. The GitHub
 runner performs only the Claude Code client work; inference runs upstream, not on GitHub
@@ -45,6 +47,7 @@ An administrator must add:
 | Actions secret | `AIWA_REVIEW_SSH_KEY` | Private key for the restricted tunnel user |
 | Actions secret | `AIWA_REVIEW_LITELLM_KEY` | Dedicated budget-limited LiteLLM virtual key |
 | Actions variable | `AIWA_CLAUDE_REVIEW_ENABLED` | `true` after both secrets are present |
+| Actions variable | `AIWA_CLAUDE_DEEP_REVIEW_ACTORS` | Comma-separated GitHub logins allowed to trigger Opus |
 
 Keep the variable unset or set to `false` until both credentials and both model aliases
 have passed a smoke test. No provider or SSH secret belongs in Git.

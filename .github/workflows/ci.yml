@@ -52,7 +52,7 @@ jobs:
       pull-requests: write
     env:
       AIWA_REVIEW_BASE_URL: http://127.0.0.1:14000
-      AIWA_REVIEW_MODEL: ${{ contains(github.event.pull_request.labels.*.name, 'deep-review') && 'aiwa-review-opus-5' || 'aiwa-review-sonnet-5' }}
+      AIWA_REVIEW_MODEL: ${{ github.event.action == 'labeled' && github.event.label.name == 'deep-review' && contains(format(',{0},', vars.AIWA_CLAUDE_DEEP_REVIEW_ACTORS), format(',{0},', github.actor)) && 'aiwa-review-opus-5' || 'aiwa-review-sonnet-5' }}
     steps:
       - uses: actions/checkout@v4
         with:
