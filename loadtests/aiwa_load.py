@@ -273,7 +273,13 @@ class LoadRun:
         candidates = re.findall(
             r"""(?:src|href)=["']([^"'?#]+\.(?:js|css))""", index, flags=re.I
         )
-        self.assets = list(dict.fromkeys(candidates))[: self.args.asset_limit]
+        # Load only staging-owned assets. External Telegram SDK availability is
+        # not a property of AIWA and must not distort service latency/errors.
+        self.assets = [
+            candidate
+            for candidate in dict.fromkeys(candidates)
+            if not urlsplit(candidate).scheme and not urlsplit(candidate).netloc
+        ][: self.args.asset_limit]
         return health
 
     async def loop_monitor(self) -> None:

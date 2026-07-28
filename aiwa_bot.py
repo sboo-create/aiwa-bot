@@ -7191,7 +7191,7 @@ _AI_JOB_WAKE = None
 _AI_JOB_TASKS = []
 _AI_JOB_COMPLETIONS = deque(maxlen=200)
 _AI_TODAY_WORKERS = max(1, min(6, int(os.environ.get("AIWA_TODAY_CONCURRENCY", "6"))))
-_AI_JOB_MAX_ATTEMPTS = max(1, min(5, int(os.environ.get("AIWA_AI_JOB_MAX_ATTEMPTS", "2"))))
+_AI_JOB_MAX_ATTEMPTS = max(1, min(5, int(os.environ.get("AIWA_AI_JOB_MAX_ATTEMPTS", "3"))))
 _AI_TODAY_QUEUE_MAX = max(100, int(os.environ.get("AIWA_TODAY_QUEUE_MAX", "1500")))
 
 def _today_job_payload(cid, u, st):

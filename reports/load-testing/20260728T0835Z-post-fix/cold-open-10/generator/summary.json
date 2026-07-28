@@ -1,0 +1,225 @@
+{
+  "run_id": "20260728T084236Z",
+  "target": "https://aiwa-staging-167.158-160-163-167.sslip.io",
+  "target_version": "2026-07-28-v147-durable-ai-queue-i167-staging",
+  "scenario": "cold-open",
+  "users": 10,
+  "ramp_seconds": 5.0,
+  "hold_seconds": 1.0,
+  "duration_seconds": 66.075,
+  "iterations": 10,
+  "completed_users": 10,
+  "achieved_rps": 0.908,
+  "overall": {
+    "requests": 60,
+    "ok": 50,
+    "errors": 10,
+    "success_rate": 0.833333,
+    "latency_ms": {
+      "p50": 47.1,
+      "p90": 60433.34,
+      "p95": 60742.03,
+      "p99": 60960.02,
+      "max": 60962.98,
+      "mean": 10132.96
+    },
+    "statuses": {
+      "0": 10,
+      "200": 50
+    },
+    "errors_by_class": {
+      "timeout": 10
+    }
+  },
+  "by_category": {
+    "ai_enqueue": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 35.36,
+        "p90": 38.29,
+        "p95": 43.82,
+        "p99": 48.25,
+        "max": 49.36,
+        "mean": 36.7
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "core": {
+      "requests": 20,
+      "ok": 20,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 46.02,
+        "p90": 51.55,
+        "p95": 82.16,
+        "p99": 86.07,
+        "max": 87.04,
+        "mean": 43.74
+      },
+      "statuses": {
+        "200": 20
+      },
+      "errors_by_class": {}
+    },
+    "static": {
+      "requests": 30,
+      "ok": 20,
+      "errors": 10,
+      "success_rate": 0.666667,
+      "latency_ms": {
+        "p50": 73.6,
+        "p90": 60747.64,
+        "p95": 60908.76,
+        "p99": 60961.52,
+        "max": 60962.98,
+        "mean": 20224.53
+      },
+      "statuses": {
+        "0": 10,
+        "200": 20
+      },
+      "errors_by_class": {
+        "timeout": 10
+      }
+    }
+  },
+  "by_route": {
+    "/": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 47.38,
+        "p90": 47.99,
+        "p95": 48.08,
+        "p99": 48.16,
+        "max": 48.18,
+        "mean": 45.37
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "/api/data": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 32.28,
+        "p90": 82.41,
+        "p95": 84.73,
+        "p99": 86.58,
+        "max": 87.04,
+        "mean": 42.11
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "/api/today": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 35.36,
+        "p90": 38.29,
+        "p95": 43.82,
+        "p99": 48.25,
+        "max": 49.36,
+        "mean": 36.7
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "/assets/deslop/main.css": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 68.02,
+        "p90": 97.32,
+        "p95": 135.05,
+        "p99": 165.24,
+        "max": 172.79,
+        "mean": 78.47
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "/assets/deslop/main.js": {
+      "requests": 10,
+      "ok": 10,
+      "errors": 0,
+      "success_rate": 1.0,
+      "latency_ms": {
+        "p50": 26.75,
+        "p90": 39.72,
+        "p95": 64.35,
+        "p99": 84.05,
+        "max": 88.98,
+        "mean": 33.56
+      },
+      "statuses": {
+        "200": 10
+      },
+      "errors_by_class": {}
+    },
+    "https://telegram.org/js/telegram-web-app.js": {
+      "requests": 10,
+      "ok": 0,
+      "errors": 10,
+      "success_rate": 0.0,
+      "latency_ms": {
+        "p50": 60570.25,
+        "p90": 60958.46,
+        "p95": 60960.72,
+        "p99": 60962.53,
+        "max": 60962.98,
+        "mean": 60561.55
+      },
+      "statuses": {
+        "0": 10
+      },
+      "errors_by_class": {
+        "timeout": 10
+      }
+    }
+  },
+  "generator": {
+    "hostname": "nsushko-local-judges-0",
+    "python": "3.10.12",
+    "loadavg": [
+      77.564453125,
+      83.69970703125,
+      84.4951171875
+    ],
+    "max_rss_kib": 52996,
+    "loop_drift_ms": {
+      "p95": 1.13,
+      "p99": 1.86,
+      "max": 2.25
+    }
+  },
+  "ai_controls": {
+    "share": 0,
+    "client_concurrency": 0,
+    "provider_metrics_source": "target SQLite llm_calls + LOAD/60s logs"
+  }
+}
