@@ -1,0 +1,81 @@
+[
+  {
+    "id": "thread_pickles_potatoes",
+    "source": "current-thread",
+    "text": "Так я поел Солёных огурцов. С картошкой и грибами.",
+    "candidate": true,
+    "completed": true
+  },
+  {
+    "id": "thread_breakfast_typo_and_workout",
+    "source": "current-thread",
+    "text": "На завтра съел печеньки, творог, 200г, пучок редиски\nУтром сделали зарядку",
+    "candidate": true,
+    "completed": true,
+    "normalized_contains": "на завтрак"
+  },
+  {
+    "id": "thread_damaged_food_verb",
+    "source": "current-thread",
+    "text": "я поезл квашеной капусты с кратошшкой и грибами на полдник",
+    "candidate": true,
+    "completed": true,
+    "normalized_contains": "я поел"
+  },
+  {
+    "id": "thread_multiple_meals_with_transport_noise",
+    "source": "current-thread",
+    "text": "аллоБ а покушал чернику -буквально две ладони полныхБ выпил молока и 3 печеньки орео утром\nа в полдник еще выпил самогону чекушечку",
+    "candidate": true,
+    "completed": true
+  },
+  {
+    "id": "thread_food_prompt_without_completed_verb",
+    "source": "current-thread-food-prompt",
+    "text": "колобки в супе гороховом пшеничные -3 штБ 4 селдки 1 салат мимоза =это на завтрак\nа на полдник - самовар чаю с кренделями",
+    "candidate": true,
+    "completed": false
+  },
+  {
+    "id": "neighbor_explicit_headings",
+    "source": "task-019fa873",
+    "text": "Сегодня завтрак: 4 яйца (2 без желтка), 20 г протеинового сыра, кулачок рукколы, помидорка\n\nПерекус: кедровый кофе 400 мл",
+    "candidate": true,
+    "completed": true
+  },
+  {
+    "id": "existing_mixed_status",
+    "source": "tests/test_sonia_journal_v2.py",
+    "text": "Не пил газировку, зато выпил воду; позже хочу съесть пасту, а утром доел кашу.",
+    "candidate": true,
+    "completed": true
+  },
+  {
+    "id": "question_is_not_mutation",
+    "source": "tests/test_sonia_journal_v2.py",
+    "text": "Можно ли есть лепёшку?",
+    "candidate": false,
+    "completed": false
+  },
+  {
+    "id": "planned_food_is_not_completed",
+    "source": "tests/test_sonia_journal_v2.py",
+    "text": "Я планирую съесть творог",
+    "candidate": true,
+    "completed": false
+  },
+  {
+    "id": "third_party_is_not_candidate",
+    "source": "tests/test_chat_journal_actions.py",
+    "text": "В офисе Соня съела творог",
+    "candidate": true,
+    "completed": true
+  },
+  {
+    "id": "personal_context_is_not_completed",
+    "source": "systemic-negative-control",
+    "text": "Я люблю творог",
+    "candidate": true,
+    "completed": false
+  }
+]

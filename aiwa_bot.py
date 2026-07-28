@@ -107,7 +107,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v162-staging-ui-journal")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v163-systemic-journal")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 AIWA_TELEGRAM_API_ORIGIN = os.environ.get(
@@ -1243,7 +1243,7 @@ def all_users(include_synthetic=False):
     rows = c.execute("""SELECT chat_id FROM users
         WHERE push_suppressed_at IS NULL
           AND ((last_period IS NOT NULL AND cycle_len IS NOT NULL)
-               OR mode IN ('irregular','none','meno','preg'))
+               OR mode IN ('irregular','none','meno','preg','male'))
           AND (?=0 OR ?=1 OR chat_id<?)""",
         (synthetic_min, int(bool(include_synthetic)), synthetic_min),
     ).fetchall()
@@ -1746,11 +1746,27 @@ _JOURNAL_WORKOUT_COMPLETED_RE = re.compile(
     r"\b(?:сделал\w*|провел\w*|закончил\w*)\b",
     re.I,
 )
+_JOURNAL_WORKOUT_NEGATED_RE = re.compile(
+    r"\bне\s+(?:(?:сегодня|вчера|позавчера)\s+)?(?:"
+    r"потренир\w*|тренировал\w*|занимал\w*|бегал\w*|пробежал\w*|"
+    r"ходил\w*|сходил\w*|гулял\w*|плавал\w*|качал\w*|танцевал\w*|"
+    r"приседал\w*|поприседал\w*|отжимал\w*|подтягивал\w*|"
+    r"делал\w*|сделал\w*|провел\w*|закончил\w*|был[аи]?"
+    r")\b",
+    re.I,
+)
 _JOURNAL_PERIOD_START_RE = re.compile(
     r"\b(?:начал\w*|пришл\w*|пошл\w*|открыл\w*)\b", re.I,
 )
 _JOURNAL_PERIOD_END_RE = re.compile(
     r"\b(?:законч\w*|кончил\w*|завершил\w*|прошл\w*|перестал\w*|отошл\w*)\b", re.I,
+)
+_JOURNAL_PERIOD_NEGATED_RE = re.compile(
+    r"\bне\s+(?:начал\w*|пришл\w*|пошл\w*|открыл\w*|законч\w*|"
+    r"кончил\w*|завершил\w*|прошл\w*|перестал\w*|отошл\w*)\b|"
+    r"\b(?:месячн\w*|менструац\w*)\s+(?:ещ[её]\s+)?не\s+"
+    r"(?:начал\w*|пришл\w*|пошл\w*|законч\w*|завершил\w*|прошл\w*)\b",
+    re.I,
 )
 _JOURNAL_CONTEXT_OPEN_RE = re.compile(
     r"^\s*(?:а\s+)?(?:и\s+)?(?:ещ[её]|также|плюс)\b|"
@@ -1771,10 +1787,105 @@ _JOURNAL_BREAKFAST_TYPO_RE = re.compile(
     r"(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|выпил\w*))",
     re.I,
 )
+_JOURNAL_COMPLETED_VERB_FORMS = (
+    "съел", "съела", "съели",
+    "доел", "доела", "доели",
+    "поел", "поела", "поели",
+    "перекусил", "перекусила", "перекусили",
+    "кушал", "кушала", "кушали",
+    "скушал", "скушала", "скушали",
+    "покушал", "покушала", "покушали",
+    "пил", "пила", "пили",
+    "выпил", "выпила", "выпили",
+    "попробовал", "попробовала", "попробовали",
+    "кусал", "кусала", "кусали",
+    "куснул", "куснула", "куснули",
+)
+_JOURNAL_INFINITIVE_SUFFIXES = ("ть", "ться", "ти")
+
+def _journal_edit_distance_at_most_one(left, right):
+    """Small bounded distance used only for the closed completed-verb lexicon."""
+    a = str(left or "")
+    b = str(right or "")
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) <= 1
+    if len(a) > len(b):
+        a, b = b, a
+    index_a = index_b = differences = 0
+    while index_a < len(a) and index_b < len(b):
+        if a[index_a] == b[index_b]:
+            index_a += 1
+            index_b += 1
+            continue
+        differences += 1
+        if differences > 1:
+            return False
+        index_b += 1
+    return True
+
+def _normalize_journal_completed_verbs(text):
+    """Repair one-character ASR/typing damage without rewriting food names."""
+    raw = str(text or "")
+
+    def replace(match):
+        token = match.group(0)
+        folded = token.casefold().replace("ё", "е")
+        if (
+            len(folded) < 4
+            or folded.endswith(_JOURNAL_INFINITIVE_SUFFIXES)
+            or folded in _JOURNAL_COMPLETED_VERB_FORMS
+        ):
+            return token
+        candidates = [
+            form for form in _JOURNAL_COMPLETED_VERB_FORMS
+            if abs(len(folded) - len(form)) <= 1
+            and folded[:2] == form[:2]
+            and _journal_edit_distance_at_most_one(folded, form)
+        ]
+        if len(candidates) != 1:
+            return token
+        replacement = candidates[0]
+        if token[:1].isupper():
+            replacement = replacement.capitalize()
+        return replacement
+
+    return re.sub(r"[А-Яа-яЁё]{3,}", replace, raw)
 
 def _normalize_journal_typo(text):
-    """Repair only the unambiguous completed-event typo «на завтра съел»."""
-    return _JOURNAL_BREAKFAST_TYPO_RE.sub("на завтрак", str(text or ""))
+    """Normalize bounded event-language damage while preserving user food text."""
+    normalized = _normalize_journal_completed_verbs(text)
+    return _JOURNAL_BREAKFAST_TYPO_RE.sub("на завтрак", normalized)
+
+def _journal_completed_event_signal(text):
+    """Stronger than the broad candidate prefilter: proves mutation-like wording."""
+    raw = _normalize_journal_typo(text)
+    positive_food = any(
+        not re.search(
+            r"\bне\s+$",
+            raw[max(0, match.start() - 12):match.start()],
+            re.I,
+        )
+        for match in _JOURNAL_FOOD_COMPLETED_RE.finditer(raw)
+    )
+    return bool(
+        positive_food
+        or (
+            _JOURNAL_WORKOUT_COMPLETED_RE.search(raw)
+            and not _JOURNAL_WORKOUT_NEGATED_RE.search(raw)
+        )
+        or (
+            _JOURNAL_PERIOD_SOURCE_RE.search(raw)
+            and (
+                _JOURNAL_PERIOD_START_RE.search(raw)
+                or _JOURNAL_PERIOD_END_RE.search(raw)
+            )
+            and not _JOURNAL_PERIOD_NEGATED_RE.search(raw)
+        )
+    )
 
 def _normalize_mixed_implicit_self_workout(text, male=False):
     """Carry the account owner's subject into a following «сделали зарядку» clause."""
@@ -1810,7 +1921,10 @@ def _journal_mixed_segments(text, max_segments=4, male=False):
             _JOURNAL_FOOD_COMPLETED_RE.search(part)
             and not _JOURNAL_FOOD_NEGATED_RE.search(part)
         )
-        workout = bool(_JOURNAL_WORKOUT_COMPLETED_RE.search(part))
+        workout = bool(
+            _JOURNAL_WORKOUT_COMPLETED_RE.search(part)
+            and not _JOURNAL_WORKOUT_NEGATED_RE.search(part)
+        )
         if food == workout:
             return []
         domains.append("food" if food else "workout")
@@ -2043,13 +2157,15 @@ def _semantic_evidence_span(source_text, payload):
     spans = _semantic_evidence_spans(source_text, payload)
     return spans[0] if spans else None
 
-def _semantic_food_evidence_safe(source_text, payload):
+def _semantic_food_evidence_safe(
+    source_text, payload, trusted_food_prompt=False,
+):
     """Every selected food fragment must prove a completed, positive event."""
     spans = _semantic_evidence_spans(source_text, payload)
     return bool(
         spans
         and all(
-            _JOURNAL_FOOD_COMPLETED_RE.search(span)
+            (trusted_food_prompt or _JOURNAL_FOOD_COMPLETED_RE.search(span))
             and not _JOURNAL_FOOD_NEGATED_RE.search(span)
             and _semantic_source_subject_safe(span)
             and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(span)
@@ -2161,6 +2277,7 @@ def _semantic_source_subject_safe(text):
 
 def _semantic_action_matches_source(
     action, text, context=None, payload=None, require_evidence=False,
+    trusted_food_prompt=False,
 ):
     """Модель выбирает смысл, код независимо подтверждает разрешённый домен события."""
     raw = str(text or "").strip()
@@ -2199,7 +2316,10 @@ def _semantic_action_matches_source(
             owned = {str(x.get("id")) for x in ((context or {}).get("meals") or [])}
             return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
         if action == "workout":
-            return bool(_JOURNAL_WORKOUT_COMPLETED_RE.search(raw))
+            return bool(
+                _JOURNAL_WORKOUT_COMPLETED_RE.search(raw)
+                and not _JOURNAL_WORKOUT_NEGATED_RE.search(raw)
+            )
         if action == "workout_update":
             target = str((payload or {}).get("target_id") or "")
             owned = {
@@ -2210,17 +2330,21 @@ def _semantic_action_matches_source(
             return bool(
                 _JOURNAL_PERIOD_SOURCE_RE.search(raw)
                 and _JOURNAL_PERIOD_START_RE.search(raw)
+                and not _JOURNAL_PERIOD_NEGATED_RE.search(raw)
             )
         if action == "period_end":
             return bool(
                 _JOURNAL_PERIOD_SOURCE_RE.search(raw)
                 and _JOURNAL_PERIOD_END_RE.search(raw)
+                and not _JOURNAL_PERIOD_NEGATED_RE.search(raw)
             )
         return False
     if action == "food":
         return bool(
             (
-                _semantic_food_evidence_safe(raw, payload)
+                _semantic_food_evidence_safe(
+                    raw, payload, trusted_food_prompt=trusted_food_prompt,
+                )
             )
             or (
                 _journal_has_recent_mutation(context)
@@ -2228,7 +2352,9 @@ def _semantic_action_matches_source(
                 and str(((context or {}).get("last_mutation") or {}).get("kind") or "").startswith("food")
                 and _JOURNAL_CONTEXT_OPEN_RE.search(raw)
                 and str((payload or {}).get("food_text") or "").strip()
-                and _semantic_food_evidence_safe(raw, payload)
+                and _semantic_food_evidence_safe(
+                    raw, payload, trusted_food_prompt=trusted_food_prompt,
+                )
             )
         )
     if action == "food_update":
@@ -2265,6 +2391,7 @@ def _semantic_action_matches_source(
         return bool(
             evidence
             and _JOURNAL_WORKOUT_COMPLETED_RE.search(evidence)
+            and not _JOURNAL_WORKOUT_NEGATED_RE.search(evidence)
             and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
         )
     if action == "workout_update":
@@ -2281,6 +2408,7 @@ def _semantic_action_matches_source(
             evidence
             and _JOURNAL_PERIOD_SOURCE_RE.search(evidence)
             and _JOURNAL_PERIOD_START_RE.search(evidence)
+            and not _JOURNAL_PERIOD_NEGATED_RE.search(evidence)
             and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
         )
     if action == "period_end":
@@ -2289,16 +2417,23 @@ def _semantic_action_matches_source(
             evidence
             and _JOURNAL_PERIOD_SOURCE_RE.search(evidence)
             and _JOURNAL_PERIOD_END_RE.search(evidence)
+            and not _JOURNAL_PERIOD_NEGATED_RE.search(evidence)
             and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
         )
     return False
 
-def _normalize_semantic_journal(data, source_text="", context=None, enable_v2=False):
+def _normalize_semantic_journal(
+    data, source_text="", context=None, enable_v2=False,
+    trusted_food_prompt=False,
+):
     """Fail-closed валидация решения модели перед любой записью в БД."""
     if not isinstance(data, dict):
         return None
     if enable_v2 and str(data.get("action") or "").strip().lower() == "food_batch":
-        return _normalize_semantic_food_batch(data, source_text, context)
+        return _normalize_semantic_food_batch(
+            data, source_text, context,
+            trusted_food_prompt=trusted_food_prompt,
+        )
     action_to_intent = {
         "food": "logmeal",
         "food_update": "updatemeal",
@@ -2324,6 +2459,7 @@ def _normalize_semantic_journal(data, source_text="", context=None, enable_v2=Fa
         or not 0.85 <= confidence <= 1.0
         or not _semantic_action_matches_source(
             action, source_text, context, data, require_evidence=enable_v2,
+            trusted_food_prompt=trusted_food_prompt,
         )
         or str(data.get("subject") or "").lower() != "self"
         or str(data.get("status") or "").lower() != "completed"
@@ -2353,7 +2489,11 @@ def _normalize_semantic_journal(data, source_text="", context=None, enable_v2=Fa
             out["food_text"] = ", ".join(parts)[:500]
         else:
             out["food_text"] = str(data.get("food_text") or "").strip()[:500]
-        if enable_v2 and food_record:
+        # An evidence-only record with every position in `unparsed` is not a
+        # meal receipt. Keep the exact verified fragments as food_text and let
+        # the dedicated food parser make one bounded second pass instead of
+        # persisting a zero-kcal placeholder.
+        if enable_v2 and food_record and food_record.get("items"):
             out["food_record"] = food_record
         slot = str(data.get("slot") or "")
         if slot in {"breakfast", "lunch", "snack", "dinner"}:
@@ -2380,7 +2520,9 @@ def _normalize_semantic_journal(data, source_text="", context=None, enable_v2=Fa
         out["workout"] = workout if isinstance(workout, dict) else {}
     return out
 
-def _normalize_semantic_food_batch(data, source_text="", context=None):
+def _normalize_semantic_food_batch(
+    data, source_text="", context=None, trusted_food_prompt=False,
+):
     """Validate every model-proposed meal independently and preserve source order."""
     if not isinstance(data, dict):
         return None
@@ -2438,6 +2580,7 @@ def _normalize_semantic_food_batch(data, source_text="", context=None):
         }
         plan = _normalize_semantic_journal(
             payload, raw, context, enable_v2=True,
+            trusted_food_prompt=trusted_food_prompt,
         )
         if not plan or plan.get("intent") != "logmeal" or not plan.get("slot"):
             return None
@@ -2501,10 +2644,16 @@ def _semantic_update_clarification(
         return None
     return "clarifymeal" if action == "food_update" else "clarifyworkout"
 
-async def resolve_semantic_journal_action(cid, text, user_generation=None):
+async def resolve_semantic_journal_action(
+    cid, text, user_generation=None, food_prompt_mode=False,
+):
     """Распознаёт естественное журналирование без привязки к порядку конкретных слов."""
     context = _journal_recent_context(cid)
-    v2 = journal_v2_enabled(cid)
+    v2 = True if food_prompt_mode else journal_v2_enabled(cid)
+    if food_prompt_mode:
+        context = dict(context, awaiting_food_text=True)
+    text = _normalize_journal_typo(text)
+    completed_signal = _journal_completed_event_signal(text)
     slot_followup = _journal_recent_meal_slot_followup(text, context)
     if slot_followup:
         ev(cid, "journal_action_planned", meta="movemealslot_fastpath")
@@ -2516,6 +2665,7 @@ async def resolve_semantic_journal_action(cid, text, user_generation=None):
         plans = await asyncio.gather(*(
             resolve_semantic_journal_action(
                 cid, segment["text"], user_generation=user_generation,
+                food_prompt_mode=food_prompt_mode,
             )
             for segment in mixed
         ))
@@ -2534,14 +2684,17 @@ async def resolve_semantic_journal_action(cid, text, user_generation=None):
             "entries": entries,
             "source_text": _normalize_journal_typo(text),
         }
-    text = _normalize_journal_typo(text)
-    if not _semantic_journal_candidate(text, context, enable_v2=v2):
+    if (
+        not food_prompt_mode
+        and not _semantic_journal_candidate(text, context, enable_v2=v2)
+    ):
         return None
     segments = _journal_explicit_meal_segments(text) if v2 else []
     if segments:
         plans = await asyncio.gather(*(
             resolve_semantic_journal_action(
                 cid, segment["text"], user_generation=user_generation,
+                food_prompt_mode=food_prompt_mode,
             )
             for segment in segments
         ))
@@ -2591,13 +2744,25 @@ async def resolve_semantic_journal_action(cid, text, user_generation=None):
     if classified is None:
         ev(cid, "journal_route_failed", meta="empty", user_generation=generation)
         return {"intent": "journalunavailable", "reason": "empty"}
-    plan = _normalize_semantic_journal(classified, text, context, enable_v2=v2)
+    plan = _normalize_semantic_journal(
+        classified, text, context, enable_v2=v2,
+        trusted_food_prompt=food_prompt_mode,
+    )
+    if food_prompt_mode and (
+        not plan or plan.get("intent") not in {"logmeal", "logmealbatch"}
+    ):
+        ev(cid, "journal_route_failed", meta="food_prompt_validation",
+           user_generation=generation)
+        return {"intent": "journalunavailable", "reason": "food_prompt_validation"}
     if not plan:
         clarification = _semantic_update_clarification(
             classified, text, context, enable_v2=v2,
         )
         if clarification:
             return {"intent": clarification}
+        if completed_signal:
+            ev(cid, "journal_route_failed", meta="validation", user_generation=generation)
+            return {"intent": "journalunavailable", "reason": "validation"}
     if plan:
         ev(cid, "journal_action_planned", meta=plan["intent"], user_generation=generation)
     return plan
@@ -6122,6 +6287,36 @@ async def handle_text(update, context, txt):
     if addressed and not txt:
         return await update.message.reply_text("Я тут. Напиши вопрос или открой меню, и я помогу с циклом, питанием, нагрузкой или самочувствием.")
 
+    if state == "await_food_text":
+        pending_at = None
+        try:
+            pending_at = datetime.fromisoformat(str(u.get("pending_date") or ""))
+            if pending_at.tzinfo is None:
+                pending_at = pending_at.replace(tzinfo=TZ)
+        except (TypeError, ValueError):
+            pending_at = None
+        still_pending = bool(
+            pending_at
+            and timedelta(0) <= datetime.now(TZ) - pending_at <= timedelta(minutes=30)
+        )
+        # The prompt is a one-shot capability and must not trap later messages.
+        upsert(cid, state=None, pending_date=None)
+        if still_pending:
+            generation = _user_generation(cid)
+            journal = await resolve_semantic_journal_action(
+                cid, txt, user_generation=generation, food_prompt_mode=True,
+            )
+            if journal and journal.get("intent") in {"logmeal", "logmealbatch"}:
+                return await dispatch_intent(
+                    context, update, cid, u, journal["intent"], txt,
+                    journal=journal, user_generation=generation,
+                )
+            return await update.message.reply_text(
+                "Не смогла надёжно разделить и проверить приёмы пищи, поэтому ничего "
+                "не записала. Нажми «Добавить приём текстом» ещё раз и перечисли еду "
+                "с пометками «завтрак:», «обед:», «полдник:» или «ужин:»."
+            )
+
     VALUE_STATES = {
         "await_date": "Напиши дату начала последних месячных, например 25.05.2026 или 26 мая 2026. Потом даты можно редактировать в приложении.",
         "await_len": "Напиши среднюю длину цикла числом. Это дни от первого дня одних месячных до первого дня следующих. Обычно 21-35, если не знаешь, можно 28.",
@@ -7008,10 +7203,16 @@ async def _api_food_prompt(request):
     if not is_onboarded(u): return _cors(web.json_response({"ok": False}))
     try:
         ev(cid, "button", meta="web_food_prompt")
+        upsert(
+            cid,
+            state="await_food_text",
+            pending_date=datetime.now(TZ).isoformat(),
+        )
         if BOT_APP:
             await BOT_APP.bot.send_message(cid, "Что ты скушала? Напиши обычным текстом — например «200 г творога и банан» — я посчитаю КБЖУ и запишу в дневник.")
         return _cors(web.json_response({"ok": True}))
     except Exception as e:
+        upsert(cid, state=None, pending_date=None)
         log.warning("food_prompt %s: %s", cid, e)
         return _cors(web.json_response({"ok": False}))
 
@@ -10284,6 +10485,7 @@ async def _health(request):
         {
             "status": "ok" if APP_READY else "starting",
             "version": AIWA_VERSION,
+            "journal_router": "v2" if journal_v2_enabled() else "v1",
             "event_queue": _EVENT_WRITE_Q.qsize(),
             "ai_workers": sum(1 for task in _AI_JOB_TASKS if not task.done()),
             "ai_worker_limit": _AI_TODAY_WORKERS,

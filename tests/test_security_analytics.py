@@ -177,6 +177,22 @@ class SecurityAnalyticsTests(unittest.TestCase):
         )
         conn.close()
 
+    def test_male_users_are_registered_for_background_jobs(self):
+        male_cid = 915
+        synthetic_cid = 790_000_000_001
+        bot._activate_user(male_cid)
+        bot.upsert(male_cid, mode="male")
+        bot._activate_user(synthetic_cid)
+        bot.upsert(synthetic_cid, mode="male")
+
+        with mock.patch.dict(
+            os.environ,
+            {"AIWA_SYNTHETIC_USER_ID_MIN": "790000000000"},
+        ):
+            self.assertIn(male_cid, bot.all_users())
+            self.assertNotIn(synthetic_cid, bot.all_users())
+            self.assertIn(synthetic_cid, bot.all_users(include_synthetic=True))
+
     def test_today_queue_accepts_1000_unique_jobs_and_deduplicates_reopens(self):
         first_cid = 790_099_000_000
         conn = bot.db()
