@@ -3665,6 +3665,43 @@ def _cors(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
     return resp
+
+def _loadtest_user_id_allowed(cid):
+    try:
+        lower = int(os.environ.get("AIWA_LOADTEST_USER_ID_MIN", "8100000000"))
+        upper = int(os.environ.get("AIWA_LOADTEST_USER_ID_MAX", "8199999999"))
+        return lower <= int(cid) <= upper
+    except (TypeError, ValueError):
+        return False
+
+async def _api_loadtest_bootstrap(request):
+    """Activate and onboard one signed synthetic user in an explicitly enabled test environment."""
+    expected = os.environ.get("AIWA_LOADTEST_BOOTSTRAP_TOKEN", "")
+    if os.environ.get("AIWA_ENABLE_LOADTEST_BOOTSTRAP") != "1" or not expected:
+        return _cors(web.json_response({"error": "not_found"}, status=404))
+    supplied = request.headers.get("X-Load-Test-Token", "")
+    if not supplied or not _hmac.compare_digest(supplied, expected):
+        return _cors(web.json_response({"error": "forbidden"}, status=403))
+    body = await request.json()
+    cid = _verify_init(body.get("initData", ""))
+    if not cid:
+        return _cors(web.json_response({"error": "auth"}, status=401))
+    if not _loadtest_user_id_allowed(cid):
+        return _cors(web.json_response({"error": "synthetic_user_required"}, status=403))
+
+    await asyncio.to_thread(_activate_user, cid)
+    today_iso = dtoday().isoformat()
+    await asyncio.to_thread(
+        upsert, cid,
+        last_period=today_iso, cycle_len=28, mode="cycle",
+        height=168, weight=64, age=30, activity=2,
+    )
+    await asyncio.to_thread(cyc_add, cid, today_iso)
+    onboarded = await asyncio.to_thread(lambda: is_onboarded(row(cid)))
+    if not onboarded:
+        return _cors(web.json_response({"ok": False, "error": "bootstrap_failed"}, status=500))
+    return _cors(web.json_response({"ok": True, "onboarded": True}))
+
 async def _serve_index(request):
     BD = os.path.dirname(os.path.abspath(__file__))
     for p in (os.path.join(WEB_DIR, "index.html"), os.path.join(BD, "index.html"),
@@ -4473,6 +4510,7 @@ async def process_food_photo_job(job_id):
     cid = int(job["chat_id"])
     generation = await asyncio.to_thread(_user_generation, cid)
     usage = []
+    started_at = time.monotonic()
     try:
         user = await asyncio.to_thread(row, cid)
         prof = await asyncio.to_thread(profile_of, user)
@@ -4500,6 +4538,11 @@ async def process_food_photo_job(job_id):
         log.warning("food photo job %s failed: %s", job_id, exc)
         await _media_job_update_async(
             job_id, "failed", error=exc, clear_image=True,
+        )
+    finally:
+        log.info(
+            "media vision duration job_id=%s seconds=%.3f",
+            job_id, time.monotonic() - started_at,
         )
 
 
@@ -4591,8 +4634,16 @@ async def _api_food_photo(request):
             await _media_job_update_async(
                 job_id, "failed", error=e, clear_image=True,
             )
+        retry_after = int(getattr(e, "retry_after", 5))
         return _cors(web.json_response(
-            {"ok": False, "message": "Не удалось поставить фото в очередь."}, status=503,
+            {
+                "ok": False,
+                "error": "media_queue_full" if hasattr(e, "depth") else "media_queue_unavailable",
+                "message": "Сейчас много фотографий. Попробуй ещё раз чуть позже.",
+                "retry_after": retry_after,
+            },
+            status=503,
+            headers={"Retry-After": str(retry_after)},
         ))
     _queue_event(cid, "flow_start", meta="food_photo_queued")
     return _cors(web.json_response(
@@ -5505,6 +5556,7 @@ def build_web():
     aio.router.add_get("/admin", _admin_page)
     aio.router.add_post("/admin/login", _admin_login)
     aio.router.add_get("/api/admin_stats", _admin_stats)
+    aio.router.add_post("/api/loadtest/bootstrap", _api_loadtest_bootstrap)
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
     aio.router.add_post("/api/today", _api_today)

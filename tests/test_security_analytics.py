@@ -43,8 +43,9 @@ class FakeRequest:
 
 
 class FakeJsonRequest:
-    def __init__(self, body):
+    def __init__(self, body, headers=None):
         self.body = body
+        self.headers = headers or {}
 
     async def json(self):
         return self.body
@@ -108,6 +109,50 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertIsNone(bot._verify_init(stale))
         tampered = signed_init_data(42).replace("%3A42", "%3A43")
         self.assertIsNone(bot._verify_init(tampered))
+
+    def test_loadtest_bootstrap_is_disabled_by_default(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIWA_ENABLE_LOADTEST_BOOTSTRAP", None)
+            os.environ.pop("AIWA_LOADTEST_BOOTSTRAP_TOKEN", None)
+            response = asyncio.run(bot._api_loadtest_bootstrap(
+                FakeJsonRequest({"initData": signed_init_data(8100000001)})
+            ))
+        self.assertEqual(response.status, 404)
+
+    def test_loadtest_bootstrap_requires_secret_and_synthetic_signed_user(self):
+        env = {
+            "AIWA_ENABLE_LOADTEST_BOOTSTRAP": "1",
+            "AIWA_LOADTEST_BOOTSTRAP_TOKEN": "bootstrap-secret",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            forbidden = asyncio.run(bot._api_loadtest_bootstrap(FakeJsonRequest(
+                {"initData": signed_init_data(8100000001)},
+                headers={"X-Load-Test-Token": "wrong"},
+            )))
+            real_user = asyncio.run(bot._api_loadtest_bootstrap(FakeJsonRequest(
+                {"initData": signed_init_data(42)},
+                headers={"X-Load-Test-Token": "bootstrap-secret"},
+            )))
+        self.assertEqual(forbidden.status, 403)
+        self.assertEqual(real_user.status, 403)
+        self.assertIsNone(bot.row(42))
+
+    def test_loadtest_bootstrap_activates_and_onboards_synthetic_user(self):
+        cid = 8100000001
+        bot._activate_user(cid)
+        bot.del_user(cid)
+        env = {
+            "AIWA_ENABLE_LOADTEST_BOOTSTRAP": "1",
+            "AIWA_LOADTEST_BOOTSTRAP_TOKEN": "bootstrap-secret",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            response = asyncio.run(bot._api_loadtest_bootstrap(FakeJsonRequest(
+                {"initData": signed_init_data(cid)},
+                headers={"X-Load-Test-Token": "bootstrap-secret"},
+            )))
+        self.assertEqual(response.status, 200)
+        self.assertTrue(bot.is_onboarded(bot.row(cid)))
+        self.assertTrue(bot._user_write_allowed(cid))
 
     def test_legacy_event_dual_writes_without_raw_user_id(self):
         bot.ev(987654321, "button", meta="view_food")
