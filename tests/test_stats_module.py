@@ -217,7 +217,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(tools["actual_tool_executions"]["status"], "no_active_users")
 
     def test_push_action_requires_campaign_specific_target(self):
-        now = time.time()
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
         self.add("checkin-sent", "u1", "push_sent",
                  {"campaign_id": "daily_checkin:2026-07-23", "campaign_type": "daily_checkin"}, now - 100)
         self.add("checkin-open", "u1", "push_opened",
@@ -229,14 +229,16 @@ class StatsModuleTests(unittest.TestCase):
                  {"campaign_id": "food_reminder:2026-07-23", "campaign_type": "food_reminder"}, now - 90)
         self.add("unrelated-chat", "u2", "assistant_response_received", ts=now - 80)
 
-        before = self.module.compute_dashboard(1)
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            before = self.module.compute_dashboard(1)
         self.assertEqual(before["push_funnel"]["acted"], 0)
         self.assertEqual(before["push_funnel"]["action_eligible"], 0)
         self.assertEqual(before["push_funnel"]["action_pending"], 2)
 
         self.add("checkin-target", "u1", "checkin_completed", ts=now - 70)
         self.add("food-target", "u2", "meal_add_completed", ts=now - 70)
-        after = self.module.compute_dashboard(1)
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            after = self.module.compute_dashboard(1)
         self.assertEqual(after["push_funnel"]["acted"], 2)
 
     def test_checkin_delayed_value_excludes_pending_and_tracks_next_summary(self):
@@ -348,7 +350,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(push["action_rate"], 0.0)
 
     def test_push_failures_separate_attempts_deliveries_recipients_and_recovery(self):
-        now = time.time()
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
         for index in range(8):
             self.add(f"blocked-{index}", "u1", "push_failed", {
                 "campaign_id": "daily_summary:today", "campaign_type": "daily_summary",
@@ -366,7 +368,8 @@ class StatsModuleTests(unittest.TestCase):
             "campaign_id": "daily_summary:retry", "campaign_type": "daily_summary",
         }, now - 60)
 
-        push = self.module.compute_dashboard(1)["push_funnel"]
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            push = self.module.compute_dashboard(1)["push_funnel"]
 
         self.assertEqual(push["failed_attempts"], 10)
         self.assertEqual(push["failed"], 2)
@@ -391,7 +394,7 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIn("iOS/Android/Desktop", platforms["help"])
 
     def test_proactive_without_product_target_does_not_report_zero_action_rate(self):
-        now = time.time()
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
         self.add("push", "u1", "push_sent", {
             "campaign_id": "proactive_felt_bad:2026-07-23",
             "campaign_type": "proactive_felt_bad",
@@ -401,7 +404,8 @@ class StatsModuleTests(unittest.TestCase):
             "campaign_type": "proactive_felt_bad",
         }, now - 90)
 
-        data = self.module.compute_dashboard(1)
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            data = self.module.compute_dashboard(1)
         campaign = data["push_funnel"]["campaigns"][0]
 
         self.assertEqual(campaign["id"], "proactive")

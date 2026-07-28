@@ -110,12 +110,31 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v169-final-review")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v170-deep-review")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
-AIWA_TELEGRAM_API_ORIGIN = os.environ.get(
-    "AIWA_TELEGRAM_API_ORIGIN", "https://api.telegram.org"
-).rstrip("/")
+
+def _validated_telegram_api_origin(raw):
+    origin = str(raw or "https://api.telegram.org").rstrip("/")
+    parsed = _urlsplit(origin)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "api.telegram.org"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.port not in (None, 443, 8443)
+    ):
+        raise RuntimeError(
+            "AIWA_TELEGRAM_API_ORIGIN must be the trusted HTTPS Telegram API host"
+        )
+    return origin
+
+AIWA_TELEGRAM_API_ORIGIN = _validated_telegram_api_origin(
+    os.environ.get("AIWA_TELEGRAM_API_ORIGIN")
+)
 APP_BUTTON_TEXT = "Открыть Айву"
 APP_MENU_BUTTON_TEXT = "Айва"
 APP_CTA_HTML = "<b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
@@ -265,8 +284,19 @@ def _connect_db():
     return c
 
 def _migrate_db():
-    """Run schema creation/migrations under SQLite's cross-process write lock."""
+    """Run schema creation/migrations and release the lock on every failure."""
     c = _connect_db()
+    try:
+        return _migrate_db_on_connection(c)
+    except BaseException:
+        try:
+            c.rollback()
+        finally:
+            c.close()
+        raise
+
+def _migrate_db_on_connection(c):
+    """Apply idempotent DDL under SQLite's cross-process write lock."""
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
     # The Python lock below coordinates threads in this process. BEGIN IMMEDIATE
@@ -537,6 +567,7 @@ _EVENT_WRITER_ACTIVE = False
 _EVENT_WRITER_LOCK = threading.Lock()
 _EVENT_WRITER_FAILURES = 0
 _EVENT_WRITER_LAST_ERROR_AT = None
+_EVENT_WRITER_DROPPED = 0
 
 def _write_event_batch(items):
     if not items:
@@ -560,7 +591,7 @@ def _write_event_batch(items):
     return written
 
 def _event_writer_loop():
-    global _EVENT_WRITER_FAILURES, _EVENT_WRITER_LAST_ERROR_AT
+    global _EVENT_WRITER_FAILURES, _EVENT_WRITER_LAST_ERROR_AT, _EVENT_WRITER_DROPPED
     batch_size = max(1, min(500, int(os.environ.get("AIWA_EVENT_BATCH_SIZE", "100"))))
     flush_seconds = max(0.05, min(2.0, float(os.environ.get("AIWA_EVENT_FLUSH_SECONDS", "0.25"))))
     while not _EVENT_WRITER_STOP.is_set() or not _EVENT_WRITE_Q.empty():
@@ -577,26 +608,40 @@ def _event_writer_loop():
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(min(0.01, max(0, deadline - time.monotonic())))
-        attempt = 0
-        while True:
+        max_attempts = 6
+        persisted = False
+        for attempt in range(1, max_attempts + 1):
             try:
                 _write_event_batch(batch)
-                for _ in batch:
-                    _EVENT_WRITE_Q.task_done()
+                persisted = True
                 break
             except Exception:
-                attempt += 1
                 _EVENT_WRITER_FAILURES += 1
                 _EVENT_WRITER_LAST_ERROR_AT = datetime.now(timezone.utc).isoformat()
-                delay = min(5.0, 0.05 * (2 ** min(attempt - 1, 7)))
+                if _EVENT_WRITER_STOP.is_set() and attempt >= 2:
+                    break
+                delay = min(2.0, 0.05 * (2 ** min(attempt - 1, 6)))
                 log.exception(
                     "events_v2 batch write failed; retaining %d events for retry "
-                    "(attempt=%d, retry_in=%.2fs)",
-                    len(batch), attempt, delay,
+                    "(attempt=%d/%d, retry_in=%.2fs)",
+                    len(batch), attempt, max_attempts, delay,
                 )
-                # Do not task_done()/discard this batch: queue backpressure is safer
-                # than silently losing analytics used by product safety decisions.
                 time.sleep(delay)
+        if not persisted:
+            # Isolate a poison item so one malformed telemetry event cannot stall
+            # every later event or clean shutdown. Safety/push events never reach
+            # this path: ev() persists them synchronously.
+            for item in batch:
+                try:
+                    _write_event_batch([item])
+                except Exception:
+                    _EVENT_WRITER_DROPPED += 1
+                    log.error(
+                        "events_v2 noncritical event dropped after retries: action=%s",
+                        item[1],
+                    )
+        for _ in batch:
+            _EVENT_WRITE_Q.task_done()
 
 def start_event_writer():
     global _EVENT_WRITER_THREAD, _EVENT_WRITER_ACTIVE
@@ -1317,6 +1362,10 @@ def _synthetic_user_id_min():
         ) from exc
     if value < 0:
         raise RuntimeError("AIWA_SYNTHETIC_USER_ID_MIN must be non-negative")
+    if value and value < 100_000_000_000:
+        raise RuntimeError(
+            "AIWA_SYNTHETIC_USER_ID_MIN must use the reserved >=100000000000 range"
+        )
     return value
 
 def all_users(include_synthetic=False):
@@ -2167,11 +2216,7 @@ def _semantic_journal_candidate(text, context=None, enable_v2=False):
         return False
     # V2 validates the model-selected evidence fragments independently below.
     # Whole-message rejection would incorrectly drop mixed self/other reports.
-    if (
-        _journal_third_party_source(raw)
-        and not _journal_explicit_first_person_event(raw)
-        and not enable_v2
-    ):
+    if _journal_third_party_source(raw) and not enable_v2:
         return False
     domain_hint = bool(_JOURNAL_SEMANTIC_CANDIDATE_RE.search(raw))
     contextual_repair = bool(
@@ -2352,10 +2397,10 @@ def _semantic_owned_recent_target(context, domain, target):
     )
 
 def _semantic_source_subject_safe(text):
-    return (
-        not _journal_third_party_source(text)
-        or _journal_explicit_first_person_event(text)
-    )
+    # Evidence is already evaluated per span in v2. If a span (or the whole
+    # legacy message) also attributes a completed event to someone else, reject
+    # it even when another clause contains first-person wording.
+    return not _journal_third_party_source(text)
 
 def _semantic_action_matches_source(
     action, text, context=None, payload=None, require_evidence=False,
@@ -3179,19 +3224,13 @@ def _claim_push_delivery(cid, campaign):
             (cid, "sent|" + campaign),
         ).fetchone()
         if not already_sent:
-            for (props_json,) in c.execute(
-                """SELECT properties_json FROM events_v2
+            already_sent = c.execute(
+                """SELECT 1 FROM events_v2
                    WHERE user_key=? AND event_name='push_sent'
-                   ORDER BY occurred_at DESC LIMIT 100""",
-                (A2.user_key(cid),),
-            ).fetchall():
-                try:
-                    props = json.loads(props_json or "{}")
-                except (TypeError, ValueError):
-                    continue
-                if props.get("campaign_id") == campaign:
-                    already_sent = True
-                    break
+                     AND json_extract(properties_json,'$.campaign_id')=?
+                   LIMIT 1""",
+                (A2.user_key(cid), campaign),
+            ).fetchone()
         if already_sent:
             c.execute(
                 """INSERT OR IGNORE INTO push_deliveries
@@ -10583,6 +10622,7 @@ async def _health(request):
             ),
             "event_writer_failures": _EVENT_WRITER_FAILURES,
             "event_writer_last_error_at": _EVENT_WRITER_LAST_ERROR_AT,
+            "event_writer_dropped": _EVENT_WRITER_DROPPED,
             "ai_workers": sum(1 for task in _AI_JOB_TASKS if not task.done()),
             "ai_worker_limit": _AI_TODAY_WORKERS,
             "llm_concurrency_limit": _AI_LLM_CONCURRENCY_LIMIT,

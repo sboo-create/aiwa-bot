@@ -316,6 +316,7 @@ class ChatJournalActionTests(unittest.TestCase):
             "В офисе Соня съела творог",
             "Вчера в офисе Соня бегала 30 минут",
             "По словам Анны, месячные начались",
+            "Я выпила чай, а дочка съела две шоколадки и печенье",
         ]
         for text in cases:
             with self.subTest(router=text):

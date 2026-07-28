@@ -940,6 +940,23 @@ class SoniaJournalV2Tests(unittest.TestCase):
         self.assertTrue(resolve.await_args.kwargs["food_prompt_mode"])
         self.assertEqual(dispatch.await_args.args[4], "logmeal")
 
+    def test_food_prompt_still_rejects_planned_meals(self):
+        text = "На ужин планирую пасту с курицей"
+        classified = route(
+            "food",
+            text,
+            evidence_spans=[text],
+            slot="dinner",
+            food_text="паста с курицей",
+        )
+        self.assertIsNone(bot._normalize_semantic_journal(
+            classified,
+            text,
+            {"meals": [], "workouts": [], "awaiting_food_text": True},
+            enable_v2=True,
+            trusted_food_prompt=True,
+        ))
+
     def test_food_prompt_api_persists_state_only_after_successful_nudge(self):
         request = SimpleNamespace(
             json=mock.AsyncMock(return_value={"initData": "signed"}),

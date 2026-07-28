@@ -207,6 +207,28 @@ class SecurityAnalyticsTests(unittest.TestCase):
             ):
                 bot.all_users()
 
+    def test_small_synthetic_user_threshold_is_rejected(self):
+        with mock.patch.dict(
+            os.environ,
+            {"AIWA_SYNTHETIC_USER_ID_MIN": "1000"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reserved"):
+                bot.all_users()
+
+    def test_telegram_api_origin_rejects_token_exfiltration_targets(self):
+        self.assertEqual(
+            bot._validated_telegram_api_origin("https://api.telegram.org:8443"),
+            "https://api.telegram.org:8443",
+        )
+        for origin in (
+            "http://api.telegram.org",
+            "https://attacker.example",
+            "https://api.telegram.org.attacker.example",
+            "https://user@api.telegram.org",
+        ):
+            with self.subTest(origin=origin), self.assertRaises(RuntimeError):
+                bot._validated_telegram_api_origin(origin)
+
     def test_secret_file_error_names_the_broken_setting(self):
         with mock.patch.dict(
             os.environ,
@@ -312,6 +334,34 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(write.call_count, 2)
         put.assert_not_called()
 
+    def test_poison_telemetry_does_not_stall_clean_shutdown(self):
+        original_queue = bot._EVENT_WRITE_Q
+        original_thread = bot._EVENT_WRITER_THREAD
+        original_active = bot._EVENT_WRITER_ACTIVE
+        original_stop = bot._EVENT_WRITER_STOP
+        original_dropped = bot._EVENT_WRITER_DROPPED
+        try:
+            bot._EVENT_WRITE_Q = bot.queue.Queue(maxsize=10)
+            bot._EVENT_WRITER_THREAD = None
+            bot._EVENT_WRITER_ACTIVE = False
+            bot._EVENT_WRITER_STOP = bot.threading.Event()
+            bot._EVENT_WRITER_DROPPED = 0
+            with mock.patch.object(
+                bot, "_write_event_batch",
+                side_effect=sqlite3.IntegrityError("poison"),
+            ), mock.patch.object(bot.time, "sleep", return_value=None):
+                bot.start_event_writer()
+                self.assertTrue(bot.ev(cid=921, action="screen_viewed"))
+                self.assertTrue(bot.stop_event_writer(timeout=2))
+            self.assertEqual(bot._EVENT_WRITER_DROPPED, 1)
+            self.assertEqual(bot._EVENT_WRITE_Q.unfinished_tasks, 0)
+        finally:
+            bot._EVENT_WRITE_Q = original_queue
+            bot._EVENT_WRITER_THREAD = original_thread
+            bot._EVENT_WRITER_ACTIVE = original_active
+            bot._EVENT_WRITER_STOP = original_stop
+            bot._EVENT_WRITER_DROPPED = original_dropped
+
     def test_main_treats_systemd_interrupt_as_clean_shutdown(self):
         def interrupt(coro):
             coro.close()
@@ -363,6 +413,15 @@ class SecurityAnalyticsTests(unittest.TestCase):
             bot.ensure_db_schema()
         self.assertEqual(migrate.call_count, 2)
         sleep.assert_called_once_with(0.25)
+        connection.close.assert_called_once_with()
+
+    def test_schema_migration_rolls_back_and_closes_on_failure(self):
+        connection = mock.Mock()
+        connection.execute.side_effect = sqlite3.DatabaseError("corrupt")
+        with mock.patch.object(bot, "_connect_db", return_value=connection):
+            with self.assertRaises(sqlite3.DatabaseError):
+                bot._migrate_db()
+        connection.rollback.assert_called_once_with()
         connection.close.assert_called_once_with()
 
     def test_food_vision_uses_only_its_dedicated_concurrency_gate(self):
@@ -819,6 +878,15 @@ class SecurityAnalyticsTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AIWA_PUSH_CLAIM_TTL_SEC": "60"}):
             self.assertTrue(bot._claim_push_delivery(cid, campaign))
             self.assertFalse(bot._claim_push_delivery(cid, campaign))
+
+    def test_push_claim_finds_campaign_beyond_one_hundred_v2_rows(self):
+        cid = 129
+        target = "daily_summary:old-target"
+        bot._activate_user(cid)
+        bot.ev(cid, "broadcast", meta="sent|" + target)
+        for index in range(101):
+            bot.ev(cid, "broadcast", meta=f"sent|other:{index}")
+        self.assertFalse(bot._claim_push_delivery(cid, target))
 
     def test_scheduled_summary_cache_miss_uses_fast_fallback_without_llm(self):
         cycle_cid = 127
