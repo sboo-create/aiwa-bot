@@ -2499,6 +2499,8 @@ def classify_journal_event(text, usage=None, context=None, enable_v2=False):
     валидирует субъект, время, полярность, уверенность и тип действия.
     """
     v2_actions = (
+        "- food_batch: в одном сообщении описаны 2–4 уже завершённых приёма пищи "
+        "с разными явно названными слотами; верни каждый приём отдельно в food_entries;\n"
         "- move_meal_slot: она исправляет приём пищи существующей записи, например сообщает, "
         "что это был завтрак, а не обед;\n"
         "- append_meal_item: она сообщает, что конкретный уже съеденный продукт пропущен "
@@ -2540,7 +2542,7 @@ def classify_journal_event(text, usage=None, context=None, enable_v2=False):
         if enable_v2 else ""
     )
     action_values = (
-        "none|food|food_update|move_meal_slot|append_meal_item|workout|workout_update|period_start|period_end"
+        "none|food|food_batch|food_update|move_meal_slot|append_meal_item|workout|workout_update|period_start|period_end"
         if enable_v2 else
         "none|food|food_update|workout|workout_update|period_start|period_end"
     )
@@ -2549,13 +2551,20 @@ def classify_journal_event(text, usage=None, context=None, enable_v2=False):
         '"evidence_spans":["дословные непересекающиеся цитаты из message"],'
         if enable_v2 else ""
     )
-    food_record_schema = (
-        '"food_record":{"title":"короткое общее название",'
+    food_record_object_schema = (
+        '{"title":"короткое общее название",'
         '"fclass":"белковое|углеводное|овощи и фрукты|молочное|жиры и орехи|сладкое|напиток|смешанное",'
         '"items":[{"name":"отдельный продукт","grams":число,"kcal":число,'
         '"protein":число,"fat":число,"carbs":число,'
         '"evidence_span":"дословное упоминание продукта из одного evidence_spans"}],'
-        '"unparsed":["непонятный фрагмент"]}|null,'
+        '"unparsed":["непонятный фрагмент"]}'
+    )
+    food_record_schema = (
+        '"food_record":' + food_record_object_schema + '|null,'
+        '"food_entries":[{"slot":"breakfast|lunch|snack|dinner",'
+        '"evidence_spans":["дословные цитаты только этого приёма"],'
+        '"food_text":"только продукты этого приёма",'
+        '"food_record":' + food_record_object_schema + '}],'
         if enable_v2 else ""
     )
     prompt = (
@@ -2576,6 +2585,11 @@ def classify_journal_event(text, usage=None, context=None, enable_v2=False):
         "- none: всё остальное.\n\n"
         "Для food/workout/period можно выбрать действие и без слов «запиши» или «отметь», "
         "если это прямое самостоятельное сообщение о своём уже произошедшем событии. "
+        "Если сообщение содержит несколько явно отделённых завершённых приёмов пищи "
+        "(например «Завтрак: ... Перекус: ...»), всегда выбирай food_batch: один объект "
+        "food_entries на каждый слот в порядке исходного сообщения. Не объединяй их КБЖУ. "
+        "Для food_batch верхние food_text и food_record должны быть пустыми/null. "
+        "Для остальных действий food_entries должен быть пустым массивом. "
         "Фразы-продолжения вроде «и ещё чипсы» могут означать НОВУЮ запись food, если перед ними "
         "есть недавняя запись еды. Фразы вроде «нет, было 100 г» означают food_update только когда "
         "можно однозначно выбрать конкретную недавнюю запись. Аналогично для workout_update. "
@@ -2621,7 +2635,7 @@ def classify_journal_event(text, usage=None, context=None, enable_v2=False):
         [{"role": "system", "content": "Ты консервативный классификатор событий для персонального трекера."},
          {"role": "user", "content": prompt}],
         (os.environ.get("AIWA_JOURNAL_MODEL") if enable_v2 else None),
-        max_tokens=(900 if enable_v2 else 520), temperature=0.0, usage=usage,
+        max_tokens=(1800 if enable_v2 else 520), temperature=0.0, usage=usage,
         attempts=(1 if enable_v2 else 2),
     )
     if not out:

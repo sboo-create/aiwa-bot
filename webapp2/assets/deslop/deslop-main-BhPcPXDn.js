@@ -19516,7 +19516,7 @@ const Yr = [
   { label: "Фолликулярная", variant: "tinted", token: "--aiwa-phase-follicular" },
   { label: "Лютеиновая", variant: "tinted", token: "--aiwa-phase-luteal" },
   { label: "Близость", variant: "tinted", token: "--aiwa-intimacy" }
-], ax = [[1, "Низкая"], [2, "Средняя"], [3, "Высокая"]], ix = [[1, "Плохое"], [2, "Нормальное"], [3, "Хорошее"]], cj = "/assets/food/pancakes.png", lx = [
+], ax = [[1, "Низкая"], [2, "Средняя"], [3, "Высокая"]], ix = [[1, "Плохое"], [2, "Нормальное"], [3, "Хорошее"]], cj = "/assets/paper-food-placeholder.png", lx = [
   { value: "breakfast", label: "Завтрак" },
   { value: "lunch", label: "Обед" },
   { value: "snack", label: "Перекус" },
@@ -21115,6 +21115,9 @@ const oA = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"], yx = (a = 3
     b > 0 && (T > h || T === h && b > f) && (h = T, f = b, c = p);
   }
   return h >= 0.5 ? c + Xf : null;
+}, foodFallbackImage = (a) => {
+  const e = zd([a?.title, ...Array.isArray(a?.items) ? a.items.map((l) => l?.name) : []].filter(Boolean).join(" "));
+  return zd(a?.fclass) === "напиток" || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(e) ? "/assets/food/drink-cup.svg?v=1" : uA;
 }, fA = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
 function iv({ mode: a, revision: e = 0 }) {
   const [l, s, r] = px(rA, [a, e]), c = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, f = c?.mode === "male", [h, y] = E.useState(!1), [p, g] = E.useState({}), [v, b] = E.useState(""), [T, S] = E.useState(null), [w, j] = E.useState(null), [M, D] = E.useState(!1), [A, R] = E.useState(null), [B, U] = E.useState(!1), [_, H] = E.useState(""), [P, K] = E.useState(null), [it, at] = E.useState(!1), I = E.useRef(null), F = !!l.foodSection && !(l.foodSection.menu?.meals || []).length, et = E.useRef(0);
@@ -21274,7 +21277,7 @@ function iv({ mode: a, revision: e = 0 }) {
         Xt.length ? Xt.map((rt) => /* @__PURE__ */ m.jsx(
           Yt,
           {
-            image: av(p, rt.title) || cj,
+            image: av(p, rt.title) || foodFallbackImage(rt) || cj,
             title: rt.title,
             description: `${_d(rt.kcal)} · Б${Math.round(rt.protein || 0)} · Ж${Math.round(rt.fat || 0)} · У${Math.round(rt.carbs || 0)}`,
             onClick: wt ? void 0 : () => H("diary")
