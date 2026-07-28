@@ -1137,8 +1137,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
             self.assertEqual(bot.scheduled_hhmm(15, "10:00")[0], "10:00")
             self.assertEqual(
                 bot.schedule_text(15, "10:00"),
-                "Время сводки: 10:00 по Москве — подготовлю заранее и начну отправку в это время. "
-                "При высокой нагрузке доставка может занять несколько минут.",
+                "Утренняя сводка будет приходить в 10:00 по Москве.",
             )
             self.assertEqual(bot.summary_prepare_hhmm(15, "10:00"), "09:35")
 
