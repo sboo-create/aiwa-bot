@@ -1,1 +1,1 @@
-import "./deslop-main-BhPcPXDn.js?v=r9";
+import "./deslop-main-BhPcPXDn.js";
