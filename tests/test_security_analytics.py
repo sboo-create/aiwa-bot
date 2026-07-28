@@ -905,11 +905,15 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertTrue(bot._clear_push_suppression(cid))
         self.assertIsNone(bot.row(cid)["push_suppressed_at"])
         self.assertIn(cid, bot.all_users())
+        self.assertEqual(bot._backfill_push_suppressions(), 0)
+        self.assertIsNone(bot.row(cid)["push_suppressed_at"])
 
         batch = a2.traction_batch(bot.DB)
         failure = next(item for item in batch if item["name"] == "push_failed")
+        reachable = next(item for item in batch if item["name"] == "user_message_sent")
         self.assertEqual(failure["properties"]["failure_class"], "blocked")
         self.assertFalse(failure["properties"]["retryable"])
+        self.assertEqual(reachable["properties"]["platform"], "bot")
 
     def test_legacy_blocked_recipient_is_backfilled_once(self):
         cid = 121

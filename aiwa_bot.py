@@ -3195,12 +3195,22 @@ def _clear_push_suppression(cid):
     """An inbound private Telegram update proves that this recipient is reachable again."""
     c = db()
     try:
+        occurred_at = datetime.now(timezone.utc).isoformat()
         changed = c.execute(
             """UPDATE users
                SET push_suppressed_at=NULL, push_suppression_reason=NULL
                WHERE chat_id=? AND push_suppressed_at IS NOT NULL""",
             (cid,),
         ).rowcount == 1
+        if changed:
+            # Backfill uses immutable delivery/reachability history after a
+            # restart. Persist the proof in the same transaction as the state
+            # change so a queued best-effort event cannot re-suppress a user
+            # who has already contacted the bot again.
+            A2.insert_event_v2(
+                c, cid, "user_message", meta="push_reachable",
+                app_version=AIWA_VERSION, occurred_at=occurred_at,
+            )
         c.commit()
         if changed:
             log.info("push delivery restored after inbound update: %s", cid)
