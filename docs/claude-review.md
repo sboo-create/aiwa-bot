@@ -46,8 +46,10 @@ An administrator must add:
 | --- | --- | --- |
 | Actions secret | `AIWA_REVIEW_SSH_KEY` | Private key for the restricted tunnel user |
 | Actions secret | `AIWA_REVIEW_LITELLM_KEY` | Dedicated budget-limited LiteLLM virtual key |
+| Actions secret | `AIWA_REVIEW_REPORT_SSH_KEY` | Forced-command key that can read aggregate reviewer spend only |
 | Actions variable | `AIWA_CLAUDE_REVIEW_ENABLED` | `true` after both secrets are present |
 | Actions variable | `AIWA_CLAUDE_DEEP_REVIEW_ACTORS` | Comma-separated GitHub logins allowed to trigger Opus |
+| Actions variable | `AIWA_CLAUDE_SPEND_ISSUE` | Issue number used as the aggregate spend dashboard |
 
 Keep the variable unset or set to `false` until both credentials and both model aliases
 have passed a smoke test. No provider or SSH secret belongs in Git.
@@ -65,6 +67,13 @@ The reviewer fetches current public OpenRouter token prices for the estimate and
 back to configured prices if that lookup fails. LiteLLM enforces the dedicated
 `$25 / 30d` key budget; the OpenRouter billing dashboard is authoritative for the
 provider charge.
+
+The separate `Claude reviewer spend` workflow publishes an aggregate dashboard to one
+GitHub issue after each successful review and once daily. It reads LiteLLM's actual
+spend logs through a second SSH key whose only permitted server command is the
+root-owned reporting script. The dashboard shows today, 7-day and 30-day totals,
+per-model usage, daily history, budget remaining, and the next reset. It never exports
+prompts, model responses, API keys, or individual spend-log records.
 
 For a strict pre-merge gate, require both `test` and `Claude review` in the `main` branch
 ruleset. The reviewer reports findings; a human still decides whether they block merge.
