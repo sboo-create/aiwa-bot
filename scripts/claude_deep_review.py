@@ -58,6 +58,17 @@ def partial_review_marker(head_sha: str) -> str:
     )
 
 
+def pull_request_diff_file(path: str) -> tuple[str, bool]:
+    with Path(path).open(encoding="utf-8", errors="replace") as diff_file:
+        diff = diff_file.read(base.MAX_DIFF_CHARS + 1)
+    if not diff.strip():
+        raise RuntimeError("pull request diff is empty")
+    truncated = len(diff) > base.MAX_DIFF_CHARS
+    if truncated:
+        diff = diff[:base.MAX_DIFF_CHARS]
+    return diff, truncated
+
+
 def deep_review_tool() -> dict:
     tool = copy.deepcopy(base.review_tool())
     properties = tool["input_schema"]["properties"]
@@ -104,61 +115,6 @@ def comment_marker_exists(
         if len(comments) < 100:
             return False
     return False
-
-
-def wait_for_test_success(
-    repo: str,
-    head_sha: str,
-    token: str,
-    *,
-    timeout: int = 900,
-    poll_interval: int = 10,
-    missing_timeout: int = 180,
-) -> None:
-    url = (
-        f"https://api.github.com/repos/{repo}/commits/{head_sha}/check-runs"
-        "?per_page=100"
-    )
-    started = time.monotonic()
-    deadline = started + timeout
-    while True:
-        response = base.get_json(url, token)
-        if not isinstance(response, dict):
-            raise RuntimeError("GitHub check-runs response is not an object")
-        test_runs = [
-            item
-            for item in (response.get("check_runs") or [])
-            if isinstance(item, dict)
-            and item.get("name") == "test"
-            and item.get("conclusion") != "skipped"
-        ]
-        if any(item.get("conclusion") == "success" for item in test_runs):
-            return
-        if test_runs and all(
-            item.get("status") == "completed" for item in test_runs
-        ):
-            conclusions = ", ".join(
-                sorted(
-                    {
-                        str(item.get("conclusion") or "unknown")
-                        for item in test_runs
-                    }
-                )
-            )
-            raise RuntimeError(
-                f"test check did not pass for {head_sha[:12]}: {conclusions}"
-            )
-        now = time.monotonic()
-        if not test_runs and now - started >= missing_timeout:
-            raise RuntimeError(
-                f"no non-skipped test check appeared for {head_sha[:12]} "
-                f"within {missing_timeout}s"
-            )
-        if now >= deadline:
-            raise RuntimeError(
-                f"timed out waiting for test check on {head_sha[:12]}"
-            )
-        time.sleep(poll_interval)
 
 
 def agent_payload(
@@ -523,15 +479,6 @@ def append_skipped_summary(head_sha: str) -> None:
         )
 
 
-def wait_main() -> int:
-    github_token = base.required_env("GITHUB_TOKEN")
-    repo = base.required_env("GITHUB_REPOSITORY")
-    head_sha = base.required_env("PR_HEAD_SHA")
-    wait_for_test_success(repo, head_sha, github_token)
-    print(f"Successful test check found for {head_sha[:12]}.")
-    return 0
-
-
 def main() -> int:
     base_url = base.required_env("AIWA_REVIEW_BASE_URL").rstrip("/")
     api_key = base.required_env("AIWA_REVIEW_LITELLM_KEY")
@@ -555,7 +502,12 @@ def main() -> int:
         )
         return 0
 
-    diff, truncated = base.pull_request_diff(base_sha, head_sha)
+    diff_path = os.environ.get("PR_DIFF_FILE", "").strip()
+    diff, truncated = (
+        pull_request_diff_file(diff_path)
+        if diff_path
+        else base.pull_request_diff(base_sha, head_sha)
+    )
     results = run_agents(
         base_url=base_url,
         api_key=api_key,
@@ -602,7 +554,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(wait_main() if "--wait-for-test" in sys.argv[1:] else main())
+        sys.exit(main())
     except Exception as exc:
         print(f"Claude deep review failed: {exc}", file=sys.stderr)
         sys.exit(1)
