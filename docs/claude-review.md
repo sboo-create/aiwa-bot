@@ -44,6 +44,18 @@ Keep the variable unset or set to `false` until both credentials and both model 
 have passed a smoke test. No provider or SSH secret belongs in Git.
 Set the variable back to `false` for an immediate reviewer kill switch.
 
+## Spend visibility
+
+Every run publishes the model, estimated cost, turn count, permission denials, and result
+in two places:
+
+- the GitHub Actions run summary;
+- a short usage comment on the pull request.
+
+The per-run value comes from Claude Code's `total_cost_usd` result and is an estimate.
+LiteLLM enforces the dedicated `$25 / 30d` key budget; the OpenRouter billing dashboard
+is authoritative for the provider charge.
+
 For a strict pre-merge gate, require both `test` and `Claude review` in the `main` branch
 ruleset. The reviewer reports findings; a human still decides whether they block merge.
 
