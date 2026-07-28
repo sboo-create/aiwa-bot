@@ -59,7 +59,8 @@ def partial_review_marker(head_sha: str) -> str:
 
 
 def pull_request_diff_file(path: str) -> tuple[str, bool]:
-    diff = Path(path).read_text(encoding="utf-8", errors="replace")
+    with Path(path).open(encoding="utf-8", errors="replace") as diff_file:
+        diff = diff_file.read(base.MAX_DIFF_CHARS + 1)
     if not diff.strip():
         raise RuntimeError("pull request diff is empty")
     truncated = len(diff) > base.MAX_DIFF_CHARS
