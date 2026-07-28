@@ -21739,12 +21739,12 @@ function SA({ initialMessages: a = [] }) {
     role: S.role === "user" ? "user" : "assistant",
     text: S.text || "",
     suggestions: []
-  }))), [s, r] = E.useState(""), [c, f] = E.useState(!1), [h, y] = E.useState(!1), p = Jf.useRef(null), g = Jf.useRef(null);
+  }))), [s, r] = E.useState(""), [c, f] = E.useState(!1), [h, y] = E.useState(!1), p = Jf.useRef(null), g = Jf.useRef(null), A = (typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData)?.mode === "male";
   E.useEffect(() => {
     e.length || l([{
       id: "hello",
       role: "assistant",
-      text: "Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.",
+      text: A ? "Привет! Спроси меня о питании, тренировках или самочувствии. Я отвечу с учётом твоих данных." : "Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.",
       suggestions: ["Можно ли тренироваться?", "Что съесть сегодня?", "Как моё самочувствие?"]
     }]);
   }, []), E.useEffect(() => {

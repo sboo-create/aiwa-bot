@@ -575,6 +575,10 @@ def _write_event_batch(items):
     written = 0
     c = db()
     try:
+        # The lifecycle check and event inserts must be one write transaction.
+        # Otherwise /stop can delete a user between the check and the insert,
+        # allowing a queued telemetry item to reappear after deletion.
+        c.execute("BEGIN IMMEDIATE")
         for item in items:
             cid, action, meta, ms, calls, request_id, generation = item
             if not _user_write_allowed(cid, generation, conn=c):
@@ -602,12 +606,19 @@ def _event_writer_loop():
             continue
         deadline = time.monotonic() + flush_seconds
         while len(batch) < batch_size:
-            try:
-                batch.append(_EVENT_WRITE_Q.get_nowait())
-            except queue.Empty:
-                if time.monotonic() >= deadline:
+            if _EVENT_WRITER_STOP.is_set():
+                try:
+                    batch.append(_EVENT_WRITE_Q.get_nowait())
+                    continue
+                except queue.Empty:
                     break
-                time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                batch.append(_EVENT_WRITE_Q.get(timeout=remaining))
+            except queue.Empty:
+                break
         max_attempts = 6
         persisted = False
         for attempt in range(1, max_attempts + 1):
@@ -860,12 +871,27 @@ def meal_edit(cid, mid, **kw):
     # SET identifiers come exclusively from the fixed cols mapping above.
     c = db(); c.execute("UPDATE meals SET " + ", ".join(sets) + " WHERE chat_id=? AND id=?", vals); c.commit(); c.close(); return True  # nosec B608
 
+def _meal_row_payload(x):
+    return {
+        "id": x[0], "ts": x[1], "title": x[2], "kcal": x[3],
+        "protein": x[4], "fat": x[5], "carbs": x[6], "grams": x[7],
+        "items": json.loads(x[8] or "[]"), "source": x[9],
+        "slot": (x[10] or "snack"), "fclass": x[11] or None,
+        "slot_guessed": bool(x[12]),
+    }
+
+
 def meals_of(cid, d=None):
     d = d or dtoday().isoformat()
-    c = db(); r = c.execute("SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed FROM meals WHERE chat_id=? AND d=? ORDER BY ts", (cid, d)).fetchall(); c.close()
-    return [{"id": x[0], "ts": x[1], "title": x[2], "kcal": x[3], "protein": x[4], "fat": x[5], "carbs": x[6],
-             "grams": x[7], "items": json.loads(x[8] or "[]"), "source": x[9], "slot": (x[10] or "snack"),
-             "fclass": x[11] or None, "slot_guessed": bool(x[12])} for x in r]
+    c = db()
+    r = c.execute(
+        """SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,
+                  slot,fclass,slot_guessed
+           FROM meals WHERE chat_id=? AND d=? ORDER BY ts""",
+        (cid, d),
+    ).fetchall()
+    c.close()
+    return [_meal_row_payload(x) for x in r]
 
 def meal_get(cid, mid):
     """Read back one owned meal. Mutation confirmations must use this DB receipt."""
@@ -1286,8 +1312,17 @@ def train_profile_set(cid, prof):
 
 def diary_totals(cid, d=None):
     ms = meals_of(cid, d)
-    return {"kcal": sum(m["kcal"] for m in ms), "protein": round(sum(m["protein"] for m in ms)),
-            "fat": round(sum(m["fat"] for m in ms)), "carbs": round(sum(m["carbs"] for m in ms)), "count": len(ms)}
+    return _diary_totals_from_meals(ms)
+
+
+def _diary_totals_from_meals(ms):
+    return {
+        "kcal": sum(m["kcal"] for m in ms),
+        "protein": round(sum(m["protein"] for m in ms)),
+        "fat": round(sum(m["fat"] for m in ms)),
+        "carbs": round(sum(m["carbs"] for m in ms)),
+        "count": len(ms),
+    }
 
 def cyc_add(cid, d, end=None, user_generation=None):
     c = db()
@@ -3039,6 +3074,13 @@ def schedule_text(cid, hhmm):
     )
 
 def today_start_iso():
+    """UTC boundary for canonical events_v2 timestamps."""
+    return datetime.combine(
+        datetime.now(TZ).date(), dtime.min, tzinfo=TZ
+    ).astimezone(timezone.utc).isoformat()
+
+def legacy_today_start_iso():
+    """Moscow-local boundary for historical naive `events.ts` rows."""
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
 
 def summary_sent_today(cid):
@@ -3056,7 +3098,7 @@ def summary_sent_today(cid):
             WHERE chat_id=? AND ts>=? AND (
                 (action='goal' AND meta='summary') OR
                 (action='broadcast' AND (meta='sent' OR meta LIKE 'sent|%'))
-            ) LIMIT 1""", (cid, today_start_iso())).fetchone()
+            ) LIMIT 1""", (cid, legacy_today_start_iso())).fetchone()
     c.close()
     return bool(r)
 
@@ -4450,6 +4492,14 @@ def _delivery_summary_fallback(u, st=None, pregnancy=None):
             "### 🏋️ Нагрузка\n"
             "- Выбирай только привычную комфортную активность без боли и перегрева."
         )
+    if mode == "male":
+        return (
+            "### ⚡ Сегодня\n"
+            "- Это резервная сводка: персональный текст не успел подготовиться заранее.\n"
+            "- Оцени энергию, сон и восстановление после последних нагрузок.\n\n"
+            "### 🍽 Питание и нагрузка\n"
+            "- Выбирай обычный сбалансированный рацион и комфортную активность, оставляя запас сил."
+        )
     if mode == "meno":
         context_line = "при менопаузе"
     elif mode == "irregular":
@@ -5422,7 +5472,14 @@ def food_reminder_text(cid):
     return base + (("\n\n" + tip) if tip else "")
 
 def train_reminder_text(cid):
-    base = "🏋️ Ещё не отмечала тренировку сегодня? Даже 20 минут считается. Отметь — Айва разберёт нагрузку и подскажет следующую."
+    male = (row(cid) or {}).get("mode") == "male"
+    base = (
+        "🏋️ Ещё не отметил тренировку сегодня? Даже 20 минут считается. "
+        "Отметь — Айва разберёт нагрузку и подскажет следующую."
+        if male else
+        "🏋️ Ещё не отмечала тренировку сегодня? Даже 20 минут считается. "
+        "Отметь — Айва разберёт нагрузку и подскажет следующую."
+    )
     tip = {"menstrual": "Сейчас менструация — подойдёт лёгкое: ходьба, растяжка, мягкая йога.",
            "follicular": "Фолликулярная фаза — хорошее окно для силовой или интенсива.",
            "ovulation": "Овуляция — сил много, но береги связки.",
@@ -5563,10 +5620,17 @@ async def reactivation_job(context: ContextTypes.DEFAULT_TYPE):
                 (A2.user_key(cid),),
             ).fetchone()[0]
             c.close()
-            last_seen = max(old_last or "", v2_last or "")
-            if not last_seen:
+            timestamps = []
+            for value, default_tz in ((old_last, TZ), (v2_last, timezone.utc)):
+                if not value:
+                    continue
+                parsed = datetime.fromisoformat(value)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=default_tz)
+                timestamps.append(parsed.astimezone(timezone.utc))
+            if not timestamps:
                 continue
-            last = datetime.fromisoformat(last_seen).date()
+            last = max(timestamps).astimezone(TZ).date()
             if (today - last).days < ndays:
                 continue
             lr = u.get("last_reactivation")
@@ -6357,10 +6421,19 @@ async def on_photo(update, context):
     cid = update.effective_chat.id
     if cid in ANNOUNCE_WAIT:
         return await _announce_capture(update, context, cid)
+    u = row(cid)
+    if not is_onboarded(u):
+        return await update.message.reply_text("Сначала настрой Айву: /start.")
+    generation = _user_generation(cid)
     acquired = await _acquire_food_vision_slot()
     if not acquired:
+        ev(
+            cid, "fallback", meta="food_vision_busy",
+            user_generation=generation,
+        )
         return await update.message.reply_text(
-            "Сейчас разбираю много фотографий. Попробуй ещё раз через минуту."
+            "Сейчас разбираю много фотографий, поэтому фото не сохранила. "
+            "Попробуй ещё раз через минуту или добавь приём текстом."
         )
     try:
         return await _on_photo_bounded(update, context)
@@ -6413,7 +6486,14 @@ async def handle_text(update, context, txt):
         return await update.message.reply_text("ID кастомных эмодзи:\n" + "\n".join(cem))
     txt, addressed = strip_aiwa_address(txt)
     if addressed and not txt:
-        return await update.message.reply_text("Я тут. Напиши вопрос или открой меню, и я помогу с циклом, питанием, нагрузкой или самочувствием.")
+        topics = (
+            "питанием, нагрузкой или самочувствием"
+            if (u or {}).get("mode") == "male"
+            else "циклом, питанием, нагрузкой или самочувствием"
+        )
+        return await update.message.reply_text(
+            f"Я тут. Напиши вопрос или открой меню, и я помогу с {topics}."
+        )
 
     if state == "await_food_text":
         pending_at = None
@@ -6439,10 +6519,13 @@ async def handle_text(update, context, txt):
                     context, update, cid, u, journal["intent"], txt,
                     journal=journal, user_generation=generation,
                 )
-            return await update.message.reply_text(
-                "Не смогла надёжно разделить и проверить приёмы пищи, поэтому ничего "
-                "не записала. Нажми «Добавить приём текстом» ещё раз и перечисли еду "
-                "с пометками «завтрак:», «обед:», «полдник:» или «ужин:»."
+            # The one-shot journal prompt must never suppress normal safety and
+            # question handling. If this is not a verifiable meal, continue
+            # through the ordinary router instead of trapping the message in a
+            # food-only refusal.
+            ev(
+                cid, "fallback", meta="food_prompt_normal_router",
+                user_generation=generation,
             )
 
     VALUE_STATES = {
@@ -7031,6 +7114,7 @@ async def traction_worker():
 
 async def on_startup(app):
     global BOT_USERNAME, BCAST_Q, FOOD_Q, TRAIN_Q, _AI_JOB_WAKE, _AI_JOB_TASKS
+    global _AI_BACKGROUND_SEM, _FOOD_VISION_SEM, _FOOD_VISION_WAITERS
     # Fail before scheduling/sending anything if the boundary protecting real
     # users from synthetic load identities is malformed.
     _synthetic_user_id_min()
@@ -7069,6 +7153,11 @@ async def on_startup(app):
         BOT_USERNAME = getattr(me, "username", None)
     except Exception:
         BOT_USERNAME = None
+    # asyncio synchronization primitives belong to the running application
+    # loop, not the module-import loop used by tests or process bootstrap.
+    _AI_BACKGROUND_SEM = asyncio.Semaphore(_AI_BACKGROUND_CONCURRENCY)
+    _FOOD_VISION_SEM = asyncio.Semaphore(_FOOD_VISION_CONCURRENCY)
+    _FOOD_VISION_WAITERS = 0
     _AI_JOB_WAKE = asyncio.Event()
     await asyncio.to_thread(_recover_ai_jobs)
     _AI_JOB_TASKS = [
@@ -7658,10 +7747,11 @@ async def _api_meal(request):
     u = row(cid); _, st = status_of(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"error": "onboard"}, status=403))
-    if st is None:
-        st = {"phase": "follicular", "phase_ru": "фолликулярная", "subphase": "общая", "day": ""}
     prof = profile_of(u); target = profile_kcal(prof) if prof else None; usage = []
-    meal = await llm_to_thread(cid, "meal_replacement", L.replace_meal, st, body.get("slot", 0), body.get("dish"), prof, target, usage)
+    meal = await llm_to_thread(
+        cid, "meal_replacement", L.replace_meal, st, body.get("slot", 0),
+        body.get("dish"), prof, target, usage, u.get("mode"),
+    )
     ev(cid, "button", meta="web_meal_replace", usage=usage)
     ev(cid, "tokens", sum(usage), meta="meal", calls=len(usage), usage=usage)
     return _cors(web.json_response({"meal": meal}))
@@ -7685,8 +7775,16 @@ async def _api_partner(request):
 def _food_ctx(u, st):
     if st:
         return f"Сейчас {st.get('subphase','')} {st['phase_ru'].lower()} фаза, день {st['day']} цикла."
-    return {"meno": "Режим менопаузы.", "preg": "Беременность.", "irregular": "Нерегулярный цикл.",
-            "none": "Месячных сейчас нет."}.get(u.get("mode"), "")
+    return {
+        "male": (
+            "Мужской профиль: никаких тем менструального цикла, фаз или "
+            "женской физиологии."
+        ),
+        "meno": "Режим менопаузы.",
+        "preg": "Беременность.",
+        "irregular": "Нерегулярный цикл.",
+        "none": "Месячных сейчас нет.",
+    }.get(u.get("mode"), "")
 
 def _recent_workouts_text(cid):
     try:
@@ -7913,7 +8011,7 @@ _AI_TODAY_WORKERS = max(
 _AI_BACKGROUND_CONCURRENCY = max(
     1, _AI_LLM_CONCURRENCY_LIMIT - _AI_CHAT_RESERVED_SLOTS
 )
-_AI_BACKGROUND_SEM = asyncio.Semaphore(_AI_BACKGROUND_CONCURRENCY)
+_AI_BACKGROUND_SEM = None
 _AI_JOB_MAX_ATTEMPTS = max(1, min(5, int(os.environ.get("AIWA_AI_JOB_MAX_ATTEMPTS", "3"))))
 _AI_TODAY_QUEUE_MAX = max(100, int(os.environ.get("AIWA_TODAY_QUEUE_MAX", "1500")))
 _FOOD_VISION_CONCURRENCY = max(
@@ -7926,8 +8024,33 @@ _FOOD_VISION_QUEUE_MAX = max(
 _FOOD_VISION_WAIT_SECONDS = max(
     1.0, min(180.0, float(os.environ.get("AIWA_FOOD_VISION_WAIT_SECONDS", "60")))
 )
-_FOOD_VISION_SEM = asyncio.Semaphore(_FOOD_VISION_CONCURRENCY)
+_FOOD_VISION_SEM = None
 _FOOD_VISION_WAITERS = 0
+
+
+def _loop_semaphore(current, limit):
+    """Create asyncio primitives lazily and replace ones bound to another loop."""
+    loop = asyncio.get_running_loop()
+    bound_loop = getattr(current, "_loop", None)
+    if current is None or (bound_loop is not None and bound_loop is not loop):
+        return asyncio.Semaphore(limit)
+    return current
+
+
+def _ensure_ai_background_semaphore():
+    global _AI_BACKGROUND_SEM
+    _AI_BACKGROUND_SEM = _loop_semaphore(
+        _AI_BACKGROUND_SEM, _AI_BACKGROUND_CONCURRENCY
+    )
+    return _AI_BACKGROUND_SEM
+
+
+def _ensure_food_vision_semaphore():
+    global _FOOD_VISION_SEM
+    _FOOD_VISION_SEM = _loop_semaphore(
+        _FOOD_VISION_SEM, _FOOD_VISION_CONCURRENCY
+    )
+    return _FOOD_VISION_SEM
 
 
 async def _acquire_food_vision_slot():
@@ -7938,7 +8061,7 @@ async def _acquire_food_vision_slot():
     _FOOD_VISION_WAITERS += 1
     try:
         await asyncio.wait_for(
-            _FOOD_VISION_SEM.acquire(),
+            _ensure_food_vision_semaphore().acquire(),
             timeout=_FOOD_VISION_WAIT_SECONDS,
         )
         return True
@@ -7949,7 +8072,49 @@ async def _acquire_food_vision_slot():
 
 
 def _release_food_vision_slot():
-    _FOOD_VISION_SEM.release()
+    _ensure_food_vision_semaphore().release()
+
+
+_MALE_TODAY_FORBIDDEN_RE = re.compile(
+    r"\b(?:цикл\w*|фолликул\w*|лютеин\w*|овуляц\w*|месячн\w*|"
+    r"менструац\w*|пмс|эстроген\w*|прогестерон\w*|гинеколог\w*)\b",
+    re.I,
+)
+
+
+def _today_note_mode_guard(mode, note):
+    """Never expose cycle-derived content in a male profile, even if an LLM errs."""
+    if not isinstance(note, dict):
+        return note
+    clean = {
+        "summary": str(note.get("summary") or "").strip(),
+        "suggestions": [
+            str(item).strip()
+            for item in (note.get("suggestions") or [])
+            if str(item).strip()
+        ][:3],
+    }
+    if mode != "male":
+        for key in ("day", "phase"):
+            if note.get(key) not in (None, ""):
+                clean[key] = note[key]
+        return clean
+    visible = " ".join([clean["summary"], *clean["suggestions"]])
+    if _MALE_TODAY_FORBIDDEN_RE.search(visible):
+        return {
+            "summary": (
+                "Сегодня ориентируйся на уровень энергии, качество сна и "
+                "восстановление после нагрузки. Выбери умеренную активность и "
+                "оставь запас сил; если усталость выше обычной, сократи темп и "
+                "добавь отдых."
+            ),
+            "suggestions": [
+                "Как оценить восстановление?",
+                "Что съесть для энергии?",
+                "Какая нагрузка подойдёт?",
+            ],
+        }
+    return clean
 
 def _today_job_payload(cid, u, st):
     return {
@@ -7993,7 +8158,34 @@ def _enqueue_today_job(cid, u, st):
                 return {"status": "rejected", "reason": "queue_full"}
         job_id = "job_" + secrets.token_hex(16)
         if existing:
-            row_ = existing
+            # Terminal jobs intentionally redact their health payload/result.
+            # If the durable day cache is unavailable, reuse the dedupe row as
+            # fresh work instead of leaving the client on a permanent fallback.
+            if existing[1] in {"completed", "failed", "expired", "superseded"} and not existing[3]:
+                c.execute(
+                    """UPDATE ai_jobs
+                       SET user_generation=?,status='queued',attempts=0,
+                           payload_json=?,available_at=?,expires_at=?,
+                           started_at=NULL,finished_at=NULL,result_json=NULL,
+                           last_error_class=NULL
+                       WHERE job_id=?""",
+                    (
+                        generation,
+                        json.dumps(
+                            payload, ensure_ascii=False, separators=(",", ":"),
+                            default=str,
+                        ),
+                        now, expires, existing[0],
+                    ),
+                )
+                row_ = c.execute(
+                    """SELECT job_id,status,attempts,result_json,created_at,
+                              started_at,finished_at,last_error_class
+                       FROM ai_jobs WHERE job_id=?""",
+                    (existing[0],),
+                ).fetchone()
+            else:
+                row_ = existing
         else:
             c.execute(
                 """INSERT INTO ai_jobs(
@@ -8072,6 +8264,17 @@ def _recover_ai_jobs():
                  AND expires_at IS NOT NULL AND expires_at<=?""",
             (now, now),
         )
+        c.execute(
+            """UPDATE ai_jobs
+               SET payload_json='{}',result_json=NULL
+               WHERE status IN ('completed','failed','expired','superseded')"""
+        )
+        c.execute(
+            """DELETE FROM ai_jobs
+               WHERE status IN ('completed','failed','expired','superseded')
+                 AND expires_at IS NOT NULL AND expires_at<=?""",
+            (now,),
+        )
         c.commit()
     finally:
         c.close()
@@ -8105,12 +8308,11 @@ def _finish_ai_job(job, status, result=None, error=None, retry_delay=0):
         else:
             c.execute(
                 """UPDATE ai_jobs
-                   SET status=?,result_json=?,last_error_class=?,finished_at=?
+                   SET status=?,payload_json='{}',result_json=NULL,
+                       last_error_class=?,finished_at=?
                    WHERE job_id=?""",
                 (
                     status,
-                    json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-                    if result is not None else None,
                     str(error or "")[:48] or None,
                     now.isoformat(),
                     job["job_id"],
@@ -8212,7 +8414,7 @@ async def _ai_job_worker(worker_no):
                 )
                 continue
             usage = []
-            async with _AI_BACKGROUND_SEM:
+            async with _ensure_ai_background_semaphore():
                 note = await llm_to_thread(
                     job["chat_id"], "today_note", L.today_note,
                     payload.get("state"), payload.get("profile"),
@@ -8226,6 +8428,7 @@ async def _ai_job_worker(worker_no):
                 )
             if not isinstance(note, dict) or not (note.get("summary") or "").strip():
                 raise ValueError("empty_response")
+            note = _today_note_mode_guard(payload.get("mode"), note)
             current = row(job["chat_id"])
             if not current or str(current.get("mode") or "") != str(payload.get("mode") or ""):
                 _finish_ai_job(job, "superseded", error="context_changed")
@@ -8262,6 +8465,15 @@ def _api_today_lookup(cid):
     _, st = status_of(cid); ev(cid, "button", meta="web_today")
     ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
     hit = _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or "")
+    if hit:
+        guarded = _today_note_mode_guard(u.get("mode"), hit)
+        if guarded != hit:
+            # Repair already-generated stale content without paying for another
+            # model call; subsequent opens read only the corrected cache entry.
+            hit = guarded
+            _TODAY_CACHE[ck] = hit
+            dc_put(cid, "today", hit, u.get("mode") or "")
+            ev(cid, "fallback", meta="today_note_mode_guard")
     return u, st, ck, hit
 
 async def _api_today(request):
@@ -8787,8 +8999,56 @@ async def _api_voice(request):
 def diary_payload(cid, prof=None, d=None):
     prof = prof if prof is not None else profile_of(row(cid))
     tg = profile_kcal(prof) if prof else None
-    return {"meals": meals_of(cid, d), "totals": diary_totals(cid, d), "date": (d or dtoday().isoformat()),
-            "target": ({"kcal": tg[0], "protein": tg[1], "fat": tg[2], "carbs": tg[3]} if tg else None)}
+    meals = meals_of(cid, d)
+    return {
+        "meals": meals,
+        "totals": _diary_totals_from_meals(meals),
+        "date": (d or dtoday().isoformat()),
+        "target": (
+            {"kcal": tg[0], "protein": tg[1], "fat": tg[2], "carbs": tg[3]}
+            if tg else None
+        ),
+    }
+
+
+def _diary_payload_with_recent(cid, selected_date=None):
+    """Build the diary off-loop; initial week load uses one SQLite read."""
+    if selected_date:
+        return diary_payload(cid, d=selected_date)
+    today = dtoday()
+    days = [(today - timedelta(days=offset)).isoformat() for offset in range(8)]
+    prof = profile_of(row(cid))
+    tg = profile_kcal(prof) if prof else None
+    target = (
+        {"kcal": tg[0], "protein": tg[1], "fat": tg[2], "carbs": tg[3]}
+        if tg else None
+    )
+    c = db()
+    rows = c.execute(
+        """SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,
+                  slot,fclass,slot_guessed,d
+           FROM meals
+           WHERE chat_id=? AND d>=? AND d<=?
+           ORDER BY d,ts""",
+        (cid, days[-1], days[0]),
+    ).fetchall()
+    c.close()
+    grouped = {day: [] for day in days}
+    for item in rows:
+        grouped.setdefault(item[13], []).append(_meal_row_payload(item))
+
+    def payload_for(day):
+        meals = grouped.get(day, [])
+        return {
+            "meals": meals,
+            "totals": _diary_totals_from_meals(meals),
+            "date": day,
+            "target": target,
+        }
+
+    payload = payload_for(days[0])
+    payload["recent"] = {day: payload_for(day) for day in days[1:]}
+    return payload
 
 def diary_reco_summary(cid):
     prof = profile_of(row(cid)); tg = profile_kcal(prof) if prof else None
@@ -9756,20 +10016,7 @@ def _read_upload(field):
     return bytes(raw), (getattr(field, "filename", "food.jpg") or "food.jpg")
 
 async def _api_food_photo(request):
-    acquired = await _acquire_food_vision_slot()
-    if not acquired:
-        return _cors(web.json_response(
-            {
-                "ok": False,
-                "error": "busy",
-                "message": "Сейчас разбираю много фотографий. Попробуй ещё раз через минуту.",
-            },
-            status=429,
-        ))
-    try:
-        return await _api_food_photo_bounded(request)
-    finally:
-        _release_food_vision_slot()
+    return await _api_food_photo_bounded(request)
 
 
 def _prepare_food_photo(cid):
@@ -9819,17 +10066,37 @@ async def _api_food_photo_bounded(request):
         return _cors(web.json_response({"ok": False, "message": "Пустое фото."}))
     if len(raw) > 12 * 1024 * 1024:
         return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
-    usage = []
-    try:
-        parsed = await llm_to_thread(
-            cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
+    acquired = await _acquire_food_vision_slot()
+    if not acquired:
+        ev(
+            cid, "fallback", meta="food_vision_busy",
             user_generation=generation,
         )
-    except Exception as e:
-        log.warning("food_photo analyze %s: %s", cid, e); parsed = None
-    return await asyncio.to_thread(
-        _finalize_food_photo, cid, generation, parsed, usage, prof
-    )
+        return _cors(web.json_response(
+            {
+                "ok": False,
+                "error": "busy",
+                "message": (
+                    "Сейчас разбираю много фотографий, поэтому фото не сохранила. "
+                    "Попробуй ещё раз через минуту или добавь приём текстом."
+                ),
+            },
+            status=429,
+        ))
+    usage = []
+    try:
+        try:
+            parsed = await llm_to_thread(
+                cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
+                user_generation=generation,
+            )
+        except Exception as e:
+            log.warning("food_photo analyze %s: %s", cid, e); parsed = None
+        return await asyncio.to_thread(
+            _finalize_food_photo, cid, generation, parsed, usage, prof
+        )
+    finally:
+        _release_food_vision_slot()
 
 async def _api_food_text(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -9988,13 +10255,7 @@ async def _api_diary(request):
             _dd = date.fromisoformat(_d)
             if _dd > dtoday() or (dtoday() - _dd).days > 92: _d = None
         except Exception: _d = None
-    payload = diary_payload(cid, d=_d)
-    if not _d:
-        prof = profile_of(row(cid))
-        payload["recent"] = {
-            day.isoformat(): diary_payload(cid, prof=prof, d=day.isoformat())
-            for day in (dtoday() - timedelta(days=offset) for offset in range(1, 8))
-        }
+    payload = await asyncio.to_thread(_diary_payload_with_recent, cid, _d)
     return _cors(web.json_response(payload))
 
 async def _api_diary_del(request):
@@ -10630,12 +10891,16 @@ async def _health(request):
             "ai_background_concurrency_limit": _AI_BACKGROUND_CONCURRENCY,
             "ai_background_active": (
                 _AI_BACKGROUND_CONCURRENCY
-                - int(getattr(_AI_BACKGROUND_SEM, "_value", 0))
+                - int(getattr(
+                    _AI_BACKGROUND_SEM, "_value", _AI_BACKGROUND_CONCURRENCY
+                ))
             ),
             "food_vision_concurrency_limit": _FOOD_VISION_CONCURRENCY,
             "food_vision_active": (
                 _FOOD_VISION_CONCURRENCY
-                - int(getattr(_FOOD_VISION_SEM, "_value", 0))
+                - int(getattr(
+                    _FOOD_VISION_SEM, "_value", _FOOD_VISION_CONCURRENCY
+                ))
             ),
             "food_vision_waiting": _FOOD_VISION_WAITERS,
         },

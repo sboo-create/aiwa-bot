@@ -429,7 +429,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
         source = Path(bot.__file__).read_text(encoding="utf-8")
         telegram_path = source.split(
             "async def _on_photo_bounded", 1
-        )[1].split("# Сводка дня", 1)[0]
+        )[1].split("async def handle_text", 1)[0]
         web_path = source.split(
             "async def _api_food_photo_bounded", 1
         )[1].split("async def _api_food_text", 1)[0]
@@ -497,6 +497,31 @@ class SecurityAnalyticsTests(unittest.TestCase):
         ).fetchone()[0]
         conn.close()
         self.assertEqual(status, "queued")
+
+    def test_terminal_today_job_redacts_health_payload_and_result(self):
+        cid = 922
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="male", height=178, weight=81, age=41)
+        queued = bot._enqueue_today_job(cid, bot.row(cid), None)
+        claimed = bot._claim_ai_job()
+
+        bot._finish_ai_job(
+            claimed, "completed",
+            {"summary": "private health summary", "suggestions": []},
+        )
+
+        conn = sqlite3.connect(bot.DB)
+        payload_json, result_json = conn.execute(
+            "SELECT payload_json,result_json FROM ai_jobs WHERE job_id=?",
+            (queued["job_id"],),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(payload_json, "{}")
+        self.assertIsNone(result_json)
+
+    def test_events_v2_day_boundary_is_utc_and_legacy_is_local_naive(self):
+        self.assertTrue(bot.today_start_iso().endswith("+00:00"))
+        self.assertNotIn("+", bot.legacy_today_start_iso())
 
     def test_today_queue_limit_returns_fast_capacity_fallback(self):
         cid = 912

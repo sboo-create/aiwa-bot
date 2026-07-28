@@ -940,6 +940,41 @@ class SoniaJournalV2Tests(unittest.TestCase):
         self.assertTrue(resolve.await_args.kwargs["food_prompt_mode"])
         self.assertEqual(dispatch.await_args.args[4], "logmeal")
 
+    def test_food_prompt_non_food_message_falls_through_to_normal_router(self):
+        now = bot.datetime.now(bot.TZ).isoformat()
+        bot.upsert(
+            self.cid, mode="male", state="await_food_text", pending_date=now
+        )
+        text = "У меня сильная боль в груди, что делать?"
+        update = SimpleNamespace(
+            update_id=5567,
+            effective_chat=SimpleNamespace(id=self.cid),
+            message=SimpleNamespace(entities=[], reply_text=mock.AsyncMock()),
+        )
+        context = SimpleNamespace(
+            bot=SimpleNamespace(send_chat_action=mock.AsyncMock()),
+        )
+        with (
+            mock.patch.object(
+                bot, "resolve_semantic_journal_action",
+                new=mock.AsyncMock(side_effect=[None, None]),
+            ),
+            mock.patch.object(
+                bot, "think_llm",
+                new=mock.AsyncMock(return_value="Обычный безопасный ответ."),
+            ) as think,
+            mock.patch.object(
+                bot, "send_answer",
+                new=mock.AsyncMock(return_value="normal-router"),
+            ) as send,
+        ):
+            result = asyncio.run(bot.handle_text(update, context, text))
+
+        self.assertEqual(result, "normal-router")
+        self.assertIsNone(bot.row(self.cid)["state"])
+        think.assert_awaited_once()
+        send.assert_awaited_once()
+
     def test_food_prompt_still_rejects_planned_meals(self):
         text = "На ужин планирую пасту с курицей"
         classified = route(

@@ -29,6 +29,14 @@ automatic restart and strict CPU/memory/task limits. AIWA only `Wants` the
 tunnel: if egress is temporarily unavailable, ordinary screens and `/health`
 remain available while durable AI jobs retry.
 
+The service-specific hosts file changes only routing: both clients still open
+TLS for the public names `api.telegram.org` and `openrouter.ai`, validate the
+public certificate chain and send secrets only after that validation succeeds.
+The local TCP listeners do not terminate TLS and possess no provider private
+keys, so replacing either listener cannot silently decrypt a bot token,
+OpenRouter key or request body. Keep the listeners bound to loopback, the hosts
+file read-only inside the service, and certificate verification enabled.
+
 `providers.env` must contain credentials only. In particular it must not
 override `OPENROUTER_BASE_URL` or model ids from `config/app.env`.
 

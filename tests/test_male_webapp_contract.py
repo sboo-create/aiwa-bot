@@ -13,6 +13,7 @@ os.environ.setdefault("BOT_TOKEN", "123456:test-token")
 os.environ.setdefault("AIWA_ANALYTICS_SALT", "test-analytics-salt")
 
 import aiwa_bot as bot
+import llm
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,7 @@ class MaleWebappContractTests(unittest.TestCase):
         bot.DB = os.path.join(self.tmp.name, "test.db")
         self.cid = 771
         bot._activate_user(self.cid)
+        bot._TODAY_CACHE.clear()
         bot.upsert(
             self.cid,
             mode="male",
@@ -49,6 +51,7 @@ class MaleWebappContractTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        bot._TODAY_CACHE.clear()
         bot.DB = self.old_db
         self.tmp.cleanup()
 
@@ -98,6 +101,94 @@ class MaleWebappContractTests(unittest.TestCase):
         self.assertTrue(male)
         self.assertIsNone(status)
         self.assertEqual(cycles, [])
+
+    def test_male_today_cache_is_repaired_without_cycle_content(self):
+        stale = {
+            "summary": "День 12, фолликулярная фаза, растёт эстроген.",
+            "suggestions": ["Как отследить овуляцию?"],
+        }
+        bot.dc_put(self.cid, "today", stale, "male")
+
+        user, status, _, note = bot._api_today_lookup(self.cid)
+
+        self.assertEqual(user["mode"], "male")
+        self.assertIsNone(status)
+        visible = json.dumps(note, ensure_ascii=False).lower()
+        for forbidden in ("цикл", "фоллик", "овуляц", "эстроген"):
+            self.assertNotIn(forbidden, visible)
+        self.assertEqual(bot.dc_get(self.cid, "today", "male"), note)
+
+    def test_male_today_prompt_explicitly_forbids_cycle_content(self):
+        captured = {}
+
+        def fake_call(messages, **kwargs):
+            captured["messages"] = messages
+            return '{"summary":"Энергия стабильна.","suggestions":["Как восстановиться?"]}'
+
+        with mock.patch.object(llm, "_call", side_effect=fake_call):
+            note = llm.today_note(
+                None, {"age": 41, "male": True}, mode="male", usage=[]
+            )
+
+        prompt = " ".join(item["content"] for item in captured["messages"]).lower()
+        self.assertIn("мужской профиль", prompt)
+        self.assertIn("любые сведения о менструальном цикле запрещены", prompt)
+        self.assertEqual(note["summary"], "Энергия стабильна.")
+
+    def test_male_training_prompts_exclude_cycle_personalization(self):
+        captured = []
+
+        def fake_call(messages, **kwargs):
+            captured.append(" ".join(item["content"] for item in messages).lower())
+            if "строго json" in captured[-1]:
+                return json.dumps({
+                    "level": "Умеренная",
+                    "duration": "30 минут",
+                    "summary": "Сегодня подойдёт ходьба.",
+                    "why": "Нагрузка соответствует восстановлению.",
+                    "options": [],
+                    "avoid": "Острая боль.",
+                    "recovery": "Сон и вода.",
+                }, ensure_ascii=False)
+            return (
+                "Разбор: Нагрузка соответствует восстановлению.\n"
+                "Что добавить: Мобильность.\n"
+                "Следующая нагрузка: Спокойная ходьба."
+            )
+
+        with mock.patch.object(llm, "_call", side_effect=fake_call):
+            llm.training_today(
+                None, {"age": 41, "male": True}, mode="male", usage=[]
+            )
+            llm.training_review(
+                {"type": "Силовая", "items": [], "duration": "40 минут"},
+                mode="male", profile={"age": 41, "male": True}, usage=[],
+            )
+
+        self.assertEqual(len(captured), 2)
+        for prompt in captured:
+            self.assertIn("мужск", prompt)
+            self.assertIn("женская физиология запрещена", prompt)
+
+    def test_male_meal_replacement_never_invents_follicular_context(self):
+        captured = {}
+
+        def fake_call(messages, **kwargs):
+            captured["prompt"] = " ".join(
+                item["content"] for item in messages
+            ).lower()
+            return '{"dish":"Омлет с овощами","time":"08:00","kcal":"420 ккал"}'
+
+        with mock.patch.object(llm, "_call", side_effect=fake_call):
+            meal = llm.replace_meal(
+                None, 0, "каша", {"age": 41, "male": True},
+                (2200, 130, 70, 250), [], "male",
+            )
+
+        self.assertEqual(meal["dish"], "Омлет с овощами")
+        self.assertIn("мужской профиль", captured["prompt"])
+        self.assertNotIn("фолликуляр", captured["prompt"])
+        self.assertNotIn("день  цикла", captured["prompt"])
 
     def test_initial_diary_payload_prefetches_previous_week(self):
         yesterday = (bot.dtoday() - timedelta(days=1)).isoformat()
@@ -151,6 +242,15 @@ class MaleWebappStaticContractTests(unittest.TestCase):
             bundle,
         )
 
+    def test_mascot_has_an_unclipped_layout_contract(self):
+        css = V162_CSS.read_text(encoding="utf-8")
+
+        self.assertIn("grid-template-columns: 52px minmax(0, 1fr)", css)
+        self.assertIn("height: 58px", css)
+        self.assertIn(".aiwa-nav-mascot .aiwa-sequence img", css)
+        self.assertIn("object-fit: contain", css)
+        self.assertIn("transform: none", css)
+
     def test_webapp_uses_prefetched_diary_for_recent_days(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
 
@@ -166,7 +266,7 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn('deslop-main-aiwa-v162.js', wrapper)
         self.assertIn('AiwaWebUiChart-aiwa-v162.js', bundle)
         self.assertIn('deslop-main-aiwa-v162.js', chart_bundle)
-        self.assertIn('main.js?v=r16', index)
+        self.assertIn('main.js?v=r17', index)
         self.assertIn(
             'import "./deslop-main-aiwa-v162.js";',
             wrapper,
