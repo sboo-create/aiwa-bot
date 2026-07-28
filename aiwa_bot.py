@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue
+import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue, atexit
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
 from difflib import SequenceMatcher
@@ -12,8 +12,11 @@ def _load_secret_file(env_name):
     path = os.environ.get(env_name + "_FILE", "").strip()
     if not path:
         return
-    with open(path, "r", encoding="utf-8") as secret_file:
-        value = secret_file.read().strip()
+    try:
+        with open(path, "r", encoding="utf-8") as secret_file:
+            value = secret_file.read().strip()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read {env_name}_FILE at {path}") from exc
     if value:
         os.environ[env_name] = value
 
@@ -107,7 +110,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v165-stable-mascot-report")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v166-review-hardening")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 AIWA_TELEGRAM_API_ORIGIN = os.environ.get(
@@ -262,10 +265,14 @@ def _connect_db():
     return c
 
 def _migrate_db():
-    """Run schema creation/migrations once for a database path."""
+    """Run schema creation/migrations under SQLite's cross-process write lock."""
     c = _connect_db()
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
+    # The Python lock below coordinates threads in this process. BEGIN IMMEDIATE
+    # additionally serializes schema work against a concurrently starting
+    # process (for example an overlapping Railway replacement).
+    c.execute("BEGIN IMMEDIATE")
     c.execute("""CREATE TABLE IF NOT EXISTS users(chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
         send_time TEXT DEFAULT '08:00', modules TEXT DEFAULT 'phase,general,food,training',
         state TEXT, pending_date TEXT, created TEXT)""")
@@ -577,6 +584,20 @@ def flush_event_writer(timeout=5):
     while _EVENT_WRITE_Q.unfinished_tasks and time.monotonic() < deadline:
         time.sleep(0.01)
     return _EVENT_WRITE_Q.unfinished_tasks == 0
+
+def stop_event_writer(timeout=10):
+    """Stop accepting queued writes and drain the writer before clean exit."""
+    global _EVENT_WRITER_ACTIVE
+    _EVENT_WRITER_ACTIVE = False
+    _EVENT_WRITER_STOP.set()
+    thread = _EVENT_WRITER_THREAD
+    if thread and thread.is_alive():
+        thread.join(max(0, timeout))
+    return _EVENT_WRITE_Q.unfinished_tasks == 0 and not (
+        thread and thread.is_alive()
+    )
+
+atexit.register(stop_event_writer)
 
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None,
        user_generation=None):
@@ -1239,7 +1260,11 @@ def last_hint(cid):
     return "; ".join(parts) or None
 def all_users(include_synthetic=False):
     c = db()
-    synthetic_min = int(os.environ.get("AIWA_SYNTHETIC_USER_ID_MIN", "0") or "0")
+    try:
+        synthetic_min = int(os.environ.get("AIWA_SYNTHETIC_USER_ID_MIN", "0") or "0")
+    except (TypeError, ValueError):
+        synthetic_min = 0
+        log.error("invalid AIWA_SYNTHETIC_USER_ID_MIN; synthetic filtering disabled")
     rows = c.execute("""SELECT chat_id FROM users
         WHERE push_suppressed_at IS NULL
           AND ((last_period IS NOT NULL AND cycle_len IS NOT NULL)
@@ -6250,8 +6275,6 @@ async def on_photo(update, context):
 
 async def _on_photo_bounded(update, context):
     cid = update.effective_chat.id; u = row(cid)
-    if cid in ANNOUNCE_WAIT:
-        return await _announce_capture(update, context, cid)
     if not is_onboarded(u):
         return await update.message.reply_text("Сначала настрой Айву: /start.")
     generation = _user_generation(cid)
@@ -6267,11 +6290,10 @@ async def _on_photo_bounded(update, context):
         return await update.message.reply_text("Не смогла скачать фото, попробуй ещё раз.")
     prof = profile_of(u); usage = []
     try:
-        async with _AI_BACKGROUND_SEM:
-            parsed = await llm_to_thread(
-                cid, "food_vision", L.analyze_food, bytes(ba), "food.jpg",
-                prof, usage, user_generation=generation,
-            )
+        parsed = await llm_to_thread(
+            cid, "food_vision", L.analyze_food, bytes(ba), "food.jpg",
+            prof, usage, user_generation=generation,
+        )
     except Exception as e:
         log.warning("on_photo analyze %s: %s", cid, e); parsed = None
     if not _user_write_allowed(cid, generation):
@@ -9701,11 +9723,10 @@ async def _api_food_photo_bounded(request):
         return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
     usage = []
     try:
-        async with _AI_BACKGROUND_SEM:
-            parsed = await llm_to_thread(
-                cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
-                user_generation=generation,
-            )
+        parsed = await llm_to_thread(
+            cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
+            user_generation=generation,
+        )
     except Exception as e:
         log.warning("food_photo analyze %s: %s", cid, e); parsed = None
     return await asyncio.to_thread(
@@ -10620,7 +10641,16 @@ async def run_all():
     await app.initialize(); await on_startup(app); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     global APP_READY; APP_READY = True
     log.info("AIWA bot + web on :%s", port)
-    await asyncio.Event().wait()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        APP_READY = False
+        drained = await asyncio.to_thread(stop_event_writer, 10)
+        if not drained:
+            log.error(
+                "events_v2 writer did not drain before shutdown: pending=%s",
+                _EVENT_WRITE_Q.unfinished_tasks,
+            )
 
 def main():
     asyncio.run(run_all())

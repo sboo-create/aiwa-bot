@@ -193,6 +193,95 @@ class SecurityAnalyticsTests(unittest.TestCase):
             self.assertNotIn(synthetic_cid, bot.all_users())
             self.assertIn(synthetic_cid, bot.all_users(include_synthetic=True))
 
+    def test_invalid_synthetic_user_threshold_fails_open_for_real_users(self):
+        cid = 916
+        bot._activate_user(cid)
+        bot.upsert(cid, mode="male")
+
+        with mock.patch.dict(
+            os.environ,
+            {"AIWA_SYNTHETIC_USER_ID_MIN": "not-a-number"},
+        ):
+            self.assertIn(cid, bot.all_users())
+
+    def test_secret_file_error_names_the_broken_setting(self):
+        with mock.patch.dict(
+            os.environ,
+            {"AIWA_TEST_SECRET_FILE": "/definitely/missing/aiwa-secret"},
+            clear=False,
+        ):
+            os.environ.pop("AIWA_TEST_SECRET", None)
+            with self.assertRaisesRegex(
+                RuntimeError, "cannot read AIWA_TEST_SECRET_FILE"
+            ):
+                bot._load_secret_file("AIWA_TEST_SECRET")
+
+    def test_event_writer_stop_drains_queued_events(self):
+        original_queue = bot._EVENT_WRITE_Q
+        original_thread = bot._EVENT_WRITER_THREAD
+        original_active = bot._EVENT_WRITER_ACTIVE
+        original_stop = bot._EVENT_WRITER_STOP
+        written = []
+        try:
+            bot._EVENT_WRITE_Q = bot.queue.Queue(maxsize=10)
+            bot._EVENT_WRITER_THREAD = None
+            bot._EVENT_WRITER_ACTIVE = False
+            bot._EVENT_WRITER_STOP = bot.threading.Event()
+            with mock.patch.object(
+                bot,
+                "_write_event_batch",
+                side_effect=lambda items: written.extend(items) or len(items),
+            ):
+                bot.start_event_writer()
+                self.assertTrue(bot.ev(cid=917, action="test"))
+                self.assertTrue(bot.stop_event_writer(timeout=2))
+            self.assertEqual(len(written), 1)
+            self.assertEqual(bot._EVENT_WRITE_Q.unfinished_tasks, 0)
+        finally:
+            bot._EVENT_WRITE_Q = original_queue
+            bot._EVENT_WRITER_THREAD = original_thread
+            bot._EVENT_WRITER_ACTIVE = original_active
+            bot._EVENT_WRITER_STOP = original_stop
+
+    def test_schema_migration_takes_sqlite_write_lock_before_ddl(self):
+        class FakeConnection:
+            def __init__(self):
+                self.statements = []
+                self.committed = False
+
+            def execute(self, statement, params=()):
+                self.statements.append(statement)
+                return self
+
+            def commit(self):
+                self.committed = True
+
+        connection = FakeConnection()
+        with mock.patch.object(bot, "_connect_db", return_value=connection), \
+                mock.patch.object(bot.A2, "init_schema"):
+            returned = bot._migrate_db()
+
+        begin_index = connection.statements.index("BEGIN IMMEDIATE")
+        first_ddl_index = next(
+            index for index, statement in enumerate(connection.statements)
+            if statement.startswith("CREATE TABLE")
+        )
+        self.assertLess(begin_index, first_ddl_index)
+        self.assertTrue(connection.committed)
+        self.assertIs(returned, connection)
+
+    def test_food_vision_uses_only_its_dedicated_concurrency_gate(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        telegram_path = source.split(
+            "async def _on_photo_bounded", 1
+        )[1].split("# Сводка дня", 1)[0]
+        web_path = source.split(
+            "async def _api_food_photo_bounded", 1
+        )[1].split("async def _api_food_text", 1)[0]
+
+        self.assertNotIn("_AI_BACKGROUND_SEM", telegram_path)
+        self.assertNotIn("_AI_BACKGROUND_SEM", web_path)
+
     def test_today_queue_accepts_1000_unique_jobs_and_deduplicates_reopens(self):
         first_cid = 790_099_000_000
         conn = bot.db()
