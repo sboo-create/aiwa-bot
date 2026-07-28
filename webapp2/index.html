@@ -514,7 +514,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 
 /* The main screen is styled by the exact Deslop package and src/deslop-main.css. */
 </style>
-<link rel="stylesheet" href="/assets/deslop/main.css?v=r8">
+<link rel="stylesheet" href="/assets/deslop/main.css?v=r9">
 </head>
 <body class="apple">
 <div id="app" data-component="Page">
@@ -529,7 +529,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 <div id="hub" class="hubsheet hidden"></div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="cmic" aria-label="Голосом">🎤</button><button id="csend" aria-label="Отправить">→</button></div>
 <div id="tabs" aria-label="Разделы приложения"></div><input type="file" id="foodfile" accept="image/*" style="display:none">
-<script type="module" src="/assets/deslop/main.js?v=r10"></script>
+<script type="module" src="/assets/deslop/main.js?v=r11"></script>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp;
 const LOCAL_HOST=/^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/;
@@ -912,6 +912,24 @@ function renderPaperHome(el){
   updateHomeBtn();
   if(!delayed&&!SELECTED_DAY)api('/api/today',{}).then(function(n){if(n&&n.summary){TODAY_NOTE=n.summary;if(!SELECTED_DAY&&window.AiwaDeslop)window.AiwaDeslop.patchHome({aiText:n.summary});}}).catch(function(){});
 }
+var TODAY_POLL_TIMER=null;
+function loadTodayNote(tries){
+  api('/api/today',{}).then(function(n){
+    if(!n||n.error)return;
+    var av=document.querySelector('#scr-today .ayva-txt');
+    if(n.summary&&av)av.textContent=n.summary;
+    var tc2=document.getElementById('tchips');
+    if(tc2&&n.suggestions&&n.suggestions.length){
+      tc2.innerHTML='';
+      n.suggestions.forEach(function(c){var b=document.createElement('button');b.className='chip';b.setAttribute('data-component','RegularButton');b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc2.appendChild(b);});
+    }
+    if(n.refreshing&&tries<30){
+      clearTimeout(TODAY_POLL_TIMER);
+      var wait=((n.job&&n.job.eta_seconds)||5)*1000;
+      TODAY_POLL_TIMER=setTimeout(function(){loadTodayNote(tries+1);},Math.max(3000,Math.min(15000,wait)));
+    }
+  }).catch(function(){});
+}
 function renderToday(){
   var el=document.getElementById('scr-today');
   var keepsPaperHome=!!window.AiwaDeslop;
@@ -944,7 +962,7 @@ function renderToday(){
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>📲 Добавить Айву на экран телефона</button>";html+="<div class='foot'>Отмечай месячные и симптомы, чтобы прогноз цикла и рекомендации становились точнее.</div>";
   el.innerHTML=html;updateHomeBtn();
   var tc=document.getElementById('tchips');(CHIPS[ph]||[]).forEach(function(c){var b=document.createElement('button');b.className='chip';b.setAttribute('data-component','RegularButton');b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc.appendChild(b);});
-  if(!delayed){api('/api/today',{}).then(function(n){if(!n||n.error)return;var av=document.querySelector('#scr-today .ayva-txt');if(n.summary&&av)av.textContent=n.summary;var tc2=document.getElementById('tchips');if(tc2&&n.suggestions&&n.suggestions.length){tc2.innerHTML='';n.suggestions.forEach(function(c){var b=document.createElement('button');b.className='chip';b.setAttribute('data-component','RegularButton');b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc2.appendChild(b);});}}).catch(function(){});}
+  if(!delayed){loadTodayNote(0);}
   syncMarks();
   STARTS=buildStarts();calOffset=0;
   document.getElementById('calPrev').onclick=function(){calOffset--;drawCal();haptic("selection");};

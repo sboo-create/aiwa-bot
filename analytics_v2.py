@@ -1,9 +1,4 @@
-"""Privacy-safe, append-only analytics storage for AIWA.
-
-The legacy ``events`` table remains the source for the current dashboard while
-the application dual-writes to these tables.  This makes the migration
-additive and safe to roll back.
-"""
+"""Privacy-safe, append-only analytics storage for AIWA."""
 import hashlib
 import hmac
 import json
@@ -11,12 +6,15 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 
 
 log = logging.getLogger("aiwa.analytics")
 _warned_salt = False
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_PATHS = set()
 
 
 SCHEMA = (
@@ -101,6 +99,30 @@ def init_schema(conn):
             pass
 
 
+def ensure_schema(db_path):
+    """Run analytics DDL once per process/database instead of on every event."""
+    target = os.path.abspath(db_path)
+    if target in _SCHEMA_PATHS:
+        return
+    with _SCHEMA_LOCK:
+        if target in _SCHEMA_PATHS:
+            return
+        conn = sqlite3.connect(target, timeout=30)
+        try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            init_schema(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        _SCHEMA_PATHS.add(target)
+
+
+def mark_schema_ready(db_path):
+    """Mark a schema initialized by the application's central migration."""
+    with _SCHEMA_LOCK:
+        _SCHEMA_PATHS.add(os.path.abspath(db_path))
+
+
 def _analytics_secret():
     global _warned_salt
     value = os.environ.get("AIWA_ANALYTICS_SALT")
@@ -175,9 +197,9 @@ def write_allowed(conn, chat_id=None, key=None, generation=None):
 
 
 def write_allowed_path(db_path, chat_id, generation=None):
+    ensure_schema(db_path)
     conn = sqlite3.connect(db_path, timeout=30)
     try:
-        init_schema(conn)
         return write_allowed(conn, chat_id=chat_id, generation=generation)
     finally:
         conn.close()
@@ -236,6 +258,10 @@ def _legacy_event_name(action, meta):
         return "tool_execution_completed", None
     if action == "tool_outcome":
         return "tool_outcome_completed", None
+    if action == "fallback":
+        return "fallback_served", None
+    if action == "ai_job":
+        return "ai_job_status_changed", None
     if action in {"manual", "suggest"}:
         return "legacy_message_interaction", None
     if action == "tokens":
@@ -301,8 +327,8 @@ def _epoch(value):
         return datetime.now(timezone.utc).timestamp()
 
 
-def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_version=None,
-                        request_id=None, calls=0):
+def insert_event_v2(conn, chat_id, action, meta=None, latency_ms=0, app_version=None,
+                    request_id=None, calls=0):
     if not write_allowed(conn, chat_id=chat_id):
         return None
     event_name, screen = _legacy_event_name(action, meta)
@@ -337,6 +363,8 @@ def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_vers
     elif action == "feedback_prompt":
         answer_id = safe_id(parts[0] if parts else "", 40)
         if answer_id: props["answer_id"] = answer_id
+        channel = safe_id(parts[1] if len(parts) > 1 else "", 24)
+        if channel: props["channel"] = channel
     elif action == "feedback":
         rating = safe_id(parts[0] if parts else "", 12)
         answer_id = safe_id(parts[1] if len(parts) > 1 else "", 40)
@@ -361,6 +389,20 @@ def insert_legacy_event(conn, chat_id, action, meta=None, latency_ms=0, app_vers
             props["status"] = status
         if outcome_type:
             props["outcome_type"] = outcome_type
+    elif action == "fallback":
+        reason = safe_id(text, 80)
+        if reason:
+            props["reason"] = reason
+    elif action == "ai_job":
+        job_status = safe_id(parts[0] if parts else "", 24)
+        kind = safe_id(parts[1] if len(parts) > 1 else "", 48)
+        reason = safe_id(parts[2] if len(parts) > 2 else "", 48)
+        if job_status:
+            props["job_status"] = job_status
+        if kind:
+            props["job_kind"] = kind
+        if reason:
+            props["reason"] = reason
     event_id = str(uuid.uuid4())
     occurred = datetime.now(timezone.utc)
     key = user_key(chat_id)
@@ -397,8 +439,8 @@ def persist_llm_call(db_path, record):
     """Usage sink registered by llm.py; failures never break a user response."""
     conn = None
     try:
+        ensure_schema(db_path)
         conn = sqlite3.connect(db_path, timeout=30)
-        init_schema(conn)
         if not write_allowed(conn, key=record.get("user_key"),
                              generation=record.get("user_generation")):
             return
@@ -449,9 +491,9 @@ def persist_llm_call(db_path, record):
 
 def seed_traction_outbox(db_path):
     """Queue existing v2 history once; acknowledged ids are never re-queued."""
+    ensure_schema(db_path)
     conn = sqlite3.connect(db_path, timeout=30)
     try:
-        init_schema(conn)
         for event_id, occurred_at, key, name, screen, props_json in conn.execute(
                 "SELECT event_id,occurred_at,user_key,event_name,screen,properties_json FROM events_v2"):
             try: props = json.loads(props_json or "{}")
@@ -486,9 +528,9 @@ def seed_traction_outbox(db_path):
 
 
 def traction_batch(db_path, limit=200):
+    ensure_schema(db_path)
     conn = sqlite3.connect(db_path, timeout=30)
     try:
-        init_schema(conn)
         rows = conn.execute(
             "SELECT event_id,occurred_at,device_id,name,properties_json,payload_version FROM traction_outbox "
             "ORDER BY occurred_at,event_id LIMIT ?", (max(1, min(int(limit), 500)),)
@@ -509,9 +551,10 @@ def traction_batch(db_path, limit=200):
 def traction_ack(db_path, event_ids):
     ids = [str(x) for x in event_ids if x]
     if not ids: return
+    ensure_schema(db_path)
     conn = sqlite3.connect(db_path, timeout=30)
     try:
-        init_schema(conn); now = datetime.now(timezone.utc).timestamp()
+        now = datetime.now(timezone.utc).timestamp()
         versions = {}
         for event_id in ids:
             row = conn.execute(

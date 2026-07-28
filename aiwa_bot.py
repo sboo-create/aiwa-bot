@@ -1,9 +1,24 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math
+import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta
 from difflib import SequenceMatcher
+
+def _load_secret_file(env_name):
+    """Load a secret from a systemd/Docker credential without committing it."""
+    if os.environ.get(env_name):
+        return
+    path = os.environ.get(env_name + "_FILE", "").strip()
+    if not path:
+        return
+    with open(path, "r", encoding="utf-8") as secret_file:
+        value = secret_file.read().strip()
+    if value:
+        os.environ[env_name] = value
+
+_load_secret_file("BOT_TOKEN")
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -13,7 +28,7 @@ except ImportError:
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, WebAppInfo, MenuButtonWebApp, BotCommand
 from telegram.ext import (Application, CommandHandler, MessageHandler, TypeHandler,
-                          CallbackQueryHandler, ContextTypes, filters)
+                          CallbackQueryHandler, ContextTypes, AIORateLimiter, filters)
 from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter, Forbidden
 from aiohttp import web
 import requests
@@ -92,9 +107,12 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-28-v148-structured-food-journal"
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v159-load-safety-main")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
+AIWA_TELEGRAM_API_ORIGIN = os.environ.get(
+    "AIWA_TELEGRAM_API_ORIGIN", "https://api.telegram.org"
+).rstrip("/")
 APP_BUTTON_TEXT = "Открыть Айву"
 APP_MENU_BUTTON_TEXT = "Айва"
 APP_CTA_HTML = "<b>Приложение Айвы</b>: календарь, симптомы, питание с заменой блюд, нагрузка и статистика. Открой кнопкой ниже."
@@ -235,9 +253,19 @@ GUIDES = [{"id": "norm", "title": "Норма цикла: длина, фазы �
            "kw": ["нормальн", "норма цикл", "что считается норм", "сколько длит", "длина цикл", "цикл норм", "это нормально"]}]
 
 # ---------- DB ----------
-def db():
+_DB_SCHEMA_LOCK = threading.Lock()
+_DB_SCHEMA_PATH = None
+
+def _connect_db():
     c = sqlite3.connect(DB, timeout=30)
+    c.execute("PRAGMA busy_timeout=30000")
+    return c
+
+def _migrate_db():
+    """Run schema creation/migrations once for a database path."""
+    c = _connect_db()
     c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA synchronous=NORMAL")
     c.execute("""CREATE TABLE IF NOT EXISTS users(chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
         send_time TEXT DEFAULT '08:00', modules TEXT DEFAULT 'phase,general,food,training',
         state TEXT, pending_date TEXT, created TEXT)""")
@@ -295,6 +323,25 @@ def db():
         created_at TEXT NOT NULL,
         reversed_at TEXT,
         PRIMARY KEY(chat_id, mutation_key))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS ai_jobs(
+        job_id TEXT PRIMARY KEY,
+        chat_id INTEGER NOT NULL,
+        user_generation INTEGER NOT NULL DEFAULT 0,
+        kind TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL UNIQUE,
+        priority INTEGER NOT NULL DEFAULT 100,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        result_json TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error_class TEXT,
+        created_at TEXT NOT NULL,
+        available_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        expires_at TEXT,
+        reported_cost REAL DEFAULT 0
+    )""")
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
                 "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
@@ -317,7 +364,9 @@ def db():
                 "CREATE INDEX IF NOT EXISTS ix_events_cid_ts ON events(chat_id, ts)",
                 "CREATE INDEX IF NOT EXISTS ix_meals_cid_d ON meals(chat_id, d)",
                 "CREATE INDEX IF NOT EXISTS ix_workouts_cid_d ON workouts(chat_id, d)",
-                "CREATE INDEX IF NOT EXISTS ix_prepared_summary_date ON prepared_summaries(summary_date)"):
+                "CREATE INDEX IF NOT EXISTS ix_prepared_summary_date ON prepared_summaries(summary_date)",
+                "CREATE INDEX IF NOT EXISTS ix_ai_jobs_pick ON ai_jobs(status,priority,available_at,created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_ai_jobs_user_kind ON ai_jobs(chat_id,kind,created_at)"):
         try: c.execute(_ix)
         except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
@@ -330,6 +379,24 @@ def db():
         except sqlite3.OperationalError: pass
     c.commit()
     return c
+
+def ensure_db_schema():
+    """Prepare the current DB path once; normal requests never execute DDL."""
+    global _DB_SCHEMA_PATH
+    target = os.path.abspath(DB)
+    if _DB_SCHEMA_PATH == target:
+        return
+    with _DB_SCHEMA_LOCK:
+        if _DB_SCHEMA_PATH == target:
+            return
+        c = _migrate_db()
+        c.close()
+        A2.mark_schema_ready(DB)
+        _DB_SCHEMA_PATH = target
+
+def db():
+    ensure_db_schema()
+    return _connect_db()
 
 def _user_generation(cid):
     c = db()
@@ -439,29 +506,93 @@ def add_sugg(cid, q):
     sid = c.execute("INSERT INTO sugg(chat_id,q) VALUES(?,?)", (cid, q)).lastrowid; c.commit(); c.close(); return sid
 def get_sugg(sid):
     c = db(); r = c.execute("SELECT q FROM sugg WHERE id=?", (sid,)).fetchone(); c.close(); return r[0] if r else None
+
+_EVENT_WRITE_Q = queue.Queue(maxsize=max(1000, int(os.environ.get("AIWA_EVENT_QUEUE_SIZE", "50000"))))
+_EVENT_WRITER_STOP = threading.Event()
+_EVENT_WRITER_THREAD = None
+_EVENT_WRITER_ACTIVE = False
+
+def _write_event_batch(items):
+    if not items:
+        return 0
+    written = 0
+    c = db()
+    try:
+        for item in items:
+            cid, action, meta, ms, calls, request_id, generation = item
+            if not _user_write_allowed(cid, generation, conn=c):
+                continue
+            event_id = A2.insert_event_v2(
+                c, cid, action, meta=meta, latency_ms=ms,
+                app_version=AIWA_VERSION, request_id=request_id, calls=calls,
+            )
+            if event_id:
+                written += 1
+        c.commit()
+    finally:
+        c.close()
+    return written
+
+def _event_writer_loop():
+    batch_size = max(1, min(500, int(os.environ.get("AIWA_EVENT_BATCH_SIZE", "100"))))
+    flush_seconds = max(0.05, min(2.0, float(os.environ.get("AIWA_EVENT_FLUSH_SECONDS", "0.25"))))
+    while not _EVENT_WRITER_STOP.is_set() or not _EVENT_WRITE_Q.empty():
+        batch = []
+        try:
+            batch.append(_EVENT_WRITE_Q.get(timeout=flush_seconds))
+        except queue.Empty:
+            continue
+        deadline = time.monotonic() + flush_seconds
+        while len(batch) < batch_size:
+            try:
+                batch.append(_EVENT_WRITE_Q.get_nowait())
+            except queue.Empty:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+        try:
+            _write_event_batch(batch)
+        except Exception:
+            log.exception("events_v2 batch write failed")
+        finally:
+            for _ in batch:
+                _EVENT_WRITE_Q.task_done()
+
+def start_event_writer():
+    global _EVENT_WRITER_THREAD, _EVENT_WRITER_ACTIVE
+    if _EVENT_WRITER_THREAD and _EVENT_WRITER_THREAD.is_alive():
+        _EVENT_WRITER_ACTIVE = True
+        return
+    _EVENT_WRITER_STOP.clear()
+    _EVENT_WRITER_THREAD = threading.Thread(
+        target=_event_writer_loop, name="aiwa-events-v2-writer", daemon=True
+    )
+    _EVENT_WRITER_THREAD.start()
+    _EVENT_WRITER_ACTIVE = True
+
+def flush_event_writer(timeout=5):
+    if not _EVENT_WRITER_ACTIVE:
+        return True
+    deadline = time.monotonic() + max(0, timeout)
+    while _EVENT_WRITE_Q.unfinished_tasks and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return _EVENT_WRITE_Q.unfinished_tasks == 0
+
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None,
        user_generation=None):
-    """Dual-write legacy counters and privacy-preserving analytics v2."""
-    tin = tout = 0; model = None
-    if usage:
-        try: tin, tout, model = L.usage_split(usage)
-        except Exception: pass
-    c = db()
-    if user_generation is not None:
-        c.execute("BEGIN IMMEDIATE")
-    if not _user_write_allowed(cid, user_generation, conn=c):
-        c.close(); return False
-    c.execute(
-        "INSERT INTO events(chat_id,ts,action,tokens,meta,ms,n,calls,tok_in,tok_out,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (cid, datetime.now(TZ).isoformat(), action, int(tokens), meta, int(ms), int(n), int(calls),
-         int(tin), int(tout), model or None))
+    """Write privacy-preserving analytics v2 only; legacy events is read-only."""
+    item = (cid, action, meta, int(ms), int(calls), request_id, user_generation)
+    if _EVENT_WRITER_ACTIVE:
+        try:
+            _EVENT_WRITE_Q.put_nowait(item)
+            return True
+        except queue.Full:
+            log.warning("events_v2 queue full; writing synchronously")
     try:
-        A2.insert_legacy_event(c, cid, action, meta=meta, latency_ms=ms,
-                               app_version=AIWA_VERSION, request_id=request_id, calls=calls)
+        return _write_event_batch([item]) == 1
     except Exception as exc:
-        # Analytics must never break a product action; the legacy write remains.
         log.warning("events_v2 write failed: %s", exc)
-    c.commit(); c.close(); return True
+        return False
 
 async def llm_to_thread(cid, purpose, func, *args, request_id=None, user_generation=None, **kwargs):
     """Run a provider call with a shared trace id and pseudonymous user key."""
@@ -1106,11 +1237,18 @@ def last_hint(cid):
     if r[0]: parts.append(f"энергия {EN.get(r[0],'')}")
     if r[1]: parts.append("симптомы: " + ", ".join(symptoms_labels(x for x in r[1].split(",") if x)))
     return "; ".join(parts) or None
-def all_users():
-    c = db(); rows = c.execute("""SELECT chat_id FROM users
+def all_users(include_synthetic=False):
+    c = db()
+    synthetic_min = int(os.environ.get("AIWA_SYNTHETIC_USER_ID_MIN", "0") or "0")
+    rows = c.execute("""SELECT chat_id FROM users
         WHERE push_suppressed_at IS NULL
           AND ((last_period IS NOT NULL AND cycle_len IS NOT NULL)
-               OR mode IN ('irregular','none','meno','preg'))""").fetchall(); c.close(); return [x[0] for x in rows]
+               OR mode IN ('irregular','none','meno','preg'))
+          AND (?=0 OR ?=1 OR chat_id<?)""",
+        (synthetic_min, int(bool(include_synthetic)), synthetic_min),
+    ).fetchall()
+    c.close()
+    return [x[0] for x in rows]
 def meno_users():
     c = db(); rows = c.execute(
         "SELECT chat_id FROM users WHERE mode='meno' AND push_suppressed_at IS NULL"
@@ -1119,7 +1257,7 @@ def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
               "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries",
-              "prepared_summaries", "feedback_requests", "chat_mutations"):
+              "prepared_summaries", "feedback_requests", "chat_mutations", "ai_jobs"):
         c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))  # nosec B608
     c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid))
     A2.delete_user(c, cid)
@@ -2479,18 +2617,30 @@ def schedule_text(cid, hhmm):
     """Пользователю показываем выбранное время — то же, что в профиле приложения.
     Внутренний сдвиг очереди рассылки (scheduled_hhmm) — деталь доставки, не UI."""
     shown = (row(cid) or {}).get("send_time") or hhmm or "08:00"
-    return f"Утренняя сводка будет приходить в {shown} по Москве."
+    return (
+        f"Время сводки: {shown} по Москве — подготовлю заранее и начну отправку в это время. "
+        "При высокой нагрузке доставка может занять несколько минут."
+    )
 
 def today_start_iso():
     return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
 
 def summary_sent_today(cid):
     c = db()
-    r = c.execute("""SELECT 1 FROM events
-        WHERE chat_id=? AND ts>=? AND (
-            (action='goal' AND meta='summary') OR
-            (action='broadcast' AND meta='sent')
-        ) LIMIT 1""", (cid, today_start_iso())).fetchone()
+    r = c.execute(
+        """SELECT 1 FROM events_v2
+           WHERE user_key=? AND occurred_at>=?
+             AND event_name IN ('summary_delivered','push_sent')
+           LIMIT 1""",
+        (A2.user_key(cid), today_start_iso()),
+    ).fetchone()
+    if not r:
+        # Historical rows created before events_v2 remain readable.
+        r = c.execute("""SELECT 1 FROM events
+            WHERE chat_id=? AND ts>=? AND (
+                (action='goal' AND meta='summary') OR
+                (action='broadcast' AND (meta='sent' OR meta LIKE 'sent|%'))
+            ) LIMIT 1""", (cid, today_start_iso())).fetchone()
     c.close()
     return bool(r)
 
@@ -2550,10 +2700,10 @@ def _clear_push_suppression(cid):
         c.close()
 
 def _backfill_push_suppressions():
-    """Persist legacy blocked recipients so deploy catch-up does not retry them again."""
+    """Persist previously blocked recipients from immutable legacy and v2 history."""
     c = db()
     try:
-        changed = c.execute(
+        changed_legacy = c.execute(
             """UPDATE users
                SET push_suppressed_at=(
                      SELECT MAX(e.ts) FROM events e
@@ -2580,7 +2730,43 @@ def _backfill_push_suppressions():
                        )
                  ), '')"""
         ).rowcount
+        changed_v2 = 0
+        user_rows = c.execute(
+            "SELECT chat_id FROM users WHERE push_suppressed_at IS NULL"
+        ).fetchall()
+        for (cid,) in user_rows:
+            key = A2.user_key(cid)
+            rows = c.execute(
+                """SELECT occurred_at,event_name,properties_json
+                   FROM events_v2
+                   WHERE user_key=?
+                     AND event_name IN (
+                       'push_failed','push_sent','user_message_sent',
+                       'screen_viewed','app_opened','legacy_message_interaction'
+                     )
+                   ORDER BY occurred_at""",
+                (key,),
+            ).fetchall()
+            latest_failed = ""
+            latest_reachable = ""
+            for occurred_at, event_name, props_json in rows:
+                try:
+                    props = json.loads(props_json or "{}")
+                except (TypeError, ValueError):
+                    props = {}
+                if event_name == "push_failed" and props.get("delivery_status") == "blocked":
+                    latest_failed = max(latest_failed, occurred_at or "")
+                elif event_name != "push_failed":
+                    latest_reachable = max(latest_reachable, occurred_at or "")
+            if latest_failed and latest_failed > latest_reachable:
+                changed_v2 += c.execute(
+                    """UPDATE users
+                       SET push_suppressed_at=?,push_suppression_reason='blocked'
+                       WHERE chat_id=? AND push_suppressed_at IS NULL""",
+                    (latest_failed, cid),
+                ).rowcount
         c.commit()
+        changed = changed_legacy + changed_v2
         if changed:
             log.info("push suppression backfilled for %d blocked recipients", changed)
         return changed
@@ -2622,6 +2808,20 @@ def _claim_push_delivery(cid, campaign):
                LIMIT 1""",
             (cid, "sent|" + campaign),
         ).fetchone()
+        if not already_sent:
+            for (props_json,) in c.execute(
+                """SELECT properties_json FROM events_v2
+                   WHERE user_key=? AND event_name='push_sent'
+                   ORDER BY occurred_at DESC LIMIT 100""",
+                (A2.user_key(cid),),
+            ).fetchall():
+                try:
+                    props = json.loads(props_json or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if props.get("campaign_id") == campaign:
+                    already_sent = True
+                    break
         if already_sent:
             c.execute(
                 """INSERT OR IGNORE INTO push_deliveries
@@ -3351,7 +3551,7 @@ async def send_rich_with_photo(bot, cid, md_text, png_bytes, reply_markup=None):
         last = None
         for _att in (1, 2):
             try:
-                r = _rq.post(f"https://api.telegram.org/bot{bot.token}/sendRichMessage",
+                r = _rq.post(f"{AIWA_TELEGRAM_API_ORIGIN}/bot{bot.token}/sendRichMessage",
                              data=data, files={"cardpng": ("card.png", png_bytes, "image/png")}, timeout=60)
                 j = r.json()
                 if j.get("ok"): return j
@@ -3668,6 +3868,18 @@ def _feedback_prompt_exists(cid, answer_id):
             (cid, answer_id),
         ).fetchone() is not None:
             return True
+        v2 = c.execute(
+            """SELECT properties_json FROM events_v2
+               WHERE user_key=? AND event_name='answer_feedback_prompted'
+               ORDER BY occurred_at DESC""",
+            (A2.user_key(cid),),
+        ).fetchall()
+        for (props_json,) in v2:
+            try:
+                if json.loads(props_json or "{}").get("answer_id") == answer_id:
+                    return True
+            except (TypeError, ValueError):
+                continue
         # Compatibility with buttons sent before feedback_requests was introduced.
         return c.execute(
             "SELECT 1 FROM events WHERE chat_id=? AND action='feedback_prompt' AND meta LIKE ? LIMIT 1",
@@ -3693,18 +3905,34 @@ def _submit_feedback(cid, answer_id, rating, channel="bot"):
             (cid, answer_id),
         ).fetchone()
         if row_ is None:
-            # Migrate a still-visible legacy button on first click.
+            # Migrate a still-visible button on first click.
+            v2_channel = None
+            for (props_json,) in c.execute(
+                """SELECT properties_json FROM events_v2
+                   WHERE user_key=? AND event_name='answer_feedback_prompted'
+                   ORDER BY occurred_at DESC""",
+                (A2.user_key(cid),),
+            ).fetchall():
+                try:
+                    props = json.loads(props_json or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if props.get("answer_id") == answer_id:
+                    v2_channel = str(props.get("channel") or saved_channel)[:24]
+                    break
             legacy = c.execute(
                 """SELECT meta FROM events
                    WHERE chat_id=? AND action='feedback_prompt' AND meta LIKE ?
                    ORDER BY id DESC LIMIT 1""",
                 (cid, answer_id + "|%"),
             ).fetchone()
-            if legacy is None:
+            if legacy is None and v2_channel is None:
                 c.rollback()
                 return "missing"
-            if "|" in (legacy[0] or ""):
+            if legacy is not None and "|" in (legacy[0] or ""):
                 saved_channel = legacy[0].split("|", 1)[1][:24] or saved_channel
+            elif v2_channel:
+                saved_channel = v2_channel
             c.execute(
                 """INSERT INTO feedback_requests
                    (chat_id,answer_id,channel,created_at) VALUES(?,?,?,?)""",
@@ -4885,10 +5113,28 @@ async def reactivation_job(context: ContextTypes.DEFAULT_TYPE):
             u = row(cid)
             if not is_onboarded(u) or not _proactive_preference_on(cid):
                 continue
-            c = db(); r = c.execute("SELECT MAX(ts) FROM events WHERE chat_id=? AND action IN ('manual','button','suggest','command','answered','voice','goal')", (cid,)).fetchone(); c.close()
-            if not r or not r[0]:
+            c = db()
+            old_last = c.execute(
+                """SELECT MAX(ts) FROM events
+                   WHERE chat_id=? AND action IN
+                     ('manual','button','suggest','command','answered','voice','goal')""",
+                (cid,),
+            ).fetchone()[0]
+            v2_last = c.execute(
+                """SELECT MAX(occurred_at) FROM events_v2
+                   WHERE user_key=? AND event_name IN (
+                     'legacy_message_interaction','screen_viewed','app_opened',
+                     'assistant_response_received','user_message_sent',
+                     'summary_delivered','meal_add_completed','workout_add_completed',
+                     'checkin_completed','checkin_updated'
+                   )""",
+                (A2.user_key(cid),),
+            ).fetchone()[0]
+            c.close()
+            last_seen = max(old_last or "", v2_last or "")
+            if not last_seen:
                 continue
-            last = datetime.fromisoformat(r[0]).date()
+            last = datetime.fromisoformat(last_seen).date()
             if (today - last).days < ndays:
                 continue
             lr = u.get("last_reactivation")
@@ -5673,6 +5919,21 @@ def food_card(rec, added=True):
     return "\n".join(lines)
 
 async def on_photo(update, context):
+    cid = update.effective_chat.id
+    if cid in ANNOUNCE_WAIT:
+        return await _announce_capture(update, context, cid)
+    acquired = await _acquire_food_vision_slot()
+    if not acquired:
+        return await update.message.reply_text(
+            "Сейчас разбираю много фотографий. Попробуй ещё раз через минуту."
+        )
+    try:
+        return await _on_photo_bounded(update, context)
+    finally:
+        _release_food_vision_slot()
+
+
+async def _on_photo_bounded(update, context):
     cid = update.effective_chat.id; u = row(cid)
     if cid in ANNOUNCE_WAIT:
         return await _announce_capture(update, context, cid)
@@ -5691,8 +5952,11 @@ async def on_photo(update, context):
         return await update.message.reply_text("Не смогла скачать фото, попробуй ещё раз.")
     prof = profile_of(u); usage = []
     try:
-        parsed = await llm_to_thread(cid, "food_vision", L.analyze_food, bytes(ba), "food.jpg", prof, usage,
-                                     user_generation=generation)
+        async with _AI_BACKGROUND_SEM:
+            parsed = await llm_to_thread(
+                cid, "food_vision", L.analyze_food, bytes(ba), "food.jpg",
+                prof, usage, user_generation=generation,
+            )
     except Exception as e:
         log.warning("on_photo analyze %s: %s", cid, e); parsed = None
     if not _user_write_allowed(cid, generation):
@@ -6219,7 +6483,14 @@ async def load_logger(app):
             avg = (s["ms"] // calls) if calls else 0
             q = BCAST_Q.qsize() if BCAST_Q is not None else 0
             wq = s.get("queued", 0); wms = (s.get("wait_ms", 0) // calls) if calls else 0
-            log.info("LOAD/60s llm_calls=%d avg_ms=%d wait_ms=%d queued=%d err=%d bcast_q=%d users=%d", calls, avg, wms, wq, s["err"], q, len(all_users()))
+            ai_jobs = await asyncio.to_thread(_ai_job_status_counts)
+            log.info(
+                "LOAD/60s llm_calls=%d avg_ms=%d wait_ms=%d queued=%d err=%d "
+                "bcast_q=%d event_q=%d ai_queued=%d ai_running=%d ai_failed=%d users=%d",
+                calls, avg, wms, wq, s["err"], q, _EVENT_WRITE_Q.qsize(),
+                ai_jobs.get("queued", 0), ai_jobs.get("running", 0),
+                ai_jobs.get("failed", 0), len(all_users(include_synthetic=True)),
+            )
             err_threshold = int(os.environ.get("AIWA_ALERT_LLM_ERRS", "2"))
             if calls and s["err"] >= err_threshold and (s["err"] / calls) >= 0.5:
                 await admin_alert(app, "llm_errors",
@@ -6229,6 +6500,14 @@ async def load_logger(app):
             if q >= q_threshold:
                 await admin_alert(app, "broadcast_queue",
                     f"Очередь рассылки выросла до {q}. Возможно, модель или Telegram тормозит.", cooldown=600)
+            ai_threshold = int(os.environ.get("AIWA_ALERT_TODAY_Q", "1200"))
+            if ai_jobs.get("queued", 0) >= ai_threshold:
+                await admin_alert(
+                    app, "today_queue",
+                    f"Очередь персональных сводок выросла до {ai_jobs['queued']}. "
+                    "Обычные экраны продолжают обслуживаться, новые сводки получают fallback.",
+                    cooldown=600,
+                )
         except Exception as e:
             log.warning("load_logger: %s", e)
 
@@ -6254,13 +6533,21 @@ async def traction_worker():
     """Durable, privacy-safe delivery to the external Disrupt Analytics module."""
     url = os.environ.get("AIWA_TRACTION_URL", "").strip()
     token = os.environ.get("AIWA_TRACTION_TOKEN", "").strip()
-    try:
-        await asyncio.to_thread(A2.seed_traction_outbox, DB)
-    except Exception as exc:
-        log.warning("traction seed failed: %s", exc)
     if not url:
         log.info("traction delivery disabled: AIWA_TRACTION_URL is not set")
         return
+    for attempt in range(5):
+        try:
+            await asyncio.to_thread(A2.seed_traction_outbox, DB)
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 4:
+                log.warning("traction seed failed: %s", exc)
+                break
+            await asyncio.sleep(0.25 * (attempt + 1))
+        except Exception as exc:
+            log.warning("traction seed failed: %s", exc)
+            break
     delay = 2
     while True:
         try:
@@ -6281,7 +6568,7 @@ async def traction_worker():
             await asyncio.sleep(delay); delay = min(delay * 2, 300)
 
 async def on_startup(app):
-    global BOT_USERNAME, BCAST_Q, FOOD_Q, TRAIN_Q
+    global BOT_USERNAME, BCAST_Q, FOOD_Q, TRAIN_Q, _AI_JOB_WAKE, _AI_JOB_TASKS
     try:
         import concurrent.futures
         _ex_threads = max(8, min(128, int(os.environ.get("AIWA_EXECUTOR_THREADS", "32"))))
@@ -6317,6 +6604,14 @@ async def on_startup(app):
         BOT_USERNAME = getattr(me, "username", None)
     except Exception:
         BOT_USERNAME = None
+    _AI_JOB_WAKE = asyncio.Event()
+    await asyncio.to_thread(_recover_ai_jobs)
+    _AI_JOB_TASKS = [
+        asyncio.create_task(_ai_job_worker(i), name=f"aiwa-today-worker-{i}")
+        for i in range(_AI_TODAY_WORKERS)
+    ]
+    _AI_JOB_WAKE.set()
+    log.info("durable today workers started: %d", _AI_TODAY_WORKERS)
     BCAST_Q = asyncio.Queue()
     _bw = max(1, min(20, int(os.environ.get("AIWA_BROADCAST_WORKERS", "10"))))
     for _ in range(_bw):
@@ -6447,22 +6742,16 @@ async def _serve_index(request):
     return web.Response(text="webapp not found", status=404)
 
 async def _prewarm_today(cid):
-    """Прогрев сводки дня при открытии аппа: к моменту запроса /api/today кэш тёплый."""
+    """Schedule one durable daily-summary job without waiting for the model."""
     try:
         u = row(cid)
         if not is_onboarded(u): return
         ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
         if _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or ""): return
         _, st = status_of(cid)
-        usage = []
-        note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), usage)
-        if usage: ev(cid, "tokens", sum(usage), meta="today_note", calls=len(usage), usage=usage)
-        if isinstance(note, dict) and (note.get("summary") or "").strip():
-            if st:
-                note.setdefault("day", st.get("day"))
-                note.setdefault("phase", (st.get("phase_ru") or ""))
-            _TODAY_CACHE[ck] = note
-            dc_put(cid, "today", note, u.get("mode") or "")
+        await asyncio.to_thread(_enqueue_today_job, cid, u, st)
+        if _AI_JOB_WAKE is not None:
+            _AI_JOB_WAKE.set()
     except Exception as e:
         log.info("today prewarm %s: %s", cid, e)
 
@@ -6620,13 +6909,12 @@ async def _api_nudge(request):
 async def _api_data(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    return await asyncio.to_thread(_api_data_sync, cid, body)
+
+def _api_data_sync(cid, body):
     u = row(cid)
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
     ev(cid, "button", meta="app_open")
-    try:
-        asyncio.create_task(_prewarm_today(cid))
-    except Exception:
-        pass
     campaign = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(body.get("campaign") or ""))[:80]
     if campaign:
         ev(cid, "push_open", meta=campaign)
@@ -6758,41 +7046,86 @@ async def _api_pa(request):
     if d > dtoday(): return _cors(web.json_response({"marked": False, "skip": True}))
     marked = pa_toggle(cid, d.isoformat()); ev(cid, "manual", meta="web_pa")
     return _cors(web.json_response({"marked": marked}))
-async def _api_checkin(request):
-    body = await request.json(); cid = _verify_init(body.get("initData", ""))
-    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+def _api_checkin_sync(cid, body):
     _evict_today_cache(cid)
     ds = body.get("date") or dtoday().isoformat()
     try: date.fromisoformat(ds)
     except Exception: ds = dtoday().isoformat()
-    log_ensure(cid, ds)
+    energy = mood = None
     changed = False
     if body.get("energy"):
         try:
-            log_set(cid, ds, energy=max(1, min(3, int(body["energy"]))))
+            energy = max(1, min(3, int(body["energy"])))
             changed = True
         except Exception: pass
     if body.get("mood"):
         try:
-            log_set(cid, ds, mood=max(1, min(3, int(body["mood"]))))
+            mood = max(1, min(3, int(body["mood"])))
             changed = True
         except Exception: pass
+    toggle_code = None
     if body.get("symptom"):
         code = str(body.get("symptom"))
         if code in SYM or code.startswith("custom:"):
-            log_toggle(cid, ds, code)
+            toggle_code = code
             changed = True
+    add_code = None
     if body.get("custom_symptom"):
         code = symptom_code(str(body.get("custom_symptom")))
         if code:
-            log_add_symptom(cid, ds, code)
+            add_code = code
             changed = True
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        if not _user_write_allowed(cid, conn=c):
+            c.rollback()
+            return {"ok": False, "log": {"symptoms": []}}
+        c.execute(
+            "INSERT OR IGNORE INTO logs(chat_id,log_date,symptoms) VALUES(?,?,'')",
+            (cid, ds),
+        )
+        row_ = c.execute(
+            "SELECT energy,mood,symptoms FROM logs WHERE chat_id=? AND log_date=?",
+            (cid, ds),
+        ).fetchone()
+        symptoms = set(x for x in ((row_[2] or "").split(",") if row_ else []) if x)
+        if toggle_code:
+            symptoms.symmetric_difference_update({toggle_code})
+        if add_code:
+            symptoms.add(add_code)
+        c.execute(
+            """UPDATE logs
+               SET energy=?,mood=?,symptoms=?
+               WHERE chat_id=? AND log_date=?""",
+            (
+                energy if energy is not None else (row_[0] if row_ else None),
+                mood if mood is not None else (row_[1] if row_ else None),
+                ",".join(sorted(symptoms)),
+                cid,
+                ds,
+            ),
+        )
+        c.commit()
+        result = {
+            "energy": energy if energy is not None else (row_[0] if row_ else None),
+            "mood": mood if mood is not None else (row_[1] if row_ else None),
+            "symptoms": sorted(symptoms),
+        }
+    finally:
+        c.close()
     if changed:
         ev(cid, "manual", meta="web_checkin")
         # In the mini app every successful field save is a completed check-in:
         # unlike the bot flow there is intentionally no separate “Готово” button.
         ev(cid, "goal", meta="web_checkin_complete")
-    return _cors(web.json_response({"ok": True, "log": log_get(cid, ds) or {"symptoms": []}}))
+    return {"ok": True, "log": result}
+
+async def _api_checkin(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    payload = await asyncio.to_thread(_api_checkin_sync, cid, body)
+    return _cors(web.json_response(payload))
 
 async def _api_proactive(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -7082,30 +7415,402 @@ async def _api_section(request):
         return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
 # Сводка дня в мини-аппе: кэш на день, чтобы апп открывался сразу, а не ждал модель.
 _TODAY_CACHE = {}
+_AI_JOB_WAKE = None
+_AI_JOB_TASKS = []
+_AI_JOB_COMPLETIONS = deque(maxlen=200)
+_AI_LLM_CONCURRENCY_LIMIT = max(
+    1, min(64, int(os.environ.get("AIWA_LLM_CONCURRENCY", "8")))
+)
+_AI_CHAT_RESERVED_SLOTS = max(
+    0,
+    min(
+        _AI_LLM_CONCURRENCY_LIMIT - 1,
+        int(os.environ.get("AIWA_CHAT_RESERVED_SLOTS", "2")),
+    ),
+)
+_AI_TODAY_WORKERS = max(
+    1,
+    min(
+        32,
+        int(os.environ.get("AIWA_TODAY_CONCURRENCY", "6")),
+        _AI_LLM_CONCURRENCY_LIMIT - _AI_CHAT_RESERVED_SLOTS,
+    ),
+)
+_AI_BACKGROUND_CONCURRENCY = max(
+    1, _AI_LLM_CONCURRENCY_LIMIT - _AI_CHAT_RESERVED_SLOTS
+)
+_AI_BACKGROUND_SEM = asyncio.Semaphore(_AI_BACKGROUND_CONCURRENCY)
+_AI_JOB_MAX_ATTEMPTS = max(1, min(5, int(os.environ.get("AIWA_AI_JOB_MAX_ATTEMPTS", "3"))))
+_AI_TODAY_QUEUE_MAX = max(100, int(os.environ.get("AIWA_TODAY_QUEUE_MAX", "1500")))
+_FOOD_VISION_CONCURRENCY = max(
+    1, min(64, int(os.environ.get("AIWA_FOOD_VISION_CONCURRENCY", "3")))
+)
+_FOOD_VISION_QUEUE_MAX = max(
+    _FOOD_VISION_CONCURRENCY,
+    min(500, int(os.environ.get("AIWA_FOOD_VISION_QUEUE_MAX", "50"))),
+)
+_FOOD_VISION_WAIT_SECONDS = max(
+    1.0, min(180.0, float(os.environ.get("AIWA_FOOD_VISION_WAIT_SECONDS", "60")))
+)
+_FOOD_VISION_SEM = asyncio.Semaphore(_FOOD_VISION_CONCURRENCY)
+_FOOD_VISION_WAITERS = 0
+
+
+async def _acquire_food_vision_slot():
+    """Bound photo parsing and provider calls before they consume memory."""
+    global _FOOD_VISION_WAITERS
+    if _FOOD_VISION_WAITERS >= _FOOD_VISION_QUEUE_MAX:
+        return False
+    _FOOD_VISION_WAITERS += 1
+    try:
+        await asyncio.wait_for(
+            _FOOD_VISION_SEM.acquire(),
+            timeout=_FOOD_VISION_WAIT_SECONDS,
+        )
+        return True
+    except asyncio.TimeoutError:
+        return False
+    finally:
+        _FOOD_VISION_WAITERS = max(0, _FOOD_VISION_WAITERS - 1)
+
+
+def _release_food_vision_slot():
+    _FOOD_VISION_SEM.release()
+
+def _today_job_payload(cid, u, st):
+    return {
+        "date": dtoday().isoformat(),
+        "mode": str(u.get("mode") or ""),
+        "profile": profile_of(u),
+        "state": st,
+        "recent_syms": _recent_syms_text(cid),
+    }
+
+def _today_job_key(cid, payload):
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    digest = _hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    return f"today:{cid}:{payload['date']}:{payload['mode']}:{digest}"
+
+def _enqueue_today_job(cid, u, st):
+    payload = _today_job_payload(cid, u, st)
+    dedupe_key = _today_job_key(cid, payload)
+    now = datetime.now(TZ).isoformat()
+    expires = datetime.combine(dtoday() + timedelta(days=2), dtime.min, tzinfo=TZ).isoformat()
+    generation = _user_generation(cid)
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        if not _user_write_allowed(cid, generation, conn=c):
+            c.rollback()
+            return None
+        existing = c.execute(
+            """SELECT job_id,status,attempts,result_json,created_at,started_at,finished_at,
+                      last_error_class
+               FROM ai_jobs WHERE dedupe_key=?""",
+            (dedupe_key,),
+        ).fetchone()
+        if not existing:
+            active = c.execute(
+                """SELECT COUNT(*) FROM ai_jobs
+                   WHERE kind='today_note' AND status IN ('queued','running')"""
+            ).fetchone()[0]
+            if int(active or 0) >= _AI_TODAY_QUEUE_MAX:
+                c.rollback()
+                return {"status": "rejected", "reason": "queue_full"}
+        job_id = "job_" + secrets.token_hex(16)
+        if existing:
+            row_ = existing
+        else:
+            c.execute(
+                """INSERT INTO ai_jobs(
+                       job_id,chat_id,user_generation,kind,dedupe_key,priority,status,
+                       payload_json,created_at,available_at,expires_at)
+                   VALUES(?,?,?,?,?,100,'queued',?,?,?,?)""",
+                (
+                    job_id, cid, generation, "today_note", dedupe_key,
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
+                    now, now, expires,
+                ),
+            )
+            row_ = c.execute(
+                """SELECT job_id,status,attempts,result_json,created_at,started_at,finished_at,
+                          last_error_class
+                   FROM ai_jobs WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+        c.commit()
+    finally:
+        c.close()
+    if not row_:
+        return None
+    return {
+        "job_id": row_[0], "status": row_[1], "attempts": int(row_[2] or 0),
+        "result": json.loads(row_[3]) if row_[3] else None,
+        "created_at": row_[4], "started_at": row_[5], "finished_at": row_[6],
+        "error": row_[7], "deduped": bool(existing),
+    }
+
+def _claim_ai_job():
+    now = datetime.now(TZ).isoformat()
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        row_ = c.execute(
+            """SELECT job_id,chat_id,user_generation,kind,payload_json,attempts
+               FROM ai_jobs
+               WHERE status='queued' AND available_at<=?
+                 AND (expires_at IS NULL OR expires_at>?)
+               ORDER BY priority ASC,created_at ASC LIMIT 1""",
+            (now, now),
+        ).fetchone()
+        if not row_:
+            c.commit()
+            return None
+        updated = c.execute(
+            """UPDATE ai_jobs SET status='running',started_at=?,attempts=attempts+1
+               WHERE job_id=? AND status='queued'""",
+            (now, row_[0]),
+        ).rowcount
+        c.commit()
+        if not updated:
+            return None
+        return {
+            "job_id": row_[0], "chat_id": row_[1], "generation": int(row_[2] or 0),
+            "kind": row_[3], "payload": json.loads(row_[4]),
+            "attempts": int(row_[5] or 0) + 1,
+        }
+    finally:
+        c.close()
+
+def _recover_ai_jobs():
+    now = datetime.now(TZ).isoformat()
+    c = db()
+    try:
+        c.execute(
+            """UPDATE ai_jobs
+               SET status='queued',started_at=NULL,available_at=?
+               WHERE status='running'""",
+            (now,),
+        )
+        c.execute(
+            """UPDATE ai_jobs SET status='expired',finished_at=?
+               WHERE status IN ('queued','running')
+                 AND expires_at IS NOT NULL AND expires_at<=?""",
+            (now, now),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+def _ai_job_status_counts():
+    c = db()
+    try:
+        counts = {
+            status: int(count)
+            for status, count in c.execute(
+                "SELECT status,COUNT(*) FROM ai_jobs GROUP BY status"
+            ).fetchall()
+        }
+        counts["active"] = counts.get("queued", 0) + counts.get("running", 0)
+        return counts
+    finally:
+        c.close()
+
+def _finish_ai_job(job, status, result=None, error=None, retry_delay=0):
+    now = datetime.now(TZ)
+    c = db()
+    try:
+        if status == "queued":
+            available = (now + timedelta(seconds=max(1, retry_delay))).isoformat()
+            c.execute(
+                """UPDATE ai_jobs
+                   SET status='queued',available_at=?,started_at=NULL,last_error_class=?
+                   WHERE job_id=?""",
+                (available, str(error or "error")[:48], job["job_id"]),
+            )
+        else:
+            c.execute(
+                """UPDATE ai_jobs
+                   SET status=?,result_json=?,last_error_class=?,finished_at=?
+                   WHERE job_id=?""",
+                (
+                    status,
+                    json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+                    if result is not None else None,
+                    str(error or "")[:48] or None,
+                    now.isoformat(),
+                    job["job_id"],
+                ),
+            )
+        c.commit()
+    finally:
+        c.close()
+
+def _ai_job_position(job_id):
+    c = db()
+    try:
+        row_ = c.execute(
+            "SELECT status,priority,created_at FROM ai_jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if not row_:
+            return None
+        if row_[0] == "completed":
+            return 0
+        running = c.execute(
+            "SELECT COUNT(*) FROM ai_jobs WHERE status='running'"
+        ).fetchone()[0]
+        ahead = c.execute(
+            """SELECT COUNT(*) FROM ai_jobs
+               WHERE status='queued'
+                 AND (priority<? OR (priority=? AND created_at<=?))""",
+            (row_[1], row_[1], row_[2]),
+        ).fetchone()[0]
+        return max(1, int(running or 0) + int(ahead or 0))
+    finally:
+        c.close()
+
+def _ai_job_eta(position):
+    if not position:
+        return 0
+    rate = float(os.environ.get("AIWA_TODAY_THROUGHPUT", "0.8"))
+    if len(_AI_JOB_COMPLETIONS) >= 3:
+        now = time.monotonic()
+        recent = [t for t in _AI_JOB_COMPLETIONS if now - t <= 300]
+        if len(recent) >= 3:
+            span = max(1.0, recent[-1] - recent[0])
+            rate = max(0.05, (len(recent) - 1) / span)
+    return int(math.ceil(float(position) / max(0.05, rate)))
+
+def _today_job_fallback(st, job=None):
+    if st:
+        summary = (
+            f"День {st.get('day')}, {(st.get('phase_ru') or '').lower()} фаза. "
+            "Персональная сводка готовится — пока ориентируйся на сегодняшнее "
+            "самочувствие и выбирай комфортную нагрузку."
+        )
+    else:
+        summary = (
+            "Персональная сводка готовится. Пока опирайся на сегодняшнее "
+            "самочувствие, регулярное питание и комфортную активность."
+        )
+    out = {
+        "summary": summary,
+        "suggestions": ["Что съесть сегодня?", "Какая нагрузка подойдёт?", "Как улучшить сон?"],
+        "cached": False,
+        "refreshing": True,
+    }
+    if job:
+        if job.get("status") == "rejected":
+            out["refreshing"] = False
+            out["capacity_limited"] = True
+            out["retry_after_seconds"] = 60
+            return out
+        if job.get("status") in {"failed", "expired", "superseded"}:
+            out["refreshing"] = False
+            out["ai_unavailable"] = True
+            return out
+        position = _ai_job_position(job["job_id"])
+        out["job"] = {
+            "id": job["job_id"], "status": job["status"],
+            "position": position, "eta_seconds": _ai_job_eta(position),
+            "attempts": job.get("attempts", 0),
+        }
+    return out
+
+async def _ai_job_worker(worker_no):
+    while True:
+        job = await asyncio.to_thread(_claim_ai_job)
+        if not job:
+            try:
+                await asyncio.wait_for(_AI_JOB_WAKE.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                pass
+            if _AI_JOB_WAKE is not None:
+                _AI_JOB_WAKE.clear()
+            continue
+        try:
+            payload = job["payload"]
+            if not await asyncio.to_thread(
+                _user_write_allowed, job["chat_id"], job["generation"]
+            ):
+                await asyncio.to_thread(
+                    _finish_ai_job, job, "superseded", None, "user_inactive"
+                )
+                continue
+            usage = []
+            async with _AI_BACKGROUND_SEM:
+                note = await llm_to_thread(
+                    job["chat_id"], "today_note", L.today_note,
+                    payload.get("state"), payload.get("profile"),
+                    payload.get("recent_syms"), payload.get("mode"), usage,
+                    user_generation=job["generation"],
+                )
+            if usage:
+                ev(
+                    job["chat_id"], "tokens", sum(usage), meta="today_note",
+                    calls=len(usage), usage=usage, user_generation=job["generation"],
+                )
+            if not isinstance(note, dict) or not (note.get("summary") or "").strip():
+                raise ValueError("empty_response")
+            current = row(job["chat_id"])
+            if not current or str(current.get("mode") or "") != str(payload.get("mode") or ""):
+                _finish_ai_job(job, "superseded", error="context_changed")
+                continue
+            st = payload.get("state")
+            if st:
+                note.setdefault("day", st.get("day"))
+                note.setdefault("phase", st.get("phase_ru") or "")
+            ck = (job["chat_id"], payload["date"], str(payload.get("mode") or ""))
+            _TODAY_CACHE[ck] = note
+            await asyncio.to_thread(
+                dc_put, job["chat_id"], "today", note, payload.get("mode") or ""
+            )
+            await asyncio.to_thread(_finish_ai_job, job, "completed", note)
+            _AI_JOB_COMPLETIONS.append(time.monotonic())
+            ev(job["chat_id"], "ai_job", meta="completed|today_note")
+        except Exception as exc:
+            error = "empty_response" if "empty_response" in str(exc) else type(exc).__name__
+            if job["attempts"] < _AI_JOB_MAX_ATTEMPTS:
+                await asyncio.to_thread(
+                    _finish_ai_job, job, "queued", None, error, 2 ** job["attempts"]
+                )
+                if _AI_JOB_WAKE is not None:
+                    _AI_JOB_WAKE.set()
+            else:
+                await asyncio.to_thread(_finish_ai_job, job, "failed", None, error)
+                ev(job["chat_id"], "ai_job", meta="failed|today_note")
+            log.warning("ai job %s worker %s: %s", job["job_id"], worker_no, error)
+
+def _api_today_lookup(cid):
+    u = row(cid)
+    if not is_onboarded(u):
+        return None, None, None, None
+    _, st = status_of(cid); ev(cid, "button", meta="web_today")
+    ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
+    hit = _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or "")
+    return u, st, ck, hit
 
 async def _api_today(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    u = row(cid)
-    if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
-    _, st = status_of(cid); ev(cid, "button", meta="web_today")
-    ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
-    hit = _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or "")
+    u, st, ck, hit = await asyncio.to_thread(_api_today_lookup, cid)
+    if not u: return _cors(web.json_response({"error": "onboard"}, status=403))
     if hit:
         _TODAY_CACHE[ck] = hit
-        return _cors(web.json_response(hit))
-    _su = []
-    note = await llm_to_thread(cid, "today_note", L.today_note, st, profile_of(u), _recent_syms_text(cid), u.get("mode"), _su)
-    if _su: ev(cid, "tokens", sum(_su), meta="today_note", calls=len(_su), usage=_su)
-    if isinstance(note, dict):
-        if st:
-            note.setdefault("day", st.get("day"))
-            note.setdefault("phase", (st.get("phase_ru") or ""))
-        if (note.get("summary") or "").strip():
-            if len(_TODAY_CACHE) > 2000: _TODAY_CACHE.clear()
-            _TODAY_CACHE[ck] = note
-            dc_put(cid, "today", note, u.get("mode") or "")
-    return _cors(web.json_response(note))
+        return _cors(web.json_response(dict(hit, cached=True, refreshing=False)))
+    job = await asyncio.to_thread(_enqueue_today_job, cid, u, st)
+    if job and job.get("status") == "rejected":
+        ev(cid, "ai_job", meta="rejected|today_note|queue_full")
+    elif job and job.get("deduped"):
+        ev(cid, "ai_job", meta="deduped|today_note")
+    elif job:
+        ev(cid, "ai_job", meta="accepted|today_note")
+    if _AI_JOB_WAKE is not None:
+        _AI_JOB_WAKE.set()
+    if job and job.get("status") == "completed" and job.get("result"):
+        _TODAY_CACHE[ck] = job["result"]
+        return _cors(web.json_response(dict(job["result"], cached=True, refreshing=False)))
+    return _cors(web.json_response(_today_job_fallback(st, job)))
 
 async def _api_chat(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -8328,7 +9033,9 @@ async def log_workout_action(cid, u, text, user_generation=None, mutation_key=No
     prof = profile_of(u) or {}
     # Как в мини-аппе: без явной длительности считаем от 40 минут, чтобы запись
     # из чата не висела с нулём калорий в дневнике приложения.
-    rec["kcal"] = workout_calories(rec["type"], rec.get("duration") or "40 мин", rec.get("rpe"), prof.get("weight"))
+    rec["kcal"] = workout_calories(
+        rec["type"], rec.get("duration") or "40 мин", rec.get("rpe"), prof.get("weight")
+    )
     saved = workout_add(
         cid, rec, d=event_date.isoformat(), user_generation=generation, mutation_key=mutation_key,
         args_hash=args_hash, return_status=True,
@@ -8396,7 +9103,9 @@ async def log_workout_update_action(cid, u, text, target_id, user_generation=Non
     prof = profile_of(u) or {}
     # Как в мини-аппе: без явной длительности считаем от 40 минут, чтобы запись
     # из чата не висела с нулём калорий в дневнике приложения.
-    rec["kcal"] = workout_calories(rec["type"], rec.get("duration") or "40 мин", rec.get("rpe"), prof.get("weight"))
+    rec["kcal"] = workout_calories(
+        rec["type"], rec.get("duration") or "40 мин", rec.get("rpe"), prof.get("weight")
+    )
     saved = workout_update(
         cid, target_id, rec, user_generation=generation, mutation_key=mutation_key,
         args_hash=args_hash, return_status=True,
@@ -8496,29 +9205,33 @@ def _read_upload(field):
     return bytes(raw), (getattr(field, "filename", "food.jpg") or "food.jpg")
 
 async def _api_food_photo(request):
+    acquired = await _acquire_food_vision_slot()
+    if not acquired:
+        return _cors(web.json_response(
+            {
+                "ok": False,
+                "error": "busy",
+                "message": "Сейчас разбираю много фотографий. Попробуй ещё раз через минуту.",
+            },
+            status=429,
+        ))
     try:
-        data = await request.post()
-    except Exception:
-        return _cors(web.json_response({"ok": False, "message": "Не получила фото."}, status=400))
-    cid = _verify_init(data.get("initData", ""))
-    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+        return await _api_food_photo_bounded(request)
+    finally:
+        _release_food_vision_slot()
+
+
+def _prepare_food_photo(cid):
     _evict_week_food_cache(cid)
     u = row(cid)
     if not is_onboarded(u):
-        return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте: /start."}, status=403))
+        return None
     generation = _user_generation(cid)
     ev(cid, "flow_start", meta="food")
-    raw, fn = _read_upload(data.get("photo"))
-    if not raw:
-        return _cors(web.json_response({"ok": False, "message": "Пустое фото."}))
-    if len(raw) > 12 * 1024 * 1024:
-        return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
-    prof = profile_of(u); usage = []
-    try:
-        parsed = await llm_to_thread(cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
-                                     user_generation=generation)
-    except Exception as e:
-        log.warning("food_photo analyze %s: %s", cid, e); parsed = None
+    return generation, profile_of(u)
+
+
+def _finalize_food_photo(cid, generation, parsed, usage, prof):
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "tokens", sum(usage), meta="food_photo", calls=len(usage), usage=usage)
@@ -8537,6 +9250,36 @@ async def _api_food_photo(request):
     except Exception as e:
         import traceback; log.warning("FOOD save FAIL %s: %s", cid, traceback.format_exc())
         return _cors(web.json_response({"ok": False, "message": "Сбой сохранения: " + str(e)[:150]}))
+
+
+async def _api_food_photo_bounded(request):
+    try:
+        data = await request.post()
+    except Exception:
+        return _cors(web.json_response({"ok": False, "message": "Не получила фото."}, status=400))
+    cid = _verify_init(data.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    prepared = await asyncio.to_thread(_prepare_food_photo, cid)
+    if not prepared:
+        return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте: /start."}, status=403))
+    generation, prof = prepared
+    raw, fn = _read_upload(data.get("photo"))
+    if not raw:
+        return _cors(web.json_response({"ok": False, "message": "Пустое фото."}))
+    if len(raw) > 12 * 1024 * 1024:
+        return _cors(web.json_response({"ok": False, "message": "Фото слишком большое, сожми и попробуй ещё раз."}))
+    usage = []
+    try:
+        async with _AI_BACKGROUND_SEM:
+            parsed = await llm_to_thread(
+                cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
+                user_generation=generation,
+            )
+    except Exception as e:
+        log.warning("food_photo analyze %s: %s", cid, e); parsed = None
+    return await asyncio.to_thread(
+        _finalize_food_photo, cid, generation, parsed, usage, prof
+    )
 
 async def _api_food_text(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -8575,9 +9318,7 @@ async def _api_food_text(request):
         import traceback; log.warning("FOOD save FAIL %s: %s", cid, traceback.format_exc())
         return _cors(web.json_response({"ok": False, "message": "Сбой сохранения: " + str(e)[:150]}))
 
-async def _api_track(request):
-    body = await request.json(); cid = _verify_init(body.get("initData", ""))
-    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+def _api_track_sync(cid, body):
     scr = re.sub(r"[^a-z0-9_]", "", str(body.get("screen") or "").lower())[:20]
     flow = re.sub(r"[^a-z0-9_]", "", str(body.get("flow") or "").lower())[:20]
     onboarded = is_onboarded(row(cid))
@@ -8585,7 +9326,13 @@ async def _api_track(request):
         ev(cid, "button", meta="view_" + scr)
     if flow in {"food", "workout"} and onboarded:
         ev(cid, "flow_start", meta=flow)
-    return _cors(web.json_response({"ok": True}))
+    return {"ok": True}
+
+async def _api_track(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    payload = await asyncio.to_thread(_api_track_sync, cid, body)
+    return _cors(web.json_response(payload))
 
 async def _api_train_day(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -8742,16 +9489,15 @@ async def _api_diary_edit(request):
     ev(cid, "button", meta="web_diary_edit")
     return _cors(web.json_response(diary_payload(cid)))
 
-async def _api_food_manual(request):
-    body = await request.json(); cid = _verify_init(body.get("initData", ""))
-    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+def _api_food_manual_sync(cid, body):
     _evict_week_food_cache(cid)
-    if not is_onboarded(row(cid)): return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву."}, status=403))
+    if not is_onboarded(row(cid)):
+        return {"ok": False, "message": "Сначала настрой Айву."}, 403
     ev(cid, "flow_start", meta="food")
     title = (body.get("title") or "").strip()[:80]
     kcal = int(_num(body.get("kcal")))
     if not title and not kcal:
-        return _cors(web.json_response({"ok": False, "message": "Укажи название или калории."}))
+        return {"ok": False, "message": "Укажи название или калории."}, 200
     rec = {"title": title or "Приём пищи", "kind": "manual", "items": [],
            "kcal": kcal, "protein": round(_num(body.get("protein")), 1), "fat": round(_num(body.get("fat")), 1),
            "carbs": round(_num(body.get("carbs")), 1), "grams": (int(_num(body.get("grams"))) or None),
@@ -8759,7 +9505,13 @@ async def _api_food_manual(request):
     if body.get("slot") in ("breakfast", "lunch", "snack", "dinner"): rec["slot"] = body["slot"]
     mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
     out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid))
-    return _cors(web.json_response(out))
+    return out, 200
+
+async def _api_food_manual(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    payload, status = await asyncio.to_thread(_api_food_manual_sync, cid, body)
+    return _cors(web.json_response(payload, status=status))
 
 async def _api_diary_reco(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -8788,23 +9540,23 @@ async def _api_mode(request):
     ev(cid, "manual", meta="web_mode_" + m)
     return _cors(web.json_response({"ok": True, "mode": m}))
 
-async def _api_prefs(request):
-    body = await request.json(); cid = _verify_init(body.get("initData", ""))
-    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+def _api_prefs_sync(cid, body):
     _evict_today_cache(cid)
-    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    if not is_onboarded(row(cid)):
+        return {"error": "onboard"}, 403
     note = (body.get("diet_note") or "").strip()[:300]
-    upsert(cid, diet_note=note)
+    changes = {"diet_note": note}
     if "kcal_goal" in body:
         g = body.get("kcal_goal")
         if g in (None, "", 0, "0"):
-            upsert(cid, kcal_goal=None)
+            changes["kcal_goal"] = None
         else:
             try:
                 gi = int(float(str(g).replace(",", ".")))
-                upsert(cid, kcal_goal=(gi if 800 <= gi <= 6000 else None))
+                changes["kcal_goal"] = gi if 800 <= gi <= 6000 else None
             except (TypeError, ValueError):
                 pass
+    upsert(cid, **changes)
     menu_cache_clear(cid)
     ev(cid, "manual", meta="web_prefs")
     _up = row(cid); _kb = None
@@ -8813,7 +9565,18 @@ async def _api_prefs(request):
             _kb = calc_calories(_up["height"], _up["weight"], _up["age"], _up.get("activity") or 2)[0]
     except Exception:
         _kb = None
-    return _cors(web.json_response({"ok": True, "diet_note": note, "kcal_goal": _up.get("kcal_goal"), "kcal_base": _kb}))
+    return {
+        "ok": True,
+        "diet_note": note,
+        "kcal_goal": _up.get("kcal_goal"),
+        "kcal_base": _kb,
+    }, 200
+
+async def _api_prefs(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    payload, status = await asyncio.to_thread(_api_prefs_sync, cid, body)
+    return _cors(web.json_response(payload, status=status))
 
 async def _api_settime(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -8901,6 +9664,102 @@ def _feat_of(action, meta):
     if m in ("view_today", "web_today", "web_checkin", "web_period") or m.startswith("ci:"): return "Сегодня"
     return None
 
+def _analytics_event_projection(conn, users):
+    """Return one legacy-shaped stream backed by events_v2 after each user's cutover."""
+    key_to_cid = {A2.user_key(cid): cid for cid, _created, _mode in users}
+    projected = []
+    first_v2 = {}
+    v2_rows = conn.execute(
+        """SELECT occurred_at,user_key,event_name,source,screen,status,latency_ms,properties_json
+           FROM events_v2 ORDER BY occurred_at"""
+    ).fetchall()
+    for ts, key, name, source, screen, status, latency_ms, props_json in v2_rows:
+        cid = key_to_cid.get(key)
+        if cid is None:
+            continue
+        first_v2[cid] = min(first_v2.get(cid, ts), ts)
+        try:
+            props = json.loads(props_json or "{}")
+        except (TypeError, ValueError):
+            props = {}
+        action = "manual"
+        meta = props.get("channel") or name
+        if name == "onboarding_started":
+            action, meta = "signup", None
+        elif name == "onboarding_completed":
+            action, meta = "onboarding_completed", None
+        elif name == "assistant_response_received":
+            action, meta = "answered", props.get("channel")
+        elif name == "user_message_sent":
+            action, meta = "user_message", props.get("channel")
+        elif name == "assistant_message_sent":
+            action, meta = "assistant_message", props.get("channel")
+        elif name == "legacy_message_interaction":
+            action, meta = "manual", props.get("channel")
+        elif name in {"screen_viewed", "app_opened"}:
+            action = "button"
+            meta = ("view_" + str(screen or "")) if name == "screen_viewed" else "app_open"
+        elif name in {"checkin_completed", "checkin_updated", "checkin_symptom_selected"}:
+            action, meta = "manual", "checkin"
+        elif name in {"push_queued", "push_sent", "push_failed", "push_shadowed"}:
+            action = "broadcast"
+            delivery = props.get("delivery_status")
+            if not delivery:
+                delivery = {
+                    "push_queued": "queued", "push_sent": "sent",
+                    "push_failed": "error", "push_shadowed": "shadow",
+                }[name]
+            meta = str(delivery)
+            if props.get("campaign_id"):
+                meta += "|" + str(props["campaign_id"])
+        elif name == "push_opened":
+            action, meta = "push_open", props.get("campaign_id")
+        elif name == "summary_delivered":
+            action, meta = "goal", "summary"
+        elif name == "summary_opened":
+            action, meta = "summary_open", "daily_summary"
+        elif name == "meal_add_completed":
+            action, meta = "goal", "food_log"
+        elif name == "workout_add_completed":
+            action, meta = "goal", "workout"
+        elif name == "answer_feedback_prompted":
+            action, meta = "feedback_prompt", props.get("answer_id")
+        elif name == "answer_feedback_submitted":
+            action = "feedback"
+            meta = "|".join(filter(None, (props.get("rating"), props.get("answer_id"))))
+        elif name == "safety_guidance_shown":
+            action, meta = "safety", props.get("safety_level")
+        elif name == "tool_execution_completed":
+            action = "tool_execution"
+            meta = "|".join(filter(None, (props.get("status"), props.get("tool_name"), source)))
+        elif name == "tool_outcome_completed":
+            action = "tool_outcome"
+            meta = "|".join(filter(None, (props.get("status"), props.get("outcome_type"), source)))
+        elif name == "fallback_served":
+            action, meta = "fallback", props.get("reason")
+        elif name == "ai_usage_recorded":
+            action, meta = "tokens", props.get("channel")
+        elif name == "error":
+            action, meta = "error", status
+        elif name.startswith("legacy_"):
+            action, meta = name[7:], props.get("channel")
+        projected.append((
+            cid, ts, action, 0, meta, int(latency_ms or 0),
+            int(props.get("calls") or 0), 0, 0, None,
+        ))
+
+    # Keep pre-cutover history only. During the former dual-write period v2 wins.
+    for legacy in conn.execute(
+        """SELECT chat_id,ts,action,tokens,meta,ms,calls,tok_in,tok_out,model
+           FROM events ORDER BY ts"""
+    ).fetchall():
+        cid, ts = legacy[0], legacy[1]
+        if cid not in first_v2 or (ts or "") < (first_v2[cid] or ""):
+            projected.append(legacy)
+    projected.sort(key=lambda row_: row_[1] or "")
+    return projected
+
+
 def analytics_data(days=7, frm=None, to=None):
     """Чистый слой аналитики (спека v2). tool-calls = Σ calls (все хопы к модели)."""
     from collections import Counter, defaultdict
@@ -8925,16 +9784,23 @@ def analytics_data(days=7, frm=None, to=None):
         except Exception: return today
     c = db()
     users = c.execute("SELECT chat_id, created, mode FROM users").fetchall()
-    evs = c.execute("SELECT chat_id, ts, action, tokens, meta, ms, calls, tok_in, tok_out, model FROM events WHERE ts>=? AND ts<=?", (since_ts, until_ts)).fetchall()
+    all_evs = _analytics_event_projection(c, users)
+    evs = [event for event in all_evs if since <= dparse(event[1]) <= until]
     partners = c.execute("SELECT partner_id, woman_id FROM partners").fetchall()
     wmin = datetime.combine(until - timedelta(days=120), dtime.min).isoformat()
-    wide = c.execute("SELECT chat_id, ts, action FROM events WHERE ts>=? AND ts<=?", (wmin, until_ts)).fetchall()
-    first_rows = c.execute("SELECT chat_id, MIN(ts) FROM events WHERE action IN ('command','button','suggest','manual','answered','user_message','voice','fallback','onboarding_completed') GROUP BY chat_id").fetchall()
-    goalrows = c.execute("SELECT DISTINCT chat_id, meta FROM events WHERE action='goal'").fetchall()
+    wide = [(event[0], event[1], event[2]) for event in all_evs
+            if (until - timedelta(days=120)) <= dparse(event[1]) <= until]
+    first_by_user = {}
+    for event in all_evs:
+        if event[2] in ACTIVE:
+            first_by_user[event[0]] = min(first_by_user.get(event[0], event[1]), event[1])
+    first_rows = list(first_by_user.items())
+    goalrows = list({(event[0], event[4]) for event in all_evs if event[2] == "goal"})
     refrows = c.execute("SELECT source, chat_id, ts FROM referrals").fetchall()
     pmin = datetime.combine(since - timedelta(days=span), dtime.min).isoformat()
     pmax = datetime.combine(since - timedelta(days=1), dtime.max).isoformat()
-    prev = c.execute("SELECT chat_id, ts, action, calls FROM events WHERE ts>=? AND ts<=?", (pmin, pmax)).fetchall()
+    prev = [(event[0], event[1], event[2], event[6]) for event in all_evs
+            if (since - timedelta(days=span)) <= dparse(event[1]) <= (since - timedelta(days=1))]
     llm_rows = c.execute("""SELECT provider,model,purpose,status,latency_ms,input_tokens,output_tokens,
                                    cached_tokens,total_tokens,user_key,request_id,reported_cost,cost_unit
                             FROM llm_calls WHERE occurred_at>=? AND occurred_at<=?""",
@@ -9188,7 +10054,29 @@ async def _security_headers(request, handler):
 
 async def _health(request):
     status = 200 if APP_READY else 503
-    return web.json_response({"status": "ok" if APP_READY else "starting", "version": AIWA_VERSION}, status=status)
+    return web.json_response(
+        {
+            "status": "ok" if APP_READY else "starting",
+            "version": AIWA_VERSION,
+            "event_queue": _EVENT_WRITE_Q.qsize(),
+            "ai_workers": sum(1 for task in _AI_JOB_TASKS if not task.done()),
+            "ai_worker_limit": _AI_TODAY_WORKERS,
+            "llm_concurrency_limit": _AI_LLM_CONCURRENCY_LIMIT,
+            "chat_reserved_slots": _AI_CHAT_RESERVED_SLOTS,
+            "ai_background_concurrency_limit": _AI_BACKGROUND_CONCURRENCY,
+            "ai_background_active": (
+                _AI_BACKGROUND_CONCURRENCY
+                - int(getattr(_AI_BACKGROUND_SEM, "_value", 0))
+            ),
+            "food_vision_concurrency_limit": _FOOD_VISION_CONCURRENCY,
+            "food_vision_active": (
+                _FOOD_VISION_CONCURRENCY
+                - int(getattr(_FOOD_VISION_SEM, "_value", 0))
+            ),
+            "food_vision_waiting": _FOOD_VISION_WAITERS,
+        },
+        status=status,
+    )
 
 def build_web():
     aio = web.Application(client_max_size=20 * 1024 * 1024, middlewares=[_security_headers])  # фото до ~20 МБ
@@ -9242,7 +10130,31 @@ def build_web():
     return aio
 
 async def run_all():
-    app = Application.builder().token(os.environ["BOT_TOKEN"]).concurrent_updates(True).build()
+    await asyncio.to_thread(ensure_db_schema)
+    start_event_writer()
+    builder = (
+        Application.builder()
+        .token(os.environ["BOT_TOKEN"])
+        .concurrent_updates(True)
+        .rate_limiter(
+            AIORateLimiter(
+                overall_max_rate=float(
+                    os.environ.get("AIWA_TELEGRAM_MAX_RATE", "28")
+                ),
+                overall_time_period=1,
+                max_retries=int(
+                    os.environ.get("AIWA_TELEGRAM_RATE_RETRIES", "2")
+                ),
+            )
+        )
+    )
+    telegram_base_url = os.environ.get("AIWA_TELEGRAM_BOT_BASE_URL", "").strip()
+    telegram_file_base_url = os.environ.get("AIWA_TELEGRAM_FILE_BASE_URL", "").strip()
+    if telegram_base_url:
+        builder = builder.base_url(telegram_base_url)
+    if telegram_file_base_url:
+        builder = builder.base_file_url(telegram_file_base_url)
+    app = builder.build()
     global BOT_APP; BOT_APP = app
     app.add_handler(TypeHandler(Update, sync_telegram_identity), group=-1)
     for cmd, fn in (("start", start), ("today", today), ("summary", today), ("id", id_cmd), ("calendar", calendar_cmd), ("checkin", checkin_cmd),
@@ -9256,8 +10168,14 @@ async def run_all():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     runner = web.AppRunner(build_web()); await runner.setup()
     port = int(os.environ.get("PORT", "8080"))
-    # Binding to all interfaces is required inside the Railway container.
-    site = web.TCPSite(runner, "0.0.0.0", port); await site.start()  # nosec B104
+    bind_host = os.environ.get("AIWA_BIND_HOST", "0.0.0.0")
+    http_backlog = max(
+        128, min(4096, int(os.environ.get("AIWA_HTTP_BACKLOG", "1024")))
+    )
+    # The Railway default remains all interfaces; self-hosted staging binds loopback.
+    site = web.TCPSite(
+        runner, bind_host, port, backlog=http_backlog
+    ); await site.start()  # nosec B104
     await app.initialize(); await on_startup(app); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     global APP_READY; APP_READY = True
     log.info("AIWA bot + web on :%s", port)
