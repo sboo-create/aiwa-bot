@@ -519,6 +519,24 @@ function renderMeno(el){
   var mc=document.getElementById('menochips');["Почему приливы?","Какие чекапы?"].forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};mc.appendChild(b);});
   var ma=document.getElementById('menoask');if(ma)["Как снизить приливы?","Что важно для костей?","Какие чекапы по возрасту?","Как улучшить сон?"].forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};ma.appendChild(b);});
 }
+var TODAY_POLL_TIMER=null;
+function loadTodayNote(tries){
+  api('/api/today',{}).then(function(n){
+    if(!n||n.error)return;
+    var av=document.querySelector('#scr-today .ayva-txt');
+    if(n.summary&&av)av.textContent=n.summary;
+    var tc2=document.getElementById('tchips');
+    if(tc2&&n.suggestions&&n.suggestions.length){
+      tc2.innerHTML='';
+      n.suggestions.forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc2.appendChild(b);});
+    }
+    if(n.refreshing&&tries<30){
+      clearTimeout(TODAY_POLL_TIMER);
+      var wait=((n.job&&n.job.eta_seconds)||5)*1000;
+      TODAY_POLL_TIMER=setTimeout(function(){loadTodayNote(tries+1);},Math.max(3000,Math.min(15000,wait)));
+    }
+  }).catch(function(){});
+}
 function renderToday(){
   var el=document.getElementById('scr-today');
   if(D.mode==='preg' && D.preg){renderPreg(el);return placeAvatar();}
@@ -550,7 +568,7 @@ function renderToday(){
   html+="<button class='homebtn' id='homebtn' style='display:none' onclick='addHome()'>📲 Добавить Айву на экран телефона</button>";html+="<div class='foot'>Отмечай месячные и симптомы, чтобы прогноз цикла и рекомендации становились точнее.</div>";
   el.innerHTML=html;blossom(document.getElementById('al'),34);updateHomeBtn();
   var tc=document.getElementById('tchips');(CHIPS[ph]||[]).forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc.appendChild(b);});
-  if(!delayed){api('/api/today',{}).then(function(n){if(!n||n.error)return;var av=document.querySelector('#scr-today .ayva-txt');if(n.summary&&av)av.textContent=n.summary;var tc2=document.getElementById('tchips');if(tc2&&n.suggestions&&n.suggestions.length){tc2.innerHTML='';n.suggestions.forEach(function(c){var b=document.createElement('button');b.className='chip';b.textContent=c;b.onclick=function(){go('chat');setTimeout(function(){send(c);},120);};tc2.appendChild(b);});}}).catch(function(){});}
+  if(!delayed){loadTodayNote(0);}
   syncMarks();
   STARTS=buildStarts();calOffset=0;
   document.getElementById('calPrev').onclick=function(){calOffset--;drawCal();haptic("selection");};

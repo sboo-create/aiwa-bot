@@ -1,0 +1,48 @@
+[Unit]
+Description=Restricted SSH egress tunnel from AIWA staging to OpenRouter
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=aiwa-staging
+Group=aiwa-staging
+ExecStart=/usr/bin/ssh -N -T \
+  -o ExitOnForwardFailure=yes \
+  -o ConnectTimeout=10 \
+  -o ConnectionAttempts=3 \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -o TCPKeepAlive=yes \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=/srv/aiwa-staging/tunnel/known_hosts \
+  -i /srv/aiwa-staging/tunnel/id_ed25519 \
+  -L 127.0.0.1:14443:openrouter.ai:443 \
+  aiwa-tunnel@104.168.54.196
+ExecStartPost=/usr/bin/curl --fail --silent --show-error \
+  --retry 10 --retry-connrefused --retry-delay 1 --retry-max-time 20 \
+  --max-time 10 \
+  --resolve openrouter.ai:14443:127.0.0.1 \
+  https://openrouter.ai:14443/api/v1/models \
+  --output /dev/null
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+MemoryMax=64M
+CPUQuota=20%
+TasksMax=32
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

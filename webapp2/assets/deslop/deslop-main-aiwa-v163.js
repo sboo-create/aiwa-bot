@@ -19516,7 +19516,7 @@ const Yr = [
   { label: "Фолликулярная", variant: "tinted", token: "--aiwa-phase-follicular" },
   { label: "Лютеиновая", variant: "tinted", token: "--aiwa-phase-luteal" },
   { label: "Близость", variant: "tinted", token: "--aiwa-intimacy" }
-], ax = [[1, "Низкая"], [2, "Средняя"], [3, "Высокая"]], ix = [[1, "Плохое"], [2, "Нормальное"], [3, "Хорошее"]], cj = "/assets/paper-food-placeholder.png", lx = [
+], ax = [[1, "Низкая"], [2, "Средняя"], [3, "Высокая"]], ix = [[1, "Плохое"], [2, "Нормальное"], [3, "Хорошее"]], cj = "/assets/food/meal-placeholder.svg", lx = [
   { value: "breakfast", label: "Завтрак" },
   { value: "lunch", label: "Обед" },
   { value: "snack", label: "Перекус" },
@@ -19591,22 +19591,7 @@ const Zg = 1e3 / 40, gj = 5e3, sx = (a, e) => Array.from(
   })))
 ), $f.get(a));
 function Gh({ size: a, frames: e = vj, pauseMs: l = gj }) {
-  const [s, r] = E.useState(0);
-  return E.useEffect(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    let f = !1, h = 0, y = 0;
-    const p = () => {
-      let g = 0;
-      r(g), h = window.setInterval(() => {
-        g += 1, r(g), g === e.length - 1 && (window.clearInterval(h), y = window.setTimeout(p, l || Zg));
-      }, Zg);
-    };
-    return bj(e).then(() => {
-      f || p();
-    }), () => {
-      f = !0, window.clearInterval(h), window.clearTimeout(y);
-    };
-  }, [e, l]), /* @__PURE__ */ m.jsx(
+  return /* @__PURE__ */ m.jsx(
     "span",
     {
       className: "aiwa-sequence",
@@ -19614,9 +19599,9 @@ function Gh({ size: a, frames: e = vj, pauseMs: l = gj }) {
       "data-aiwa-sequence": "true",
       "data-sequence": e === $h ? "card" : "default",
       "data-pause-ms": l,
-      "data-frame": s,
+      "data-frame": 0,
       "aria-hidden": "true",
-      children: /* @__PURE__ */ m.jsx("img", { src: e[s], alt: "", draggable: "false" })
+      children: /* @__PURE__ */ m.jsx("img", { src: e[0], alt: "", draggable: "false", decoding: "sync" })
     }
   );
 }
@@ -19695,7 +19680,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-sx8eqQoP.js").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v163.js").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -20443,7 +20428,10 @@ function Yt({
   image: f,
   loading: h = !1
 }) {
-  const y = s !== void 0 ? s : l ? /* @__PURE__ */ m.jsx(pt.Part, { type: "Chevron" }) : null, p = h ? /* @__PURE__ */ m.jsx("span", { className: "aiwa-cell-thumb aiwa-cell-thumb-loading", children: /* @__PURE__ */ m.jsx(Uh, { size: 22 }) }) : f ? /* @__PURE__ */ m.jsx("span", { className: "aiwa-cell-thumb", children: /* @__PURE__ */ m.jsx("img", { src: f, alt: "", loading: "lazy" }) }) : c;
+  const y = s !== void 0 ? s : l ? /* @__PURE__ */ m.jsx(pt.Part, { type: "Chevron" }) : null, p = h ? /* @__PURE__ */ m.jsx("span", { className: "aiwa-cell-thumb aiwa-cell-thumb-loading", children: /* @__PURE__ */ m.jsx(Uh, { size: 22 }) }) : f ? /* @__PURE__ */ m.jsx("span", { className: "aiwa-cell-thumb", children: /* @__PURE__ */ m.jsx("img", { src: f, alt: "", loading: "lazy", onError: (g) => {
+    const v = "/assets/food/meal-placeholder.svg";
+    g.currentTarget.getAttribute("src") === v ? g.currentTarget.style.display = "none" : g.currentTarget.src = v;
+  } }) }) : c;
   return /* @__PURE__ */ m.jsx(
     pt,
     {
@@ -20505,7 +20493,7 @@ function Yh({ isOpen: a, onClose: e }) {
       height: g.height,
       weight: g.weight,
       age: g.age,
-      cycle_len: g.cycle_len
+      ...r.mode === "cycle" ? { cycle_len: g.cycle_len } : {}
     }).catch(() => null), R = await qt("/api/prefs", {
       diet_note: g.diet_note,
       kcal_goal: g.kcal_goal
@@ -20554,9 +20542,9 @@ function Yh({ isOpen: a, onClose: e }) {
             )) })
           ] }),
           /* @__PURE__ */ m.jsx(yt, { className: "aiwa-tma-blocks", children: /* @__PURE__ */ m.jsxs(yt.Item, { children: [
-            r.mode === "male" ? null : /* @__PURE__ */ m.jsx(Yt, { title: "Выписка для врача", description: "PDF в чат бота", onClick: () => s("report") }),
+            /* @__PURE__ */ m.jsx(Yt, { title: r.mode === "male" ? "Выписка по самочувствию" : "Выписка для врача", description: "PDF в чат бота", onClick: () => s("report") }),
             /* @__PURE__ */ m.jsx(Yt, { title: "Предпочтения по питанию", description: "ограничения и цель калорий", onClick: () => s("data") }),
-            /* @__PURE__ */ m.jsx(Yt, { title: "Мои данные", description: "рост · вес · возраст · цикл", onClick: () => s("data") }),
+            /* @__PURE__ */ m.jsx(Yt, { title: "Мои данные", description: r.mode === "male" ? "рост · вес · возраст" : "рост · вес · возраст · цикл", onClick: () => s("data") }),
             /* @__PURE__ */ m.jsx(Yt, { title: "Утренняя сводка", description: `${g.send_time || "08:00"} · МСК`, onClick: () => s("summary") }),
             /* @__PURE__ */ m.jsx(
               pt.Switch,
@@ -20581,7 +20569,7 @@ function Yh({ isOpen: a, onClose: e }) {
             /* @__PURE__ */ m.jsx(ie, { label: "Рост, см", value: g.height || "", onChange: (A) => v((R) => ({ ...R, height: A })), inputMode: "decimal" }),
             /* @__PURE__ */ m.jsx(ie, { label: "Вес, кг", value: g.weight || "", onChange: (A) => v((R) => ({ ...R, weight: A })), inputMode: "decimal" }),
             /* @__PURE__ */ m.jsx(ie, { label: "Возраст", value: g.age || "", onChange: (A) => v((R) => ({ ...R, age: A })), inputMode: "numeric" }),
-            /* @__PURE__ */ m.jsx(ie, { label: "Длина цикла", value: g.cycle_len || "", onChange: (A) => v((R) => ({ ...R, cycle_len: A })), inputMode: "numeric" })
+            r.mode === "cycle" ? /* @__PURE__ */ m.jsx(ie, { label: "Длина цикла", value: g.cycle_len || "", onChange: (A) => v((R) => ({ ...R, cycle_len: A })), inputMode: "numeric" }) : null
           ] }),
           /* @__PURE__ */ m.jsx(lt, { variant: "title3", weight: "semibold", children: "Питание" }),
           /* @__PURE__ */ m.jsx(
@@ -20604,7 +20592,7 @@ function Yh({ isOpen: a, onClose: e }) {
           /* @__PURE__ */ m.jsx(Wt, { variant: "filled", label: "Сохранить", isFill: !0, ...se("Сохранить время сводки", T) })
         ] }) : null,
         l === "report" ? /* @__PURE__ */ m.jsxs("div", { className: "aiwa-form-stack", children: [
-          /* @__PURE__ */ m.jsx(lt, { variant: "body", weight: "regular", children: "Циклы, динамика и дневник симптомов придут PDF-файлом в чат бота." }),
+          /* @__PURE__ */ m.jsx(lt, { variant: "body", weight: "regular", children: r.mode === "male" ? "Динамика энергии и дневник самочувствия придут PDF-файлом в чат бота." : "Циклы, динамика и дневник симптомов придут PDF-файлом в чат бота." }),
           /* @__PURE__ */ m.jsx(
             Wi,
             {
@@ -21057,14 +21045,13 @@ const mx = {
   diary: () => qt("/api/diary", {}),
   trainingSection: () => qt("/api/section", { kind: "training" }),
   train: () => qt("/api/train", {})
-}, Zi = /* @__PURE__ */ new Map(), sr = /* @__PURE__ */ new Map(), or = (a) => Object.fromEntries(a.map((e) => [e, Zi.get(e) ?? null])), Od = (a, { force: e = !1 } = {}) => {
-  if (!e) {
-    if (Zi.has(a)) return Promise.resolve(Zi.get(a));
-    const s = sr.get(a);
-    if (s) return s;
-  }
-  const l = mx[a]().catch(() => null).then((s) => (s && Zi.set(a, s), sr.get(a) === l && sr.delete(a), Zi.get(a) ?? null));
-  return sr.set(a, l), l;
+}, Zi = /* @__PURE__ */ new Map(), sr = /* @__PURE__ */ new Map(), aiwaCacheTs = /* @__PURE__ */ new Map(), or = (a) => Object.fromEntries(a.map((e) => [e, Zi.get(e) ?? null])), Od = (a, { force: e = !1, maxAgeMs: l = 1500 } = {}) => {
+  const s = sr.get(a);
+  if (s) return s;
+  if (!e && Zi.has(a) && Date.now() - (aiwaCacheTs.get(a) || 0) <= l)
+    return Promise.resolve(Zi.get(a));
+  const r = mx[a]().catch(() => null).then((c) => (c && (Zi.set(a, c), aiwaCacheTs.set(a, Date.now())), sr.get(a) === r && sr.delete(a), Zi.get(a) ?? null));
+  return sr.set(a, r), r;
 }, sA = () => {
   Object.keys(mx).forEach((a) => {
     Od(a);
@@ -21075,7 +21062,7 @@ function px(a, e) {
     const y = h.length ? h : a;
     await Promise.all(y.map((p) => Od(p, { force: !0 }))), s(or(a));
   }, [a]), f = E.useCallback((h, y) => {
-    Zi.set(h, y), s(or(a));
+    Zi.set(h, y), aiwaCacheTs.set(h, Date.now()), s(or(a));
   }, [a]);
   return E.useEffect(() => {
     let h = !0;
@@ -21087,16 +21074,21 @@ function px(a, e) {
     };
   }, e), [l, c, f];
 }
-const oA = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"], yx = (a = 30) => {
+const aiwaTodayIso = () => {
+  const a = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, e = String(a?.today || "");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(e)) return e;
+  const l = Object.fromEntries(new Intl.DateTimeFormat("en", { timeZone: "Europe/Moscow", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(/* @__PURE__ */ new Date()).filter((s) => s.type !== "literal").map((s) => [s.type, s.value]));
+  return `${l.year}-${l.month}-${l.day}`;
+}, oA = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"], yx = (a = 30) => {
   const e = [];
   for (let l = a - 1; l >= 0; l -= 1) {
-    const s = /* @__PURE__ */ new Date();
+    const s = /* @__PURE__ */ new Date(`${aiwaTodayIso()}T12:00:00`);
     s.setDate(s.getDate() - l);
     const r = `${s.getFullYear()}-${String(s.getMonth() + 1).padStart(2, "0")}-${String(s.getDate()).padStart(2, "0")}`;
     e.push({ iso: r, date: String(s.getDate()), label: oA[s.getDay()], today: l === 0 });
   }
   return e;
-}, rA = ["foodSection", "diary"], uA = "/assets/paper-food-placeholder.png", zd = (a) => String(a || "").toLowerCase().replace(/ё/g, "е"), Xf = "?v=2", nv = (a) => zd(a).split(/[^а-яa-z0-9]+/).filter((e) => e.length >= 3), cA = (a, e) => {
+}, rA = ["foodSection", "diary"], uA = "/assets/food/meal-placeholder.svg", zd = (a) => String(a || "").toLowerCase().replace(/ё/g, "е"), Xf = "?v=2", nv = (a) => zd(a).split(/[^а-яa-z0-9]+/).filter((e) => e.length >= 3), cA = (a, e) => {
   const l = Math.min(4, a.length, e.length);
   return a.slice(0, l) === e.slice(0, l);
 }, av = (a, e) => {
@@ -21163,9 +21155,14 @@ function iv({ mode: a, revision: e = 0 }) {
       S(null);
       return;
     }
+    const ii = Z.recent?.[Kt];
+    if (ii) {
+      S(ii);
+      return;
+    }
     S(null);
-    const ii = await qt("/api/diary", { d: Kt }).catch(() => null);
-    S(ii || { meals: [] });
+    const nt = await qt("/api/diary", { d: Kt }).catch(() => null);
+    S(nt || { meals: [] });
   }, rn = async (rt, Kt) => {
     if (!M) {
       D(!0);
@@ -21210,7 +21207,7 @@ function iv({ mode: a, revision: e = 0 }) {
           className: "aiwa-avatar-initial aiwa-screen-profile",
           "aria-label": "Открыть профиль",
           onClick: () => y(!0),
-          children: (c?.name || "•").trim()[0]?.toUpperCase() || "•"
+          children: /* @__PURE__ */ m.jsx(Fj, {})
         }
       ) : null
     ] }),
@@ -21355,7 +21352,7 @@ function iv({ mode: a, revision: e = 0 }) {
   ] }) }) });
 }
 function dA({ isOpen: a, onClose: e, onSaved: l, suggested: s }) {
-  const r = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), [c, f] = E.useState(r), [h, y] = E.useState("Силовая"), [p, g] = E.useState("45 мин"), [v, b] = E.useState("Нормально"), [T, S] = E.useState([]), [w, j] = E.useState({}), [M, D] = E.useState(""), [A, R] = E.useState(!1), [B, U] = E.useState(""), [_, H] = E.useState(null);
+  const r = aiwaTodayIso(), [c, f] = E.useState(r), [h, y] = E.useState("Силовая"), [p, g] = E.useState("45 мин"), [v, b] = E.useState("Нормально"), [T, S] = E.useState([]), [w, j] = E.useState({}), [M, D] = E.useState(""), [A, R] = E.useState(!1), [B, U] = E.useState(""), [_, H] = E.useState(null);
   E.useEffect(() => {
     if (!a) return;
     tx("workout");
@@ -21617,7 +21614,7 @@ function xA({ mode: a, revision: e = 0 }) {
   if (!l.trainingSection || !l.train) return /* @__PURE__ */ m.jsx(hx, { title: "Нагрузка", variant: "activity" });
   const A = l.trainingSection, R = l.train, B = A.training || {}, U = (B.options || []).slice(0, 4), _ = R.today || [], H = R.week || [], P = H.filter((V) => V.count).slice(-3).reverse(), K = H.reduce((V, Z) => V + (Z.count || 0), 0), it = (V = null) => {
     v(V), p("workout");
-  }, at = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), I = !!(S && S !== at), F = async (V) => {
+  }, at = aiwaTodayIso(), I = !!(S && S !== at), F = async (V) => {
     const Z = typeof V == "string" ? V : V?.iso || "";
     if (w(Z), !Z || Z === at) {
       M(null);
@@ -21641,7 +21638,7 @@ function xA({ mode: a, revision: e = 0 }) {
           className: "aiwa-avatar-initial aiwa-screen-profile",
           "aria-label": "Открыть профиль",
           onClick: () => h(!0),
-          children: (r?.name || "•").trim()[0]?.toUpperCase() || "•"
+          children: /* @__PURE__ */ m.jsx(Fj, {})
         }
       ) : null
     ] }),
@@ -21750,12 +21747,12 @@ function SA({ initialMessages: a = [] }) {
     role: S.role === "user" ? "user" : "assistant",
     text: S.text || "",
     suggestions: []
-  }))), [s, r] = E.useState(""), [c, f] = E.useState(!1), [h, y] = E.useState(!1), p = Jf.useRef(null), g = Jf.useRef(null);
+  }))), [s, r] = E.useState(""), [c, f] = E.useState(!1), [h, y] = E.useState(!1), p = Jf.useRef(null), g = Jf.useRef(null), A = (typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData)?.mode === "male";
   E.useEffect(() => {
     e.length || l([{
       id: "hello",
       role: "assistant",
-      text: "Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.",
+      text: A ? "Привет! Спроси меня о питании, тренировках или самочувствии. Я отвечу с учётом твоих данных." : "Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.",
       suggestions: ["Можно ли тренироваться?", "Что съесть сегодня?", "Как моё самочувствие?"]
     }]);
   }, []), E.useEffect(() => {
@@ -21851,7 +21848,7 @@ const sv = [
   { id: "train", label: "Нагрузка", icon: /* @__PURE__ */ m.jsx(JE, {}) }
 ];
 function wA({ active: a }) {
-  const s = (typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData)?.mode === "male" ? sv.filter((f) => f.id !== "today") : sv, r = a === "stats" ? "today" : a, c = Math.max(0, s.findIndex((f) => f.id === r));
+  const s = sv, r = a === "stats" ? "today" : a, c = Math.max(0, s.findIndex((f) => f.id === r));
   return /* @__PURE__ */ m.jsx(ol, { children: /* @__PURE__ */ m.jsxs("div", { className: "aiwa-nav-root", "data-aiwa-nav": "true", children: [
     /* @__PURE__ */ m.jsx("div", { className: "aiwa-nav-tabbar-layer", children: /* @__PURE__ */ m.jsx(
       GE,

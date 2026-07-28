@@ -68,6 +68,26 @@ def _capture_usage(usage_list, data, provider, model, started, status="success",
         usage_list.append(Tok(total, inp, out, model))
     if _USAGE_SINK:
         ctx = _CALL_CONTEXT.get() or {}
+        meta = {
+            "reasoning_tokens": int(
+                (raw.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+            )
+        }
+        generation_id = data.get("id") if isinstance(data, dict) else None
+        if generation_id:
+            meta["generation_id"] = str(generation_id)
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            finish_reason = choices[0].get("finish_reason")
+            if finish_reason:
+                meta["finish_reason"] = str(finish_reason)
+        cost_details = raw.get("cost_details") or {}
+        upstream_cost = cost_details.get("upstream_inference_cost")
+        try:
+            if upstream_cost is not None:
+                meta["upstream_inference_cost"] = float(upstream_cost)
+        except (TypeError, ValueError):
+            pass
         record = {
             "call_id": str(uuid.uuid4()), "occurred_at": datetime.now(timezone.utc).isoformat(),
             "user_key": ctx.get("user_key"), "request_id": ctx.get("request_id"),
@@ -78,7 +98,7 @@ def _capture_usage(usage_list, data, provider, model, started, status="success",
             "total_tokens": total, "retry_index": retry_index, "fallback_from": fallback_from,
             "reported_cost": reported_cost,
             "cost_unit": ((cost_unit or "provider_credit") if reported_cost is not None else None),
-            "meta": {"reasoning_tokens": int((raw.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)},
+            "meta": meta,
         }
         try:
             _USAGE_SINK(record)
@@ -520,6 +540,14 @@ def _focus(st):
 
 
 _OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
+
+
+def _direct_openrouter_enabled():
+    return PROVIDER == "openrouter" or bool(
+        _OPENROUTER_KEY and not os.environ.get("LITELLM_URL")
+    )
+
+
 def _chat_completions_url(base_url):
     """Accept either an OpenAI base URL (/v1) or a full chat-completions URL."""
     url = (base_url or "").strip().rstrip("/")
@@ -531,17 +559,42 @@ def _chat_completions_url(base_url):
         return url + "/chat/completions"
     return url + "/v1/chat/completions"
 
-_PROXY_BASE = (os.environ.get("LITELLM_URL") or os.environ.get("OPENROUTER_BASE_URL")
-               or ("https://openrouter.ai/api/v1" if _OPENROUTER_KEY else ""))
+def _configured_proxy_base():
+    if PROVIDER == "openrouter":
+        return os.environ.get("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+    return (os.environ.get("LITELLM_URL") or os.environ.get("OPENROUTER_BASE_URL")
+            or ("https://openrouter.ai/api/v1" if _OPENROUTER_KEY else ""))
+
+
+def _configured_proxy_model():
+    if PROVIDER == "openrouter":
+        return (os.environ.get("OPENROUTER_TEXT_MODEL")
+                or os.environ.get("OPENROUTER_MODEL"))
+    return (os.environ.get("LITELLM_MODEL") or os.environ.get("OPENROUTER_TEXT_MODEL")
+            or os.environ.get("OPENROUTER_MODEL")
+            or (None if _OPENROUTER_KEY else "gigachat-3-ultra"))
+
+
+_PROXY_BASE = _configured_proxy_base()
 PROXY_URL = _chat_completions_url(_PROXY_BASE)
-if PROXY_URL.startswith("http://") and not _env_bool("AIWA_ALLOW_INSECURE_LLM_HTTP", False):
-    print("LLM proxy disabled: plain HTTP would expose API keys and health data; configure HTTPS")
-    PROXY_URL = ""
-PROXY_MODEL = (os.environ.get("LITELLM_MODEL") or os.environ.get("OPENROUTER_TEXT_MODEL")
-               or os.environ.get("OPENROUTER_MODEL") or (None if _OPENROUTER_KEY else "gigachat-3-ultra"))
+if PROXY_URL.startswith("http://"):
+    from urllib.parse import urlsplit as _urlsplit
+    proxy_host = (_urlsplit(PROXY_URL).hostname or "").lower()
+    insecure_loopback_allowed = (
+        proxy_host in {"127.0.0.1", "::1", "localhost"}
+        and _env_bool("AIWA_ALLOW_INSECURE_LLM_HTTP", False)
+    )
+    if not insecure_loopback_allowed:
+        print("LLM proxy disabled: plain HTTP would expose API keys and health data; configure HTTPS")
+        PROXY_URL = ""
+PROXY_MODEL = _configured_proxy_model()
 OPENROUTER_VISION_MODEL = os.environ.get("OPENROUTER_VISION_MODEL")
 FALLBACK_PROXY_URL = ""  # no implicit third-party endpoints; configure the fallback explicitly
 def _proxy_verify():
+    if _direct_openrouter_enabled():
+        # OpenRouter is a public HTTPS endpoint. A custom CA may be supplied,
+        # but stale LiteLLM settings must never disable certificate checks.
+        return os.environ.get("OPENROUTER_CA_BUNDLE_FILE") or True
     raw = (os.environ.get("LITELLM_CA_BUNDLE_FILE") or os.environ.get("LITELLM_SSL_VERIFY") or "true").strip()
     if raw.lower() in {"0", "false", "no", "off"}: return False
     if raw.lower() in {"1", "true", "yes", "on"}: return True
@@ -641,7 +694,66 @@ def _openrouter_provider_preferences():
     prefs = {"data_collection": collection}
     if _env_bool("OPENROUTER_ZDR", True):
         prefs["zdr"] = True
+    for env_name, field in (
+        ("OPENROUTER_PROVIDER_IGNORE", "ignore"),
+        ("OPENROUTER_PROVIDER_ONLY", "only"),
+        ("OPENROUTER_PROVIDER_ORDER", "order"),
+    ):
+        values = [
+            item.strip() for item in (os.environ.get(env_name) or "").split(",")
+            if item.strip()
+        ]
+        if values:
+            prefs[field] = values
+    if "OPENROUTER_ALLOW_FALLBACKS" in os.environ:
+        prefs["allow_fallbacks"] = _env_bool("OPENROUTER_ALLOW_FALLBACKS", True)
+    if "OPENROUTER_REQUIRE_PARAMETERS" in os.environ:
+        prefs["require_parameters"] = _env_bool("OPENROUTER_REQUIRE_PARAMETERS", True)
+    provider_sort = (os.environ.get("OPENROUTER_PROVIDER_SORT") or "").strip().lower()
+    if provider_sort in {"price", "throughput", "latency"}:
+        prefs["sort"] = provider_sort
     return prefs
+
+
+def _openrouter_vision_provider_preferences():
+    """Keep privacy defaults without inheriting a text-model-only allowlist."""
+    prefs = _openrouter_provider_preferences()
+    for field in (
+        "ignore",
+        "only",
+        "order",
+        "allow_fallbacks",
+        "require_parameters",
+        "sort",
+    ):
+        prefs.pop(field, None)
+    for env_name, field in (
+        ("OPENROUTER_VISION_PROVIDER_IGNORE", "ignore"),
+        ("OPENROUTER_VISION_PROVIDER_ONLY", "only"),
+        ("OPENROUTER_VISION_PROVIDER_ORDER", "order"),
+    ):
+        values = [
+            item.strip()
+            for item in (os.environ.get(env_name) or "").split(",")
+            if item.strip()
+        ]
+        if values:
+            prefs[field] = values
+    if "OPENROUTER_VISION_ALLOW_FALLBACKS" in os.environ:
+        prefs["allow_fallbacks"] = _env_bool(
+            "OPENROUTER_VISION_ALLOW_FALLBACKS", True
+        )
+    if "OPENROUTER_VISION_REQUIRE_PARAMETERS" in os.environ:
+        prefs["require_parameters"] = _env_bool(
+            "OPENROUTER_VISION_REQUIRE_PARAMETERS", True
+        )
+    provider_sort = (
+        os.environ.get("OPENROUTER_VISION_PROVIDER_SORT") or ""
+    ).strip().lower()
+    if provider_sort in {"price", "throughput", "latency"}:
+        prefs["sort"] = provider_sort
+    return prefs
+
 
 def _response_text(data):
     try:
@@ -665,8 +777,10 @@ def _response_text(data):
     return None
 
 def _proxy_configs():
-    key = os.environ.get("LITELLM_KEY") or _OPENROUTER_KEY; xkey = os.environ.get("LITELLM_XKEY")
-    is_openrouter = bool(_OPENROUTER_KEY and not os.environ.get("LITELLM_URL"))
+    is_openrouter = _direct_openrouter_enabled()
+    key = (_OPENROUTER_KEY if is_openrouter
+           else os.environ.get("LITELLM_KEY") or _OPENROUTER_KEY)
+    xkey = None if is_openrouter else os.environ.get("LITELLM_XKEY")
     # A LiteLLM gateway can still route an explicitly prefixed OpenRouter
     # model. OpenRouter credits are denominated in USD, so preserve that unit
     # even though the immediate HTTP endpoint is LiteLLM.
@@ -704,7 +818,7 @@ def _openrouter_vision_config():
         "key": _OPENROUTER_KEY,
         "referer": os.environ.get("OPENROUTER_HTTP_REFERER"),
         "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA",
-        "provider": _openrouter_provider_preferences(),
+        "provider": _openrouter_vision_provider_preferences(),
         "cost_unit": "usd",
     }
 
@@ -740,13 +854,29 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
                 if i < attempts - 1: _t.sleep(min(wait, 10)); wait = min(wait * 2, 12); continue
                 return None
             data = r.json()
+            # LiteLLM commonly reports spend in a response header instead of
+            # the OpenAI-compatible JSON usage object. Normalize it so the
+            # existing privacy-safe llm_calls sink records real test cost.
+            response_cost = r.headers.get("x-litellm-response-cost")
+            if response_cost is not None and isinstance(data, dict):
+                usage_data = data.setdefault("usage", {})
+                if isinstance(usage_data, dict) and usage_data.get("cost") is None:
+                    try:
+                        usage_data["cost"] = float(response_cost)
+                    except (TypeError, ValueError):
+                        pass
             actual_provider = data.get("provider") or cfg.get("name") or "litellm"
             actual_model = data.get("model") or cfg.get("model")
             txt = _response_text(data)
             txt = (txt or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
             if not txt:
-                _capture_failure(actual_provider, actual_model, started, "empty_response", i)
+                # A syntactically successful provider response may still have
+                # consumed tokens and credits. Preserve its usage and
+                # generation id even though no answer can be delivered.
+                _capture_usage(None, data, actual_provider, actual_model, started,
+                               status="empty_response", retry_index=i,
+                               cost_unit=cfg.get("cost_unit"))
                 if _route_record_failure(cfg, "empty_response"):
                     return None
                 if i < attempts - 1:
@@ -831,11 +961,32 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
         if not ok:
             STATS["err"] += 1
 
+def _provider_chain(primary):
+    """Return the configured provider chain without silently inventing fallbacks."""
+    known = ("litellm", "gigastand", "gigachat")
+    raw = os.environ.get("AIWA_PROVIDER_FALLBACKS")
+    if raw is None:
+        fallbacks = [item for item in known if item != primary]
+    elif raw.strip().lower() in {"", "0", "false", "none", "off", "no"}:
+        fallbacks = []
+    else:
+        aliases = {
+            "proxy": "litellm", "openrouter": "litellm",
+            "stand": "gigastand", "direct": "gigastand", "adapter": "gigastand",
+        }
+        fallbacks = []
+        for value in raw.split(","):
+            provider = aliases.get(value.strip().lower(), value.strip().lower())
+            if provider in known and provider != primary and provider not in fallbacks:
+                fallbacks.append(provider)
+    return [primary] + fallbacks
+
+
 def _call_impl(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=4):
     """Единая точка вызова модели. Движок выбирается переменной AIWA_PROVIDER."""
     aliases = {"proxy": "litellm", "openrouter": "litellm", "stand": "gigastand", "direct": "gigastand", "adapter": "gigastand"}
     primary = aliases.get(PROVIDER, PROVIDER)
-    providers = [primary] + [p for p in ("litellm", "gigastand", "gigachat") if p != primary]
+    providers = _provider_chain(primary)
     for i, p in enumerate(providers):
         tries = attempts if i == 0 else 1
         if p == "litellm":
@@ -892,7 +1043,7 @@ def _compact_messages(messages):
 # --- метрики нагрузки: считаем вызовы модели и латентность за интервал ---
 STATS = {"calls": 0, "ms": 0, "err": 0, "wait_ms": 0, "queued": 0}
 # семафор: не больше N одновременных обращений к модели, остальные ждут в очереди
-_LLM_SEM = threading.Semaphore(int(os.environ.get("AIWA_LLM_CONCURRENCY", "10")))
+_LLM_SEM = threading.Semaphore(int(os.environ.get("AIWA_LLM_CONCURRENCY", "8")))
 def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2):
     import time as _tt
     t0 = _tt.time(); STATS["calls"] += 1
@@ -1291,26 +1442,51 @@ def training_review(workout, recent=None, phase_ru=None, mode=None, profile=None
         hist_lines.append((w.get("d","") or "") + ": " + (w.get("type","") or "") + ((" (" + it + ")") if it else ""))
     hist = "; ".join(hist_lines) or "нет записей"
     ctx = []
-    if phase_ru: ctx.append("Фаза цикла сейчас: " + str(phase_ru) + ".")
-    if mode and mode != "cycle": ctx.append("Режим: " + str(mode) + " (цикл не отслеживается, опирайся на самочувствие).")
+    male = mode == "male"
+    if phase_ru and not male:
+        ctx.append("Фаза цикла сейчас: " + str(phase_ru) + ".")
+    if male:
+        ctx.append(
+            "Мужской профиль: оценивай нагрузку только по тренировкам, "
+            "самочувствию и восстановлению; женская физиология запрещена."
+        )
+    elif mode and mode != "cycle":
+        ctx.append("Режим: " + str(mode) + " (цикл не отслеживается, опирайся на самочувствие).")
     prof = profile if isinstance(profile, dict) else {}
     pr = "; ".join(str(k) + ": " + str(v) for k, v in prof.items() if v)
     if pr: ctx.append("Профиль тренировок: " + pr + ".")
     if workout.get("muscles"): ctx.append("Основные группы мышц: " + str(workout.get("muscles")) + ".")
     if workout.get("kcal"): ctx.append("Оценка сожжённых калорий: около " + str(workout.get("kcal")) + " ккал.")
     parts = [
-        "Пользователь только что отметила тренировку.",
+        (
+            "Пользователь только что отметил тренировку."
+            if male else "Пользователь только что отметила тренировку."
+        ),
         "Сегодня: " + (workout.get("type","") or "") + " - " + today_items + " - " + (workout.get("duration","") or "") + " - ощущение: " + (workout.get("rpe","") or "") + ".",
         "Недавние тренировки (свежие сверху): " + hist + ".",
         " ".join(ctx),
         "Ответь обычным текстом, без markdown и звёздочек, тремя короткими блоками, каждый с новой строки и с указанной подписи в начале:",
-        "Разбор: 1-2 предложения, как эта нагрузка ложится на фазу цикла и недавнюю историю, поддерживающе.",
+        (
+            "Разбор: 1-2 предложения, как эта нагрузка сочетается с недавней "
+            "историей и восстановлением, поддерживающе. Не упоминай цикл или "
+            "женскую физиологию."
+            if male else
+            "Разбор: 1-2 предложения, как эта нагрузка ложится на фазу цикла "
+            "и недавнюю историю, поддерживающе."
+        ),
         "Что добавить: 1 предложение - какой группы мышц или элемента не хватает на этой неделе.",
         "Следующая нагрузка: 1-2 предложения, конкретно что сделать в следующий раз, обязательно с учётом восстановления (после тяжёлой силовой - восстановление или другая группа, не то же самое) и без повторов изо дня в день.",
     ]
     user = "\n".join(x for x in parts if x)
     sys = (
-        "Ты AIWA - тёплый и точный ассистент по женскому здоровью и тренировкам. "
+        (
+            "Ты AIWA - точный ассистент по здоровью и тренировкам для мужчины. "
+            "Никогда не упоминай менструальный цикл, фазы, овуляцию или женскую "
+            "физиологию. Обращайся в мужском роде. "
+        ) if male else (
+            "Ты AIWA - тёплый и точный ассистент по женскому здоровью и тренировкам. "
+        )
+    ) + (
         "Пиши по-русски, обычным текстом, без markdown, без звёздочек и списков, без приветствий. "
         + IDENTITY_RULE
     )
@@ -1340,7 +1516,8 @@ def _train_ctx(st, mode, profile, pregnancy=None, checkin=None):
                 f"{st['phase_ru'].lower()} фаза, до месячных ~{st['days_to_next']} дн.")
     else:
         mm = {"meno": "менопауза (цикл не отслеживается)", "preg": "беременность",
-              "irregular": "нерегулярный цикл", "none": "месячных сейчас нет"}.get(mode, "цикл не отслеживается")
+              "irregular": "нерегулярный цикл", "none": "месячных сейчас нет",
+              "male": "мужской профиль; менструального цикла нет"}.get(mode, "цикл не отслеживается")
         base = f"Режим: {mm}. Опирайся на самочувствие, сон, боль и энергию, без жёсткой привязки к фазе."
     bits = []
     if profile:
@@ -1387,12 +1564,20 @@ def training_today(st, profile=None, recent=None, mode=None, usage=None, pregnan
     if recent:
         rec = (" Недавние тренировки (свежие сверху): " + recent +
                ". Не предлагай то же самое подряд, чередуй нагрузку и группы мышц, учитывай восстановление.")
+    male = mode == "male"
     prompt = (
-        "Ты тренер и физиолог женского здоровья. Составь рекомендацию по физической нагрузке на СЕГОДНЯ лично для неё. "
+        (
+            "Ты тренер и физиолог. Составь рекомендацию по физической нагрузке "
+            "на СЕГОДНЯ для мужчины. Никаких тем менструального цикла, фаз, "
+            "овуляции и женской физиологии. Обращайся в мужском роде. "
+        ) if male else (
+            "Ты тренер и физиолог женского здоровья. Составь рекомендацию по "
+            "физической нагрузке на СЕГОДНЯ лично для неё. "
+        )
         + ctx + rec +
         " Ответ должен быть живым и разным день ото дня, без шаблонных повторов. "
         "Пиши ПРОСТЫМИ словами без спортивного жаргона и англицизмов: никаких DOMS, RPE, «циркуляций», "
-        "«оценок энергии» и выдуманных техник — только то, что понятно обычной девушке. Строго JSON без обрамления:\n"
+        "«оценок энергии» и выдуманных техник — только понятные формулировки. Строго JSON без обрамления:\n"
         '{"level":"2-4 слова, напр. Силовая, можно активнее",'
         '"duration":"диапазон, напр. 35-50 мин",'
         '"summary":"1-2 живых предложения: что делать сегодня и ради чего",'
@@ -1418,7 +1603,13 @@ def training_today(st, profile=None, recent=None, mode=None, usage=None, pregnan
             "риск падения, перегрев, задержку дыхания, тренировку через боль или новые упражнения высокой интенсивности. "
             "Не обещай медицинский эффект и напомни остановиться при боли, кровотечении, головокружении или ухудшении самочувствия."
         )
-    out = _call([{"role": "system", "content": "Ты тренер femtech-приложения. Отвечай строго JSON, по-русски, без markdown."},
+    system = (
+        "Ты тренер приложения для мужского профиля. Женская физиология запрещена. "
+        "Отвечай строго JSON, по-русски, без markdown."
+        if male else
+        "Ты тренер femtech-приложения. Отвечай строго JSON, по-русски, без markdown."
+    )
+    out = _call([{"role": "system", "content": system},
                  {"role": "user", "content": prompt}], max_tokens=1100, temperature=0.6, usage=usage)
     data = None
     if out:
@@ -1472,12 +1663,37 @@ def today_note(st, profile=None, recent_syms=None, mode=None, usage=None):
     """Короткая персональная сводка на «Сегодня» + подсказки — от модели."""
     ctx = _train_ctx(st, mode, profile)
     sy = (" Сегодня отмечено: " + recent_syms + ".") if recent_syms else ""
-    prompt = ("Ты точный ассистент по женскому здоровью. " + ctx + sy +
-              " Напиши короткую персональную сводку на сегодня. ПЕРВОЕ предложение ОБЯЗАТЕЛЬНО начинается с дня цикла и фазы: «День 12, фолликулярная фаза - ...» (для беременности - неделя и триместр, для менопаузы - без дня). Дальше 2-3 предложения о том, как её тело сегодня "
-              "и что это значит для энергии и самочувствия, с одним практичным действием. " + TOV + " "
-              "И 3 разных саджеста — только про тело, цикл, фазу, питание, нагрузку, сон или самочувствие (не продуктивность и не быт). " + SUGG_RULES + " Строго JSON без обрамления: "
+    if mode == "male":
+        opening = (
+            "Это мужской профиль. Никогда не упоминай менструальный цикл, его день, "
+            "фазу, овуляцию, ПМС, месячные, эстроген или гинеколога. Начни прямо с "
+            "энергии, восстановления или самочувствия."
+        )
+        audience = "мужчине"
+        system = (
+            "Ты ассистент по здоровью для мужского профиля. Отвечай строго JSON, "
+            "по-русски, без markdown. Любые сведения о менструальном цикле запрещены."
+        )
+    else:
+        opening = (
+            "Если цикл отслеживается, первое предложение начни с точного дня и фазы. "
+            "Для беременности начни со срока и триместра; для менопаузы и режимов "
+            "без цикла не придумывай день или фазу."
+        )
+        audience = "пользовательнице"
+        system = "Ты ассистент femtech-приложения. Отвечай строго JSON, по-русски, без markdown."
+    suggestion_topics = (
+        "тело, питание, нагрузку, сон или самочувствие"
+        if mode == "male" else
+        "тело, цикл, фазу, питание, нагрузку, сон или самочувствие"
+    )
+    prompt = ("Ты точный ассистент по здоровью. " + ctx + sy + " " + opening +
+              " Напиши короткую персональную сводку на сегодня: 2-3 предложения о том, "
+              "как тело чувствует себя сегодня и что это значит для энергии и "
+              f"самочувствия {audience}, с одним практичным действием. " + TOV + " "
+              f"И 3 разных саджеста — только про {suggestion_topics} (не продуктивность и не быт). " + SUGG_RULES + " Строго JSON без обрамления: "
               '{"summary":"...","suggestions":["...","...","..."]}. По-русски, без markdown.')
-    out = _call([{"role": "system", "content": "Ты ассистент femtech-приложения. Отвечай строго JSON, по-русски, без markdown."},
+    out = _call([{"role": "system", "content": system},
                  {"role": "user", "content": prompt}], max_tokens=600, temperature=0.55, usage=usage)
     data = None
     if out:
@@ -2020,7 +2236,9 @@ def menu_today(st, profile=None, target=None, usage=None):
     return _fb
 
 
-def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
+def replace_meal(
+    st, slot=0, avoid=None, profile=None, target=None, usage=None, mode=None,
+):
     slots = ("b", "l", "s", "d")
     times = {"b": "08:00", "l": "13:00", "s": "16:00", "d": "20:00"}
     try:
@@ -2035,12 +2253,29 @@ def replace_meal(st, slot=0, avoid=None, profile=None, target=None, usage=None):
         if parts: extra += f" Ограничения: {', '.join(parts)}."
         if target:
             extra += f" Ориентир дня: {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, углеводы {target[3]} г."
+        physiology = (
+            f"{st.get('subphase','')} {st.get('phase_ru','').lower()} фаза, "
+            f"день {st.get('day','')} цикла. "
+            if st else
+            (
+                "Мужской профиль: не упоминай менструальный цикл, фазы или "
+                "женскую физиологию. "
+                if mode == "male" else
+                f"Режим питания: {GEN_NUTRI.get(mode, GEN_NUTRI['none'])}. "
+            )
+        )
         prompt = (f"Замени один приём пищи. Это {('завтрак' if k=='b' else 'обед' if k=='l' else 'перекус' if k=='s' else 'ужин')} около {times[k]}. "
-                  f"{st.get('subphase','')} {st.get('phase_ru','').lower()} фаза, день {st.get('day','')} цикла. "
+                  + physiology +
                   f"Не повторяй блюдо: {avoid or 'нет'}." + extra +
                   " Блюдо должно быть обычным для России, простым, белковым, без тофу, батата, киноа, протеиновых порошков и странных сочетаний. "
                   'Ответь строго JSON: {"time":"08:00","dish":"...","note":"нутриент","kcal":"NNN ккал"}')
-        out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
+        system = (
+            "Ты нутрициолог приложения для мужского профиля. Женская физиология "
+            "запрещена. Отвечай строго JSON, по-русски."
+            if mode == "male" else
+            "Ты нутрициолог wellness-приложения. Отвечай строго JSON, по-русски."
+        )
+        out = _call([{"role": "system", "content": system},
                      {"role": "user", "content": prompt}], max_tokens=320, temperature=0.2, usage=usage)
         if out:
             try:
@@ -2161,7 +2396,14 @@ def general_menu(profile, mode, target=None, usage=None):
               " Блюда короткие, до 5 слов. Ответь строго JSON без обрамления: "
               '{"macros":{"protein":"NN г","fat":"NN г","carbs":"NNN г"},'
               '"meals":[{"time":"08:00","dish":"...","note":"нутриент","kcal":"NNN ккал"}]}')
-    out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
+    system = (
+        "Ты нутрициолог приложения для мужского профиля. Никогда не упоминай "
+        "менструальный цикл, фазы или женскую физиологию. Отвечай строго JSON, "
+        "по-русски."
+        if mode == "male" else
+        "Ты нутрициолог wellness-приложения. Отвечай строго JSON, по-русски."
+    )
+    out = _call([{"role": "system", "content": system},
                  {"role": "user", "content": prompt}], max_tokens=900, usage=usage)
     if out:
         try:
@@ -2498,6 +2740,20 @@ def classify_journal_event(text, usage=None, context=None, enable_v2=False):
     Это семантический роутер, а не генератор ответа: вызывающий код дополнительно
     валидирует субъект, время, полярность, уверенность и тип действия.
     """
+    awaiting_food_text = bool(
+        enable_v2
+        and isinstance(context, dict)
+        and context.get("awaiting_food_text")
+    )
+    food_prompt_rule = (
+        "Серверный контекст awaiting_food_text=true означает, что пользовательница "
+        "только что нажала «Добавить приём текстом» и это сообщение является прямым "
+        "ответом о уже съеденной еде. Поэтому отсутствие глагола «съела» не переводит "
+        "его в none. Раздели явно названные завтрак/обед/полдник/перекус/ужин в "
+        "food_entries, даже если слот указан после списка через «это на завтрак». "
+        "При этом всё равно отвергай планы, отрицания и еду другого человека. "
+        if awaiting_food_text else ""
+    )
     v2_actions = (
         "- food_batch: в одном сообщении описаны 2–4 уже завершённых приёма пищи "
         "с разными явно названными слотами; верни каждый приём отдельно в food_entries;\n"
@@ -2585,6 +2841,7 @@ def classify_journal_event(text, usage=None, context=None, enable_v2=False):
         "- none: всё остальное.\n\n"
         "Для food/workout/period можно выбрать действие и без слов «запиши» или «отметь», "
         "если это прямое самостоятельное сообщение о своём уже произошедшем событии. "
+        + food_prompt_rule +
         "Если сообщение содержит несколько явно отделённых завершённых приёмов пищи "
         "(например «Завтрак: ... Перекус: ...»), всегда выбирай food_batch: один объект "
         "food_entries на каждый слот в порядке исходного сообщения. Не объединяй их КБЖУ. "

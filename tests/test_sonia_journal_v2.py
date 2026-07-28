@@ -1,8 +1,10 @@
 import asyncio
+import json
 import os
 import tempfile
 import unittest
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -269,6 +271,26 @@ class SoniaJournalV2Tests(unittest.TestCase):
         result = self._reply(text, "mixed-status", classified)
         self.assertEqual(result["mutation"]["kind"], "food")
         self.assertEqual([x["name"] for x in bot.meals_of(self.cid)[0]["items"]], ["Творог"])
+
+    def test_negated_workout_and_period_events_cannot_become_mutations(self):
+        cases = [
+            ("Я сегодня не тренировалась", "workout"),
+            ("Месячные ещё не начались", "period_start"),
+            ("Месячные ещё не закончились", "period_end"),
+        ]
+        context = {"meals": [], "workouts": [], "last_mutation": None}
+        for text, action in cases:
+            with self.subTest(text=text):
+                classified = route(action, text, workout={"type": "Силовая"})
+                self.assertFalse(bot._journal_completed_event_signal(text))
+                self.assertIsNone(
+                    bot._normalize_semantic_journal(
+                        classified,
+                        text,
+                        context,
+                        enable_v2=True,
+                    )
+                )
 
     def test_disjoint_completed_fragments_are_saved_and_other_statuses_are_excluded(self):
         cases = [
@@ -706,6 +728,321 @@ class SoniaJournalV2Tests(unittest.TestCase):
                 bot.resolve_semantic_journal_action(self.cid, "Можно ли есть лепёшку?")
             ))
         classify.assert_not_called()
+
+    def test_real_regression_corpus_reaches_only_the_safe_router_boundary(self):
+        fixture = (
+            Path(__file__).parent / "fixtures" / "journal_regression_cases.json"
+        )
+        cases = json.loads(fixture.read_text(encoding="utf-8"))
+        for case in cases:
+            with self.subTest(case=case["id"]):
+                normalized = bot._normalize_journal_typo(case["text"])
+                if case.get("normalized_contains"):
+                    self.assertIn(case["normalized_contains"], normalized.casefold())
+                self.assertEqual(
+                    bot._semantic_journal_candidate(
+                        normalized, enable_v2=True,
+                    ),
+                    case["candidate"],
+                )
+                self.assertEqual(
+                    bot._journal_completed_event_signal(normalized),
+                    case["completed"],
+                )
+
+    def test_completed_verb_typo_is_normalized_without_rewriting_food_names(self):
+        text = "я поезл квашеной капусты с кратошшкой и грибами на полдник"
+        normalized = bot._normalize_journal_typo(text)
+        self.assertEqual(
+            normalized,
+            "я поел квашеной капусты с кратошшкой и грибами на полдник",
+        )
+        self.assertTrue(bot._journal_completed_event_signal(normalized))
+
+        planned = "Я хочу кушать квашеную капусту"
+        self.assertEqual(bot._normalize_journal_typo(planned), planned)
+        self.assertFalse(bot._journal_completed_event_signal(planned))
+
+    def test_invalid_completed_event_never_silently_falls_through_to_advice(self):
+        text = "я поезл квашеной капусты с картошкой и грибами"
+        rejected = route(
+            "none",
+            "",
+            subject="self",
+            status="completed",
+            primary_purpose="journal",
+        )
+        with mock.patch.object(
+            bot.L, "classify_journal_event", return_value=rejected,
+        ):
+            result = asyncio.run(
+                bot.resolve_semantic_journal_action(self.cid, text)
+            )
+        self.assertEqual(result["intent"], "journalunavailable")
+        self.assertEqual(result["reason"], "validation")
+
+        with mock.patch.object(
+            bot.L, "classify_journal_event", return_value=rejected,
+        ):
+            context_only = asyncio.run(
+                bot.resolve_semantic_journal_action(
+                    self.cid, "Я люблю творог",
+                )
+            )
+        self.assertIsNone(context_only)
+
+    def test_v2_requires_explicit_deploy_flag_and_keeps_allowlist_canary(self):
+        old = os.environ.pop("AIWA_JOURNAL_V2", None)
+        old_ids = os.environ.pop("AIWA_JOURNAL_V2_IDS", None)
+        try:
+            self.assertFalse(bot.journal_v2_enabled(self.cid))
+            os.environ["AIWA_JOURNAL_V2"] = "0"
+            self.assertFalse(bot.journal_v2_enabled(self.cid))
+            os.environ["AIWA_JOURNAL_V2_IDS"] = str(self.cid)
+            self.assertTrue(bot.journal_v2_enabled(self.cid))
+        finally:
+            if old is None:
+                os.environ["AIWA_JOURNAL_V2"] = "1"
+            else:
+                os.environ["AIWA_JOURNAL_V2"] = old
+            if old_ids is None:
+                os.environ.pop("AIWA_JOURNAL_V2_IDS", None)
+            else:
+                os.environ["AIWA_JOURNAL_V2_IDS"] = old_ids
+
+    def test_i167_deploy_contract_matches_production_runtime_features(self):
+        deploy_env = (
+            Path(__file__).parents[1] / "deploy" / "i167" / "aiwa-staging.env"
+        ).read_text(encoding="utf-8").splitlines()
+        values = dict(
+            line.split("=", 1)
+            for line in deploy_env
+            if line and not line.startswith("#") and "=" in line
+        )
+        self.assertEqual(values.get("AIWA_JOURNAL_V2"), "1")
+        self.assertEqual(values.get("AIWA_PROACTIVE"), "1")
+        self.assertEqual(values.get("AIWA_PROACTIVE_SHADOW"), "0")
+        self.assertEqual(values.get("AIWA_MODEL_PROBE_SEC"), "300")
+
+    def test_food_prompt_context_accepts_verified_batch_without_magic_verbs(self):
+        text = (
+            "колобки в супе гороховом пшеничные -3 штБ 4 селдки "
+            "1 салат мимоза =это на завтрак\n"
+            "а на полдник - самовар чаю с кренделями"
+        )
+        breakfast_span = (
+            "колобки в супе гороховом пшеничные -3 штБ 4 селдки "
+            "1 салат мимоза =это на завтрак"
+        )
+        snack_span = "а на полдник - самовар чаю с кренделями"
+        classified = route(
+            "food_batch",
+            "",
+            food_entries=[
+                {
+                    "slot": "breakfast",
+                    "evidence_spans": [breakfast_span],
+                    "food_text": "колобки, сельдь, салат мимоза",
+                    "food_record": {
+                        "title": "Колобки, сельдь и салат",
+                        "fclass": "смешанное",
+                        "items": [
+                            {
+                                "name": "Колобки", "grams": 180, "kcal": 360,
+                                "protein": 12, "fat": 8, "carbs": 58,
+                                "evidence_span": "колобки",
+                            },
+                            {
+                                "name": "Сельдь", "grams": 300, "kcal": 650,
+                                "protein": 54, "fat": 48, "carbs": 0,
+                                "evidence_span": "селдки",
+                            },
+                            {
+                                "name": "Салат мимоза", "grams": 150, "kcal": 300,
+                                "protein": 12, "fat": 24, "carbs": 10,
+                                "evidence_span": "салат мимоза",
+                            },
+                        ],
+                        "unparsed": [],
+                    },
+                },
+                {
+                    "slot": "snack",
+                    "evidence_spans": [snack_span],
+                    "food_text": "чай с кренделями",
+                    "food_record": {
+                        "title": "Чай с кренделями",
+                        "fclass": "смешанное",
+                        "items": [
+                            {
+                                "name": "Чай", "grams": 300, "kcal": 0,
+                                "protein": 0, "fat": 0, "carbs": 0,
+                                "evidence_span": "чаю",
+                            },
+                            {
+                                "name": "Крендели", "grams": 100, "kcal": 340,
+                                "protein": 9, "fat": 4, "carbs": 67,
+                                "evidence_span": "кренделями",
+                            },
+                        ],
+                        "unparsed": [],
+                    },
+                },
+            ],
+        )
+        context = {"meals": [], "workouts": [], "awaiting_food_text": True}
+        self.assertIsNone(bot._normalize_semantic_journal(
+            classified, text, context, enable_v2=True,
+        ))
+        normalized = bot._normalize_semantic_journal(
+            classified, text, context, enable_v2=True,
+            trusted_food_prompt=True,
+        )
+        self.assertEqual(normalized["intent"], "logmealbatch")
+        self.assertEqual(
+            [entry["slot"] for entry in normalized["entries"]],
+            ["breakfast", "snack"],
+        )
+
+    def test_food_prompt_state_is_one_shot_and_bypasses_general_advice(self):
+        now = bot.datetime.now(bot.TZ).isoformat()
+        bot.upsert(self.cid, state="await_food_text", pending_date=now)
+        text = "завтрак: яйца и сыр"
+        journal = {
+            "intent": "logmeal",
+            "food_text": "яйца и сыр",
+            "slot": "breakfast",
+        }
+        update = SimpleNamespace(
+            update_id=5566,
+            effective_chat=SimpleNamespace(id=self.cid),
+            message=SimpleNamespace(
+                entities=[],
+                reply_text=mock.AsyncMock(),
+            ),
+        )
+        context = SimpleNamespace(
+            bot=SimpleNamespace(send_chat_action=mock.AsyncMock()),
+        )
+        with (
+            mock.patch.object(
+                bot, "resolve_semantic_journal_action",
+                new=mock.AsyncMock(return_value=journal),
+            ) as resolve,
+            mock.patch.object(
+                bot, "dispatch_intent",
+                new=mock.AsyncMock(return_value="sent"),
+            ) as dispatch,
+        ):
+            result = asyncio.run(bot.handle_text(update, context, text))
+        self.assertEqual(result, "sent")
+        self.assertIsNone(bot.row(self.cid)["state"])
+        self.assertTrue(resolve.await_args.kwargs["food_prompt_mode"])
+        self.assertEqual(dispatch.await_args.args[4], "logmeal")
+
+    def test_food_prompt_non_food_message_falls_through_to_normal_router(self):
+        now = bot.datetime.now(bot.TZ).isoformat()
+        bot.upsert(
+            self.cid, mode="male", state="await_food_text", pending_date=now
+        )
+        text = "У меня сильная боль в груди, что делать?"
+        update = SimpleNamespace(
+            update_id=5567,
+            effective_chat=SimpleNamespace(id=self.cid),
+            message=SimpleNamespace(entities=[], reply_text=mock.AsyncMock()),
+        )
+        context = SimpleNamespace(
+            bot=SimpleNamespace(send_chat_action=mock.AsyncMock()),
+        )
+        with (
+            mock.patch.object(
+                bot, "resolve_semantic_journal_action",
+                new=mock.AsyncMock(side_effect=[None, None]),
+            ),
+            mock.patch.object(
+                bot, "think_llm",
+                new=mock.AsyncMock(return_value="Обычный безопасный ответ."),
+            ) as think,
+            mock.patch.object(
+                bot, "send_answer",
+                new=mock.AsyncMock(return_value="normal-router"),
+            ) as send,
+        ):
+            result = asyncio.run(bot.handle_text(update, context, text))
+
+        self.assertEqual(result, "normal-router")
+        self.assertIsNone(bot.row(self.cid)["state"])
+        think.assert_awaited_once()
+        send.assert_awaited_once()
+
+    def test_food_prompt_still_rejects_planned_meals(self):
+        text = "На ужин планирую пасту с курицей"
+        classified = route(
+            "food",
+            text,
+            evidence_spans=[text],
+            slot="dinner",
+            food_text="паста с курицей",
+        )
+        self.assertIsNone(bot._normalize_semantic_journal(
+            classified,
+            text,
+            {"meals": [], "workouts": [], "awaiting_food_text": True},
+            enable_v2=True,
+            trusted_food_prompt=True,
+        ))
+
+    def test_food_prompt_api_persists_state_only_after_successful_nudge(self):
+        request = SimpleNamespace(
+            json=mock.AsyncMock(return_value={"initData": "signed"}),
+        )
+        app = SimpleNamespace(
+            bot=SimpleNamespace(send_message=mock.AsyncMock()),
+        )
+        with (
+            mock.patch.object(bot, "_verify_init", return_value=self.cid),
+            mock.patch.object(bot, "BOT_APP", app),
+        ):
+            response = asyncio.run(bot._api_food_prompt(request))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(bot.row(self.cid)["state"], "await_food_text")
+        self.assertTrue(bot.row(self.cid)["pending_date"])
+
+        app.bot.send_message = mock.AsyncMock(side_effect=RuntimeError("telegram"))
+        with (
+            mock.patch.object(bot, "_verify_init", return_value=self.cid),
+            mock.patch.object(bot, "BOT_APP", app),
+        ):
+            response = asyncio.run(bot._api_food_prompt(request))
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(bot.row(self.cid)["state"])
+        self.assertIsNone(bot.row(self.cid)["pending_date"])
+
+    def test_all_unparsed_classifier_record_falls_back_to_food_parser(self):
+        text = "завтрак: три селдки и самовар чаю"
+        classified = route(
+            "food",
+            text,
+            evidence_spans=[text],
+            slot="breakfast",
+            food_text=text,
+            food_record={
+                "title": "Приём пищи",
+                "fclass": "смешанное",
+                "items": [],
+                "unparsed": ["три селдки", "самовар чаю"],
+            },
+        )
+        plan = bot._normalize_semantic_journal(
+            classified,
+            text,
+            {"meals": [], "workouts": [], "awaiting_food_text": True},
+            enable_v2=True,
+            trusted_food_prompt=True,
+        )
+        self.assertEqual(plan["intent"], "logmeal")
+        self.assertNotIn("food_record", plan)
+        self.assertIn("три селдки", plan["food_text"])
 
     def test_v2_off_preserves_legacy_prefilter_and_rejects_new_actions(self):
         os.environ["AIWA_JOURNAL_V2"] = "0"
