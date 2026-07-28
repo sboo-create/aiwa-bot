@@ -74,6 +74,18 @@ class MaleWebappContractTests(unittest.TestCase):
         self.assertTrue(json.loads(response.text)["ok"])
         self.assertIsNone(bot.row(self.cid)["cycle_len"])
 
+    def test_male_report_copy_never_mentions_cycle_or_gynecologist(self):
+        user = bot.row(self.cid)
+
+        prompt = bot.report_prompt(user)
+        caption = bot.report_caption(user, "Весь период")
+
+        self.assertEqual(prompt, "За какой период собрать выписку по самочувствию?")
+        self.assertIn("самочувствию", caption)
+        self.assertNotIn("цикл", (prompt + caption).lower())
+        self.assertNotIn("гинеколог", (prompt + caption).lower())
+        self.assertIn("терапевт", caption.lower())
+
     def test_initial_diary_payload_prefetches_previous_week(self):
         yesterday = (bot.dtoday() - timedelta(days=1)).isoformat()
         bot.meal_add(
@@ -113,6 +125,18 @@ class MaleWebappStaticContractTests(unittest.TestCase):
             bundle,
         )
         self.assertNotIn("мужской режим: без главной", index)
+        self.assertIn(
+            'title: r.mode === "male" ? "Выписка по самочувствию" : "Выписка для врача"',
+            bundle,
+        )
+        self.assertIn(
+            'description: r.mode === "male" ? "рост · вес · возраст" : "рост · вес · возраст · цикл"',
+            bundle,
+        )
+        self.assertIn(
+            'r.mode === "male" ? "Динамика энергии и дневник самочувствия придут PDF-файлом в чат бота."',
+            bundle,
+        )
 
     def test_webapp_uses_prefetched_diary_for_recent_days(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
@@ -129,10 +153,24 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn('deslop-main-aiwa-v162.js', wrapper)
         self.assertIn('AiwaWebUiChart-aiwa-v162.js', bundle)
         self.assertIn('deslop-main-aiwa-v162.js', chart_bundle)
-        self.assertIn('main.js?v=r14', index)
+        self.assertIn('main.js?v=r15', index)
+        self.assertIn(
+            'import "./deslop-main-aiwa-v162.js?v=mascot-static-1";',
+            wrapper,
+        )
         self.assertIn("aiwaCacheTs", bundle)
         self.assertIn("maxAgeMs: l = 1500", bundle)
         self.assertIn("Date.now() - (aiwaCacheTs.get(a) || 0) <= l", bundle)
+
+    def test_aiwa_mascot_uses_one_fully_decoded_frame_in_every_surface(self):
+        bundle = BUNDLE.read_text(encoding="utf-8")
+        component = bundle.split("function Gh", 1)[1].split("function xj", 1)[0]
+
+        self.assertNotIn("setInterval", component)
+        self.assertNotIn("setTimeout", component)
+        self.assertIn('"data-frame": 0', component)
+        self.assertIn("src: e[0]", component)
+        self.assertIn('decoding: "sync"', component)
 
     def test_aiwa_art_stays_inside_telegram_safe_area(self):
         css = V162_CSS.read_text(encoding="utf-8")

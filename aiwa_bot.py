@@ -107,7 +107,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v163-systemic-journal")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v164-stable-mascot")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 AIWA_TELEGRAM_API_ORIGIN = os.environ.get(
@@ -2861,6 +2861,14 @@ HIST_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("3 месяца", callback_data="rep:3"), InlineKeyboardButton("6 месяцев", callback_data="rep:6")],
     [InlineKeyboardButton("Весь период", callback_data="rep:all")],
 ])
+def report_prompt(u):
+    if u and u.get("mode") == "male":
+        return "За какой период собрать выписку по самочувствию?"
+    return "За какой период собрать выписку для врача?"
+def report_caption(u, label):
+    if u and u.get("mode") == "male":
+        return f"📄 Выписка по самочувствию, {label.lower()}. Можно показать терапевту."
+    return f"📄 Выписка по циклу, {label.lower()}. Можно показать гинекологу."
 ACT_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Минимальная", callback_data="act:1"), InlineKeyboardButton("Лёгкая", callback_data="act:2")],
     [InlineKeyboardButton("Умеренная", callback_data="act:3"), InlineKeyboardButton("Высокая", callback_data="act:4")],
@@ -4468,7 +4476,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         log_ensure(cid, dtoday().isoformat())
         return await msg.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
     if intent == "history":
-        return await msg.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
+        return await msg.reply_text(report_prompt(u), reply_markup=HIST_KB)
     if intent == "phases":
         _pu = []
         _pa = None
@@ -5524,7 +5532,9 @@ async def send_report(context, cid, period):
     _, st = status_of(cid)
     await context.bot.send_chat_action(cid, "upload_document")
     since, label = RPT.period_since(period)
-    cycles = cycles_of(cid, since); logs = logs_of(cid, since)
+    male = u.get("mode") == "male"
+    cycles = [] if male else cycles_of(cid, since)
+    logs = logs_of(cid, since)
     if st and u.get("last_period") and u["last_period"] not in cycles:
         cycles = sorted(set(cycles + [u["last_period"]]))
     try:
@@ -5532,7 +5542,7 @@ async def send_report(context, cid, period):
                                 "period_label": label, "profile": profile_of(u), "mode": u.get("mode")})
         bio = io.BytesIO(pdf); bio.name = "AIWA_vypiska.pdf"
         await context.bot.send_document(cid, document=bio, filename="AIWA_vypiska.pdf",
-            caption=f"📄 Выписка по циклу, {label.lower()}. Можно показать гинекологу.")
+            caption=report_caption(u, label))
         ev(cid, "goal", meta="report")
     except Exception as e:
         log.warning("report: %s", e); await context.bot.send_message(cid, "Не удалось собрать выписку, попробуй позже.")
@@ -5873,8 +5883,9 @@ async def about_cmd(update, context):
     ev(update.effective_chat.id, "command"); await update.message.reply_text(ABOUT_TEXT)
 async def report_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
-    if not is_onboarded(row(cid)): return await need_onboard(update.message)
-    await update.message.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
+    u = row(cid)
+    if not is_onboarded(u): return await need_onboard(update.message)
+    await update.message.reply_text(report_prompt(u), reply_markup=HIST_KB)
 async def partner_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
@@ -6700,7 +6711,7 @@ async def on_cb(update, context):
         elif st["status"] != "normal": await send_delay(context, cid, st)
         else: await send_infographic(context.bot, cid)
     elif data == "history":
-        await q.message.reply_text("За какой период собрать выписку для врача?", reply_markup=HIST_KB)
+        await q.message.reply_text(report_prompt(u), reply_markup=HIST_KB)
     elif data.startswith("rep:"):
         await send_report(context, cid, data.split(":")[1])
     elif data == "partner":

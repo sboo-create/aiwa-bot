@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Красивая выписка по циклу в PDF: краткий вывод, история, график, симптомы, рекомендации, прогноз. УТП AIWA."""
+"""Контекстная PDF-выписка: цикл для циклического режима, самочувствие для остальных."""
 import io, os, statistics
 from collections import Counter
 from datetime import date, timedelta
@@ -103,7 +103,7 @@ def _cycle_lengths(cycles):
     return out
 
 
-def _summary_box(cycles, logs, st, w):
+def _summary_box(cycles, logs, st, w, male=False):
     lens = [ln for _, ln in _cycle_lengths(cycles)]
     lines = []
     if len(lens) >= 2:
@@ -130,6 +130,8 @@ def _summary_box(cycles, logs, st, w):
         lines.append(f"<b>Энергия:</b> в среднем {ENR.get(round(statistics.mean(en)),'')} (по {len(en)} отметкам).")
     if st:
         lines.append(f"<b>Сейчас:</b> {st['subphase']} {st['phase_ru'].lower()} фаза, день {st['day']} из {st['cycle_len']}.")
+    elif male:
+        lines.append("<b>Профиль:</b> общая выписка по симптомам, энергии и самочувствию.")
     else:
         lines.append("<b>Режим:</b> без отслеживания фазы цикла, выписка по симптомам и самочувствию.")
     style = ParagraphStyle("sm", fontName=_FONT, fontSize=10, textColor=INK, leading=15, spaceAfter=2)
@@ -193,17 +195,19 @@ def build_report(meta):
     W, H = A4; ml = 16*mm; fw = W - 2*ml
     doc = BaseDocTemplate(buf, pagesize=A4, leftMargin=ml, rightMargin=ml, topMargin=15*mm, bottomMargin=15*mm)
     frame = Frame(ml, 15*mm, fw, H-30*mm, id="f", leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+    male = meta.get("mode") == "male"
     def _bg(canvas, _doc):
         canvas.setFillColor(PAPER); canvas.rect(0, 0, W, H, fill=1, stroke=0)
         canvas.setFillColor(SOFT); canvas.setFont(_FONT, 8)
-        canvas.drawString(ml, 9*mm, "Сформировано AIWA. Документ для ориентира, не заменяет консультацию гинеколога.")
+        clinician = "терапевта" if male else "гинеколога"
+        canvas.drawString(ml, 9*mm, f"Сформировано AIWA. Документ для ориентира, не заменяет консультацию {clinician}.")
         canvas.drawRightString(W-ml, 9*mm, f"стр. {_doc.page}")
     doc.addPageTemplates([PageTemplate(id="main", frames=[frame], onPage=_bg)])
 
     def H2(t): return Paragraph(t, ParagraphStyle("h2", fontName=_FONT, fontSize=12, textColor=ROSE, spaceBefore=2, spaceAfter=5, leading=15))
     def P(t): return Paragraph(t, ParagraphStyle("p", fontName=_FONT, fontSize=10, textColor=INK, leading=15))
 
-    st = meta["st"]; cycles = sorted(set(meta.get("cycles", []))); logs = meta.get("logs", [])
+    st = meta["st"]; cycles = [] if male else sorted(set(meta.get("cycles", []))); logs = meta.get("logs", [])
     story = []
     story.append(Band(fw, ("Выписка по менструальному циклу" if st else "Выписка по самочувствию"), f"{meta['period_label']} · сформировано {_ru(date.today())}"))
     story.append(Spacer(1, 7*mm))
@@ -217,13 +221,13 @@ def build_report(meta):
                  ("Текущая фаза", st["phase_ru"]), ("Следующие месячные", _ru(nxt) if nxt else "-")]
     else:
         nsym = sum(len(lg.get("symptoms", [])) for lg in logs)
-        cards = [("Режим", "без цикла"), ("Возраст", f"{prof.get('age')}" if prof.get("age") else "-"),
+        cards = [("Профиль", "общий" if male else "без цикла"), ("Возраст", f"{prof.get('age')}" if prof.get("age") else "-"),
                  ("Дней с отметками", f"{len(logs)}"), ("Симптомов отмечено", f"{nsym}")]
     story.append(_stat_cards(cards, fw))
     story.append(Spacer(1, 5*mm))
 
     story.append(H2("Краткий вывод"))
-    box, avg2 = _summary_box(cycles, logs, st, fw)
+    box, avg2 = _summary_box(cycles, logs, st, fw, male=male)
     story.append(box); story.append(Spacer(1, 6*mm))
 
     if st:
