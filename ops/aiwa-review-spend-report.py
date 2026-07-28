@@ -43,24 +43,24 @@ def psql(query: str) -> list[list[str]]:
 
 def main() -> None:
     budget_rows = psql(
-        f"""
+        """
         SELECT
             COALESCE(spend, 0),
             COALESCE(max_budget, 0),
             COALESCE(budget_reset_at::text, '')
         FROM "LiteLLM_VerificationToken"
-        WHERE key_alias = '{KEY_ALIAS}'
+        WHERE key_alias = 'github-aiwa-claude-review'
         """
     )
     if len(budget_rows) != 1:
         raise RuntimeError(f"expected one reviewer key, got {len(budget_rows)}")
 
     stats_rows = psql(
-        f"""
+        """
         WITH reviewer_key AS (
             SELECT token
             FROM "LiteLLM_VerificationToken"
-            WHERE key_alias = '{KEY_ALIAS}'
+            WHERE key_alias = 'github-aiwa-claude-review'
         ),
         windows(name, starts_at) AS (
             VALUES
@@ -86,11 +86,11 @@ def main() -> None:
     )
 
     daily_rows = psql(
-        f"""
+        """
         WITH reviewer_key AS (
             SELECT token
             FROM "LiteLLM_VerificationToken"
-            WHERE key_alias = '{KEY_ALIAS}'
+            WHERE key_alias = 'github-aiwa-claude-review'
         )
         SELECT
             logs."startTime"::date,
