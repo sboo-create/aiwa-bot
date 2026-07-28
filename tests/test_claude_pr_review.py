@@ -12,6 +12,28 @@ SPEC.loader.exec_module(reviewer)
 
 
 class ClaudePrReviewTests(unittest.TestCase):
+    def test_already_reviewed_deduplicates_by_revision_and_model(self):
+        marker = reviewer.review_marker("a" * 40, "aiwa-review-sonnet-5")
+        with mock.patch.object(
+            reviewer,
+            "get_json",
+            return_value=[{"body": f"review\n{marker}"}],
+        ):
+            self.assertTrue(reviewer.already_reviewed(
+                "owner/repo",
+                "12",
+                "token",
+                "a" * 40,
+                "aiwa-review-sonnet-5",
+            ))
+            self.assertFalse(reviewer.already_reviewed(
+                "owner/repo",
+                "12",
+                "token",
+                "a" * 40,
+                "aiwa-review-opus-5",
+            ))
+
     def test_extract_review_requires_forced_tool_result(self):
         expected = {
             "summary": "Safe",

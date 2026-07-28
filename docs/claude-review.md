@@ -21,6 +21,7 @@ The review job:
 
 - runs on GitHub-hosted `ubuntu-latest`; this repository is public, so standard runner
   usage is not billed;
+- runs only for pull requests targeting `main`;
 - ignores draft pull requests, forks, and authors outside
   `OWNER`/`MEMBER`/`COLLABORATOR`;
 - sends the bounded PR diff in one forced-schema model request instead of running an
@@ -32,6 +33,8 @@ The review job:
 - uses a dedicated SSH key restricted to forwarding `127.0.0.1:4000`;
 - uses a dedicated LiteLLM virtual key restricted to the two review aliases, at most
   two parallel requests, and a `$25` budget per 30 days.
+- skips a duplicate model call when the same model has already reviewed the same commit
+  SHA.
 
 ## Required repository configuration
 

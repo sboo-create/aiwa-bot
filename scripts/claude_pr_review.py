@@ -209,6 +209,51 @@ def request_json(
         raise RuntimeError(f"HTTP {exc.code} from {url}: {detail}") from None
 
 
+def get_json(url: str, github_token: str, timeout: int = 30) -> object:
+    parsed_url = urllib.parse.urlsplit(url)
+    if parsed_url.scheme != "https" or parsed_url.hostname != "api.github.com":
+        raise RuntimeError(f"unsupported GitHub API URL: {url}")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "accept": "application/vnd.github+json",
+            "authorization": f"Bearer {github_token}",
+            "user-agent": "aiwa-claude-pr-review/1",
+            "x-github-api-version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(1_000).decode(errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} from GitHub API: {detail}") from None
+
+
+def review_marker(head_sha: str, model: str) -> str:
+    return f"<!-- aiwa-claude-review:{head_sha}:{model} -->"
+
+
+def already_reviewed(
+    repo: str,
+    pr_number: str,
+    token: str,
+    head_sha: str,
+    model: str,
+) -> bool:
+    url = (
+        f"https://api.github.com/repos/{repo}/issues/{int(pr_number)}/comments"
+        "?per_page=100&sort=created&direction=desc"
+    )
+    comments = get_json(url, token)
+    marker = review_marker(head_sha, model)
+    return any(
+        marker in str(item.get("body") or "")
+        for item in comments
+        if isinstance(item, dict)
+    )
+
+
 def extract_review(response: dict) -> dict:
     for item in response.get("content") or []:
         if item.get("type") == "tool_use" and item.get("name") == TOOL_NAME:
@@ -268,7 +313,7 @@ def render_comment(
     ]
     findings.sort(key=lambda item: {"P0": 0, "P1": 1, "P2": 2}[item["severity"]])
     lines = [
-        f"<!-- aiwa-claude-review:{head_sha}:{model} -->",
+        review_marker(head_sha, model),
         f"## {friendly_model} review",
         "",
         clean_text(review.get("summary")) or "Review completed.",
@@ -338,6 +383,19 @@ def append_step_summary(model: str, usage: dict, cost: Decimal, pricing_source: 
         summary.write(text)
 
 
+def append_skipped_summary(model: str, head_sha: str) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    text = (
+        "### Claude review usage\n\n"
+        f"`{model}` already reviewed revision `{head_sha[:12]}`. "
+        "Skipped duplicate model call; estimated incremental cost: `$0.0000`.\n"
+    )
+    with Path(path).open("a", encoding="utf-8") as summary:
+        summary.write(text)
+
+
 def workflow_notice(model: str, usage: dict, cost: Decimal) -> None:
     message = (
         f"{model} · 1 request · "
@@ -359,6 +417,14 @@ def main() -> int:
     pr_title = required_env("PR_TITLE")
     base_sha = required_env("PR_BASE_SHA")
     head_sha = required_env("PR_HEAD_SHA")
+
+    if already_reviewed(repo, pr_number, github_token, head_sha, model):
+        append_skipped_summary(model, head_sha)
+        print(
+            f"::notice title=Claude review usage::{model} already reviewed "
+            f"{head_sha[:12]} · skipped · $0.0000"
+        )
+        return 0
 
     diff, truncated = pull_request_diff(base_sha, head_sha)
     payload = messages_payload(
