@@ -7,15 +7,17 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'labeled' && 'label' || 'code' }}
+  # Queue repeated manual deep-review triggers so an in-flight paid request is
+  # never cancelled and charged twice; normal code pushes still cancel stale CI.
+  cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 permissions:
   contents: read
 
 jobs:
   test:
-    if: github.event.action != 'labeled' || github.event.label.name == 'deep-review'
+    if: github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -27,12 +29,12 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
       - run: pip install -r stats/requirements.txt
-      - run: python -m py_compile aiwa_bot.py llm.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py scripts/claude_pr_review.py scripts/claude_review_spend_dashboard.py ops/aiwa-review-spend-report.py
+      - run: python -m py_compile aiwa_bot.py llm.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py scripts/claude_pr_review.py scripts/claude_deep_review.py scripts/claude_review_spend_dashboard.py ops/aiwa-review-spend-report.py
       - run: python -m unittest discover -s tests -v
       - run: pip install pip-audit bandit
       - run: pip-audit -r requirements.txt
       - run: pip-audit -r stats/requirements.txt
-      - run: bandit -q -r aiwa_bot.py llm.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py scripts/claude_pr_review.py scripts/claude_review_spend_dashboard.py ops/aiwa-review-spend-report.py -ll
+      - run: bandit -q -r aiwa_bot.py llm.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py scripts/claude_pr_review.py scripts/claude_deep_review.py scripts/claude_review_spend_dashboard.py ops/aiwa-review-spend-report.py -ll
 
   claude-review:
     name: Claude review
@@ -52,7 +54,7 @@ jobs:
       pull-requests: write
     env:
       AIWA_REVIEW_BASE_URL: http://127.0.0.1:14000
-      AIWA_REVIEW_MODEL: ${{ github.event.action == 'labeled' && github.event.label.name == 'deep-review' && contains(format(',{0},', vars.AIWA_CLAUDE_DEEP_REVIEW_ACTORS), format(',{0},', github.actor)) && 'aiwa-review-opus-5' || 'aiwa-review-sonnet-5' }}
+      AIWA_REVIEW_MODEL: aiwa-review-sonnet-5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -141,6 +143,126 @@ jobs:
         run: |
           control_socket="$RUNNER_TEMP/aiwa-review-ssh-control"
           key_file="$RUNNER_TEMP/aiwa-review-tunnel-key"
+          ssh -S "$control_socket" -O exit aiwa-tunnel@104.168.54.196 2>/dev/null || true
+          if [[ -f "$key_file" ]]; then
+            shred -u "$key_file"
+          fi
+
+  claude-deep-review:
+    name: Claude deep review
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'claude-deep-review' &&
+      vars.AIWA_CLAUDE_REVIEW_ENABLED == 'true' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) &&
+      contains(format(',{0},', vars.AIWA_CLAUDE_DEEP_REVIEW_ACTORS), format(',{0},', github.actor))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      checks: read
+      contents: read
+      issues: write
+      pull-requests: write
+    env:
+      AIWA_REVIEW_BASE_URL: http://127.0.0.1:14000
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Wait for tests on this exact revision
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -m scripts.claude_deep_review --wait-for-test
+
+      - name: Open encrypted tunnel to AIWA LiteLLM
+        env:
+          AIWA_REVIEW_SSH_KEY: ${{ secrets.AIWA_REVIEW_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/aiwa-deep-review-tunnel-key"
+          control_socket="$RUNNER_TEMP/aiwa-deep-review-ssh-control"
+
+          install -m 600 /dev/null "$key_file"
+          printf '%s\n' "$AIWA_REVIEW_SSH_KEY" > "$key_file"
+
+          ssh -fNT -M -S "$control_socket" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ExitOnForwardFailure=yes \
+            -o IdentitiesOnly=yes \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$GITHUB_WORKSPACE/.github/aiwa-review-known-hosts" \
+            -i "$key_file" \
+            -L 127.0.0.1:14000:127.0.0.1:4000 \
+            aiwa-tunnel@104.168.54.196
+
+          shred -u "$key_file"
+
+          for attempt in {1..10}; do
+            if curl --fail --silent --show-error \
+              --max-time 3 \
+              http://127.0.0.1:14000/health/liveliness >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "LiteLLM did not become healthy through the SSH tunnel" >&2
+          exit 1
+
+      - name: Deep-review pull request with parallel Claude agents
+        env:
+          AIWA_REVIEW_LITELLM_KEY: ${{ secrets.AIWA_REVIEW_LITELLM_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python -m scripts.claude_deep_review
+
+      - name: Refresh aggregate spend dashboard
+        if: always()
+        continue-on-error: true
+        env:
+          AIWA_REVIEW_REPORT_SSH_KEY: ${{ secrets.AIWA_REVIEW_REPORT_SSH_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/aiwa-deep-review-report-key"
+          report_file="$RUNNER_TEMP/aiwa-deep-review-spend.json"
+          trap 'shred -u "$key_file" 2>/dev/null || true' EXIT
+
+          install -m 600 /dev/null "$key_file"
+          printf '%s\n' "$AIWA_REVIEW_REPORT_SSH_KEY" > "$key_file"
+          sleep 30
+          ssh \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$GITHUB_WORKSPACE/.github/aiwa-review-known-hosts" \
+            -i "$key_file" \
+            root@104.168.54.196 > "$report_file"
+
+          python -m json.tool "$report_file" >/dev/null
+          python scripts/claude_review_spend_dashboard.py \
+            --input "$report_file" \
+            --issue "${{ vars.AIWA_CLAUDE_SPEND_ISSUE }}"
+
+      - name: Close tunnel and remove credentials
+        if: always()
+        run: |
+          control_socket="$RUNNER_TEMP/aiwa-deep-review-ssh-control"
+          key_file="$RUNNER_TEMP/aiwa-deep-review-tunnel-key"
           ssh -S "$control_socket" -O exit aiwa-tunnel@104.168.54.196 2>/dev/null || true
           if [[ -f "$key_file" ]]; then
             shred -u "$key_file"
