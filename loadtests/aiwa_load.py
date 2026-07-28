@@ -30,7 +30,7 @@ import aiohttp
 
 
 EXPECTED_HOST = "aiwa-staging-167.158-160-163-167.sslip.io"
-EXPECTED_VERSION = "2026-07-27-v146-summary-dedup-i167-staging"
+EXPECTED_VERSION = "2026-07-28-v147-durable-ai-queue-i167-staging"
 DEFAULT_USER_ID_BASE = 790_000_000_000
 
 
