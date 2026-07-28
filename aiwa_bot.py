@@ -692,6 +692,38 @@ def stop_event_writer(timeout=10):
 
 atexit.register(stop_event_writer)
 
+def _write_durable_event(item, max_attempts=3):
+    """Persist a critical event, retrying only transient SQLite contention."""
+    global _EVENT_WRITER_FAILURES, _EVENT_WRITER_LAST_ERROR_AT
+    action = item[1]
+    for attempt in range(1, max(1, int(max_attempts)) + 1):
+        try:
+            return _write_event_batch([item]) == 1
+        except sqlite3.OperationalError as exc:
+            transient = any(
+                marker in str(exc).lower() for marker in ("locked", "busy")
+            )
+            if not transient or attempt >= max_attempts:
+                log.error(
+                    "durable events_v2 write failed for %s "
+                    "(attempt=%d/%d): %s",
+                    action, attempt, max_attempts, exc,
+                )
+                return False
+            _EVENT_WRITER_FAILURES += 1
+            _EVENT_WRITER_LAST_ERROR_AT = datetime.now(timezone.utc).isoformat()
+            delay = min(0.2, 0.05 * (2 ** (attempt - 1)))
+            log.warning(
+                "durable events_v2 write contention for %s; retrying "
+                "(attempt=%d/%d, retry_in=%.2fs)",
+                action, attempt, max_attempts, delay,
+            )
+            time.sleep(delay)
+        except Exception as exc:
+            log.error("durable events_v2 write failed for %s: %s", action, exc)
+            return False
+    return False
+
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None,
        user_generation=None):
     """Write privacy-preserving analytics v2; legacy events is read-only.
@@ -704,11 +736,7 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
         datetime.now(timezone.utc).isoformat(),
     )
     if action in {"safety", "broadcast"}:
-        try:
-            return _write_event_batch([item]) == 1
-        except Exception as exc:
-            log.error("durable events_v2 write failed for %s: %s", action, exc)
-            return False
+        return _write_durable_event(item)
     if _EVENT_WRITER_ACTIVE and not (
         _EVENT_WRITER_THREAD and _EVENT_WRITER_THREAD.is_alive()
     ):

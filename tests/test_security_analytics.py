@@ -357,6 +357,33 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(write.call_count, 2)
         put.assert_not_called()
 
+    def test_durable_event_retries_transient_sqlite_contention(self):
+        attempts = []
+
+        def write(items):
+            attempts.append(list(items))
+            if len(attempts) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return len(items)
+
+        with mock.patch.object(bot, "_write_event_batch", side_effect=write), \
+             mock.patch.object(bot.time, "sleep") as sleep:
+            self.assertTrue(bot.ev(cid=920, action="safety", meta="urgent"))
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+        sleep.assert_called_once_with(0.05)
+
+    def test_durable_event_does_not_retry_non_transient_failure(self):
+        with mock.patch.object(
+            bot, "_write_event_batch",
+            side_effect=sqlite3.IntegrityError("invalid event"),
+        ) as write, mock.patch.object(bot.time, "sleep") as sleep:
+            self.assertFalse(bot.ev(cid=920, action="broadcast", meta="sent|daily"))
+
+        write.assert_called_once()
+        sleep.assert_not_called()
+
     def test_poison_telemetry_does_not_stall_clean_shutdown(self):
         original_queue = bot._EVENT_WRITE_Q
         original_thread = bot._EVENT_WRITER_THREAD
