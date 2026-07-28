@@ -92,7 +92,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = "2026-07-28-v147-multiline-food-journal"
+AIWA_VERSION = "2026-07-28-v148-structured-food-journal"
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 APP_BUTTON_TEXT = "Открыть Айву"
@@ -1372,7 +1372,8 @@ _JOURNAL_THIRD_PARTY_EVENT_RE = (
     r"ходил\w*|плавал\w*|начал\w*|пришл\w*|законч\w*|завершил\w*)"
 )
 _JOURNAL_NON_NAME_STARTERS = (
-    r"Сегодня|Вчера|Позавчера|Пожалуйста|Айва|После|Перед|Только|На|"
+    r"Сегодня|Вчера|Позавчера|Сейчас|Позже|Потом|Затем|Утром|Днём|Днем|"
+    r"Вечером|Ночью|Пожалуйста|Айва|После|Перед|Только|На|"
     r"Ну|А|И|Ещё|Еще|Кстати|Короче|Вообще|Ладно|Нет|Да|"
     r"Как|Можешь|Запиши|Записать|Добавь|Добавить|Внеси|Внести|"
     r"Отметь|Отметить|Зафиксируй|Зафиксировать|"
@@ -1685,13 +1686,13 @@ def _journal_has_recent_mutation(context, max_minutes=180):
         return False
 
 _JOURNAL_MEAL_HEADING_RE = re.compile(
-    r"(?im)^[ \t]*(?:(?:сегодня|вчера|позавчера)\s+)?(?:на\s+)?"
+    r"(?i)(?<![а-яёa-z0-9])(?:(?:сегодня|вчера|позавчера)\s+)?(?:на\s+)?"
     r"(завтрак\w*|обед\w*|перекус\w*|полдник\w*|ужин\w*)"
     r"[ \t]*(?::|[-–—])[ \t]*",
 )
 
 def _journal_explicit_meal_segments(text, max_segments=4):
-    """Split an explicit multi-meal note without guessing boundaries or slots."""
+    """Split explicit headings even when a client has flattened newlines to spaces."""
     raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not raw or len(raw) > 1200:
         return []
@@ -2072,6 +2073,8 @@ def _normalize_semantic_journal(data, source_text="", context=None, enable_v2=Fa
     """Fail-closed валидация решения модели перед любой записью в БД."""
     if not isinstance(data, dict):
         return None
+    if enable_v2 and str(data.get("action") or "").strip().lower() == "food_batch":
+        return _normalize_semantic_food_batch(data, source_text, context)
     action_to_intent = {
         "food": "logmeal",
         "food_update": "updatemeal",
@@ -2153,6 +2156,76 @@ def _normalize_semantic_journal(data, source_text="", context=None, enable_v2=Fa
         out["workout"] = workout if isinstance(workout, dict) else {}
     return out
 
+def _normalize_semantic_food_batch(data, source_text="", context=None):
+    """Validate every model-proposed meal independently and preserve source order."""
+    if not isinstance(data, dict):
+        return None
+    entries = data.get("food_entries")
+    confidence = data.get("confidence")
+    if (
+        not isinstance(entries, list)
+        or not 2 <= len(entries) <= 4
+        or not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not math.isfinite(float(confidence))
+        or not 0.85 <= float(confidence) <= 1.0
+        or str(data.get("subject") or "").lower() != "self"
+        or str(data.get("status") or "").lower() != "completed"
+        or str(data.get("polarity") or "").lower() != "positive"
+        or str(data.get("certainty") or "").lower() != "certain"
+        or str(data.get("primary_purpose") or "").lower() != "journal"
+    ):
+        return None
+
+    raw = str(source_text or "")
+    folded = raw.casefold()
+    cursor = 0
+    plans = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        spans = entry.get("evidence_spans")
+        if not isinstance(spans, list) or not spans:
+            return None
+        exact_spans = []
+        for value in spans:
+            span = str(value or "").strip()
+            if not span or len(span) > 300:
+                return None
+            start = folded.find(span.casefold(), cursor)
+            if start < 0:
+                return None
+            exact_spans.append(raw[start:start + len(span)])
+            cursor = start + len(span)
+        payload = {
+            "action": "food",
+            "target_id": None,
+            "slot": entry.get("slot"),
+            "evidence_spans": spans,
+            "subject": data.get("subject"),
+            "status": data.get("status"),
+            "polarity": data.get("polarity"),
+            "certainty": data.get("certainty"),
+            "primary_purpose": data.get("primary_purpose"),
+            "confidence": confidence,
+            "food_text": entry.get("food_text"),
+            "food_record": entry.get("food_record"),
+            "workout": {},
+        }
+        plan = _normalize_semantic_journal(
+            payload, raw, context, enable_v2=True,
+        )
+        if not plan or plan.get("intent") != "logmeal" or not plan.get("slot"):
+            return None
+        plan["source_text"] = "\n".join(exact_spans)
+        plans.append(plan)
+    return {
+        "intent": "logmealbatch",
+        "confidence": float(confidence),
+        "entries": plans,
+        "source_text": raw,
+    }
+
 def _semantic_update_clarification(
     data, source_text, context=None, enable_v2=False,
 ):
@@ -2208,6 +2281,8 @@ async def resolve_semantic_journal_action(cid, text, user_generation=None):
     """Распознаёт естественное журналирование без привязки к порядку конкретных слов."""
     context = _journal_recent_context(cid)
     v2 = journal_v2_enabled(cid)
+    if not _semantic_journal_candidate(text, context, enable_v2=v2):
+        return None
     segments = _journal_explicit_meal_segments(text) if v2 else []
     if segments:
         plans = await asyncio.gather(*(
@@ -2227,9 +2302,11 @@ async def resolve_semantic_journal_action(cid, text, user_generation=None):
             entry["slot"] = segment["slot"]
             entries.append(entry)
         ev(cid, "journal_action_planned", meta=f"food_batch|{len(entries)}")
-        return {"intent": "logmealbatch", "entries": entries}
-    if not _semantic_journal_candidate(text, context, enable_v2=v2):
-        return None
+        return {
+            "intent": "logmealbatch",
+            "entries": entries,
+            "source_text": str(text or ""),
+        }
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     usage = []
     try:
@@ -7735,6 +7812,17 @@ _CHAT_DATE_RE = re.compile(
     r"август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)(?:\s+\d{4})?)\b",
     re.I,
 )
+_CHAT_RELATIVE_DATE_RE = re.compile(
+    r"\b(?:сегодня|вчера|позавчера|завтра)\b",
+    re.I,
+)
+
+def _chat_explicit_date_tokens(text):
+    """Return explicit date tokens in source order; `завтрак` is not `завтра`."""
+    raw = str(text or "")
+    matches = list(_CHAT_RELATIVE_DATE_RE.finditer(raw))
+    matches.extend(_CHAT_DATE_RE.finditer(raw))
+    return [match.group(0) for match in sorted(matches, key=lambda match: match.start())]
 
 def _parse_chat_absolute_date(raw):
     value = str(raw or "").strip()
@@ -7756,13 +7844,13 @@ def chat_event_date(text, max_past_days=366):
     """Дата события из чата. Возвращает (date, error); без даты — сегодня по Москве."""
     low = (text or "").lower()
     today = dtoday()
-    if "позавчера" in low:
+    if re.search(r"\bпозавчера\b", low):
         parsed = today - timedelta(days=2)
-    elif "вчера" in low:
+    elif re.search(r"\bвчера\b", low):
         parsed = today - timedelta(days=1)
-    elif "сегодня" in low:
+    elif re.search(r"\bсегодня\b", low):
         parsed = today
-    elif "завтра" in low:
+    elif re.search(r"\bзавтра\b", low):
         return None, "future"
     else:
         match = _CHAT_DATE_RE.search(text or "")
@@ -7882,13 +7970,22 @@ async def log_food_batch_action(cid, u, journal, user_generation=None, mutation_
             "text": "Не смогла надёжно разделить приёмы пищи, поэтому ничего не записала.",
             "record_ids": [],
         }
+    batch_date_tokens = _chat_explicit_date_tokens(
+        (journal or {}).get("source_text") or "",
+    )
+    common_date_token = (
+        batch_date_tokens[0] if len(batch_date_tokens) == 1 else None
+    )
     results = []
     for index, entry in enumerate(entries):
         child_key = f"{mutation_key}:meal:{index}" if mutation_key else None
+        entry_source = str(entry.get("source_text") or "")
+        if common_date_token and not _chat_explicit_date_tokens(entry_source):
+            entry_source = f"{common_date_token} {entry_source}".strip()
         result = await log_food_action(
             cid,
             u,
-            entry.get("source_text") or "",
+            entry_source,
             user_generation=user_generation,
             mutation_key=child_key,
             preparsed_food_text=entry.get("food_text"),
