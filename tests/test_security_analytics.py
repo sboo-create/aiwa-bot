@@ -300,6 +300,16 @@ class SecurityAnalyticsTests(unittest.TestCase):
             bot._EVENT_WRITER_ACTIVE = original_active
             bot._EVENT_WRITER_STOP = original_stop
 
+    def test_main_treats_systemd_interrupt_as_clean_shutdown(self):
+        def interrupt(coro):
+            coro.close()
+            raise KeyboardInterrupt
+
+        with mock.patch.object(bot.asyncio, "run", side_effect=interrupt), \
+             mock.patch.object(bot.log, "info") as info:
+            bot.main()
+        info.assert_called_once_with("AIWA stopped cleanly after interrupt")
+
     def test_schema_migration_takes_sqlite_write_lock_before_ddl(self):
         class FakeConnection:
             def __init__(self):
