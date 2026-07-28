@@ -4,9 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
+    if: github.event.action != 'labeled' || github.event.label.name == 'deep-review'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,3 +33,107 @@ jobs:
       - run: pip-audit -r requirements.txt
       - run: pip-audit -r stats/requirements.txt
       - run: bandit -q -r aiwa_bot.py llm.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py -ll
+
+  claude-review:
+    name: Claude review
+    needs: test
+    if: >-
+      github.event_name == 'pull_request' &&
+      vars.AIWA_CLAUDE_REVIEW_ENABLED == 'true' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    env:
+      ANTHROPIC_BASE_URL: http://127.0.0.1:14000
+      AIWA_REVIEW_MODEL: ${{ contains(github.event.pull_request.labels.*.name, 'deep-review') && 'aiwa-review-opus-5' || 'aiwa-review-sonnet-5' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Open encrypted tunnel to AIWA LiteLLM
+        env:
+          AIWA_REVIEW_SSH_KEY: ${{ secrets.AIWA_REVIEW_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/aiwa-review-tunnel-key"
+          control_socket="$RUNNER_TEMP/aiwa-review-ssh-control"
+
+          install -m 600 /dev/null "$key_file"
+          printf '%s\n' "$AIWA_REVIEW_SSH_KEY" > "$key_file"
+
+          ssh -fNT -M -S "$control_socket" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ExitOnForwardFailure=yes \
+            -o IdentitiesOnly=yes \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$GITHUB_WORKSPACE/.github/aiwa-review-known-hosts" \
+            -i "$key_file" \
+            -L 127.0.0.1:14000:127.0.0.1:4000 \
+            aiwa-tunnel@104.168.54.196
+
+          shred -u "$key_file"
+
+          for attempt in {1..10}; do
+            if curl --fail --silent --show-error \
+              --max-time 3 \
+              http://127.0.0.1:14000/health/liveliness >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "LiteLLM did not become healthy through the SSH tunnel" >&2
+          exit 1
+
+      - name: Review pull request with Claude
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
+        env:
+          ANTHROPIC_BASE_URL: http://127.0.0.1:14000
+        with:
+          anthropic_api_key: ${{ secrets.AIWA_REVIEW_LITELLM_KEY }}
+          github_token: ${{ github.token }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            MODEL: ${{ env.AIWA_REVIEW_MODEL }}
+
+            Review this pull request according to CLAUDE.md.
+            Review only the PR diff and issues introduced or made materially worse by it.
+            Do not modify files, push commits, or execute project code.
+
+            Use inline comments only for concrete, actionable findings on changed lines.
+            Use `mcp__github_inline_comment__create_inline_comment` with `confirmed: true`.
+            Finish with one concise `gh pr comment` summary containing:
+            - the model used;
+            - findings grouped as P0/P1/P2;
+            - test gaps or residual risks;
+            - "No blocking findings" when there are no P0/P1 findings.
+
+            Only post feedback to GitHub; do not leave the review solely in the action log.
+          claude_args: |
+            --model ${{ env.AIWA_REVIEW_MODEL }}
+            --effort high
+            --max-turns 8
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --disallowedTools "Write,Edit,NotebookEdit,WebFetch,WebSearch"
+
+      - name: Close tunnel and remove credentials
+        if: always()
+        run: |
+          control_socket="$RUNNER_TEMP/aiwa-review-ssh-control"
+          key_file="$RUNNER_TEMP/aiwa-review-tunnel-key"
+          ssh -S "$control_socket" -O exit aiwa-tunnel@104.168.54.196 2>/dev/null || true
+          if [[ -f "$key_file" ]]; then
+            shred -u "$key_file"
+          fi
