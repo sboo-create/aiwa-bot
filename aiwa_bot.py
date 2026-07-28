@@ -110,7 +110,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v168-clean-shutdown")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v169-final-review")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 AIWA_TELEGRAM_API_ORIGIN = os.environ.get(
@@ -396,7 +396,23 @@ def ensure_db_schema():
     with _DB_SCHEMA_LOCK:
         if _DB_SCHEMA_PATH == target:
             return
-        c = _migrate_db()
+        c = None
+        for attempt in range(4):
+            try:
+                c = _migrate_db()
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 3:
+                    raise
+                delay = 0.25 * (2 ** attempt)
+                log.warning(
+                    "schema migration lock contention; retrying in %.2fs "
+                    "(attempt=%d/4)",
+                    delay, attempt + 1,
+                )
+                time.sleep(delay)
+        if c is None:
+            raise RuntimeError("schema migration did not return a connection")
         c.close()
         A2.mark_schema_ready(DB)
         _DB_SCHEMA_PATH = target
@@ -619,8 +635,18 @@ atexit.register(stop_event_writer)
 
 def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, usage=None,
        user_generation=None):
-    """Write privacy-preserving analytics v2 only; legacy events is read-only."""
+    """Write privacy-preserving analytics v2; legacy events is read-only.
+
+    Safety and push-delivery decisions are durable before returning. High-volume
+    UX telemetry is accepted into the monitored/drained batch writer.
+    """
     item = (cid, action, meta, int(ms), int(calls), request_id, user_generation)
+    if action in {"safety", "broadcast"}:
+        try:
+            return _write_event_batch([item]) == 1
+        except Exception as exc:
+            log.error("durable events_v2 write failed for %s: %s", action, exc)
+            return False
     if _EVENT_WRITER_ACTIVE and not (
         _EVENT_WRITER_THREAD and _EVENT_WRITER_THREAD.is_alive()
     ):
@@ -1281,13 +1307,21 @@ def last_hint(cid):
     if r[0]: parts.append(f"энергия {EN.get(r[0],'')}")
     if r[1]: parts.append("симптомы: " + ", ".join(symptoms_labels(x for x in r[1].split(",") if x)))
     return "; ".join(parts) or None
+def _synthetic_user_id_min():
+    raw = os.environ.get("AIWA_SYNTHETIC_USER_ID_MIN", "0") or "0"
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "AIWA_SYNTHETIC_USER_ID_MIN must be an integer"
+        ) from exc
+    if value < 0:
+        raise RuntimeError("AIWA_SYNTHETIC_USER_ID_MIN must be non-negative")
+    return value
+
 def all_users(include_synthetic=False):
     c = db()
-    try:
-        synthetic_min = int(os.environ.get("AIWA_SYNTHETIC_USER_ID_MIN", "0") or "0")
-    except (TypeError, ValueError):
-        synthetic_min = 0
-        log.error("invalid AIWA_SYNTHETIC_USER_ID_MIN; synthetic filtering disabled")
+    synthetic_min = _synthetic_user_id_min()
     rows = c.execute("""SELECT chat_id FROM users
         WHERE push_suppressed_at IS NULL
           AND ((last_period IS NOT NULL AND cycle_len IS NOT NULL)
@@ -3068,34 +3102,33 @@ def _backfill_push_suppressions():
                  ), '')"""
         ).rowcount
         changed_v2 = 0
-        user_rows = c.execute(
-            "SELECT chat_id FROM users WHERE push_suppressed_at IS NULL"
-        ).fetchall()
-        for (cid,) in user_rows:
-            key = A2.user_key(cid)
-            rows = c.execute(
-                """SELECT occurred_at,event_name,properties_json
-                   FROM events_v2
-                   WHERE user_key=?
-                     AND event_name IN (
-                       'push_failed','push_sent','user_message_sent',
-                       'screen_viewed','app_opened','legacy_message_interaction'
-                     )
-                   ORDER BY occurred_at""",
-                (key,),
+        users_by_key = {
+            A2.user_key(cid): cid
+            for (cid,) in c.execute(
+                "SELECT chat_id FROM users WHERE push_suppressed_at IS NULL"
             ).fetchall()
-            latest_failed = ""
-            latest_reachable = ""
-            for occurred_at, event_name, props_json in rows:
-                try:
-                    props = json.loads(props_json or "{}")
-                except (TypeError, ValueError):
-                    props = {}
-                if event_name == "push_failed" and props.get("delivery_status") == "blocked":
-                    latest_failed = max(latest_failed, occurred_at or "")
-                elif event_name != "push_failed":
-                    latest_reachable = max(latest_reachable, occurred_at or "")
-            if latest_failed and latest_failed > latest_reachable:
+        }
+        # One indexed scan/group replaces an unbounded history query per user.
+        # json_extract is safe here: analytics_v2 always stores an object.
+        v2_states = c.execute(
+            """SELECT user_key,
+                      MAX(CASE
+                          WHEN event_name='push_failed'
+                           AND json_extract(properties_json,'$.delivery_status')='blocked'
+                          THEN occurred_at ELSE '' END) AS latest_failed,
+                      MAX(CASE
+                          WHEN event_name!='push_failed'
+                          THEN occurred_at ELSE '' END) AS latest_reachable
+               FROM events_v2
+               WHERE event_name IN (
+                 'push_failed','push_sent','user_message_sent',
+                 'screen_viewed','app_opened','legacy_message_interaction'
+               )
+               GROUP BY user_key"""
+        ).fetchall()
+        for key, latest_failed, latest_reachable in v2_states:
+            cid = users_by_key.get(key)
+            if cid is not None and latest_failed and latest_failed > (latest_reachable or ""):
                 changed_v2 += c.execute(
                     """UPDATE users
                        SET push_suppressed_at=?,push_suppression_reason='blocked'
@@ -6959,6 +6992,9 @@ async def traction_worker():
 
 async def on_startup(app):
     global BOT_USERNAME, BCAST_Q, FOOD_Q, TRAIN_Q, _AI_JOB_WAKE, _AI_JOB_TASKS
+    # Fail before scheduling/sending anything if the boundary protecting real
+    # users from synthetic load identities is malformed.
+    _synthetic_user_id_min()
     try:
         import concurrent.futures
         _ex_threads = max(8, min(128, int(os.environ.get("AIWA_EXECUTOR_THREADS", "32"))))

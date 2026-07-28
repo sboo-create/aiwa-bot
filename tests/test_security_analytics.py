@@ -193,7 +193,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
             self.assertNotIn(synthetic_cid, bot.all_users())
             self.assertIn(synthetic_cid, bot.all_users(include_synthetic=True))
 
-    def test_invalid_synthetic_user_threshold_fails_open_for_real_users(self):
+    def test_invalid_synthetic_user_threshold_fails_before_push_selection(self):
         cid = 916
         bot._activate_user(cid)
         bot.upsert(cid, mode="male")
@@ -202,7 +202,10 @@ class SecurityAnalyticsTests(unittest.TestCase):
             os.environ,
             {"AIWA_SYNTHETIC_USER_ID_MIN": "not-a-number"},
         ):
-            self.assertIn(cid, bot.all_users())
+            with self.assertRaisesRegex(
+                RuntimeError, "AIWA_SYNTHETIC_USER_ID_MIN must be an integer"
+            ):
+                bot.all_users()
 
     def test_secret_file_error_names_the_broken_setting(self):
         with mock.patch.dict(
@@ -300,6 +303,15 @@ class SecurityAnalyticsTests(unittest.TestCase):
             bot._EVENT_WRITER_ACTIVE = original_active
             bot._EVENT_WRITER_STOP = original_stop
 
+    def test_safety_and_broadcast_events_bypass_memory_queue(self):
+        with mock.patch.object(
+            bot, "_write_event_batch", return_value=1
+        ) as write, mock.patch.object(bot._EVENT_WRITE_Q, "put_nowait") as put:
+            self.assertTrue(bot.ev(cid=920, action="safety", meta="urgent"))
+            self.assertTrue(bot.ev(cid=920, action="broadcast", meta="sent|daily"))
+        self.assertEqual(write.call_count, 2)
+        put.assert_not_called()
+
     def test_main_treats_systemd_interrupt_as_clean_shutdown(self):
         def interrupt(coro):
             coro.close()
@@ -336,6 +348,22 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertLess(begin_index, first_ddl_index)
         self.assertTrue(connection.committed)
         self.assertIs(returned, connection)
+
+    def test_schema_migration_retries_sqlite_lock_contention(self):
+        connection = mock.Mock()
+        with mock.patch.object(
+            bot,
+            "_migrate_db",
+            side_effect=[
+                sqlite3.OperationalError("database is locked"),
+                connection,
+            ],
+        ) as migrate, mock.patch.object(bot.time, "sleep") as sleep:
+            bot._DB_SCHEMA_PATH = None
+            bot.ensure_db_schema()
+        self.assertEqual(migrate.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+        connection.close.assert_called_once_with()
 
     def test_food_vision_uses_only_its_dedicated_concurrency_gate(self):
         source = Path(bot.__file__).read_text(encoding="utf-8")
