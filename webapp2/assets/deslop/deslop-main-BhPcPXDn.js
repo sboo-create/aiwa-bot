@@ -21215,7 +21215,7 @@ function iv({ mode: a, revision: e = 0 }) {
           className: "aiwa-avatar-initial aiwa-screen-profile",
           "aria-label": "Открыть профиль",
           onClick: () => y(!0),
-          children: (c?.name || "•").trim()[0]?.toUpperCase() || "•"
+          children: /* @__PURE__ */ m.jsx(Fj, {})
         }
       ) : null
     ] }),
@@ -21646,7 +21646,7 @@ function xA({ mode: a, revision: e = 0 }) {
           className: "aiwa-avatar-initial aiwa-screen-profile",
           "aria-label": "Открыть профиль",
           onClick: () => h(!0),
-          children: (r?.name || "•").trim()[0]?.toUpperCase() || "•"
+          children: /* @__PURE__ */ m.jsx(Fj, {})
         }
       ) : null
     ] }),

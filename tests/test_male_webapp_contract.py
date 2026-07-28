@@ -116,3 +116,19 @@ class MaleWebappStaticContractTests(unittest.TestCase):
 
         self.assertIn("const ii = Z.recent?.[Kt]", bundle)
         self.assertIn("S(ii);", bundle)
+
+    def test_food_and_training_use_telegram_photo_avatar(self):
+        bundle = BUNDLE.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            bundle.count("children: /* @__PURE__ */ m.jsx(Fj, {})"),
+            2,
+        )
+        self.assertNotIn(
+            'children: (c?.name || "•").trim()[0]?.toUpperCase() || "•"',
+            bundle,
+        )
+        self.assertNotIn(
+            'children: (r?.name || "•").trim()[0]?.toUpperCase() || "•"',
+            bundle,
+        )
