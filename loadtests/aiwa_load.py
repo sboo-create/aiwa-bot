@@ -30,7 +30,7 @@ import aiohttp
 
 
 EXPECTED_HOST = "aiwa-staging-167.158-160-163-167.sslip.io"
-EXPECTED_VERSION = "2026-07-28-v159-load-safety-main"
+EXPECTED_VERSION = "2026-07-28-v160-staging-hotfix"
 DEFAULT_USER_ID_BASE = 790_002_000_000
 
 

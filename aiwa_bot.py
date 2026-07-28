@@ -107,7 +107,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v159-load-safety-main")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v160-staging-hotfix")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 AIWA_TELEGRAM_API_ORIGIN = os.environ.get(
@@ -1686,7 +1686,7 @@ def match_intent(t):
     return None
 
 _JOURNAL_MUTATION_INTENTS = frozenset({
-    "logmeal", "logmealbatch", "updatemeal", "movemealslot", "appendmealitem",
+    "logmeal", "logmealbatch", "logjournalbatch", "updatemeal", "movemealslot", "appendmealitem",
     "logworkout", "updateworkout", "logperiod", "period_end",
     "journalunavailable", "journalreplay",
 })
@@ -1766,6 +1766,61 @@ _JOURNAL_CORRECTION_RE = re.compile(
     r"подход\w*|повтор\w*))\b",
     re.I,
 )
+_JOURNAL_BREAKFAST_TYPO_RE = re.compile(
+    r"\bна\s+завтра(?=\s+(?:(?:я|мы)\s+)?"
+    r"(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|выпил\w*))",
+    re.I,
+)
+
+def _normalize_journal_typo(text):
+    """Repair only the unambiguous completed-event typo «на завтра съел»."""
+    return _JOURNAL_BREAKFAST_TYPO_RE.sub("на завтрак", str(text or ""))
+
+def _normalize_mixed_implicit_self_workout(text, male=False):
+    """Carry the account owner's subject into a following «сделали зарядку» clause."""
+    raw = str(text or "")
+    if re.search(r"\b(?:я|мы|он|она|они|муж|жена|сын|дочь|дочка|подруг\w*)\b", raw, re.I):
+        return raw
+    return re.sub(
+        r"\bсделали(?=\s+(?:утренн\w*\s+)?"
+        r"(?:зарядк\w*|тренировк\w*|кардио\w*|растяжк\w*))",
+        ("я сделал" if male else "я сделала"),
+        raw,
+        count=1,
+        flags=re.I,
+    )
+
+def _journal_mixed_segments(text, max_segments=4, male=False):
+    """Return independent completed food/workout clauses, or fail closed."""
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw or len(raw) > 1200:
+        return []
+    parts = [
+        _normalize_journal_typo(part).strip()
+        for part in re.split(r"(?:\n+|(?<=[.!?;])\s+)", raw)
+        if part.strip()
+    ]
+    if not 2 <= len(parts) <= int(max_segments):
+        return []
+    domains = []
+    normalized_parts = []
+    for part in parts:
+        part = _normalize_mixed_implicit_self_workout(part, male=male)
+        food = bool(
+            _JOURNAL_FOOD_COMPLETED_RE.search(part)
+            and not _JOURNAL_FOOD_NEGATED_RE.search(part)
+        )
+        workout = bool(_JOURNAL_WORKOUT_COMPLETED_RE.search(part))
+        if food == workout:
+            return []
+        domains.append("food" if food else "workout")
+        normalized_parts.append(part)
+    if set(domains) != {"food", "workout"}:
+        return []
+    return [
+        {"text": part, "domain": domain}
+        for part, domain in zip(normalized_parts, domains)
+    ]
 
 def _journal_recent_context(cid, limit=5):
     """Small DB-backed context for ellipsis and corrections; IDs stay server-owned."""
@@ -2419,6 +2474,32 @@ async def resolve_semantic_journal_action(cid, text, user_generation=None):
     """Распознаёт естественное журналирование без привязки к порядку конкретных слов."""
     context = _journal_recent_context(cid)
     v2 = journal_v2_enabled(cid)
+    mixed = _journal_mixed_segments(
+        text, male=(row(cid) or {}).get("mode") == "male",
+    )
+    if mixed:
+        plans = await asyncio.gather(*(
+            resolve_semantic_journal_action(
+                cid, segment["text"], user_generation=user_generation,
+            )
+            for segment in mixed
+        ))
+        entries = []
+        for segment, plan in zip(mixed, plans):
+            expected = "logmeal" if segment["domain"] == "food" else "logworkout"
+            if not plan or plan.get("intent") != expected:
+                ev(cid, "journal_route_failed", meta="mixed_segment")
+                return {"intent": "journalunavailable", "reason": "mixed_segment"}
+            entry = dict(plan)
+            entry["source_text"] = segment["text"]
+            entries.append(entry)
+        ev(cid, "journal_action_planned", meta=f"mixed_batch|{len(entries)}")
+        return {
+            "intent": "logjournalbatch",
+            "entries": entries,
+            "source_text": _normalize_journal_typo(text),
+        }
+    text = _normalize_journal_typo(text)
     if not _semantic_journal_candidate(text, context, enable_v2=v2):
         return None
     segments = _journal_explicit_meal_segments(text) if v2 else []
@@ -4233,6 +4314,29 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             user_generation=turn_generation,
         )
         return await msg.reply_text(result["text"])
+    if intent == "logjournalbatch":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await log_journal_batch_action(
+            cid, u, journal,
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key(
+                "telegram", getattr(update, "update_id", None),
+            ),
+        )
+        rows = []
+        for record in result.get("records", []):
+            record_id = record.get("record_id")
+            if record.get("intent") == "logmeal":
+                rows.append([B("🗑 Убрать еду", f"mdel:{record_id}")])
+            elif record.get("intent") == "logworkout":
+                rows.append([B("🗑 Убрать тренировку", f"wdel:{record_id}")])
+        wu = webapp_url(u) or AIWA_WEBAPP_URL
+        if wu and rows:
+            rows.append([InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(
+            result["text"],
+            reply_markup=(InlineKeyboardMarkup(rows) if rows else None),
+        )
     if intent == "logworkout":
         await context.bot.send_chat_action(cid, "typing")
         generation = turn_generation
@@ -6322,7 +6426,7 @@ async def on_cb(update, context):
         if m == "male":
             # тестовые/старые аккаунты: дата цикла от прежнего профиля не должна
             # включать циклическую логику в ответах и сводках
-            upsert(cid, last_period=None)
+            upsert(cid, last_period=None, cycle_len=None)
         schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
         if m == "preg":
             upsert(cid, state="await_preg_date")
@@ -6920,8 +7024,10 @@ def _api_data_sync(cid, body):
         ev(cid, "push_open", meta=campaign)
         if campaign.split(":", 1)[0] == "daily_summary":
             ev(cid, "summary_open", meta="daily_summary")
-    out = {"onboarded": True, "cycle": bool(is_cycle(u) and u.get("last_period")),
-           "last_period": u.get("last_period"), "cycle_len": u.get("cycle_len") or 28,
+    cycle_user = is_cycle(u)
+    out = {"onboarded": True, "cycle": bool(cycle_user and u.get("last_period")),
+           "last_period": (u.get("last_period") if cycle_user else None),
+           "cycle_len": ((u.get("cycle_len") or 28) if cycle_user else None),
            "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
            "bot_username": BOT_USERNAME,
            "partner_linked": bool(partner_of(cid)),
@@ -7162,7 +7268,7 @@ async def _api_profile(request):
                 upsert(cid, kcal_goal=(gi if 800 <= gi <= 6000 else None))
             except (TypeError, ValueError):
                 pass
-    if "cycle_len" in body:
+    if is_cycle(u) and "cycle_len" in body:
         try:
             _ci = int(float(str(body.get("cycle_len"))))
             if 15 <= _ci <= 60:
@@ -7176,7 +7282,8 @@ async def _api_profile(request):
     ev(cid, "manual", meta="web_profile")
     _u2 = row(cid)
     return _cors(web.json_response({"ok": True,
-        "profile": {"height": int(cm), "weight": kg, "age": age, "kcal_goal": _u2.get("kcal_goal")}, "cycle_len": _u2.get("cycle_len"),
+        "profile": {"height": int(cm), "weight": kg, "age": age, "kcal_goal": _u2.get("kcal_goal")},
+        "cycle_len": (_u2.get("cycle_len") if is_cycle(_u2) else None),
         "kcal_base": calc_calories(int(cm), kg, age, _u2.get("activity") or 2)[0]}))
 async def _api_meal(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -8068,6 +8175,24 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
         if result.get("mutation"):
             out["mutation"] = result["mutation"]
         return out
+    if intent == "logjournalbatch":
+        if require_mutation_key and not mutation_key:
+            return {
+                "answer": "Не стала записывать без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                "suggestions": ["Открыть питание", "Открыть нагрузку"],
+            }
+        result = await log_journal_batch_action(
+            cid, u, journal,
+            user_generation=generation,
+            mutation_key=mutation_key,
+        )
+        out = {
+            "answer": result["text"],
+            "suggestions": ["Открыть питание", "Открыть нагрузку"],
+        }
+        if result.get("mutations"):
+            out["mutations"] = result["mutations"]
+        return out
     if intent == "logworkout":
         if require_mutation_key and not mutation_key:
             return {"answer": "Не стала записывать без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
@@ -8328,6 +8453,14 @@ def chat_mutation_key(channel, request_id):
     digest = _hashlib.sha256((str(channel or "chat") + ":" + raw).encode("utf-8")).hexdigest()
     return str(channel or "chat")[:12] + ":" + digest[:40]
 
+def chat_mutation_child_key(mutation_key, label):
+    if not mutation_key:
+        return None
+    digest = _hashlib.sha256(
+        (str(mutation_key) + ":" + str(label or "")).encode("utf-8")
+    ).hexdigest()
+    return "batch:" + digest[:40]
+
 def chat_mutation_args_hash(kind, text):
     normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
     return _hashlib.sha256((str(kind) + "\n" + normalized).encode("utf-8")).hexdigest()
@@ -8412,6 +8545,57 @@ def journal_replay_result(cid, journal):
     return {
         "ok": False,
         "text": "Этот запрос уже обрабатывался, но сейчас не удалось подтвердить запись в дневнике.",
+    }
+
+async def log_journal_batch_action(
+    cid, u, journal, user_generation=None, mutation_key=None,
+):
+    """Apply an already validated mixed food/workout message with child idempotency keys."""
+    entries = list((journal or {}).get("entries") or [])
+    if not 2 <= len(entries) <= 4:
+        return {"ok": False, "text": "Не удалось безопасно разделить записи. Ничего не меняла."}
+    results = []
+    for index, entry in enumerate(entries):
+        intent = entry.get("intent")
+        source = str(entry.get("source_text") or "").strip()
+        child_key = chat_mutation_child_key(mutation_key, f"{index}:{intent}")
+        if intent == "logmeal":
+            result = await log_food_action(
+                cid, u, source,
+                user_generation=user_generation,
+                mutation_key=child_key,
+                preparsed_food_text=entry.get("food_text"),
+                preparsed_slot=entry.get("slot"),
+                preparsed_food_record=entry.get("food_record"),
+            )
+        elif intent == "logworkout":
+            result = await log_workout_action(
+                cid, u, source,
+                user_generation=user_generation,
+                mutation_key=child_key,
+                preparsed_workout=entry.get("workout"),
+            )
+        else:
+            return {"ok": False, "text": "Не удалось безопасно разделить записи. Ничего не меняла."}
+        results.append({"intent": intent, "result": result})
+    successful = [item for item in results if item["result"].get("ok")]
+    return {
+        "ok": len(successful) == len(results),
+        "text": "\n\n".join(item["result"]["text"] for item in results),
+        "records": [
+            {
+                "intent": item["intent"],
+                "record_id": item["result"].get("record_id"),
+                "mutation": item["result"].get("mutation"),
+            }
+            for item in successful
+            if item["result"].get("record_id")
+        ],
+        "mutations": [
+            item["result"]["mutation"]
+            for item in successful
+            if item["result"].get("mutation")
+        ],
     }
 
 def chat_mutation_preflight(cid, mutation_key, kind, args_hash):
@@ -9438,7 +9622,14 @@ async def _api_diary(request):
             _dd = date.fromisoformat(_d)
             if _dd > dtoday() or (dtoday() - _dd).days > 92: _d = None
         except Exception: _d = None
-    return _cors(web.json_response(diary_payload(cid, d=_d)))
+    payload = diary_payload(cid, d=_d)
+    if not _d:
+        prof = profile_of(row(cid))
+        payload["recent"] = {
+            day.isoformat(): diary_payload(cid, prof=prof, d=day.isoformat())
+            for day in (dtoday() - timedelta(days=offset) for offset in range(1, 8))
+        }
+    return _cors(web.json_response(payload))
 
 async def _api_diary_del(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))

@@ -20505,7 +20505,7 @@ function Yh({ isOpen: a, onClose: e }) {
       height: g.height,
       weight: g.weight,
       age: g.age,
-      cycle_len: g.cycle_len
+      ...r.mode === "cycle" ? { cycle_len: g.cycle_len } : {}
     }).catch(() => null), R = await qt("/api/prefs", {
       diet_note: g.diet_note,
       kcal_goal: g.kcal_goal
@@ -20581,7 +20581,7 @@ function Yh({ isOpen: a, onClose: e }) {
             /* @__PURE__ */ m.jsx(ie, { label: "Рост, см", value: g.height || "", onChange: (A) => v((R) => ({ ...R, height: A })), inputMode: "decimal" }),
             /* @__PURE__ */ m.jsx(ie, { label: "Вес, кг", value: g.weight || "", onChange: (A) => v((R) => ({ ...R, weight: A })), inputMode: "decimal" }),
             /* @__PURE__ */ m.jsx(ie, { label: "Возраст", value: g.age || "", onChange: (A) => v((R) => ({ ...R, age: A })), inputMode: "numeric" }),
-            /* @__PURE__ */ m.jsx(ie, { label: "Длина цикла", value: g.cycle_len || "", onChange: (A) => v((R) => ({ ...R, cycle_len: A })), inputMode: "numeric" })
+            r.mode === "cycle" ? /* @__PURE__ */ m.jsx(ie, { label: "Длина цикла", value: g.cycle_len || "", onChange: (A) => v((R) => ({ ...R, cycle_len: A })), inputMode: "numeric" }) : null
           ] }),
           /* @__PURE__ */ m.jsx(lt, { variant: "title3", weight: "semibold", children: "Питание" }),
           /* @__PURE__ */ m.jsx(
@@ -21163,9 +21163,14 @@ function iv({ mode: a, revision: e = 0 }) {
       S(null);
       return;
     }
+    const ii = Z.recent?.[Kt];
+    if (ii) {
+      S(ii);
+      return;
+    }
     S(null);
-    const ii = await qt("/api/diary", { d: Kt }).catch(() => null);
-    S(ii || { meals: [] });
+    const nt = await qt("/api/diary", { d: Kt }).catch(() => null);
+    S(nt || { meals: [] });
   }, rn = async (rt, Kt) => {
     if (!M) {
       D(!0);
@@ -21851,7 +21856,7 @@ const sv = [
   { id: "train", label: "Нагрузка", icon: /* @__PURE__ */ m.jsx(JE, {}) }
 ];
 function wA({ active: a }) {
-  const s = (typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData)?.mode === "male" ? sv.filter((f) => f.id !== "today") : sv, r = a === "stats" ? "today" : a, c = Math.max(0, s.findIndex((f) => f.id === r));
+  const s = sv, r = a === "stats" ? "today" : a, c = Math.max(0, s.findIndex((f) => f.id === r));
   return /* @__PURE__ */ m.jsx(ol, { children: /* @__PURE__ */ m.jsxs("div", { className: "aiwa-nav-root", "data-aiwa-nav": "true", children: [
     /* @__PURE__ */ m.jsx("div", { className: "aiwa-nav-tabbar-layer", children: /* @__PURE__ */ m.jsx(
       GE,
