@@ -378,6 +378,23 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertNotIn("file_server", caddy)
         self.assertEqual(mimetypes.guess_type("catalog.webp")[0], "image/webp")
 
+    def test_webp_static_response_has_browser_safe_content_type(self):
+        request = SimpleNamespace(
+            path="/assets/food/catalog-v2/example.webp",
+            headers={},
+        )
+
+        async def handler(_request):
+            return bot.web.Response(
+                body=b"webp",
+                content_type="application/octet-stream",
+            )
+
+        response = asyncio.run(bot._security_headers(request, handler))
+
+        self.assertEqual(response.content_type, "image/webp")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+
 
 if __name__ == "__main__":
     unittest.main()
