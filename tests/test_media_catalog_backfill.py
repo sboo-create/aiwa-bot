@@ -254,6 +254,22 @@ class ResumableBackfillTests(unittest.TestCase):
                 )
             generate.assert_not_called()
 
+    def test_review_worker_rejects_missing_literal_description(self):
+        row = {
+            "label": "Падел",
+            "canonical_id": sport_assets.canonical_id("Падел"),
+            "status": "ready",
+            "content_hash": "a" * 64,
+            "filename": f"{'a' * 64}.webp",
+        }
+        with mock.patch.object(
+            sport_assets, "generate_and_store"
+        ) as generate, self.assertRaisesRegex(
+            ValueError, "manifest_description"
+        ):
+            backfill._review_one("sport", row, 2)
+        generate.assert_not_called()
+
 
 class VisualReviewQueueTests(unittest.TestCase):
     def test_queue_requires_complete_decisions_before_promotion(self):

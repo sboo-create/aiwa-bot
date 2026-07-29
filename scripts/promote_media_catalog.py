@@ -128,6 +128,9 @@ def promote(
     try:
         for source, target, _, _ in planned:
             if target.exists():
+                _verified_source(
+                    destination, target.name, target.stem
+                )
                 continue
             temporary = target.with_name(
                 f".{target.name}.{os.getpid()}.tmp"

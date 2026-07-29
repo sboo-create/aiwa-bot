@@ -270,13 +270,26 @@ def _review_one(
     kind: str, row: dict[str, object], repair_attempts: int,
 ) -> dict[str, object]:
     assets = _module(kind)
+    label = row.get("label")
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("media_backfill_manifest_label")
+    description = row.get("literal_description")
+    if (
+        row.get("status") != "failed"
+        and (
+            not isinstance(description, str)
+            or not description.strip()
+            or len(description) > 1_000
+        )
+    ):
+        raise ValueError("media_backfill_manifest_description")
     errors = []
     if row.get("status") != "failed":
         try:
             path = _asset_path(assets, row)
             score = assets._validate_generated_image(
-                str(row["label"]),
-                str(row["literal_description"]),
+                label,
+                description,
                 path.read_bytes(),
             )
             return {
@@ -292,14 +305,14 @@ def _review_one(
     for repair in range(1, repair_attempts + 1):
         try:
             replacement = assets.generate_and_store(
-                row["label"], attempt=3 + repair
+                label, attempt=3 + repair
             )
             replacement_path = (
                 assets.generated_asset_dir()
                 / Path(str(replacement["image_url"])).name
             )
             score = assets._validate_generated_image(
-                str(row["label"]),
+                label,
                 str(replacement["literal_description"]),
                 replacement_path.read_bytes(),
             )
