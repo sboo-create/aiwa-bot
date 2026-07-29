@@ -20972,7 +20972,7 @@ function aA({ isOpen: a, onClose: e, onSaved: l, editingMeal: s = null }) {
       /* @__PURE__ */ m.jsx(
         ie,
         {
-          label: "Что съела?",
+          label: "Что было в приёме пищи?",
           value: f,
           onChange: h,
           placeholder: "Например: 200 г творога и банан",

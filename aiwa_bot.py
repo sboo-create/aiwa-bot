@@ -68,13 +68,10 @@ TRAIN_PENDING = set()
 ANNOUNCE_WAIT = set()   # админы в режиме рассылки: ждём следующее сообщение и копируем всем
 ALERT_LAST = {}
 CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
-def hist_get(cid):
+def hist_get(cid, male=False):
     mem = list(CHAT_HIST.get(cid, []))
-    if mem and is_male_profile(row(cid)):
-        mem = [
-            item for item in mem
-            if not _MALE_CYCLE_FORBIDDEN_RE.search(str(item.get("content") or ""))
-        ]
+    if mem and male:
+        mem = _male_safe_history(mem, text_key="content")
     if mem:
         return mem
     try:
@@ -82,11 +79,8 @@ def hist_get(cid):
         for m in chatlog_get(cid, 8):
             role = "assistant" if m.get("role") in ("ai", "assistant") else "user"
             out.append({"role": role, "content": (m.get("text") or "")[:1200]})
-        if is_male_profile(row(cid)):
-            out = [
-                item for item in out
-                if not _MALE_CYCLE_FORBIDDEN_RE.search(str(item.get("content") or ""))
-            ]
+        if male:
+            out = _male_safe_history(out, text_key="content")
         if out:
             dq = CHAT_HIST.setdefault(cid, deque(maxlen=6))
             for x in out[-6:]: dq.append(x)
@@ -1619,6 +1613,16 @@ def workouts_recent(cid, days=10, limit=8):
     c = db(); r = c.execute("SELECT d,type,items,duration,rpe FROM workouts WHERE chat_id=? AND d>=? ORDER BY ts DESC LIMIT ?", (cid, cut, limit)).fetchall(); c.close()
     return [{"d": x[0], "type": x[1], "items": json.loads(x[2] or "[]"), "duration": x[3], "rpe": x[4]} for x in r]
 
+def workouts_count_recent(cid, days=10):
+    cut = (dtoday() - timedelta(days=days)).isoformat()
+    c = db()
+    r = c.execute(
+        "SELECT COUNT(*) FROM workouts WHERE chat_id=? AND d>=?",
+        (cid, cut),
+    ).fetchone()
+    c.close()
+    return int((r or [0])[0] or 0)
+
 def workout_del(cid, wid):
     c = db()
     c.execute("DELETE FROM workouts WHERE chat_id=? AND id=?", (cid, int(wid)))
@@ -1920,9 +1924,39 @@ _UNVERIFIED_MUTATION_CLAIM_RE = re.compile(
     r"\bзапись\s+уже\s+(?:видна|в\s+дневнике)\b",
     re.I,
 )
+_MALE_REPRODUCTIVE_STRONG_RE = re.compile(
+    r"\b(?:фолликул\w*|лютеин\w*|овуляц\w*|месячн\w*|"
+    r"менструац\w*|пмс)\b",
+    re.I,
+)
+_MALE_CYCLE_CONTEXT_FORBIDDEN_RE = re.compile(
+    r"\b(?:день|фаз\w*|длин\w*|календар\w*|прогноз\w*|"
+    r"отслежив\w*)\b.{0,32}\bцикл\w*\b|"
+    r"\bцикл\w*\b.{0,32}\b(?:день|фаз\w*|длин\w*|месячн\w*|"
+    r"менструац\w*|овуляц\w*)\b|"
+    r"\b(?:по|о)\s+(?:мо(?:ему|ём)\s+)?цикл\w*\b",
+    re.I,
+)
 _MALE_CYCLE_FORBIDDEN_RE = re.compile(
-    r"\b(?:цикл\w*|фолликул\w*|лютеин\w*|овуляц\w*|месячн\w*|"
-    r"менструац\w*|пмс|гинеколог\w*)\b",
+    _MALE_REPRODUCTIVE_STRONG_RE.pattern + r"|" +
+    _MALE_CYCLE_CONTEXT_FORBIDDEN_RE.pattern,
+    re.I,
+)
+_MALE_BENIGN_CYCLE_RE = re.compile(
+    r"\b(?:день|фаз\w*|длин\w*)?\s*"
+    r"(?:трениров\w*|нагрузоч\w*|восстановитель\w*|сон\w*|сна)\s+"
+    r"цикл\w*\b|"
+    r"\bцикл\w*\s+(?:трениров\w*|нагруз\w*|восстановлен\w*|сон\w*|сна)\b",
+    re.I,
+)
+_MALE_SUGGESTION_PERSONAL_CYCLE_RE = re.compile(
+    r"\bчто\s+сейчас\s+с\s+цикл\w*\b|"
+    r"\b(?:мой|твой|ваш)\s+цикл\w*\b",
+    re.I,
+)
+_MEDICAL_ESCALATION_RE = re.compile(
+    r"\b(?:врач\w*|скор\w+\s+помощ\w*|неотлож\w*|112|температур\w*|"
+    r"кровотеч\w*|резк\w+\s+ухудш\w*|сильн\w+\s+бол\w*)\b",
     re.I,
 )
 MALE_PROFILE_FUNCTION_TEXT = (
@@ -1935,16 +1969,69 @@ MALE_SAFE_SUGGESTIONS = (
     "Открыть питание",
     "Открыть нагрузку",
 )
+_MALE_CYCLE_MUTATION_KIND_RE = re.compile(
+    r"^(?:period(?:$|_)|cycle(?:$|_)|cyclelen$|addcycles$|"
+    r"ovulation(?:$|_)|menstruation(?:$|_))",
+    re.I,
+)
 
 def is_male_profile(u):
     return bool(u and u.get("mode") == "male")
+
+def _male_cycle_content_forbidden(text):
+    """Block reproductive cycle copy without rejecting training/sleep cycles."""
+    value = str(text or "")
+    if _MALE_REPRODUCTIVE_STRONG_RE.search(value):
+        return True
+    without_benign_cycles = _MALE_BENIGN_CYCLE_RE.sub("", value)
+    return bool(_MALE_CYCLE_CONTEXT_FORBIDDEN_RE.search(without_benign_cycles))
+
+def _male_suggestion_forbidden(text):
+    value = str(text or "")
+    if _male_cycle_content_forbidden(value):
+        return True
+    without_benign_cycles = _MALE_BENIGN_CYCLE_RE.sub("", value)
+    return bool(_MALE_SUGGESTION_PERSONAL_CYCLE_RE.search(without_benign_cycles))
+
+def _male_reply_fallback(original=None, escalation_required=None):
+    text = (
+        "Для этого профиля я ориентируюсь на самочувствие, сон, питание, "
+        "восстановление и фактическую нагрузку. Напиши, что именно хочешь "
+        "разобрать, и я отвечу по этим данным."
+    )
+    if escalation_required is None:
+        escalation_required = bool(
+            _MEDICAL_ESCALATION_RE.search(str(original or ""))
+        )
+    if escalation_required:
+        text += (
+            " Если есть сильная или нарастающая боль, высокая температура, "
+            "кровотечение либо резкое ухудшение состояния, обратись к врачу; "
+            "при экстренных симптомах — за неотложной помощью."
+        )
+    return text
+
+def _male_safe_history(items, text_key="text"):
+    """Preserve ordering/user turns; rewrite unsafe assistant text consistently."""
+    out = []
+    for item in items or []:
+        safe_item = dict(item)
+        role = str(item.get("role") or "")
+        text = item.get(text_key)
+        if (
+            role in ("ai", "assistant")
+            and _male_cycle_content_forbidden(text)
+        ):
+            safe_item[text_key] = _male_reply_fallback(text)
+        out.append(safe_item)
+    return out
 
 def guard_aiwa_suggestions(cid, items):
     """Male profiles never receive reproductive suggestions, even from an LLM."""
     values = [str(item).strip() for item in (items or []) if str(item).strip()]
     if not is_male_profile(row(cid)):
         return values
-    safe = [item for item in values if not _MALE_CYCLE_FORBIDDEN_RE.search(item)]
+    safe = [item for item in values if not _male_suggestion_forbidden(item)]
     for fallback in MALE_SAFE_SUGGESTIONS:
         if len(safe) >= 2:
             break
@@ -1954,8 +2041,9 @@ def guard_aiwa_suggestions(cid, items):
 
 def guard_aiwa_reply(cid, text, verified_mutation=False):
     """Final identity and write-truth invariants before model text reaches the user."""
+    u = row(cid)
     try:
-        guarded = L.guard_user_address(text, llm_profile_of(row(cid)))
+        guarded = L.guard_user_address(text, llm_profile_of(u))
     except Exception:
         guarded = text
     # Suggestions are protocol metadata.  Strip them again at the final
@@ -1965,12 +2053,13 @@ def guard_aiwa_reply(cid, text, verified_mutation=False):
         guarded = L.split_followups(guarded)[0]
     except Exception:
         pass
-    if is_male_profile(row(cid)) and _MALE_CYCLE_FORBIDDEN_RE.search(str(guarded or "")):
+    if is_male_profile(u) and _male_cycle_content_forbidden(guarded):
         ev(cid, "fallback", meta="male_mode_content_guard")
-        return (
-            "Для этого профиля я ориентируюсь на самочувствие, сон, питание, "
-            "восстановление и фактическую нагрузку. Напиши, что именно хочешь "
-            "разобрать, и я отвечу по этим данным."
+        return _male_reply_fallback(
+            guarded,
+            escalation_required=bool(
+                _MEDICAL_ESCALATION_RE.search(str(guarded or ""))
+            ),
         )
     if not verified_mutation and _UNVERIFIED_MUTATION_CLAIM_RE.search(str(guarded or "")):
         ev(cid, "journal_claim_blocked", meta="unverified_model_claim")
@@ -1987,17 +2076,36 @@ def guard_chat_payload(cid, payload):
     out["answer"] = md_plain(guard_aiwa_reply(cid, out.get("answer") or ""))
     out["suggestions"] = guard_aiwa_suggestions(cid, out.get("suggestions"))[:2]
     if is_male_profile(row(cid)):
+        blocked_mutation = False
         mutation = out.get("mutation") or {}
-        if mutation.get("kind") == "period":
+        if _MALE_CYCLE_MUTATION_KIND_RE.search(str(mutation.get("kind") or "")):
             out.pop("mutation", None)
+            blocked_mutation = True
+        raw_mutations = out.get("mutations") or []
         mutations = [
-            item for item in (out.get("mutations") or [])
-            if isinstance(item, dict) and item.get("kind") != "period"
+            item for item in raw_mutations
+            if isinstance(item, dict)
+            and not _MALE_CYCLE_MUTATION_KIND_RE.search(
+                str(item.get("kind") or "")
+            )
         ]
+        blocked_mutation = blocked_mutation or len(mutations) < len(raw_mutations)
         if mutations:
             out["mutations"] = mutations
         else:
             out.pop("mutations", None)
+        if blocked_mutation:
+            out["mutation_blocked"] = "male_mode"
+            if mutations:
+                out["answer"] = (
+                    str(out.get("answer") or "").rstrip()
+                    + "\n\n"
+                    + MALE_PROFILE_FUNCTION_TEXT
+                ).strip()
+            else:
+                out["answer"] = MALE_PROFILE_FUNCTION_TEXT
+            out["suggestions"] = list(MALE_SAFE_SUGGESTIONS[:2])
+            ev(cid, "male_mode_block", meta="payload_cycle_mutation")
     return out
 
 def diet_human(code_csv):
@@ -5152,9 +5260,13 @@ def cycle_text_analysis(cid):
             parts.append(f"• Средняя энергия по отметкам: {EN.get(round(ST.mean(energy)), '')}.")
         if mood:
             parts.append(f"• Среднее настроение: {MOOD.get(round(ST.mean(mood)), '')}.")
-        recent_workouts = workouts_recent(cid, days=14, limit=8) or []
-        if recent_workouts:
-            parts.append(f"• Тренировок за последние 14 дней: {len(recent_workouts)}.")
+        try:
+            recent_workout_count = workouts_count_recent(cid, days=14)
+        except Exception as exc:
+            log.warning("male wellbeing analysis workouts unavailable for %s: %s", cid, exc)
+            recent_workout_count = 0
+        if recent_workout_count:
+            parts.append(f"• Тренировок за последние 14 дней: {recent_workout_count}.")
         if len(parts) == 1:
             parts.append(
                 "Пока мало данных. Отмечай энергию, настроение, питание и "
@@ -6299,7 +6411,19 @@ async def food_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     log.info("food reminder queued: %d", n)
 
 def finish_onboarding(context, cid, last_period_iso, n):
-    upsert(cid, last_period=last_period_iso, cycle_len=n, state=None, pending_date=None)
+    # Switch into cycle mode only after both onboarding inputs are valid.
+    # Until then an existing male profile must remain isolated from cycle state.
+    upsert(
+        cid,
+        mode="cycle",
+        last_period=last_period_iso,
+        cycle_len=n,
+        period_end=None,
+        period_len=None,
+        state=None,
+        pending_date=None,
+    )
+    _invalidate_mode_dependent_state(cid)
     cyc_add(cid, last_period_iso); schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 
 async def welcome_finish(context, cid, msg):
@@ -7442,7 +7566,7 @@ async def handle_text(update, context, txt):
         if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
+        ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid, male=is_male_profile(u)), usage=usage)
         ev(cid, "answered", meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
@@ -7453,7 +7577,7 @@ async def handle_text(update, context, txt):
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.answer_question, st, txt, llm_profile_of(u), hist_get(cid), usage=usage)
+        ans = await think_llm(context, cid, L.answer_question, st, txt, llm_profile_of(u), hist_get(cid, male=is_male_profile(u)), usage=usage)
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
@@ -7540,8 +7664,9 @@ async def on_cb(update, context):
     if data == "onb_female":
         return await q.message.reply_text(FEMALE_START_TEXT, reply_markup=FEMALE_ONB_KB)
     if data == "onb_cycle":
-        upsert(cid, mode="cycle", state="await_date", pending_date=None)
-        _invalidate_mode_dependent_state(cid)
+        # Defer the mode transition until finish_onboarding has valid cycle
+        # inputs. Cancelling this step must not expose cycle state.
+        upsert(cid, state="await_date", pending_date=None)
         return await q.message.reply_text(
             "Напиши дату начала последних месячных — например 25.05.2026 или 26 мая 2026.\n\n"
             "По ней я определю день цикла и подстрою питание и нагрузку. Даты потом можно править в приложении.")
@@ -7698,11 +7823,11 @@ async def on_cb(update, context):
         ev(cid, "user_message", meta="suggest", n=len(question))
         await context.bot.send_chat_action(cid, "typing")
         if general:
-            usage = []; ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid, male=is_male_profile(u)), usage=usage)
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, None, question, usage=usage, quote=question)
         else:
-            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, llm_profile_of(u), hist_get(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, llm_profile_of(u), hist_get(cid, male=is_male_profile(u)), usage=usage)
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, st, question, usage=usage, quote=question)
 
@@ -8191,7 +8316,7 @@ async def _api_recipe(request):
         return _cors(web.json_response({"error": "generation"}, status=502))
 
 async def _api_food_prompt(request):
-    """Кнопка «Текстом» в питании: бот спрашивает в чате, что она ела — ответ запишется в дневник."""
+    """Кнопка «Текстом»: бот просит нейтрально описать приём пищи."""
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
@@ -8205,11 +8330,8 @@ async def _api_food_prompt(request):
         )
         if BOT_APP:
             question = (
-                "Что ты съел? Напиши обычным текстом — например «200 г творога "
-                "и банан» — я посчитаю КБЖУ и запишу в дневник."
-                if is_male_profile(u) else
-                "Что ты съела? Напиши обычным текстом — например «200 г творога "
-                "и банан» — я посчитаю КБЖУ и запишу в дневник."
+                "Что было в приёме пищи? Напиши обычным текстом — например "
+                "«200 г творога и банан» — я посчитаю КБЖУ и запишу в дневник."
             )
             await BOT_APP.bot.send_message(cid, question)
         return _cors(web.json_response({"ok": True}))
@@ -8265,10 +8387,7 @@ def _api_data_sync(cid, body):
     cycle_user = is_cycle(u)
     chatlog = chatlog_get(cid, 60)
     if is_male_profile(u):
-        chatlog = [
-            item for item in chatlog
-            if not _MALE_CYCLE_FORBIDDEN_RE.search(str(item.get("text") or ""))
-        ]
+        chatlog = _male_safe_history(chatlog, text_key="text")
     out = {"onboarded": True, "cycle": bool(cycle_user and u.get("last_period")),
            "today": dtoday().isoformat(), "timezone": str(TZ),
            "last_period": (u.get("last_period") if cycle_user else None),
@@ -8560,10 +8679,11 @@ async def _api_profile(request):
     menu_cache_clear(cid)
     ev(cid, "manual", meta="web_profile")
     _u2 = row(cid)
+    _profile = profile_of(_u2)
     return _cors(web.json_response({"ok": True,
         "profile": {"height": int(cm), "weight": kg, "age": age, "kcal_goal": _u2.get("kcal_goal")},
         "cycle_len": (_u2.get("cycle_len") if is_cycle(_u2) else None),
-        "kcal_base": calc_calories(int(cm), kg, age, _u2.get("activity") or 2)[0]}))
+        "kcal_base": (profile_kcal(_profile)[0] if _profile else None)}))
 async def _api_meal(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -9344,7 +9464,7 @@ def _today_note_mode_guard(mode, note):
                 clean[key] = note[key]
         return clean
     visible = " ".join([clean["summary"], *clean["suggestions"]])
-    if _MALE_CYCLE_FORBIDDEN_RE.search(visible):
+    if _male_suggestion_forbidden(visible):
         return {
             "summary": (
                 "Сегодня ориентируйся на уровень энергии, качество сна и "
@@ -9941,9 +10061,9 @@ async def _agent_final(cid, u, msg, gathered, usage, request_id, user_generation
             q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про здоровье, цикл, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
     q = _with_memory(cid, q)
     if st is not None:
-        return await llm_to_thread(cid, "final_answer", L.answer_question, st, q, prof, hist_get(cid), usage=usage,
+        return await llm_to_thread(cid, "final_answer", L.answer_question, st, q, prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
                                    request_id=request_id, user_generation=user_generation)
-    return await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid), usage=usage,
+    return await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid, male=is_male_profile(u)), usage=usage,
                                request_id=request_id, user_generation=user_generation)
 
 async def _memory_learn(cid, umsg, amsg, user_generation=None):
@@ -10202,16 +10322,16 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
                   "Какая физическая активность мне сегодня подходит и почему? Дай 2-3 конкретных варианта. Отвечай про тренировки, тему цикла не разворачивай.")
             fq = _with_memory(cid, fq)
             if st is not None:
-                ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, fq, prof, hist_get(cid), usage=usage,
+                ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, fq, prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
                                           request_id=request_id, user_generation=generation)
             else:
-                ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage,
+                ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid, male=is_male_profile(u)), usage=usage,
                                           request_id=request_id, user_generation=generation)
         elif st is not None:
-            ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid), usage=usage,
+            ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
                                       request_id=request_id, user_generation=generation)
         else:
-            ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid), usage=usage,
+            ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid, male=is_male_profile(u)), usage=usage,
                                       request_id=request_id, user_generation=generation)
     current = _user_write_allowed(cid, generation)
     clean, sugg = L.split_followups(ans)
@@ -10354,7 +10474,10 @@ def diary_reco_summary(cid):
 async def answer_diary(cid, usage=None):
     summ = diary_reco_summary(cid)
     if not summ:
-        return "За сегодня в дневнике пусто. Сфоткай еду или напиши, что съела — посчитаю калории и подскажу, чего добрать."
+        return (
+            "За сегодня в дневнике пусто. Сфотографируй еду или опиши приём "
+            "текстом — посчитаю калории и подскажу, чего добрать."
+        )
     return await llm_to_thread(cid, "diary_recommendation", L.diary_reco, summ, (usage if usage is not None else []))
 
 def chat_mutation_key(channel, request_id):
@@ -10766,7 +10889,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         return {"ok": False, "text": "Не стала записывать: укажи сегодняшнюю дату или один из последних 31 дней."}
     food = str(preparsed_food_text or "").strip()[:500] or extract_food_log_text(text)
     if not food:
-        return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «съела 200 г творога, запиши»."}
+        return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «200 г творога, запиши»."}
     usage = []
     parsed = preparsed_food_record if isinstance(preparsed_food_record, dict) else None
     if parsed is None:
@@ -10781,7 +10904,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
        user_generation=generation)
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec or not food_record_admissible(rec):
-        return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «съела 200 г творога 5%, запиши»."}
+        return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «200 г творога 5%, запиши»."}
     rec["slot"] = slot or slot_for_now()
     rec["slot_guessed"] = not bool(slot)
     saved = meal_add(
@@ -11452,7 +11575,7 @@ async def _api_food_text(request):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте."}, status=403))
     generation = _user_generation(cid)
     txt = (body.get("text") or "").strip()
-    if not txt: return _cors(web.json_response({"ok": False, "message": "Напиши, что съела."}))
+    if not txt: return _cors(web.json_response({"ok": False, "message": "Опиши приём пищи."}))
     ev(cid, "flow_start", meta="food")
     prof = profile_of(u); usage = []
     try:
