@@ -33,13 +33,13 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
       - run: pip install -r stats/requirements.txt
-      - run: python -m py_compile aiwa_bot.py llm.py food_assets.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py scripts/claude_pr_review.py scripts/claude_deep_review.py scripts/claude_review_spend_dashboard.py ops/aiwa-review-spend-report.py
+      - run: python -m py_compile aiwa_bot.py llm.py food_assets.py sport_assets.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py scripts/catalog_seed_labels.py scripts/backfill_media_assets.py scripts/media_review_queue.py scripts/rekey_media_manifest.py scripts/select_media_catalog.py scripts/promote_media_catalog.py scripts/claude_pr_review.py scripts/claude_deep_review.py scripts/claude_review_spend_dashboard.py ops/aiwa-review-spend-report.py
       - run: python -m unittest discover -s tests -v
       - run: python loadtests/food_assets_hotpath.py
       - run: pip install pip-audit bandit
       - run: pip-audit -r requirements.txt
       - run: pip-audit -r stats/requirements.txt
-      - run: bandit -q -r aiwa_bot.py llm.py food_assets.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py scripts/claude_pr_review.py scripts/claude_deep_review.py scripts/claude_review_spend_dashboard.py ops/aiwa-review-spend-report.py -ll
+      - run: bandit -q -r aiwa_bot.py llm.py food_assets.py sport_assets.py analytics_v2.py cycle.py image.py report.py stats/server.py scripts/migrate_legacy_analytics.py scripts/catalog_seed_labels.py scripts/backfill_media_assets.py scripts/media_review_queue.py scripts/rekey_media_manifest.py scripts/select_media_catalog.py scripts/promote_media_catalog.py scripts/claude_pr_review.py scripts/claude_deep_review.py scripts/claude_review_spend_dashboard.py ops/aiwa-review-spend-report.py -ll
 
   claude-review:
     name: Claude review
