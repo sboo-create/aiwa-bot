@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import sys
@@ -50,6 +51,56 @@ def _configure(kind: str, output_dir: Path) -> None:
         os.environ["AIWA_SPORT_ASSET_PUBLIC_BASE"] = "/generated-sport"
 
 
+def _validated_rows(kind: str, value: object) -> list[dict]:
+    if not isinstance(value, list):
+        raise ValueError("media_backfill_input_rows")
+    assets = _module(kind)
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for source in value:
+        if not isinstance(source, dict):
+            raise ValueError("media_backfill_input_row")
+        row = dict(source)
+        label = assets.reviewed_generation_label(row.get("label"))
+        if not label:
+            raise ValueError("media_backfill_input_label")
+        canonical_id = assets.canonical_id(label)
+        if (
+            str(row.get("canonical_id") or "") != canonical_id
+            or not canonical_id.startswith(f"{kind}:")
+            or canonical_id in seen
+        ):
+            raise ValueError("media_backfill_input_canonical_id")
+        seen.add(canonical_id)
+        row["label"] = label
+        row["canonical_id"] = canonical_id
+        rows.append(row)
+    return rows
+
+
+def _require_validation(kind: str) -> None:
+    if not _module(kind).validation_enabled():
+        raise ValueError("media_backfill_validation_required")
+
+
+def _asset_path(assets, row: dict) -> Path:
+    content_hash = str(row.get("content_hash") or "")
+    filename = str(row.get("filename") or "")
+    directory = assets.generated_asset_dir().resolve()
+    if (
+        len(content_hash) != 64
+        or filename != f"{content_hash}.webp"
+    ):
+        raise ValueError("media_backfill_asset_filename")
+    path = (directory / filename).resolve()
+    if path.parent != directory:
+        raise ValueError("media_backfill_asset_directory")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != content_hash:
+        raise ValueError("media_backfill_asset_hash")
+    return path
+
+
 def _generate_one(
     kind: str, row: dict[str, object], max_attempts: int,
 ) -> dict[str, object]:
@@ -85,17 +136,22 @@ def _generate_one(
 def _valid_existing(assets, output_dir: Path, row: dict) -> bool:
     filename = str(row.get("filename") or "")
     content_hash = str(row.get("content_hash") or "")
-    path = output_dir / filename
+    directory = output_dir.resolve()
+    path = (directory / filename).resolve()
     if (
         row.get("status") != "ready"
         or not filename
         or filename != f"{content_hash}.webp"
+        or path.parent != directory
         or not path.is_file()
     ):
         return False
     try:
-        return assets.canonical_id(row.get("label")) == row.get(
-            "canonical_id"
+        return (
+            assets.canonical_id(row.get("label"))
+            == row.get("canonical_id")
+            and hashlib.sha256(path.read_bytes()).hexdigest()
+            == content_hash
         )
     except Exception:
         return False
@@ -107,27 +163,36 @@ def generate(
     output_dir: Path,
     workers: int,
     attempts: int,
+    max_total_attempts: int = 5_000,
 ) -> int:
     assets = _module(kind)
     source = json.loads(input_path.read_text(encoding="utf-8"))
     if source.get("schema") != _label_schema(kind):
         raise ValueError("media_backfill_input_schema")
     rows = source.get("labels")
-    if not isinstance(rows, list):
-        raise ValueError("media_backfill_input_labels")
+    rows = _validated_rows(kind, rows)
+    _require_validation(kind)
+    if len(rows) * attempts > max_total_attempts:
+        raise ValueError("media_backfill_attempt_budget")
     output_dir.mkdir(parents=True, exist_ok=True)
     _configure(kind, output_dir)
     manifest_path = output_dir / "backfill-manifest.json"
     completed: dict[str, dict] = {}
+    expected_ids = {str(row["canonical_id"]) for row in rows}
     if manifest_path.exists():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
         if previous.get("schema") != _asset_schema(kind):
             raise ValueError("media_backfill_resume_schema")
-        for row in previous.get("assets") or []:
-            if isinstance(row, dict) and _valid_existing(
-                assets, output_dir, row
-            ):
-                completed[str(row["canonical_id"])] = row
+        previous_rows = _validated_rows(
+            kind, previous.get("assets")
+        )
+        for row in previous_rows:
+            canonical_id = str(row["canonical_id"])
+            if canonical_id not in expected_ids:
+                raise ValueError("media_backfill_resume_input")
+            if _valid_existing(assets, output_dir, row):
+                canonical_id = str(row.get("canonical_id"))
+                completed[canonical_id] = row
 
     lock = threading.Lock()
 
@@ -208,8 +273,8 @@ def _review_one(
     assets = _module(kind)
     errors = []
     if row.get("status") != "failed":
-        path = assets.generated_asset_dir() / str(row["filename"])
         try:
+            path = _asset_path(assets, row)
             score = assets._validate_generated_image(
                 str(row["label"]),
                 str(row["literal_description"]),
@@ -265,26 +330,44 @@ def review(
     output_path: Path,
     workers: int,
     repair_attempts: int,
+    max_total_attempts: int = 5_000,
 ) -> int:
     assets = _module(kind)
     source = json.loads(input_path.read_text(encoding="utf-8"))
     if source.get("schema") != _asset_schema(kind):
         raise ValueError("media_backfill_manifest_schema")
     rows = source.get("assets")
-    if not isinstance(rows, list):
-        raise ValueError("media_backfill_manifest_assets")
+    rows = _validated_rows(kind, rows)
+    _require_validation(kind)
+    if output_path.resolve().parent != input_path.resolve().parent:
+        raise ValueError("media_review_output_directory")
+    if output_path.resolve() == input_path.resolve():
+        raise ValueError("media_review_output_manifest")
+    if len(rows) * repair_attempts > max_total_attempts:
+        raise ValueError("media_backfill_attempt_budget")
     _configure(kind, input_path.resolve().parent)
+    for row in rows:
+        if row.get("status") == "ready":
+            _asset_path(assets, row)
+    expected = {
+        str(row["canonical_id"]): row for row in rows
+    }
     reviewed: dict[str, dict] = {}
     if output_path.exists():
         previous = json.loads(output_path.read_text(encoding="utf-8"))
         if previous.get("schema") != _asset_schema(kind):
             raise ValueError("media_review_resume_schema")
-        for row in previous.get("assets") or []:
-            if (
-                isinstance(row, dict)
-                and row.get("review_status") in {"approved", "rejected"}
-            ):
-                reviewed[str(row.get("canonical_id"))] = row
+        previous_rows = _validated_rows(
+            kind, previous.get("assets")
+        )
+        for row in previous_rows:
+            canonical_id = str(row["canonical_id"])
+            if canonical_id not in expected:
+                raise ValueError("media_review_resume_input")
+            if row.get("review_status") in {"approved", "rejected"}:
+                if row.get("review_status") == "approved":
+                    _asset_path(assets, row)
+                reviewed[canonical_id] = row
 
     lock = threading.Lock()
 
@@ -344,6 +427,8 @@ def review(
                     ensure_ascii=False,
                 ), flush=True)
     checkpoint(final=True)
+    if set(reviewed) != set(expected):
+        raise ValueError("media_review_incomplete")
     rejected = sum(
         row.get("review_status") == "rejected"
         for row in reviewed.values()
@@ -362,6 +447,7 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--repair-attempts", type=int, default=2)
+    parser.add_argument("--max-total-attempts", type=int, default=5_000)
     args = parser.parse_args()
     workers = max(1, min(8, args.workers))
     if args.generate:
@@ -371,6 +457,7 @@ def main() -> int:
             args.output,
             workers,
             max(1, min(3, args.attempts)),
+            max(1, args.max_total_attempts),
         )
     else:
         failures = review(
@@ -379,6 +466,7 @@ def main() -> int:
             args.output,
             workers,
             max(0, min(2, args.repair_attempts)),
+            max(1, args.max_total_attempts),
         )
     return 1 if failures else 0
 

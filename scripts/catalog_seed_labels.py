@@ -10,14 +10,19 @@ identifier is written to the output.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 
 
 _SPACE_RE = re.compile(r"\s+")
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import food_assets
+import sport_assets
 
 
 def _normal(value: object) -> str:
@@ -599,7 +604,9 @@ def _food_rows(production_path: Path | None, count: int) -> list[dict]:
     rows: list[dict] = []
     seen: set[str] = set(existing)
     for row in production:
-        label = _SPACE_RE.sub(" ", str(row["label"]).strip())[:80]
+        label = food_assets.reviewed_generation_label(row.get("label"))
+        if not label:
+            continue
         key = _normal(label)
         if key in seen:
             continue
@@ -607,7 +614,7 @@ def _food_rows(production_path: Path | None, count: int) -> list[dict]:
         rows.append(
             {
                 "label": label,
-                "canonical_id": str(row.get("canonical_id") or ""),
+                "canonical_id": food_assets.canonical_id(label),
                 "frequency": max(0, int(row.get("frequency") or 0)),
                 "origin": "production_aggregate",
             }
@@ -619,11 +626,10 @@ def _food_rows(production_path: Path | None, count: int) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
         rows.append(
             {
                 "label": label,
-                "canonical_id": f"food:{digest}",
+                "canonical_id": food_assets.canonical_id(label),
                 "frequency": 0,
                 "origin": "curated_taxonomy",
             }
@@ -636,12 +642,10 @@ def _food_rows(production_path: Path | None, count: int) -> list[dict]:
 def _sport_rows(count: int) -> list[dict]:
     rows = []
     for label in sport_seed_labels()[:count]:
-        key = _normal(label)
-        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
         rows.append(
             {
                 "label": label,
-                "canonical_id": f"sport:{digest}",
+                "canonical_id": sport_assets.canonical_id(label),
                 "frequency": 0,
                 "origin": "curated_taxonomy",
             }

@@ -8,12 +8,18 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import food_assets
+import sport_assets
 
 
 def _normalized(value: object) -> str:
@@ -59,6 +65,7 @@ def select_catalog(
     if target is not None and target < 1:
         raise ValueError("media_select_target")
     schema = f"aiwa-{kind}-backfill-assets-v1"
+    assets = food_assets if kind == "food" else sport_assets
     existing = _existing_labels(kind)
     candidates: list[tuple[dict, Path]] = []
     seen_labels: set[str] = set()
@@ -87,6 +94,14 @@ def select_catalog(
             ):
                 continue
             reviewed_total += 1
+            label = assets.reviewed_generation_label(row.get("label"))
+            canonical_id = str(row.get("canonical_id") or "")
+            if (
+                not label
+                or canonical_id != assets.canonical_id(label)
+                or not canonical_id.startswith(f"{kind}:")
+            ):
+                raise ValueError("media_select_canonical_id")
             label_key = _normalized(row.get("label"))
             content_hash = str(row.get("content_hash") or "")
             if (
@@ -100,6 +115,8 @@ def select_catalog(
             candidates.append((dict(row), source))
             seen_labels.add(label_key)
             seen_hashes.add(content_hash)
+    if not candidates:
+        raise ValueError("media_select_insufficient:0")
     if target is not None and len(candidates) < target:
         raise ValueError(
             f"media_select_insufficient:{len(candidates)}/{target}"
@@ -138,6 +155,10 @@ def select_catalog(
             "visual_review_required": len(rows),
             "visual_review_approved": len(rows),
             "visual_review_rejected": 0,
+            "visual_review_sources_sha256": [
+                hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in manifest_paths
+            ],
         })
     manifest_path = output_dir / "selected-manifest.json"
     temporary = manifest_path.with_name(

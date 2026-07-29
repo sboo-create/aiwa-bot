@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import html
 import json
+import os
+import re
 from pathlib import Path
 
 
@@ -14,6 +17,40 @@ SUPPORTED_SCHEMAS = {
     "aiwa-food-backfill-assets-v1",
     "aiwa-sport-backfill-assets-v1",
 }
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _atomic_json(path: Path, payload: dict) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _review_rows(payload: dict) -> list[dict]:
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for row in payload.get("assets") or []:
+        if (
+            not isinstance(row, dict)
+            or row.get("review_status") != "approved"
+        ):
+            continue
+        canonical_id = str(row.get("canonical_id") or "")
+        content_hash = str(row.get("content_hash") or "")
+        filename = str(row.get("filename") or "")
+        if (
+            not canonical_id
+            or canonical_id in seen
+            or len(content_hash) != 64
+            or filename != f"{content_hash}.webp"
+        ):
+            raise ValueError("media_review_asset_identity")
+        seen.add(canonical_id)
+        rows.append(row)
+    return rows
 
 
 def _load(path: Path) -> tuple[dict, str]:
@@ -28,12 +65,9 @@ def _load(path: Path) -> tuple[dict, str]:
 
 def build_queue(manifest_path: Path, output_path: Path) -> int:
     payload, source_hash = _load(manifest_path)
-    rows = [
-        row for row in payload.get("assets") or []
-        if isinstance(row, dict)
-        and row.get("review_status") == "approved"
-        and row.get("filename")
-    ]
+    rows = _review_rows(payload)
+    if not rows:
+        raise ValueError("media_review_empty")
     cards = []
     for index, row in enumerate(rows):
         canonical_id = html.escape(str(row.get("canonical_id") or ""))
@@ -74,6 +108,9 @@ def build_queue(manifest_path: Path, output_path: Path) -> int:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+ content="default-src 'none'; img-src 'self' data:;
+ style-src 'unsafe-inline'; script-src 'unsafe-inline'">
 <title>{title}</title>
 <style>
 :root{{--ink:#17212b;--muted:#66717d;--paper:#fff;--bg:#f4f1ed;
@@ -163,17 +200,32 @@ document.querySelector("#export").onclick=()=>{{
 def apply_decisions(
     manifest_path: Path, decisions_path: Path, output_path: Path,
 ) -> tuple[int, int]:
-    payload, source_hash = _load(manifest_path)
+    if output_path.resolve() == manifest_path.resolve():
+        raise ValueError("media_review_output_manifest")
+    loaded, source_hash = _load(manifest_path)
+    payload = copy.deepcopy(loaded)
     decisions = json.loads(decisions_path.read_text(encoding="utf-8"))
     if decisions.get("schema") != "aiwa-media-visual-decisions-v1":
         raise ValueError("media_review_decisions_schema")
     if decisions.get("source_manifest_sha256") != source_hash:
         raise ValueError("media_review_decisions_source")
-    decision_map = {
-        str(row.get("canonical_id")): row
-        for row in decisions.get("decisions") or []
-        if isinstance(row, dict)
+    expected_rows = _review_rows(payload)
+    expected_ids = {
+        str(row["canonical_id"]) for row in expected_rows
     }
+    decision_rows = decisions.get("decisions")
+    if not isinstance(decision_rows, list):
+        raise ValueError("media_review_decisions")
+    decision_map: dict[str, dict] = {}
+    for row in decision_rows:
+        if not isinstance(row, dict):
+            raise ValueError("media_review_decision")
+        canonical_id = str(row.get("canonical_id") or "")
+        if not canonical_id or canonical_id in decision_map:
+            raise ValueError("media_review_decision_identity")
+        decision_map[canonical_id] = row
+    if set(decision_map) != expected_ids:
+        raise ValueError("media_review_incomplete")
     approved = rejected = required = 0
     for row in payload.get("assets") or []:
         if not isinstance(row, dict) or row.get("review_status") != "approved":
@@ -190,19 +242,21 @@ def apply_decisions(
                 + str(row.get("canonical_id") or "unknown")
             )
         row["visual_review_status"] = decision["decision"]
-        row["visual_review_note"] = str(decision.get("note") or "")[:240]
+        note = _CONTROL_RE.sub(
+            "", str(decision.get("note") or "")
+        )
+        row["visual_review_note"] = " ".join(note.split())[:240]
         if decision["decision"] == "approved":
             approved += 1
         else:
             rejected += 1
+    if required == 0:
+        raise ValueError("media_review_empty")
     payload["visual_review_status"] = "complete"
     payload["visual_review_required"] = required
     payload["visual_review_approved"] = approved
     payload["visual_review_rejected"] = rejected
-    output_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _atomic_json(output_path, payload)
     return approved, rejected
 
 

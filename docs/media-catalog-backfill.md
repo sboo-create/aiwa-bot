@@ -11,9 +11,10 @@ The runtime food generator remains a one-worker, durable long-tail queue with
 - it receives only a parsed short label and aggregate frequency;
 - it writes immutable 512×512 WebP files to an operator-owned directory.
 
-`railway run` is used only to inject the already configured provider variables
-into the local process. It does not execute the batch inside the production
-container.
+Use a dedicated spend-capped backfill provider key in a local environment
+manager. Do not export a production runtime key into an unmanaged shell.
+`railway run --environment production` was used for the one-time 2026-07-29
+migration, but is not the repeatable workflow.
 
 ## Source sets
 
@@ -27,6 +28,18 @@ container.
 No chat text, profile field or Telegram identifier is exported. Invalid
 production labels are expected to fail the semantic gate and are replaced from
 the curated reserve.
+
+The 2026-07-29 batch predates canonical-ID hardening. Before selecting that
+one batch, migrate each reviewed manifest into a new sibling file:
+
+```bash
+python scripts/rekey_media_manifest.py --kind food \
+  --input food-assets/reviewed-manifest.json \
+  --output food-assets/rekeyed-reviewed-manifest.json
+```
+
+Newly generated manifests already use the canonical label-derived ID and do not
+need this migration.
 
 ## Generation
 
@@ -42,22 +55,26 @@ python scripts/catalog_seed_labels.py \
 Run bounded generators (the combined recommended ceiling is eight workers):
 
 ```bash
-railway run --project <project> --service <service> \
-  --environment production --no-local \
+env AIWA_FOOD_IMAGE_API_KEY='<dedicated-backfill-key>' \
+  AIWA_FOOD_IMAGE_VALIDATION_API_KEY='<dedicated-backfill-key>' \
   python scripts/backfill_media_assets.py \
   --generate --kind food --input food-labels-500.json \
-  --output food-assets --workers 6 --attempts 3
+  --output food-assets --workers 6 --attempts 3 \
+  --max-total-attempts 1800
 
-railway run --project <project> --service <service> \
-  --environment production --no-local \
+env AIWA_SPORT_IMAGE_API_KEY='<dedicated-backfill-key>' \
+  AIWA_SPORT_IMAGE_VALIDATION_API_KEY='<dedicated-backfill-key>' \
   python scripts/backfill_media_assets.py \
   --generate --kind sport --input sport-labels-200.json \
-  --output sport-assets --workers 2 --attempts 3
+  --output sport-assets --workers 2 --attempts 3 \
+  --max-total-attempts 750
 ```
 
 The manifest is atomically checkpointed after every item. Restarting the same
 command verifies and skips completed content-addressed WebP files. Failed rows
-are retried on restart; approved files cannot be silently overwritten.
+are retried on restart; approved files cannot be silently overwritten. The
+attempt ceiling fails before the batch starts when its worst-case attempt count
+exceeds the explicit budget.
 
 ## Automatic semantic review and repair
 
@@ -69,10 +86,12 @@ repair generations:
 python scripts/backfill_media_assets.py \
   --review --kind food --input food-assets/backfill-manifest.json \
   --output food-assets/reviewed-manifest.json \
-  --workers 6 --repair-attempts 2
+  --workers 6 --repair-attempts 2 --max-total-attempts 1100
 ```
 
-Use the same command with `--kind sport`. An image is rejected for the wrong
+The reviewed manifest must stay beside the source assets; the command fails if
+the input and output parent directories differ. Use the same command with
+`--kind sport`. An image is rejected for the wrong
 main ingredient/activity, wrong preparation/equipment, visible text or logo,
 unsafe/anatomically impossible sport posture, person/face problems, invalid
 bytes, excessive size or a semantic score below the configured threshold.
@@ -114,9 +133,9 @@ local progress and JSON export. Apply the exported decisions:
 
 ```bash
 python scripts/media_review_queue.py --apply \
-  --manifest food-assets/reviewed-manifest.json \
+  --manifest food-selected/selected-manifest.json \
   --decisions visual-decisions.json \
-  --output food-assets/visually-reviewed-manifest.json
+  --output food-selected/visually-reviewed-manifest.json
 ```
 
 The apply step fails unless every automatically approved image has a decision
@@ -150,6 +169,11 @@ Promotion verifies SHA-256, WebP format and 512×512 dimensions, copies approved
 files under an immutable `catalog-v2/` path, preserves existing reviewed
 catalog images, and updates the static manifest. The resulting source change
 goes through a normal PR, CI and one deep review before deployment.
+
+Run promotion with `--dry-run` first. Promotion validates the complete plan
+before copying and removes newly copied files if the manifest update fails.
+Rollback is a normal `git revert` of the catalog promotion commit; the same
+revert removes its immutable `catalog-v2/` files and restores both manifests.
 
 ## Cost and stop conditions
 

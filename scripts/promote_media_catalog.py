@@ -8,12 +8,18 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import food_assets
+import sport_assets
 
 
 def _atomic_json(path: Path, payload: dict) -> None:
@@ -45,7 +51,9 @@ def _verified_source(
     return path
 
 
-def promote(kind: str, manifest_path: Path) -> dict[str, int]:
+def promote(
+    kind: str, manifest_path: Path, dry_run: bool = False,
+) -> dict[str, int]:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     expected_schema = f"aiwa-{kind}-backfill-assets-v1"
     if payload.get("schema") != expected_schema:
@@ -59,31 +67,44 @@ def promote(kind: str, manifest_path: Path) -> dict[str, int]:
         "food" if kind == "food" else "train"
     )
     destination = asset_root / "catalog-v2"
-    destination.mkdir(parents=True, exist_ok=True)
     manifest_file = asset_root / "manifest.json"
     catalog = json.loads(manifest_file.read_text(encoding="utf-8"))
+    if not isinstance(catalog, dict):
+        raise ValueError("media_promote_static_manifest")
+    assets = food_assets if kind == "food" else sport_assets
+    existing_labels = {
+        assets.normalize_label(label) for label in catalog
+    }
     source_dir = manifest_path.resolve().parent
     promoted = skipped_existing = rejected = 0
+    planned: list[tuple[Path, Path, str, str]] = []
     for row in payload.get("assets") or []:
         if not isinstance(row, dict):
-            continue
+            raise ValueError("media_promote_row")
         if row.get("visual_review_status") != "approved":
             rejected += 1
             continue
-        label = " ".join(str(row.get("label") or "").split())
+        label = assets.reviewed_generation_label(row.get("label"))
         if not label:
             raise ValueError("media_promote_label")
-        if label in catalog:
+        canonical_id = str(row.get("canonical_id") or "")
+        if (
+            canonical_id != assets.canonical_id(label)
+            or not canonical_id.startswith(f"{kind}:")
+        ):
+            raise ValueError("media_promote_canonical_id")
+        normalized_label = assets.normalize_label(label)
+        if normalized_label in existing_labels:
             skipped_existing += 1
             continue
+        existing_labels.add(normalized_label)
         content_hash = str(row.get("content_hash") or "")
         filename = str(row.get("filename") or "")
         source = _verified_source(source_dir, filename, content_hash)
         target = destination / filename
         if target.exists():
             _verified_source(destination, filename, content_hash)
-        else:
-            shutil.copyfile(source, target)
+        planned.append((source, target, label, filename))
         catalog[label] = (
             f"/assets/{'food' if kind == 'food' else 'train'}"
             f"/catalog-v2/{filename}"
@@ -91,22 +112,49 @@ def promote(kind: str, manifest_path: Path) -> dict[str, int]:
         promoted += 1
 
     ordered = dict(sorted(catalog.items(), key=lambda item: item[0].casefold()))
-    _atomic_json(manifest_file, ordered)
-    return {
+    result = {
         "promoted": promoted,
         "skipped_existing": skipped_existing,
         "rejected": rejected,
         "catalog_total": len(ordered),
+        "dry_run": int(dry_run),
     }
+    if dry_run or promoted == 0:
+        return result
+
+    destination.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = []
+    temporaries: list[Path] = []
+    try:
+        for source, target, _, _ in planned:
+            if target.exists():
+                continue
+            temporary = target.with_name(
+                f".{target.name}.{os.getpid()}.tmp"
+            )
+            temporaries.append(temporary)
+            shutil.copyfile(source, temporary)
+            os.replace(temporary, target)
+            temporaries.remove(temporary)
+            created.append(target)
+        _atomic_json(manifest_file, ordered)
+    except Exception:
+        for temporary in temporaries:
+            temporary.unlink(missing_ok=True)
+        for target in created:
+            target.unlink(missing_ok=True)
+        raise
+    return result
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--kind", choices=("food", "sport"), required=True)
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     print(json.dumps(
-        promote(args.kind, args.manifest),
+        promote(args.kind, args.manifest, args.dry_run),
         ensure_ascii=False,
     ))
     return 0
