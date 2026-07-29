@@ -111,7 +111,9 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-29-v174-food-catalog-recall")
+AIWA_VERSION = os.environ.get(
+    "AIWA_VERSION", "2026-07-29-v175-validated-food-assets"
+)
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 
@@ -426,6 +428,36 @@ def _migrate_db_on_connection(c):
                 _catalog_label, "ready", "catalog", _catalog_url, _catalog_now,
             ),
         )
+    if FA.validation_enabled():
+        # Assets produced before the semantic quality gate are not trusted.
+        # Keep immutable files for rollback/audit, but stop publishing them and
+        # make their durable jobs eligible for validated regeneration.
+        _legacy_generated = [
+            item[0]
+            for item in c.execute(
+                """SELECT canonical_id FROM food_assets
+                   WHERE source='generated' AND status='ready'
+                     AND COALESCE(prompt_version,'')!=?""",
+                (FA.GENERATED_PROMPT_VERSION,),
+            ).fetchall()
+        ]
+        if _legacy_generated:
+            _marks = ",".join("?" for _ in _legacy_generated)
+            c.execute(
+                f"""UPDATE food_assets SET status='rejected',image_url=NULL,
+                           content_hash=NULL,retry_after=NULL,
+                           last_error_class='legacy_unvalidated',
+                           updated_at=?
+                    WHERE canonical_id IN ({_marks})
+                      AND source='generated'""",
+                (datetime.now(TZ).isoformat(), *_legacy_generated),
+            )
+            c.execute(
+                f"""UPDATE food_asset_jobs SET status='rejected',
+                           last_error_class='legacy_unvalidated'
+                    WHERE canonical_id IN ({_marks})""",
+                tuple(_legacy_generated),
+            )
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
                 "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
@@ -1908,6 +1940,25 @@ def _journal_explicit_first_person_event(text):
         )
     )
 
+_TRAINING_SECTION_INTENT_RE = re.compile(
+    r"(?:"
+    r"(?:собер|состав|подбер)\w*.{0,24}(?:трениров\w*|нагрузк\w*)|"
+    r"(?:покажи|дай)\w*.{0,18}(?:трениров\w*|нагрузк\w*|план\w*)"
+    r"(?:.{0,12}(?:сегодня|на\s+день))?|"
+    r"(?:какую|какая)\s+(?:мне\s+)?(?:сегодня\s+)?"
+    r"(?:трениров\w*|нагрузк\w*)|"
+    r"(?:трениров\w*|нагрузк\w*|упражнен\w*)\s+на\s+сегодня|"
+    r"какой\s+(?:мне\s+)?спорт|каким\s+спортом|"
+    r"чем\s+(?:мне\s+)?(?:сегодня\s+)?(?:заня\w*|позанима\w*)|"
+    r"какая\s+(?:сегодня\s+)?активн\w*|"
+    r"что\s+(?:мне\s+)?потренир\w*(?:\s+сегодня)?|"
+    r"что\s+по\s+(?:спорт\w*|трениров\w*|нагрузк\w*)|"
+    r"можно\s+ли\s+(?:мне\s+)?(?:сегодня\s+)?"
+    r"(?:бегать|качат\w*|приседат\w*)"
+    r")",
+    re.I,
+)
+
 def match_intent(t):
     raw_t = str(t or "")
     t = t.lower()
@@ -2038,7 +2089,12 @@ def match_intent(t):
     ):
         return "logworkout"
     if re.search(r"(длин\w*|продолжительн\w*).{0,14}цикл|цикл.{0,8}(длин|продолж)|(измен\w*|поменя\w*|задат\w*|сменит\w*|настро\w*|выстав\w*|постав\w*|укаж\w*).{0,14}(длин\w*\s*)?цикл|цикл\w*\s*(на\s+)?\d{1,2}\s*дн", t): return "cyclelen"
-    if re.search(r"(нагрузк|трениров|какой\s+спорт|каким\s+спортом|позанима|чем\s+(мне\s+)?заня|упражнени|фитнес|какая\s+(сегодня\s+)?активн|как\s+(мне\s+)?двигат|размят|разминк|зарядк|можно\s+ли\s+(мне\s+)?(бегать|качат|присед)|(какую|какая)\s+(мне\s+)?(сегодня\s+)?(трениров|нагрузк)|что\s+по\s+(спорт|трениров|нагрузк))", t): return "training"
+    # A topic mention is not a navigation intent. Questions such as
+    # “полезно ли кардио?” and “почему болят мышцы после тренировки?” must
+    # reach the conversational answer path. Only an explicit request for a
+    # personal section/plan is routed to the generated training card.
+    if _TRAINING_SECTION_INTENT_RE.search(t):
+        return "training"
     if re.search(r"(мой\s+дневник|дневник\s+питани|что\s+(?:мне\s+)?добрать|добрать\s+.{0,12}(белк|калор|бжу)|сколько\s+.{0,12}(съел|калор|ккал)\s*.{0,10}сегодн|мой\s+калораж|хватает\s+ли\s+.{0,12}(белк|калор)|итог\w*\s*.{0,10}(дн|калор|по\s+еде|бжу)|сколько\s+осталось\s+.{0,12}(калор|ккал|съесть))", t): return "diary"
     if re.search(r"(что\s+(?:мне\s+|тебе\s+|лучше\s+|полезн\w*\s+|стоит\s+|сейчас\s+|сегодня\s+|можно\s+|бы\s+|такого\s+|нужно\s+)*(?:есть|поесть|съесть|покушать|скушать|кушать|приготовить|готовить)\b(?!\s*(?:ли\b|у\s+мен|в\s+профил|в\s+приложени|в\s+холодильник|дома|интересн|врем|деньг|дела|презентац|отчёт|доклад))|полезн\w*\s+(?:есть|поесть|кушать|съесть)|(?:поесть|покушать|съесть|скушать|кушать)\s+полезн|что\s+(?:есть|поесть)\s+(?:полезн|при\b|для\s|чтобы|на\s+(?:завтрак|обед|ужин|перекус))|какое\s+питани|какая\s+(?:сегодня\s+)?еда|какие\s+(?:мне\s+)?продукт|какие\s+продукты\s+полезн|меню\s+(?:на\s+)?(?:сегодня|день|завтра)|составь\s+меню|подбери\s+меню|обнови\s+меню|дай\s+меню|покажи\s+меню|пересобер\w*\s+меню|чем\s+(?:мне\s+)?(?:сегодня\s+)?питат|как\s+(?:мне\s+)?(?:лучше\s+)?питат|что\s+по\s+(?:еде|питани)|(?:посоветуй|подскажи|дай|хочу|можешь|порекоменду)\w*\s+.{0,24}(?:поесть|съесть|еду|питани|меню|рацион|продукт|блюд)|\bрацион\b|еда\s+на\s+сегодня|что\s+поедим|проголодал|что\s+на\s+(?:завтрак|обед|ужин|перекус))", t): return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
@@ -2466,17 +2522,21 @@ def _semantic_journal_candidate(text, context=None, enable_v2=False):
             or re.search(r"\b(?:дневник\w*|запис\w*|добав\w*|пропуст\w*)\b", raw, re.I)
         )
     )
-    if (
-        re.search(
-            r"^\s*(?:айва[,\s]*)?(?:что|как|какая|какую|какие|почему|зачем|"
-            r"когда|сколько|можно\s+ли|нужно\s+ли)\b",
+    # A question must not become a diary write. Keep this boundary narrower
+    # than the conversational helper: an internal phrase such as “это на
+    # завтрак” is not a question merely because it contains “это”.
+    journal_question_like = bool(
+        "?" in raw
+        or re.search(
+            r"^\s*(?:айва[,\s]*)?(?:что|как|какая|какую|какие|почему|"
+            r"зачем|когда|сколько|можно\s+ли|нужно\s+ли|стоит\s+ли|"
+            r"полезн\w*\s+ли|вредн\w*\s+ли|помога\w*\s+ли|"
+            r"эффективн\w*\s+ли|нормальн\w*\s+ли|имеет\s+ли\s+смысл)\b",
             raw,
             re.I,
         )
-        and not contextual_repair
-    ):
-        return False
-    if "?" in raw and not contextual_repair:
+    )
+    if journal_question_like and not contextual_repair:
         return False
     personal_report_shape = bool(
         re.search(r"^\s*(?:(?:ну|а|кстати|короче)[,\s]+)*(?:я|сегодня|вчера|позавчера)\b", raw, re.I)
@@ -3135,7 +3195,14 @@ def is_question_like(txt):
     t = (txt or "").strip().lower()
     if len(t) < 5 or is_gibberish(t): return False
     if re.sub(r"[ .,:/\\-]", "", t).isdigit(): return False
-    return ("?" in t) or (re.search(r"(^|\b)(что|как|почему|зачем|когда|какой|какая|какие|каков|сколько|можно ли|нужно ли|стоит ли|значит|расскаж|объясн|правда ли|а если|это\s)", t) is not None)
+    return ("?" in t) or (re.search(
+        r"(^|\b)(?:что|как|почему|зачем|когда|какой|какая|какие|каков|"
+        r"сколько|можно\s+ли|нужно\s+ли|стоит\s+ли|значит|расскаж|"
+        r"объясн|правда\s+ли|а\s+если|это\s|полезн\w*\s+ли|"
+        r"вредн\w*\s+ли|помога\w*\s+ли|эффективн\w*\s+ли|"
+        r"нормальн\w*\s+ли|имеет\s+ли\s+смысл)",
+        t,
+    ) is not None)
 def is_gibberish(t):
     s = t.strip(); low = s.lower()
     letters = re.sub(r"[^а-яёa-z]", "", low)
@@ -8550,7 +8617,8 @@ def _finish_food_asset_job(job, result=None, error=None):
                        retry_after=NULL,last_error_class=NULL,updated_at=?
                    WHERE canonical_id=? AND style_version=?""",
                 (
-                    result["image_url"], result["content_hash"], "food-icon-v1",
+                    result["image_url"], result["content_hash"],
+                    result.get("prompt_version") or FA.GENERATED_PROMPT_VERSION,
                     now.isoformat(), job["canonical_id"], FA.STYLE_VERSION,
                 ),
             )
@@ -8642,6 +8710,7 @@ def _recover_food_asset_jobs():
 
 async def _food_asset_worker(worker_no):
     loop = asyncio.get_running_loop()
+    last_overlay_refresh = 0.0
     while True:
         try:
             food_id, label = await asyncio.wait_for(
@@ -8675,12 +8744,25 @@ async def _food_asset_worker(worker_no):
             await asyncio.sleep(1)
             continue
         if not job:
+            now = time.monotonic()
+            if now - last_overlay_refresh >= 30:
+                try:
+                    await asyncio.to_thread(_load_generated_food_assets)
+                    last_overlay_refresh = now
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning(
+                        "food asset overlay refresh failed: worker=%s error=%s",
+                        worker_no, type(exc).__name__,
+                    )
             continue
         try:
             result = await loop.run_in_executor(
                 _FOOD_ASSET_EXECUTOR,
                 FA.generate_and_store,
                 job["canonical_label"],
+                job["attempts"],
             )
             await asyncio.to_thread(_finish_food_asset_job, job, result, None)
             FA.RESOLVER.publish_generated(job["canonical_id"], result["image_url"])

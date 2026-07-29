@@ -106,6 +106,34 @@ class ChatJournalActionTests(unittest.TestCase):
         self.assertEqual(bot.match_intent("Можешь записать, я съела творог"), "logmeal")
         self.assertEqual(bot.extract_food_log_text("Можешь записать, я съела творог"), "творог")
 
+    def test_training_knowledge_questions_stay_in_freeform_chat(self):
+        questions = [
+            "Полезно ли кардио",
+            "Полезны ли кардиотренировки?",
+            "Почему после тренировки болят мышцы?",
+            "Сколько кардио нужно для сердца?",
+            "Что лучше: кардио или силовая?",
+            "Как тренировки влияют на сон?",
+        ]
+        for text in questions:
+            with self.subTest(text=text):
+                self.assertTrue(bot.is_question_like(text))
+                self.assertIsNone(bot.match_intent(text))
+                self.assertFalse(
+                    bot._semantic_journal_candidate(text, enable_v2=True)
+                )
+
+        section_requests = [
+            "Какая тренировка сегодня?",
+            "Какую мне тренировку выбрать?",
+            "Собери тренировку",
+            "Что по нагрузке сегодня?",
+            "Можно ли мне сегодня бегать?",
+        ]
+        for text in section_requests:
+            with self.subTest(text=text):
+                self.assertEqual(bot.match_intent(text), "training")
+
     def test_semantic_router_logs_completed_workout_without_magic_words(self):
         text = "Я сегодня тренировку сделала на ноги"
         classified = {

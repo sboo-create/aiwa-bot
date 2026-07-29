@@ -60,6 +60,22 @@ class FoodAssetResolverTests(unittest.TestCase):
         self.assertEqual(unknown["image_source"], "category")
         self.assertEqual(unknown["asset_state"], "missing")
 
+    def test_validated_exact_label_overrides_only_a_broad_catalog_fallback(self):
+        resolver = assets.FoodAssetResolver(assets.RESOLVER.manifest)
+        label = "Треска с тушёной капустой"
+        fallback = resolver.resolve(label)
+        self.assertEqual(fallback["image_source"], "catalog_family")
+
+        generated_url = "/generated-food/validated.webp"
+        resolver.publish_generated(assets.canonical_id(label), generated_url)
+        generated = resolver.resolve(label)
+        exact_catalog = resolver.resolve("Треска на пару")
+
+        self.assertEqual(generated["image_source"], "generated")
+        self.assertEqual(generated["image_url"], generated_url)
+        self.assertEqual(exact_catalog["image_source"], "catalog_exact")
+        self.assertNotEqual(exact_catalog["image_url"], generated_url)
+
     def test_family_fallback_uses_label_head_not_secondary_ingredient(self):
         cases = {
             "Салат с говядиной и креветками": "Овощной салат",
@@ -160,6 +176,97 @@ class FoodAssetResolverTests(unittest.TestCase):
         self.assertIn("Гречка с грибами", request["json"]["prompt"])
         self.assertNotIn("chat_id", json.dumps(request["json"]))
         self.assertNotIn("profile", json.dumps(request["json"]))
+
+    def test_provider_uses_literal_translation_and_bounded_model_options(self):
+        image = Image.new("RGB", (32, 32), "orange")
+        raw = io.BytesIO()
+        image.save(raw, "PNG")
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "data": [{"b64_json": base64.b64encode(raw.getvalue()).decode()}]
+        }
+        configured = {
+            "AIWA_FOOD_IMAGE_API_URL": "https://provider.example/v1/images",
+            "AIWA_FOOD_IMAGE_API_KEY": "secret",
+            "AIWA_FOOD_IMAGE_MODEL": "image-model",
+            "AIWA_FOOD_IMAGE_SIZE": "1024x1024",
+            "AIWA_FOOD_IMAGE_QUALITY": "low",
+        }
+        with (
+            mock.patch.dict(os.environ, configured, clear=False),
+            mock.patch.object(assets.requests, "post", return_value=response) as post,
+        ):
+            assets._image_request(
+                "Караси жареные",
+                "whole fried crucian carp fish with visible fins",
+                attempt=2,
+            )
+        request = post.call_args.kwargs["json"]
+        self.assertIn("whole fried crucian carp fish", request["prompt"])
+        self.assertIn("Караси жареные", request["prompt"])
+        self.assertIn("This is a retry", request["prompt"])
+        self.assertEqual(request["size"], "1024x1024")
+        self.assertEqual(request["quality"], "low")
+
+    def test_semantic_validator_rejects_wrong_main_ingredient(self):
+        configured = {
+            "AIWA_FOOD_IMAGE_VALIDATION": "1",
+            "AIWA_FOOD_IMAGE_VALIDATION_THRESHOLD": "0.78",
+        }
+        with (
+            mock.patch.dict(os.environ, configured, clear=False),
+            mock.patch.object(
+                assets,
+                "_validation_chat",
+                return_value={
+                    "matches": False,
+                    "confidence": 0.97,
+                    "reason": "carrots instead of fish",
+                },
+            ),
+        ):
+            with self.assertRaisesRegex(
+                assets.FoodImageValidationError,
+                "semantic_mismatch",
+            ):
+                assets._validate_generated_image(
+                    "Караси жареные",
+                    "whole fried crucian carp fish",
+                    b"webp",
+                )
+
+    def test_rejected_image_is_not_published_to_immutable_store(self):
+        image = Image.new("RGB", (32, 32), "orange")
+        raw = io.BytesIO()
+        image.save(raw, "PNG")
+        with tempfile.TemporaryDirectory() as directory:
+            configured = {
+                "AIWA_FOOD_IMAGE_VALIDATION": "1",
+                "AIWA_FOOD_ASSET_DIR": directory,
+                "AIWA_FOOD_ASSET_PUBLIC_BASE": "/generated-food",
+            }
+            with (
+                mock.patch.dict(os.environ, configured, clear=False),
+                mock.patch.object(
+                    assets,
+                    "_literal_food_description",
+                    return_value="whole fried crucian carp fish",
+                ),
+                mock.patch.object(
+                    assets, "_image_request", return_value=raw.getvalue()
+                ),
+                mock.patch.object(
+                    assets,
+                    "_validate_generated_image",
+                    side_effect=assets.FoodImageValidationError(
+                        "food_image_semantic_mismatch"
+                    ),
+                ),
+            ):
+                with self.assertRaises(assets.FoodImageValidationError):
+                    assets.generate_and_store("Караси жареные")
+            self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_external_public_base_requires_exact_host_allowlist(self):
         configured = {
@@ -296,6 +403,48 @@ class FoodAssetQueueTests(unittest.TestCase):
         ).fetchone()[0]
         conn.close()
         self.assertEqual(status, "queued")
+
+    def test_validation_quarantines_legacy_generated_assets_for_regeneration(self):
+        record = assets.decorate({"title": "неизвестная рыбная тарелка"})
+        self.assertTrue(bot._enqueue_food_asset_job(
+            record["canonical_id"], record["canonical_label"]
+        ))
+        conn = sqlite3.connect(bot.DB)
+        conn.execute(
+            """UPDATE food_assets SET status='ready',source='generated',
+                   image_url='/generated-food/legacy.webp',
+                   content_hash='legacy',prompt_version='food-icon-v1'
+               WHERE canonical_id=? AND style_version=?""",
+            (record["canonical_id"], assets.STYLE_VERSION),
+        )
+        conn.execute(
+            """UPDATE food_asset_jobs SET status='completed'
+               WHERE canonical_id=? AND style_version=?""",
+            (record["canonical_id"], assets.STYLE_VERSION),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.dict(
+            os.environ, {"AIWA_FOOD_IMAGE_VALIDATION": "1"}, clear=False
+        ):
+            bot._DB_SCHEMA_PATH = None
+            bot.ensure_db_schema()
+
+        conn = sqlite3.connect(bot.DB)
+        asset = conn.execute(
+            """SELECT status,image_url,last_error_class FROM food_assets
+               WHERE canonical_id=? AND style_version=?""",
+            (record["canonical_id"], assets.STYLE_VERSION),
+        ).fetchone()
+        job = conn.execute(
+            """SELECT status,last_error_class FROM food_asset_jobs
+               WHERE canonical_id=? AND style_version=?""",
+            (record["canonical_id"], assets.STYLE_VERSION),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(asset, ("rejected", None, "legacy_unvalidated"))
+        self.assertEqual(job, ("rejected", "legacy_unvalidated"))
 
 
 class FoodSectionLoadContracts(unittest.TestCase):

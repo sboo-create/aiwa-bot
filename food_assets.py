@@ -9,6 +9,7 @@ import base64
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import threading
@@ -20,6 +21,7 @@ import requests
 
 
 STYLE_VERSION = "food-v1"
+GENERATED_PROMPT_VERSION = "food-icon-v2-validated"
 MEAL_PLACEHOLDER = "/assets/food/meal-placeholder.svg"
 DRINK_PLACEHOLDER = "/assets/food/drink-cup.svg?v=1"
 _MANIFEST_PATH = Path(__file__).resolve().parent / "webapp2/assets/food/manifest.json"
@@ -287,7 +289,10 @@ class FoodAssetResolver:
     ) -> dict[str, object]:
         title = str(label or "").strip()
         match = self._manifest_match(title)
-        if match:
+        # Preserve reviewed exact catalog art. For a broader family/canonical
+        # fallback, prefer a semantically validated image generated for this
+        # exact label when one is available.
+        if match and match[2] in {"catalog_exact", "catalog_alias"}:
             canonical_label, url, source = match
             return {
                 "canonical_id": canonical_id(canonical_label),
@@ -306,6 +311,16 @@ class FoodAssetResolver:
                 "canonical_label": title,
                 "image_url": generated,
                 "image_source": "generated",
+                "asset_state": "ready",
+                "style_version": STYLE_VERSION,
+            }
+        if match:
+            canonical_label, url, source = match
+            return {
+                "canonical_id": canonical_id(canonical_label),
+                "canonical_label": canonical_label,
+                "image_url": url,
+                "image_source": source,
                 "asset_state": "ready",
                 "style_version": STYLE_VERSION,
             }
@@ -363,6 +378,12 @@ def generation_enabled() -> bool:
     return os.environ.get("AIWA_FOOD_ASSET_GENERATION", "0").strip().casefold() in {
         "1", "true", "yes", "on",
     }
+
+
+def validation_enabled() -> bool:
+    return os.environ.get(
+        "AIWA_FOOD_IMAGE_VALIDATION", "0"
+    ).strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def generated_asset_dir() -> Path:
@@ -425,7 +446,154 @@ def reviewed_generation_label(value: object) -> str | None:
     return label
 
 
-def _image_request(label: str) -> bytes:
+class FoodImageValidationError(ValueError):
+    """A technically valid image does not visibly represent the requested food."""
+
+
+def _json_object(value: object) -> dict:
+    text = str(value or "").strip()
+    if len(text) > 8_000:
+        raise ValueError("food_image_validator_response_size")
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("food_image_validator_json")
+    data = json.loads(text[start:end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("food_image_validator_json")
+    return data
+
+
+def _validation_chat(prompt: str, image: bytes | None = None) -> dict:
+    endpoint = os.environ.get(
+        "AIWA_FOOD_IMAGE_VALIDATION_API_URL", ""
+    ).strip()
+    api_key = os.environ.get(
+        "AIWA_FOOD_IMAGE_VALIDATION_API_KEY", ""
+    ).strip() or os.environ.get("AIWA_FOOD_IMAGE_API_KEY", "").strip()
+    model = os.environ.get(
+        "AIWA_FOOD_IMAGE_VALIDATION_MODEL", ""
+    ).strip()
+    if not (endpoint and api_key and model):
+        raise RuntimeError("food_image_validator_unconfigured")
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+    ):
+        raise ValueError("food_image_validator_url")
+    content: object = prompt
+    if image is not None:
+        encoded = base64.b64encode(image).decode("ascii")
+        content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/webp;base64,{encoded}",
+                },
+            },
+        ]
+    response = requests.post(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0,
+            "max_tokens": 220,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=(5, max(15, min(90, int(os.environ.get(
+            "AIWA_FOOD_IMAGE_VALIDATION_TIMEOUT_SECONDS", "45"
+        ))))),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    message = ((payload.get("choices") or [{}])[0] or {}).get("message") or {}
+    answer = message.get("content")
+    if isinstance(answer, list):
+        answer = " ".join(
+            str(part.get("text") or "")
+            for part in answer
+            if isinstance(part, dict)
+        )
+    return _json_object(answer)
+
+
+def _literal_food_description(label: str) -> str:
+    if not validation_enabled():
+        return label
+    data = _validation_chat(
+        "Translate the following short Russian food diary label into a literal, "
+        "concise English visual description for an image model. Preserve the "
+        "exact main ingredient or animal species, cooking method and dish form. "
+        "Do not add ingredients and do not infer health context. Return only "
+        'JSON: {"description":"..."}. Label: '
+        + json.dumps(label, ensure_ascii=False)
+    )
+    description = " ".join(str(data.get("description") or "").split())
+    if (
+        not 3 <= len(description) <= 180
+        or re.search(
+            r"\b(?:http|prompt|instruction|token|password)\b",
+            description,
+            re.I,
+        )
+    ):
+        raise ValueError("food_image_translation")
+    return description
+
+
+def _validate_generated_image(
+    label: str, description: str, image: bytes,
+) -> float:
+    if not validation_enabled():
+        return 1.0
+    data = _validation_chat(
+        "Act as a strict food-image quality gate. Compare the image with the "
+        "target dish. The main named ingredient/category and preparation form "
+        "must be visibly correct; garnish may differ. Reject substitutions "
+        "caused by similar-sounding words (for example fish versus carrots), "
+        "non-food objects, visible text/logos or people. Return only JSON: "
+        '{"matches":true,"confidence":0.0,"reason":"short reason"}. '
+        "Original Russian label: " + json.dumps(label, ensure_ascii=False)
+        + ". Literal English target: " + json.dumps(description),
+        image=image,
+    )
+    matches = data.get("matches") is True
+    confidence = data.get("confidence")
+    if (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not math.isfinite(float(confidence))
+    ):
+        raise FoodImageValidationError("food_image_validation_score")
+    score = max(0.0, min(1.0, float(confidence)))
+    threshold = max(0.5, min(0.95, float(os.environ.get(
+        "AIWA_FOOD_IMAGE_VALIDATION_THRESHOLD", "0.78"
+    ))))
+    if not matches or score < threshold:
+        reason = re.sub(
+            r"[^a-zA-Zа-яА-ЯёЁ0-9 _-]",
+            "",
+            str(data.get("reason") or "semantic_mismatch"),
+        )[:48]
+        raise FoodImageValidationError(
+            f"food_image_semantic_mismatch:{score:.2f}:{reason}"
+        )
+    return score
+
+
+def _image_request(
+    label: str, description: str | None = None, attempt: int = 1,
+) -> bytes:
     endpoint = os.environ.get("AIWA_FOOD_IMAGE_API_URL", "").strip()
     api_key = os.environ.get("AIWA_FOOD_IMAGE_API_KEY", "").strip()
     model = os.environ.get("AIWA_FOOD_IMAGE_MODEL", "").strip()
@@ -440,24 +608,42 @@ def _image_request(label: str) -> bytes:
         or parsed.fragment
     ):
         raise ValueError("food_image_provider_url")
-    prompt = (
-        "Single appetizing food icon for a wellness diary: "
-        f"{label}. Centered plate, simple warm 3D illustration, neutral light "
-        "background, no people, no text, no logo, square composition."
+    literal = description or label
+    retry_note = (
+        " This is a retry: depict the literal main ingredient unmistakably "
+        "and avoid metaphor or word association."
+        if int(attempt or 1) > 1 else ""
     )
+    prompt = (
+        "Single appetizing food icon for a wellness diary. Show exactly this "
+        f"dish: {literal}. Original Russian label: {label}. The main ingredient "
+        "and cooking form must be visually recognizable. Centered plate, simple "
+        "warm 3D illustration, neutral light background, no people, no text, "
+        "no logo, square composition. Do not replace an ingredient with a "
+        "similar-sounding object." + retry_note
+    )
+    size = os.environ.get("AIWA_FOOD_IMAGE_SIZE", "512x512").strip()
+    if not re.fullmatch(r"(?:512|1024)x(?:512|1024)", size):
+        raise ValueError("food_image_provider_size")
+    request_json = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "response_format": "b64_json",
+        "n": 1,
+    }
+    quality = os.environ.get("AIWA_FOOD_IMAGE_QUALITY", "").strip()
+    if quality:
+        if quality not in {"low", "medium", "high", "auto"}:
+            raise ValueError("food_image_provider_quality")
+        request_json["quality"] = quality
     response = requests.post(
         endpoint,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": model,
-            "prompt": prompt,
-            "size": "512x512",
-            "response_format": "b64_json",
-            "n": 1,
-        },
+        json=request_json,
         timeout=(5, max(15, min(180, int(os.environ.get(
             "AIWA_FOOD_IMAGE_TIMEOUT_SECONDS", "75"
         ))))),
@@ -500,19 +686,23 @@ def _safe_webp(raw: bytes) -> bytes:
     return result
 
 
-def generate_and_store(label: object) -> dict[str, str]:
+def generate_and_store(label: object, attempt: int = 1) -> dict[str, object]:
     """Generate one immutable asset. Intended only for a bounded worker."""
     reviewed = reviewed_generation_label(label)
     if not reviewed:
         raise ValueError("food_image_label_rejected")
-    webp = _safe_webp(_image_request(reviewed))
+    description = _literal_food_description(reviewed)
+    webp = _safe_webp(_image_request(reviewed, description, attempt))
+    validation_score = _validate_generated_image(reviewed, description, webp)
     content_hash = hashlib.sha256(webp).hexdigest()
     directory = generated_asset_dir()
     directory.mkdir(parents=True, exist_ok=True)
     filename = f"{content_hash}.webp"
     destination = directory / filename
     if not destination.exists():
-        temporary = directory / f".{filename}.{os.getpid()}.tmp"
+        temporary = directory / (
+            f".{filename}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
         with temporary.open("wb") as target:
             target.write(webp)
             target.flush()
@@ -522,4 +712,7 @@ def generate_and_store(label: object) -> dict[str, str]:
         "image_url": f"{generated_public_base()}/{filename}",
         "content_hash": content_hash,
         "canonical_label": reviewed,
+        "literal_description": description,
+        "prompt_version": GENERATED_PROMPT_VERSION,
+        "validation_score": validation_score,
     }
