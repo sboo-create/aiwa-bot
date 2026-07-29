@@ -389,6 +389,13 @@ class PostReleaseSystemicTests(unittest.TestCase):
         )
         self.assertEqual(
             bot._detected_release_sha(
+                {},
+                f"/tmp/extract/{release}/aiwa_bot.py",
+            ),
+            "",
+        )
+        self.assertEqual(
+            bot._detected_release_sha(
                 {"AIWA_RELEASE_SHA": "main; rm -rf /"},
                 "/app/aiwa_bot.py",
             ),

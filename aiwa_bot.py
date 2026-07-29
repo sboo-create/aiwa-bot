@@ -129,12 +129,19 @@ print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при ста
 
 def _detected_release_sha(environ=None, source_path=None):
     env = environ if environ is not None else os.environ
+    real_source = os.path.realpath(source_path or __file__)
+    source_dir = os.path.dirname(real_source)
+    release_parent = os.path.dirname(source_dir)
+    path_release = None
+    if (
+        os.path.basename(real_source) == "aiwa_bot.py"
+        and os.path.basename(release_parent) == "releases"
+    ):
+        path_release = os.path.basename(source_dir)
     candidates = (
         env.get("AIWA_RELEASE_SHA"),
         env.get("RAILWAY_GIT_COMMIT_SHA"),
-        os.path.basename(
-            os.path.dirname(os.path.realpath(source_path or __file__))
-        ),
+        path_release,
     )
     for candidate in candidates:
         value = str(candidate or "").strip().lower()
@@ -12454,6 +12461,8 @@ async def _health(request):
         {
             "status": "ok" if APP_READY else "starting",
             "version": AIWA_VERSION,
+            # The repository is public; this non-secret marker lets deploy
+            # automation prove which immutable revision actually took traffic.
             "release_sha": AIWA_RELEASE_SHA or None,
             "journal_router": "v2" if journal_v2_enabled() else "v1",
             "event_queue": _EVENT_WRITE_Q.qsize(),
