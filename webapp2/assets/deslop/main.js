@@ -1,1 +1,1 @@
-import "./deslop-main-aiwa-v177.js";
+import "./deslop-main-aiwa-v177.js?v=r23";

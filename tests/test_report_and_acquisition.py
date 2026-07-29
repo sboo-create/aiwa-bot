@@ -66,6 +66,27 @@ class ReportAndAcquisitionTests(unittest.TestCase):
             call.args == (702, "signup") for call in event.call_args_list
         ))
 
+    def test_existing_incomplete_profile_records_acquisition_exactly_once(self):
+        bot._activate_user(706)
+        bot.upsert(706, state=None, tg_first_name="Новый")
+        update = self._start_update(706)
+        context = types.SimpleNamespace(args=[])
+        with (
+            mock.patch.object(bot, "ev") as first_event,
+            mock.patch.object(bot, "begin_onboard", new=mock.AsyncMock()),
+        ):
+            asyncio.run(bot.start(update, context))
+        first_event.assert_any_call(706, "signup")
+
+        with (
+            mock.patch.object(bot, "ev") as second_event,
+            mock.patch.object(bot, "begin_onboard", new=mock.AsyncMock()),
+        ):
+            asyncio.run(bot.start(update, context))
+        self.assertFalse(any(
+            call.args == (706, "signup") for call in second_event.call_args_list
+        ))
+
     def test_send_report_returns_confirmed_delivery_status(self):
         bot._activate_user(703)
         bot.upsert(703, mode="male")
@@ -135,6 +156,53 @@ class ReportAndAcquisitionTests(unittest.TestCase):
             bot.BOT_APP, bot.RPT = old_app, old_report
 
         self.assertEqual(response.status, 400)
+
+    def test_report_api_accepts_every_period_offered_by_all_clients(self):
+        bot._activate_user(707)
+        bot.upsert(707, mode="male")
+        old_app, old_report = bot.BOT_APP, bot.RPT
+        bot.BOT_APP = types.SimpleNamespace(bot=object())
+        bot.RPT = object()
+        try:
+            for period in bot.REPORT_PERIODS:
+                with (
+                    self.subTest(period=period),
+                    mock.patch.object(bot, "_verify_init", return_value=707),
+                    mock.patch.object(
+                        bot,
+                        "send_report",
+                        new=mock.AsyncMock(return_value={
+                            "ok": True,
+                            "delivered": True,
+                        }),
+                    ) as send,
+                    mock.patch.object(bot, "ev"),
+                ):
+                    response = asyncio.run(bot._api_report(
+                        _JsonRequest({"initData": "signed", "period": period})
+                    ))
+                    self.assertEqual(response.status, 200)
+                    send.assert_awaited_once()
+        finally:
+            bot.BOT_APP, bot.RPT = old_app, old_report
+
+        root = Path(__file__).resolve().parents[1]
+        bundle = (
+            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
+        ).read_text(encoding="utf-8")
+        legacy_sources = [
+            (root / "aiwa_webapp.html").read_text(encoding="utf-8"),
+            (root / "webapp/index.html").read_text(encoding="utf-8"),
+            (root / "webapp2/index.html").read_text(encoding="utf-8"),
+        ]
+        for period in bot.REPORT_PERIODS:
+            self.assertTrue(
+                f'value: "{period}"' in bundle
+                or f'period: "{period}"' in bundle
+            )
+            self.assertTrue(all(
+                f"doReport('{period}')" in source for source in legacy_sources
+            ))
 
     def test_current_mini_app_confirms_delivery_and_returns_to_chat(self):
         bundle = (

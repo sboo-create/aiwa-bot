@@ -309,7 +309,8 @@ def _migrate_db_on_connection(c):
     c.execute("""CREATE TABLE IF NOT EXISTS users(chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
         send_time TEXT DEFAULT '08:00', daily_summary_enabled INTEGER DEFAULT 1,
         modules TEXT DEFAULT 'phase,general,food,training',
-        state TEXT, pending_date TEXT, created TEXT)""")
+        state TEXT, pending_date TEXT, created TEXT,
+        onboarding_started INTEGER DEFAULT 0)""")
     c.execute("CREATE TABLE IF NOT EXISTS sugg(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, q TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS cycles(chat_id INTEGER, start_date TEXT, PRIMARY KEY(chat_id,start_date))")
     c.execute("CREATE TABLE IF NOT EXISTS intimacy(chat_id INTEGER, d TEXT, PRIMARY KEY(chat_id,d))")
@@ -492,7 +493,8 @@ def _migrate_db_on_connection(c):
                 "last_phase_notified TEXT", "last_reactivation TEXT",
                 "proactive_enabled INTEGER DEFAULT 1",
                 "daily_summary_enabled INTEGER DEFAULT 1", "tg_first_name TEXT",
-                "push_suppressed_at TEXT", "push_suppression_reason TEXT"):
+                "push_suppressed_at TEXT", "push_suppression_reason TEXT",
+                "onboarding_started INTEGER DEFAULT 0"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     c.commit()
@@ -589,6 +591,47 @@ def upsert(cid, *, user_generation=None, **kw):
     # Dynamic identifier is safe because every key was checked against _USER_UPDATE_COLUMNS.
     for k, v in kw.items(): c.execute(f"UPDATE users SET {k}=? WHERE chat_id=?", (v, cid))  # nosec B608
     c.commit(); c.close(); return True
+
+def record_onboarding_started(cid):
+    """Emit one acquisition start per active privacy lifecycle.
+
+    Existing fully onboarded profiles are marked without being recounted.
+    `/stop` removes both the user row and analytics lifecycle, so a later
+    explicit `/start` correctly begins a new, separately consented lifecycle.
+    """
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        if not _user_write_allowed(cid, conn=c):
+            c.rollback()
+            return False
+        user = c.execute(
+            """SELECT last_period,cycle_len,mode,
+                      COALESCE(onboarding_started,0)
+               FROM users WHERE chat_id=?""",
+            (cid,),
+        ).fetchone()
+        if not user:
+            c.rollback()
+            return False
+        already_onboarded = (
+            user[2] in ("irregular", "none", "meno", "preg", "male")
+            or bool(user[0] and user[1])
+        )
+        if user[3]:
+            c.commit()
+            return False
+        c.execute(
+            "UPDATE users SET onboarding_started=1 WHERE chat_id=?",
+            (cid,),
+        )
+        c.commit()
+    finally:
+        c.close()
+    if already_onboarded:
+        return False
+    ev(cid, "signup")
+    return True
 
 def _clean_telegram_first_name(value):
     """Telegram profile label used only for addressing, never inferred from chat."""
@@ -3290,6 +3333,7 @@ EDIT_KB = InlineKeyboardMarkup([
 ])
 PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
 SKIP_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Пропустить", callback_data="prof_skip")]])
+REPORT_PERIODS = frozenset({"3", "6", "all"})
 HIST_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("3 месяца", callback_data="rep:3"), InlineKeyboardButton("6 месяцев", callback_data="rep:6")],
     [InlineKeyboardButton("Весь период", callback_data="rep:all")],
@@ -3714,8 +3758,8 @@ async def need_onboard(t):
     cid = getattr(getattr(t, "chat", None), "id", None)
     if cid and is_partner(cid) and not is_onboarded(row(cid)):
         return await t.reply_text(PARTNER_INFO)
-    if cid and not row(cid): ev(cid, "signup")
     if cid: upsert(cid, state=None)
+    if cid: record_onboarding_started(cid)
     await t.reply_text("Чтобы Айва давала персональные рекомендации, выбери, что сейчас ближе: ведёшь цикл или нет регулярного цикла.", reply_markup=ONB_KB)
 _last_start = {}
 async def begin_onboard(cid, msg, force=False):
@@ -3723,8 +3767,8 @@ async def begin_onboard(cid, msg, force=False):
     # дебаунс только для повторного /start; явный тап по кнопке (force) должен отвечать всегда
     if not force and now - _last_start.get(cid, 0) < 4: return
     _last_start[cid] = now
-    if not row(cid): ev(cid, "signup")
     upsert(cid, state=None, pending_date=None)
+    record_onboarding_started(cid)
     await msg.reply_text(START_TEXT, reply_markup=ONB_KB)
 
 _CARD_CACHE = {}
@@ -6335,13 +6379,8 @@ async def start(update, context):
     # /start is the only operation that begins a fresh lifecycle after /stop.
     # Incrementing the generation keeps older in-flight tasks permanently stale.
     _activate_user(cid)
-    is_new_user = row(cid) is None
     _sync_telegram_identity(update, allow_create=True)
-    # Identity sync creates the user row before begin_onboard() runs. Record the
-    # acquisition event from the pre-sync state, otherwise every genuinely new
-    # /start disappears from the activation funnel.
-    if is_new_user:
-        ev(cid, "signup")
+    record_onboarding_started(cid)
     if context.args and context.args[0].startswith("p_"):
         return await partner_join(context, cid, update.message, context.args[0][2:])
     if context.args and context.args[0] and not context.args[0].startswith("p_"):
@@ -11337,7 +11376,7 @@ async def _api_report(request):
     if not (BOT_APP and RPT):
         return _cors(web.json_response({"error": "unavail", "text": "Выписка временно недоступна."}, status=503))
     period = str(body.get("period") or "all")
-    if period not in {"3", "6", "all"}:
+    if period not in REPORT_PERIODS:
         return _cors(web.json_response({"error": "period", "text": "Выбери период выписки."}, status=400))
     ev(cid, "manual", meta="web_report_requested")
     try:
