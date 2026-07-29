@@ -1230,8 +1230,9 @@ async function renderFood(){
   var hasCycle=!!(D&&D.cycle&&(!D.mode||D.mode==="cycle"));
   var ph=hasCycle?((D&&D.phase)?({menstrual:"men",follicular:"fol",ovulation:"ovu",luteal:"lut"}[D.phase]||"fol"):"fol"):null;
   if(hasCycle&&D&&D.day&&D.cycle_len)ph=phaseForDay(D.day,D.cycle_len);
+  var isMale=!!(D&&D.mode==="male");
   var mk=(r.menu&&r.menu.macros)||{},chips=hasCycle?foodFocus(ph):["белок","железо","клетчатка","вода"],html="<div class='h'>Питание</div>";
-  var phaseTag=hasCycle?("<span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span>"):"<span class='tag delaychip'>без фазы цикла</span>";
+  var phaseTag=hasCycle?("<span class='tag' style='color:"+COL[ph]+";background:"+WASH[ph]+"'>"+RU[ph]+"</span>"):(isMale?"<span class='tag delaychip'>по самочувствию</span>":"<span class='tag delaychip'>без прогноза</span>");
   html+="<div class='card foodhero'><div class='pl'>"+phaseTag+(r.kcal?"<span class='tag' style='color:var(--quinceDeep);background:#fff'>~"+esc(r.kcal)+" ккал</span>":"")+"</div><div class='sec' style='margin-top:10px'>Меню на сегодня</div><div class='ayva-txt'>"+esc(r.text||"Выбираем простую еду с белком в каждом приёме и нормальной сытостью.")+"</div><div class='foodchips'>";
   chips.forEach(function(c){html+="<span class='nutrichip'>"+c+"</span>";});
   html+="</div></div>";
@@ -1242,7 +1243,7 @@ async function renderFood(){
     html+=suggChips(r.suggestions);
   }
   html+="<div id='diarybox'></div>";
-  html+="<div class='foot'>Меню рассчитывается каждый день с учётом фазы цикла, твоих пожеланий, пищевых ограничений и медицинских рекомендаций.</div>";
+  html+="<div class='foot'>"+(isMale?"Меню рассчитывается каждый день с учётом твоих целей, самочувствия, пищевых ограничений и медицинских рекомендаций.":"Меню рассчитывается каждый день с учётом выбранного режима, самочувствия, пищевых ограничений и медицинских рекомендаций.")+"</div>";
   el.innerHTML=html;loadedFood=true;
   loadDiary();
 }
@@ -1321,7 +1322,7 @@ async function sendFoodText(){var i=document.getElementById('foodtextin');var t=
 async function delMeal(id){var r=await api('/api/diary_del',{id:id});if(_applyDiary(r))haptic('selection');}
 async function diaryReco(){var box=document.getElementById('diarreco');if(box)box.innerHTML=thinkHTML('Айва смотрит дневник');var r=await api('/api/diary_reco',{});if(box)box.textContent=(r&&r.text)||'Не получилось, попробуй позже.';}
 (function(){var f=document.getElementById('foodfile');if(f)f.addEventListener('change',onFoodFile);})();
-async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;if(window.AiwaDeslop){el.className='paper-screen';window.AiwaDeslop.renderActivity(el,{mode:D&&D.mode||"cycle"});loadedTrain=true;return;}el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Если цикл сейчас не отслеживается, безопаснее опираться на сон, энергию, боль, кровотечение и общее состояние.",hormones:["Без данных о цикле Айва не делает выводы о фазе.","Главные ориентиры: боль, кровотечение, слабость, сон и восстановление.","При беременности, сильной боли, головокружении или обильном кровотечении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине, тазу и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли, рывков и глубокого пресса"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости, боли или обильного кровотечения",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость, головокружение или обильное кровотечение",recovery:"вода, белок после нагрузки, сон и спокойная заминка",suggestions:["Мало сил сегодня?","Что после нагрузки?","Можно при боли?"]};}
+async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;if(window.AiwaDeslop){el.className='paper-screen';window.AiwaDeslop.renderActivity(el,{mode:D&&D.mode||"cycle"});loadedTrain=true;return;}var isMale=!!(D&&D.mode==="male");el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Безопаснее опираться на сон, энергию, боль и общее состояние.",hormones:["Главные ориентиры: энергия, боль, сон и восстановление.","Повышай интенсивность постепенно и оставляй время на восстановление.","При сильной боли, слабости или головокружении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли и рывков"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости или боли",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость или головокружение",recovery:"вода, белок после нагрузки, сон и спокойная заминка",suggestions:["Мало сил сегодня?","Что после нагрузки?","Можно при боли?"]};}
   var html="<div class='h'>Нагрузка</div>";
   html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trainBlossom'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+esc(p.level)+"</div><div class='pmeta'>"+esc(p.duration)+(p.day?(" · день "+esc(p.day)+" из "+esc(p.cycle_len)):"")+"</div><div class='ayva-txt' style='margin-top:9px'>"+esc(p.summary||"")+"</div>"+(p.why?("<div class='ayva-txt' style='margin-top:8px'>"+esc(p.why)+"</div>"):"")+"</div></div></div>";
   html+="<div id='trLog'></div>";
@@ -1329,7 +1330,7 @@ async function renderTrain(){var el=document.getElementById('scr-train');if(load
   (p.options||[]).forEach(function(o,i){html+="<div class='trainrow rich'><div class='trainico'>"+(i+1)+"</div><div><div class='tn'>"+esc(o.name)+"</div><div class='trainmeta'><div><div class='ml'>Чем полезна</div><div class='mv'>"+esc(o.benefit||"")+"</div></div><div><div class='ml'>Как делать</div><div class='mv'>"+esc(o.how||o.detail||"")+"</div></div></div></div></div>";});
   html+="</div>";
   html+=suggChips(p.suggestions);
-  html+="<div class='foot'>Нагрузка подбирается по фазе цикла и самочувствию. При боли, слабости, беременности или обильном кровотечении лучше снизить интенсивность и обсудить активность с врачом.</div>";
+  html+="<div class='foot'>"+(isMale?"Нагрузка подбирается по самочувствию, целям и восстановлению. При боли, слабости или головокружении снизь интенсивность и при необходимости обсуди активность с врачом.":"Нагрузка подбирается по выбранному режиму и самочувствию. При боли или слабости лучше снизить интенсивность и обсудить активность с врачом.")+"</div>";
   el.innerHTML=html;blossom(document.getElementById('trainBlossom'),34);loadedTrain=true;try{renderTrainLog();}catch(e){}}
 var TREX={
  'Силовая':{w:true,groups:{
@@ -1533,6 +1534,7 @@ async function saveProfileApp(){
 }
 function renderStats(){
   var el=document.getElementById('scr-stats');
+  if(D&&D.mode==='male'){el.innerHTML="<div class='h'>Дневник</div><div class='card'><div class='sec' style='margin-top:0'>Самочувствие и восстановление</div>"+symptomDiary()+"</div><div class='card'><div class='sec' style='margin-top:0'>Выписка для врача</div><div class='partnernote'>PDF с отметками о самочувствии, питании и нагрузке придёт в чат бота.</div><button class='copylink' onclick='getReport()'>Получить выписку</button></div><div class='foot'>Дневник строится по твоим отметкам о самочувствии, питании и нагрузке.</div>";return;}
   if(D&&(D.mode==='meno'||D.mode==='preg'||D.mode==='irregular'||D.mode==='none')){el.innerHTML="<div class='h'>Дневник</div><div class='card'><div class='sec' style='margin-top:0'>Дневник симптомов</div>"+symptomDiary()+"</div>"+periodHistory()+"<div class='foot'>Дневник строится по твоим отметкам. Прошлые циклы сохранены и вернутся при переключении на «Цикл». Профиль и партнёр — в кружке профиля сверху.</div>";return;}
   var s=(D&&D.stats)||{},p=(D&&D.profile)||{};
   var html="<div class='h'>Статистика</div>";
@@ -1569,9 +1571,10 @@ function initChat(){
   if(chatInited)return;chatInited=true;var log=(D&&D.chatlog)||[];
   if(log.length){log.forEach(function(m){if(m.role==="user")bubbleMe(m.text);else bubbleAI(m.text);});scrollBottom();}
   else{
-    var b=bubbleAI("Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоей фазы, данных и медицинских рекомендаций.");
+    var male=!!(D&&D.mode==="male");
+    var b=bubbleAI(male?"Привет! Спроси меня о питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.":"Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоей фазы, данных и медицинских рекомендаций.");
     var c=document.createElement("div");c.className="chips";
-    ["Когда овуляция?","Что есть сегодня?","Можно тренироваться?"].forEach(function(s){var x=document.createElement("button");x.className="chip";x.textContent=s;x.onclick=function(){send(s);};c.appendChild(x);});
+    (male?["Что есть сегодня?","Как восстановиться?","Можно тренироваться?"]:["Когда овуляция?","Что есть сегодня?","Можно тренироваться?"]).forEach(function(s){var x=document.createElement("button");x.className="chip";x.textContent=s;x.onclick=function(){send(s);};c.appendChild(x);});
     b.appendChild(c);
   }
 }
@@ -1636,17 +1639,17 @@ function closeHub(){document.getElementById('hubBackdrop').classList.add('hidden
 function hubToggle(k){var el=document.getElementById('hub-'+k);if(!el)return;var was=el.classList.contains('hidden');['mode','prefs','data','time','partner'].forEach(function(x){var e=document.getElementById('hub-'+x);if(e)e.classList.add('hidden');});if(was)el.classList.remove('hidden');haptic("selection");}
 function renderHub(){
   var p=(D&&D.profile)||{},m=(D&&D.mode)||"cycle";
-  var modeOpts=["cycle","irregular","preg","meno","none"].map(function(x){return "<div class='modeopt"+(x===m?" on":"")+"' onclick=\"chooseMode('"+x+"')\">"+modeLabel(x)+(x===m?" ✓":"")+"</div>";}).join("");
+  var modeOpts=["cycle","irregular","preg","meno","none","male"].map(function(x){return "<div class='modeopt"+(x===m?" on":"")+"' onclick=\"chooseMode('"+x+"')\">"+modeLabel(x)+(x===m?" ✓":"")+"</div>";}).join("");
   var h="";
   h+="<div class='hubhead'><div class='hubtitle'>Профиль</div><button class='hubclose' aria-label='Закрыть профиль' onclick='closeHub()'>✕</button></div>";
   h+="<div class='cells'>";
   h+="<div class='cellrow' onclick=\"hubToggle('mode')\"><div class='ci'>🔄</div><div class='ctxt'><div class='ct'>Режим</div><div class='cc'>"+modeLabel(m)+"</div></div><div class='chev'>›</div></div>";
   h+="<div id='hub-mode' class='hubpanel hidden'>"+modeOpts+"<div class='cc' style='margin-top:8px'>Для «Цикла» и «Беременности» нужна отмеченная дата последних месячных.</div></div>";
-  h+="<div class='cellrow' onclick='getReport()'><div class='ci'>📄</div><div class='ctxt'><div class='ct'>Выписка для врача</div><div class='cc'>PDF придёт в чат бота</div></div><div class='chev'>›</div></div>";
+  h+="<div class='cellrow' onclick='getReport()'><div class='ci'>📄</div><div class='ctxt'><div class='ct'>"+(m==="male"?"Выписка по самочувствию":"Выписка для врача")+"</div><div class='cc'>PDF придёт в чат бота</div></div><div class='chev'>›</div></div>";
   h+="<div class='cellrow' onclick=\"hubToggle('prefs')\"><div class='ci'>🍽</div><div class='ctxt'><div class='ct'>Предпочтения по питанию</div><div class='cc'>любимое, что исключить, аллергии</div></div><div class='chev'>›</div></div>";
   h+="<div id='hub-prefs' class='hubpanel hidden'><textarea id='hubPrefs' placeholder='Например: без свинины, люблю рыбу и творог, аллергия на орехи'>"+esc(p.diet_note||"")+"</textarea><div class='trlabel' style='margin:12px 2px 6px'>Желаемые калории <span style='text-transform:none;letter-spacing:0;font-weight:600;color:var(--inkSoft)'>&middot; необязательно</span></div><input id='hubKcal' class='tpin' inputmode='numeric' placeholder='напр. 1700 &middot; пусто = рассчитаю сама' value='"+esc(p.kcal_goal||"")+"'><div class='trpick' style='margin-top:8px'><div class='trpill' onclick='setKcalPreset(0.8)'>Дефицит</div><div class='trpill' onclick='setKcalPreset(1)'>Норма</div><div class='trpill' onclick='setKcalPreset(1.12)'>Профицит</div></div><div class='cc' style='margin-top:6px'>"+((D&&D.kcal_base)?('Норма для тебя ~'+D.kcal_base+' ккал в день'):'Заполни рост, вес и возраст — рассчитаю норму.')+"</div><button class='pbtn' style='margin-top:10px' onclick='saveHubPrefs()'>Сохранить</button></div>";
   h+="<div class='cellrow' onclick=\"hubToggle('data')\"><div class='ci'>📏</div><div class='ctxt'><div class='ct'>Мои данные</div><div class='cc'>рост "+(p.height||"—")+" · вес "+(p.weight||"—")+" · возраст "+(p.age||"—")+"</div></div><div class='chev'>›</div></div>";
-  h+="<div id='hub-data' class='hubpanel hidden'><div class='hubgrid3'><input id='hubH' inputmode='decimal' placeholder='Рост' value='"+esc(p.height||"")+"'><input id='hubW' inputmode='decimal' placeholder='Вес' value='"+esc(p.weight||"")+"'><input id='hubA' inputmode='numeric' placeholder='Возраст' value='"+esc(p.age||"")+"'></div><div class='trlabel' style='margin:12px 2px 6px'>Средняя длина цикла</div><input id='hubCycle' class='tpin' inputmode='numeric' placeholder='напр. 28' value='"+esc(D&&D.cycle_len||"")+"'><button class='pbtn' style='margin-top:10px' onclick='saveHubProfile()'>Сохранить</button></div>";
+  h+="<div id='hub-data' class='hubpanel hidden'><div class='hubgrid3'><input id='hubH' inputmode='decimal' placeholder='Рост' value='"+esc(p.height||"")+"'><input id='hubW' inputmode='decimal' placeholder='Вес' value='"+esc(p.weight||"")+"'><input id='hubA' inputmode='numeric' placeholder='Возраст' value='"+esc(p.age||"")+"'></div>"+(m==="male"?"":"<div class='trlabel' style='margin:12px 2px 6px'>Средняя длина цикла</div><input id='hubCycle' class='tpin' inputmode='numeric' placeholder='напр. 28' value='"+esc(D&&D.cycle_len||"")+"'>")+"<button class='pbtn' style='margin-top:10px' onclick='saveHubProfile()'>Сохранить</button></div>";
   h+="<div class='cellrow' onclick=\"hubToggle('time')\"><div class='ci'>⏰</div><div class='ctxt'><div class='ct'>Время утренней сводки</div><div class='cc'>"+(D.send_time||"08:00")+" · МСК</div></div><div class='chev'>›</div></div>";
   h+="<div id='hub-time' class='hubpanel hidden'><input id='hubTime' placeholder='09:00' value='"+esc(D.send_time||"08:00")+"'><button class='pbtn' style='margin-top:8px' onclick='saveHubTime()'>Сохранить</button></div>";
   h+="<div class='cellrow' onclick='hubPartner()'><div class='ci'>❤️</div><div class='ctxt'><div class='ct'>Партнёр и близкие</div><div class='cc'>"+(D.partner_linked?"подключён":"короткая сводка партнёру")+"</div></div><div class='chev'>›</div></div>";
@@ -1661,7 +1664,7 @@ async function saveHubProfile(){var h=parseFloat(String(document.getElementById(
 function setKcalPreset(m){var b=(D&&D.kcal_base)||0;if(!b){toast('Заполни рост, вес и возраст');return;}var el=document.getElementById('hubKcal');if(el)el.value=Math.round(b*m/10)*10;}
 async function saveHubTime(){var t=(document.getElementById('hubTime').value||"").trim();var r=await api('/api/settime',{time:t});if(r&&r.ok){D.send_time=r.send_time;toast("Сводка в "+r.send_time);renderHub();}else toast((r&&r.text)||"Время в формате 09:00");}
 function getReport(){
-  var h="<div class='hubhead'><div class='hubtitle'>Выписка для врача</div><button class='hubclose' aria-label='Закрыть' onclick='closeHub()'>✕</button></div><div class='hubpanel'>";
+  var h="<div class='hubhead'><div class='hubtitle'>"+(D&&D.mode==="male"?"Выписка по самочувствию":"Выписка для врача")+"</div><button class='hubclose' aria-label='Закрыть' onclick='closeHub()'>✕</button></div><div class='hubpanel'>";
   h+="<div class='cc' style='margin-bottom:12px'>За какой период собрать выписку? PDF придёт в чат бота.</div>";
   h+="<div style='display:flex;flex-direction:column;gap:8px'>";
   h+="<button class='pbtn' onclick=\"doReport('3')\">Последние 3 месяца</button>";
