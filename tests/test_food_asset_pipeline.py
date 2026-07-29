@@ -38,6 +38,28 @@ class FoodAssetResolverTests(unittest.TestCase):
         self.assertEqual(snack["image_source"], "category")
         self.assertEqual(snack["asset_state"], "missing")
 
+    def test_generated_menu_variants_use_category_correct_catalog_art(self):
+        cases = {
+            "Омлет из двух яиц": "Омлет с овощами",
+            "Гречка с отварной говядиной": "Говядина тушёная",
+            "Треска с тушёной капустой": "Треска на пару",
+        }
+
+        for dish, catalog_label in cases.items():
+            with self.subTest(dish=dish):
+                result = assets.RESOLVER.resolve(dish)
+                self.assertEqual(result["image_source"], "catalog_family")
+                self.assertEqual(
+                    result["image_url"], assets.RESOLVER.manifest[catalog_label]
+                )
+                self.assertEqual(result["asset_state"], "ready")
+
+    def test_family_fallback_requires_an_explicit_main_food_token(self):
+        unknown = assets.RESOLVER.resolve("солёные хрустящие снеки")
+
+        self.assertEqual(unknown["image_source"], "category")
+        self.assertEqual(unknown["asset_state"], "missing")
+
     def test_drink_uses_drink_placeholder_without_generation(self):
         result = assets.RESOLVER.resolve(
             "кедровый кофе", fclass="углеводное",
