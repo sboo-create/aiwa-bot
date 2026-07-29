@@ -475,18 +475,42 @@ def norm_suggs(items, n=2, maxlen=40, maxwords=5, ensure_q=False):
     return (short + long)[:n]
 
 def split_followups(text):
-    """Достаёт 'СЛЕДУЮЩИЕ: q1 ;; q2' (в т.ч. обрезанное) и возвращает (чистый текст, [вопросы])."""
+    """Remove the internal follow-up envelope from user-visible text."""
     if not text:
         return text, []
+    value = str(text)
     qs = []
-    m = re.search(r"СЛЕДУЮЩИЕ\s*:?\s*(.*)$", text, re.S)   # верхний регистр, как в инструкции, в любом месте
+    marker = re.compile(
+        r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:\*{0,2}|_{0,2})?"
+        r"(?:следующ(?:ие|ий|ая)|suggestions?|follow[- ]?ups?)"
+        r"(?:\*{0,2}|_{0,2})?[ \t]*[:：\-—]?[ \t]*(.*)$"
+    )
+    m = marker.search(value)
     if m:
         tail = m.group(1)
         raw = [q for q in re.split(r";;|\||\n|,\s+(?=[А-ЯA-ZЁ])", tail) if q.strip()]
         qs = norm_suggs(raw, n=2, maxlen=40, maxwords=5, ensure_q=True)
-        clean = text[:m.start()]
+        clean = value[:m.start()]
     else:
-        clean = re.sub(r"\n?\s*СЛЕДУ[А-ЯЁ]{0,6}\s*:?\s*$", "", text)   # обрезанный маркер в конце
+        inline = re.search(
+            r"(?is)(?:^|\s)(?:\*{0,2}|_{0,2})?"
+            r"(?:следующ(?:ие|ий|ая)|suggestions?|follow[- ]?ups?)"
+            r"(?:\*{0,2}|_{0,2})?\s*[:：\-—]\s*(.*)$",
+            value,
+        )
+        if inline:
+            tail = inline.group(1)
+            raw = [q for q in re.split(r";;|\||\n|,\s+(?=[А-ЯA-ZЁ])", tail) if q.strip()]
+            qs = norm_suggs(raw, n=2, maxlen=40, maxwords=5, ensure_q=True)
+            clean = value[:inline.start()]
+        else:
+            clean = re.sub(
+                r"(?is)\n?\s*(?:\*{0,2}|_{0,2})?"
+                r"(?:СЛЕДУ[А-ЯЁ]{0,6}|SUGGEST(?:ION)?S?|FOLLOW[- ]?UPS?)"
+                r"(?:\*{0,2}|_{0,2})?\s*:?\s*$",
+                "",
+                value,
+            )
     return clean.rstrip(), qs
 
 def _clean(out, fallback):
@@ -1936,6 +1960,15 @@ def _gen_ctx(profile, mode):
     parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
     if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
     if parts: diet = f" Пищевые ограничения: {', '.join(parts)}."
+    if mode == "male":
+        return (
+            "Профиль мужчины. Обращайся к пользователю только в мужском роде. "
+            "Менструального цикла у него нет: никогда не интерпретируй отсутствие "
+            "менструаций как аменорею и не предлагай ему темы овуляции, яичников, "
+            "фаз цикла или обращения к гинекологу, если он сам явно не спрашивает "
+            "об этом как об общей информации или о другом человеке. "
+            f"Возраст примерно {age} ({band}).{diet}\n{_identity_note(profile)}"
+        )
     return (
         f"Режим без отслеживания фазы цикла: {MODE_RU.get(mode, mode)}. "
         f"Возраст примерно {age} ({band}).{diet}\n{_identity_note(profile)}"
@@ -2055,13 +2088,20 @@ def summary_card_facts(mode, st=None, pregnancy=None, hint=None, usage=None):
 
 def general_answer(profile, mode, question, hint=None, history=None, usage=None):
     h = f" {hint}." if hint else ""
+    address = (
+        "Пользователь — мужчина; используй мужской род. "
+        "Не добавляй женскую репродуктивную физиологию к нерепродуктивному вопросу. "
+        if mode == "male"
+        else "Используй род и обращение, соответствующие профилю. "
+    )
     msgs = [{"role": "system", "content": SYSTEM + "\n\n" + _gen_ctx(profile, mode) + h + _history_note(history)}]
     msgs.append({"role": "user", "content": (
         "НОВЫЙ ВОПРОС, НА КОТОРЫЙ НУЖНО ОТВЕТИТЬ СЕЙЧАС:\n" + question + "\n\n"
         "Дай подробный, качественный ответ с медицинским обоснованием, простыми словами, с учётом возраста, режима и контекста диалога. "
         "Отвечай строго по заданному вопросу, без лишних разделов. Начни с уместного эмодзи, разбивай на части только там, где это нужно по теме. НЕ добавляй разделы про питание или нагрузку, если вопрос не про них. Конкретика (продукты, действия, числа) там, где уместно. "
         "Если уместно по возрасту или режиму, добавь, на что обратить внимание и когда к врачу. "
-        "Не здоровайся, если пользовательница не поздоровалась прямо сейчас. Если есть история диалога, отвечай как продолжение и учитывай предыдущие реплики. "
+        + address +
+        "Не здоровайся, если пользователь не поздоровался прямо сейчас. Если есть история диалога, отвечай как продолжение и учитывай предыдущие реплики. "
         "Пиши живо и тепло, без воды. Будь ЛАКОНИЧНА: целевой объём 900-1500 знаков, ЖЁСТКИЙ предел 1900 знаков. Оставляй только суть по вопросу. Лучше короче и завершённо, чем длинно и оборванно — ОБЯЗАТЕЛЬНО заверши мысль. Только русский. " + FMT_TG + " "
         "ВАЖНО: у этого человека фаза цикла НЕ отслеживается, поэтому НЕ упоминай фазы менструального цикла (фолликулярную, лютеиновую, овуляторную, менструальную) и не привязывай советы к дню цикла. "
         "В самом конце добавь отдельной строкой ровно так: СЛЕДУЮЩИЕ: <текст> ;; <текст> — два релевантных саджеста. " + SUGG_RULES)})
@@ -2559,9 +2599,30 @@ _FOOD_FORMAT_STRUCTURED = (
     "Числа без единиц измерения; при неизвестном весе используй реалистичную оценку."
 )
 
-def food_class_norm(v, protein=0, fat=0, carbs=0):
+def food_class_norm(v, protein=0, fat=0, carbs=0, text=""):
     """Приводит класс продукта к канону; если модель класс не дала — оцениваем по БЖУ."""
     t = str(v or "").strip().lower()
+    content = str(text or "").strip().lower()
+    # The record content is stronger evidence than a generative class label.
+    # In particular, drinks must never inherit pastry/meal artwork because the
+    # model happened to classify their macros as carbohydrate-heavy.
+    looks_like_drink = re.search(
+        r"\b(?:кофе|капучин\w*|латте|эспрессо|американо|раф|чай|какао|"
+        r"компот|морс|лимонад|сок|смузи|кефир|айран|вода|напит\w*|"
+        r"выпил\w*|выпила|стакан|кружк\w*|чашк\w*)\b",
+        content,
+        re.I,
+    )
+    contains_solid_food = re.search(
+        r"\b(?:хлеб\w*|булоч\w*|ватруш\w*|печень\w*|блин\w*|сыр\w*|"
+        r"творог\w*|яйц\w*|омлет\w*|каша|круп\w*|мяс\w*|рыб\w*|"
+        r"куриц\w*|салат\w*|овощ\w*|фрукт\w*|ягод\w*|суп\w*|"
+        r"картоф\w*|макарон\w*|рис\w*|греч\w*|десерт\w*|торт\w*)\b",
+        content,
+        re.I,
+    )
+    if looks_like_drink and not contains_solid_food:
+        return "напиток"
     for c in FOOD_CLASSES:
         if c in t: return c
     alias = {"белок": "белковое", "мясо": "белковое", "рыба": "белковое", "птица": "белковое",

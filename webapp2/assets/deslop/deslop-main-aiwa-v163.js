@@ -19529,7 +19529,7 @@ const Yr = [
   fat: String(a?.fat ?? ""),
   carbs: String(a?.carbs ?? ""),
   slot: a?.slot || "snack"
-}), dj = ["Силовая", "Кардио", "Йога", "Ходьба", "Плавание", "Своё"], Za = {
+}), dj = ["Силовая", "Кардио", "Пилатес", "Йога", "Ходьба", "Плавание", "Своё"], Za = {
   Ноги: ["Присед", "Жим ногами", "Выпады", "Болгарские", "Румынская тяга", "Разгибания", "Сгибания", "Икры"],
   Спина: ["Вертикальная тяга", "Горизонтальная тяга", "Тяга в наклоне", "Становая", "Подтягивания", "Гиперэкстензия"],
   Грудь: ["Жим лёжа", "Жим гантелей", "Жим в наклоне", "Сведения", "Отжимания"],
@@ -19540,7 +19540,8 @@ const Yr = [
 }, hj = {
   Силовая: [],
   Кардио: ["Бег", "Велотренажёр", "Эллипс", "Гребля", "Скакалка"],
-  Йога: ["Виньяса", "Хатха", "Растяжка", "Пилатес", "Дыхание"],
+  Пилатес: ["Мат", "Реформер", "Мобилити", "Кор"],
+  Йога: ["Виньяса", "Хатха", "Растяжка", "Дыхание"],
   Ходьба: ["Прогулка", "Скандинавская", "Быстрая ходьба"],
   Плавание: ["Кроль", "Брасс", "На спине"],
   Своё: []
@@ -20481,6 +20482,7 @@ function Yh({ isOpen: a, onClose: e }) {
       diet_note: A.profile?.diet_note || A.diet_note || "",
       kcal_goal: String(A.profile?.kcal_goal || A.kcal_goal || ""),
       send_time: A.send_time || "08:00",
+      daily_summary_enabled: A.daily_summary_enabled !== !1,
       proactive_enabled: A.proactive_enabled !== !1
     });
   }, [a]);
@@ -20505,6 +20507,9 @@ function Yh({ isOpen: a, onClose: e }) {
   }, w = async (A) => {
     const R = g.proactive_enabled !== !1;
     v((U) => ({ ...U, proactive_enabled: A })), (await qt("/api/proactive", { enabled: A }).catch(() => null))?.ok || (v((U) => ({ ...U, proactive_enabled: R })), Ot("Не получилось изменить настройку", { type: "error" }));
+  }, P = async (A) => {
+    const R = g.daily_summary_enabled !== !1;
+    v((U) => ({ ...U, daily_summary_enabled: A })), (await qt("/api/daily-summary", { enabled: A }).catch(() => null))?.ok || (v((U) => ({ ...U, daily_summary_enabled: R })), Ot("Не получилось изменить настройку", { type: "error" }));
   }, j = (A) => {
     e(), vn("chooseMode", A);
   }, M = async () => {
@@ -20545,7 +20550,7 @@ function Yh({ isOpen: a, onClose: e }) {
             /* @__PURE__ */ m.jsx(Yt, { title: r.mode === "male" ? "Выписка по самочувствию" : "Выписка для врача", description: "PDF в чат бота", onClick: () => s("report") }),
             /* @__PURE__ */ m.jsx(Yt, { title: "Предпочтения по питанию", description: "ограничения и цель калорий", onClick: () => s("data") }),
             /* @__PURE__ */ m.jsx(Yt, { title: "Мои данные", description: r.mode === "male" ? "рост · вес · возраст" : "рост · вес · возраст · цикл", onClick: () => s("data") }),
-            /* @__PURE__ */ m.jsx(Yt, { title: "Утренняя сводка", description: `${g.send_time || "08:00"} · МСК`, onClick: () => s("summary") }),
+            /* @__PURE__ */ m.jsx(Yt, { title: "Утренняя сводка", description: g.daily_summary_enabled === !1 ? "выключена" : `${g.send_time || "08:00"} · МСК`, onClick: () => s("summary") }),
             /* @__PURE__ */ m.jsx(
               pt.Switch,
               {
@@ -20588,6 +20593,20 @@ function Yh({ isOpen: a, onClose: e }) {
         l === "summary" ? /* @__PURE__ */ m.jsxs("div", { className: "aiwa-form-stack", children: [
           /* @__PURE__ */ m.jsx(lt, { variant: "title3", weight: "semibold", children: "Утренняя сводка" }),
           /* @__PURE__ */ m.jsx(lt, { variant: "body", weight: "regular", children: "Каждое утро Айва присылает сводку дня в чат — выбери удобное время (МСК)." }),
+          /* @__PURE__ */ m.jsx(
+            pt.Switch,
+            {
+              value: g.daily_summary_enabled !== !1,
+              onChange: P,
+              children: /* @__PURE__ */ m.jsx(
+                pt.Text,
+                {
+                  title: "Присылать утром",
+                  description: g.daily_summary_enabled === !1 ? "выключено" : "включено"
+                }
+              )
+            }
+          ),
           /* @__PURE__ */ m.jsx(ie, { label: "Время утренней сводки", type: "time", value: g.send_time || "08:00", onChange: (A) => v((R) => ({ ...R, send_time: A })) }),
           /* @__PURE__ */ m.jsx(Wt, { variant: "filled", label: "Сохранить", isFill: !0, ...se("Сохранить время сводки", T) })
         ] }) : null,
@@ -21088,25 +21107,15 @@ const aiwaTodayIso = () => {
     e.push({ iso: r, date: String(s.getDate()), label: oA[s.getDay()], today: l === 0 });
   }
   return e;
-}, rA = ["foodSection", "diary"], uA = "/assets/food/meal-placeholder.svg", zd = (a) => String(a || "").toLowerCase().replace(/ё/g, "е"), Xf = "?v=2", nv = (a) => zd(a).split(/[^а-яa-z0-9]+/).filter((e) => e.length >= 3), cA = (a, e) => {
-  const l = Math.min(4, a.length, e.length);
-  return a.slice(0, l) === e.slice(0, l);
-}, av = (a, e) => {
+}, rA = ["foodSection", "diary"], uA = "/assets/food/meal-placeholder.svg", zd = (a) => String(a || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim(), Xf = "?v=2", av = (a, e) => {
   const l = zd(e).trim();
   if (!a || !l) return null;
   const s = a[String(e || "").trim()];
   if (s) return s + Xf;
-  const r = nv(e);
-  if (!r.length) return null;
-  let c = null, f = 0, h = 0;
   for (const [y, p] of Object.entries(a)) {
     if (zd(y) === l) return p + Xf;
-    const v = nv(y);
-    if (!v.length) continue;
-    const b = v.filter((S) => r.some((w) => cA(S, w))).length, T = b / v.length;
-    b > 0 && (T > h || T === h && b > f) && (h = T, f = b, c = p);
   }
-  return h >= 0.5 ? c + Xf : null;
+  return null;
 }, foodFallbackImage = (a) => {
   const e = zd([a?.title, ...Array.isArray(a?.items) ? a.items.map((l) => l?.name) : []].filter(Boolean).join(" "));
   return zd(a?.fclass) === "напиток" || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(e) ? "/assets/food/drink-cup.svg?v=1" : uA;
@@ -21356,7 +21365,7 @@ function dA({ isOpen: a, onClose: e, onSaved: l, suggested: s }) {
   E.useEffect(() => {
     if (!a) return;
     tx("workout");
-    const N = s?.name || "", V = (s?.exercises || []).filter((st) => st?.name), Z = /ход|прогул/i.test(N) ? "Ходьба" : /йог|мобил|релиз|растяж/i.test(N) ? "Йога" : /кардио|бег|вело/i.test(N) ? "Кардио" : /плав/i.test(N) ? "Плавание" : "Силовая";
+    const N = s?.name || "", V = (s?.exercises || []).filter((st) => st?.name), Z = /ход|прогул/i.test(N) ? "Ходьба" : /пилатес/i.test(N) ? "Пилатес" : /йог|мобил|релиз|растяж/i.test(N) ? "Йога" : /кардио|бег|вело/i.test(N) ? "Кардио" : /плав/i.test(N) ? "Плавание" : "Силовая";
     y(Z), V.length ? (S(V.map((st) => st.name)), j(Object.fromEntries(V.map((st) => [st.name, { sets: st.sets || "", reps: st.reps || "" }])))) : (S(N ? [N] : []), j({})), D("");
     const nt = (s?.exercises || []).find((st) => st?.name)?.name;
     U(nt && Object.keys(Za).find((st) => Za[st].includes(nt)) || ""), H(null), f(r);
@@ -21586,7 +21595,7 @@ const yA = ["trainingSection", "train"], gA = (a) => {
   ["растяж", "Растяжка"],
   ["стретч", "Растяжка"],
   ["мобил", "Растяжка"],
-  ["пилатес", "Йога"],
+  ["пилатес", "Пилатес"],
   ["плава", "Плавание"],
   ["бассейн", "Плавание"],
   ["отдых", "Отдых"],
