@@ -12378,6 +12378,7 @@ async def _security_headers(request, handler):
     response = await handler(request)
     if (
         request.path.casefold().endswith(".webp")
+        and response.status == 200
         and response.content_type in {"", "application/octet-stream"}
     ):
         # Linux MIME databases are not guaranteed to know WebP. Combined

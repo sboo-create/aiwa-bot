@@ -4,6 +4,7 @@ import inspect
 import json
 import mimetypes
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -401,6 +402,95 @@ class PostReleaseSystemicTests(unittest.TestCase):
 
         explicit = asyncio.run(bot._security_headers(request, explicit_handler))
         self.assertEqual(explicit.content_type, "text/plain")
+
+        async def missing_handler(_request):
+            return bot.web.Response(
+                status=404,
+                body=b"not found",
+                content_type="application/octet-stream",
+            )
+
+        missing = asyncio.run(bot._security_headers(request, missing_handler))
+        self.assertEqual(missing.status, 404)
+        self.assertEqual(missing.content_type, "application/octet-stream")
+
+    def test_public_asset_activation_is_atomic_idempotent_and_additive(self):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "deploy/i167/activate-public-assets.sh"
+        first_sha = "1" * 40
+        second_sha = "2" * 40
+        operator = subprocess.run(
+            ["id", "-un"], check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        group = subprocess.run(
+            ["id", "-gn"], check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        env = {
+            **os.environ,
+            "AIWA_STAGING_ROOT": self.tmp.name,
+            "AIWA_PUBLIC_OWNER": operator,
+            "AIWA_PUBLIC_GROUP": group,
+        }
+
+        def release(sha, *, include_old=True):
+            assets = (
+                Path(self.tmp.name) / "releases" / sha / "webapp2" / "assets"
+            )
+            for kind in ("food", "train"):
+                catalog = assets / kind / "catalog-v2"
+                catalog.mkdir(parents=True)
+                manifest = {}
+                if include_old:
+                    image = catalog / f"{kind}-old.webp"
+                    image.write_bytes(b"old")
+                    manifest[f"{kind} old"] = (
+                        f"/assets/{kind}/catalog-v2/{kind}-old.webp"
+                    )
+                (assets / kind / "manifest.json").write_text(
+                    json.dumps(manifest or {f"{kind} new": (
+                        f"/assets/{kind}/catalog-v2/{kind}-new.webp"
+                    )}),
+                    encoding="utf-8",
+                )
+                if not include_old:
+                    (catalog / f"{kind}-new.webp").write_bytes(b"new")
+
+        release(first_sha)
+        partial = Path(self.tmp.name) / "public-releases" / first_sha
+        partial.mkdir(parents=True)
+        (partial / "partial").write_text("interrupted", encoding="utf-8")
+
+        first = subprocess.run(
+            [str(script), first_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        current = Path(self.tmp.name) / "public-current"
+        self.assertEqual(current.resolve(), partial.resolve())
+        self.assertTrue((partial / ".activation-complete").is_file())
+        self.assertIn("quarantined incomplete", first.stderr)
+
+        subprocess.run(
+            [str(script), first_sha],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(current.resolve(), partial.resolve())
+
+        release(second_sha, include_old=False)
+        failed = subprocess.run(
+            [str(script), second_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("previously published asset disappeared", failed.stderr)
+        self.assertEqual(current.resolve(), partial.resolve())
 
     def test_aiwa_upstream_serves_static_manifest_for_i167_proxy(self):
         async def fetch_manifest():

@@ -62,6 +62,11 @@ Caddy group read/traverse access to that public tree, and atomically replace
 `/srv/aiwa-staging/public-current` only after the complete tree validates.
 This keeps static assets available during application restarts without
 granting Caddy access to code, configuration, SQLite or provider credentials.
+Activation always builds and validates a fresh candidate directory. A partial
+inactive target is quarantined; an active immutable target may only be reused
+when its completion marker and full contents match. The validator also refuses
+to publish a release that removes an asset URL used by the previous manifests,
+so cached older clients keep working.
 
 After deployment:
 
