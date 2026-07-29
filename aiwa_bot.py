@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
-import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue, atexit
+import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue, atexit, contextvars
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -110,7 +110,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-28-v170-deep-review")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-29-v171-post-release")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 
@@ -304,7 +304,8 @@ def _migrate_db_on_connection(c):
     # process (for example an overlapping Railway replacement).
     c.execute("BEGIN IMMEDIATE")
     c.execute("""CREATE TABLE IF NOT EXISTS users(chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
-        send_time TEXT DEFAULT '08:00', modules TEXT DEFAULT 'phase,general,food,training',
+        send_time TEXT DEFAULT '08:00', daily_summary_enabled INTEGER DEFAULT 1,
+        modules TEXT DEFAULT 'phase,general,food,training',
         state TEXT, pending_date TEXT, created TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS sugg(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, q TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS cycles(chat_id INTEGER, start_date TEXT, PRIMARY KEY(chat_id,start_date))")
@@ -410,7 +411,8 @@ def _migrate_db_on_connection(c):
                 "activity INTEGER", "diet TEXT", "partner_code TEXT", "mode TEXT", "diet_note TEXT",
                 "period_end TEXT", "period_len INTEGER", "train_profile TEXT", "kcal_goal INTEGER",
                 "last_phase_notified TEXT", "last_reactivation TEXT",
-                "proactive_enabled INTEGER DEFAULT 1", "tg_first_name TEXT",
+                "proactive_enabled INTEGER DEFAULT 1",
+                "daily_summary_enabled INTEGER DEFAULT 1", "tg_first_name TEXT",
                 "push_suppressed_at TEXT", "push_suppression_reason TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
@@ -477,7 +479,7 @@ def _activate_user(cid):
         c.close()
 
 def row(cid):
-    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled,tg_first_name,push_suppressed_at,push_suppression_reason FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
+    c = db(); r = c.execute("SELECT chat_id,last_period,cycle_len,send_time,modules,state,pending_date,height,weight,age,activity,diet,partner_code,mode,diet_note,period_end,period_len,train_profile,kcal_goal,last_phase_notified,last_reactivation,proactive_enabled,tg_first_name,push_suppressed_at,push_suppression_reason,daily_summary_enabled FROM users WHERE chat_id=?", (cid,)).fetchone(); c.close()
     if not r: return None
     return {"chat_id": r[0], "last_period": r[1], "cycle_len": r[2], "send_time": r[3],
             "modules": (r[4] or "phase,general,food,training").split(","), "state": r[5], "pending_date": r[6],
@@ -486,11 +488,12 @@ def row(cid):
             "train_profile": r[17], "kcal_goal": r[18], "last_phase_notified": r[19],
             "last_reactivation": r[20], "proactive_enabled": r[21] is None or bool(r[21]),
             "tg_first_name": r[22] or "", "push_suppressed_at": r[23],
-            "push_suppression_reason": r[24] or ""}
+            "push_suppression_reason": r[24] or "",
+            "daily_summary_enabled": r[25] is None or bool(r[25])}
 
 _USER_UPDATE_COLUMNS = frozenset({"activity", "age", "cycle_len", "diet", "diet_note", "height", "kcal_goal",
     "last_period", "last_phase_notified", "last_reactivation", "mode", "partner_code", "pending_date",
-    "period_end", "period_len", "proactive_enabled", "push_suppressed_at",
+    "period_end", "period_len", "proactive_enabled", "daily_summary_enabled", "push_suppressed_at",
     "push_suppression_reason", "send_time", "state", "tg_first_name", "train_profile", "weight"})
 def upsert(cid, *, user_generation=None, **kw):
     unknown = set(kw) - _USER_UPDATE_COLUMNS
@@ -836,7 +839,14 @@ def normalize_food(data, source="photo"):
         total_has_evidence = any(value > 0 for value in (grams or 0, kcal, protein, fat, carbs))
         if placeholder in invalid_titles or not (has_title and (total_has_evidence or item_has_evidence)):
             return None
-    fclass = L.food_class_norm(data.get("fclass") or data.get("class") or data.get("category"), protein, fat, carbs)
+    class_evidence = " ".join(
+        [title]
+        + [str(item.get("name") or "") for item in items]
+    )
+    fclass = L.food_class_norm(
+        data.get("fclass") or data.get("class") or data.get("category"),
+        protein, fat, carbs, class_evidence,
+    )
     unparsed = [
         str(x).strip()[:120]
         for x in (data.get("unparsed") or [])[:8]
@@ -859,6 +869,38 @@ def normalize_food(data, source="photo"):
             "kcal": kcal, "protein": protein, "fat": fat, "carbs": carbs, "grams": grams,
             "unparsed": unparsed, "confidence": data.get("confidence") or "medium",
             "note": str(data.get("note") or "")[:160], "source": source}
+
+def food_record_admissible(rec):
+    """A model label alone is not enough evidence to mutate the diary."""
+    if not isinstance(rec, dict):
+        return False
+    numeric_evidence = any(
+        _num(rec.get(field)) > 0
+        for field in ("grams", "kcal", "protein", "fat", "carbs")
+    )
+    item_evidence = any(
+        str(item.get("name") or "").strip()
+        and any(
+            _num(item.get(field)) > 0
+            for field in ("grams", "kcal", "protein", "fat", "carbs")
+        )
+        for item in (rec.get("items") or [])
+        if isinstance(item, dict)
+    )
+    # Zero-calorie drinks are legitimate even when a provider omitted volume.
+    # Keep this whitelist narrow so generic labels such as “снек” or
+    # “нет данных” cannot become empty diary rows.
+    title = re.sub(
+        r"[^а-яёa-z0-9]+", " ", str(rec.get("title") or "").casefold()
+    ).strip()
+    zero_calorie_drink = bool(re.fullmatch(
+        r"(?:(?:стакан|кружка|чашка|бутылка)\s+)?"
+        r"(?:вод[аы]|минеральная вода|чай|чёрный чай|черный чай|"
+        r"зелёный чай|зеленый чай|кофе|эспрессо|американо)"
+        r"(?:\s+без\s+(?:сахара|молока))?",
+        title,
+    ))
+    return bool(numeric_evidence or item_evidence or zero_calorie_drink)
 
 def slot_for_now():
     try: h = datetime.now(TZ).hour
@@ -946,11 +988,17 @@ def meal_edit(cid, mid, **kw):
     c = db(); c.execute("UPDATE meals SET " + ", ".join(sets) + " WHERE chat_id=? AND id=?", vals); c.commit(); c.close(); return True  # nosec B608
 
 def _meal_row_payload(x):
+    items = json.loads(x[8] or "[]")
+    class_evidence = " ".join(
+        [str(x[2] or "")]
+        + [str(item.get("name") or "") for item in items if isinstance(item, dict)]
+    )
     return {
         "id": x[0], "ts": x[1], "title": x[2], "kcal": x[3],
         "protein": x[4], "fat": x[5], "carbs": x[6], "grams": x[7],
-        "items": json.loads(x[8] or "[]"), "source": x[9],
-        "slot": (x[10] or "snack"), "fclass": x[11] or None,
+        "items": items, "source": x[9],
+        "slot": (x[10] or "snack"),
+        "fclass": L.food_class_norm(x[11], x[4], x[5], x[6], class_evidence),
         "slot_guessed": bool(x[12]),
     }
 
@@ -982,11 +1030,18 @@ def meal_get(cid, mid):
     c.close()
     if not x:
         return None
+    items = json.loads(x[9] or "[]")
+    class_evidence = " ".join(
+        [str(x[3] or "")]
+        + [str(item.get("name") or "") for item in items if isinstance(item, dict)]
+    )
     return {
         "id": x[0], "date": x[1], "ts": x[2], "title": x[3], "kcal": x[4],
         "protein": x[5], "fat": x[6], "carbs": x[7], "grams": x[8],
-        "items": json.loads(x[9] or "[]"), "source": x[10],
-        "slot": x[11] or "snack", "fclass": x[12] or None, "slot_guessed": bool(x[13]),
+        "items": items, "source": x[10],
+        "slot": x[11] or "snack",
+        "fclass": L.food_class_norm(x[12], x[5], x[6], x[7], class_evidence),
+        "slot_guessed": bool(x[13]),
     }
 
 def meal_update(cid, mid, rec, *, user_generation=None, mutation_key=None,
@@ -1665,6 +1720,13 @@ def guard_aiwa_reply(cid, text, verified_mutation=False):
         guarded = L.guard_user_address(text, llm_profile_of(row(cid)))
     except Exception:
         guarded = text
+    # Suggestions are protocol metadata.  Strip them again at the final
+    # delivery boundary so direct, partner and onboarding paths are protected
+    # too, not only the main send_answer() route.
+    try:
+        guarded = L.split_followups(guarded)[0]
+    except Exception:
+        pass
     if not verified_mutation and _UNVERIFIED_MUTATION_CLAIM_RE.search(str(guarded or "")):
         ev(cid, "journal_claim_blocked", meta="unverified_model_claim")
         return (
@@ -1694,7 +1756,7 @@ def match_meta(text):
                             "на чем ты сделан", "на чём ты сделан", "из чего ты", "что под капотом", "какой движок", "какая технология", "на какой технологии",
                             "какая модель", "что за модель", "на какой модели", "какая нейросеть", "какой ии", "что за нейросеть", "ты нейросеть",
                             "ты gpt", "ты чат gpt", "chatgpt", "ты openai", "openai", "ты llama", "языковая модель", "ты ллм", "кто тебя сделал", "кто тебя создал")): return "tech"
-    if any(k in t for k in ("что такое айва", "что такое aiwa", "расскажи о себе", "расскажи про себя", "расскажи о айв", "расскажи про айв", "расскажи о aiwa", "кто ты", "о тебе", "про себя", "что ты умеешь", "что умеешь", "что ты можешь", "что можешь", "чем можешь помочь", "чем ты помога", "чем занимаешься", "что ты делаешь", "что ты за", "что за бот", "какой ты бот", "представься", "твои возможност", "какие возможност", "какие у тебя функц", "твои функц", "что ты такое", "зачем ты", "для чего ты", "ты кто")): return "about"
+    if any(k in t for k in ("что такое айва", "что такое aiwa", "расскажи о себе", "расскажи про себя", "расскажи о айв", "расскажи про айв", "расскажи о aiwa", "кто ты", "о тебе", "про себя", "что ты умеешь", "что умеешь", "что ты можешь", "что можешь", "чем можешь помочь", "чем ты помога", "чем занимаешься", "что ты делаешь", "что ты за", "что за бот", "какой ты бот", "представься", "твои возможност", "какие возможност", "какие у тебя функц", "твои функц", "что ты такое", "для чего ты", "ты кто")): return "about"
     if any(k in t for k in ("храните данные", "хранишь данные", "хранение данных", "мои данные", "персональные данные", "приватн", "конфиденц",
                             "что с данными", "безопасн", "удалить данные", "передаёте", "передаете данные", "данные в безопас")): return "privacy"
     return None
@@ -1806,6 +1868,24 @@ def match_intent(t):
         r"внес\w*|занос\w*|занес\w*|отмеч\w*|отмет\w*|фиксир\w*|зафиксир\w*)",
         t,
     ))
+    _date_question = re.search(
+        r"\b(?:какая\s+(?:сегодня\s+)?дата|какое\s+(?:сегодня\s+)?число|"
+        r"сегодня\s+какое\s+число|какой\s+сегодня\s+день(?!\s+цикл))\b",
+        t,
+    )
+    _journal_signal = bool(
+        re.search(
+            r"\b(?:запис\w*|запиш\w*|добав\w*|внес\w*|занес\w*|отмет\w*|"
+            r"зафиксир\w*|залогир\w*|логни)\b",
+            t,
+        )
+        or _JOURNAL_SEMANTIC_CANDIDATE_RE.search(raw_t)
+    )
+    # A deterministic date answer is safe only for a standalone question.
+    # Combined messages must continue through journal routing so a write is
+    # never discarded merely because the same sentence mentions today's date.
+    if _date_question and (not _journal_signal or _mutation_denied):
+        return "current_date"
     _mutation_context_blocked = bool(
         _journal_third_party_source(raw_t)
         or "?" in t
@@ -1933,7 +2013,7 @@ _JOURNAL_MUTATION_INTENTS = frozenset({
 _JOURNAL_SEMANTIC_CANDIDATE_RE = re.compile(
     r"\b(?:"
     r"съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|кушал\w*|скушал\w*|"
-    r"покушал\w*|пил[аи]?\b|выпил\w*|попробовал\w*|кусал\w*|куснул\w*|"
+    r"покушал\w*|пил[аи]?\b|выпил\w*|попил\w*|попробовал\w*|кусал\w*|куснул\w*|"
     r"завтрак\w*|обед\w*|ужин\w*|перекус\w*|"
     r"тренир\w*|потренир\w*|занимал\w*|спорт\w*|зал\w*|упражнен\w*|"
     r"бегал\w*|пробеж\w*|ходил\w*|гулял\w*|плавал\w*|бассейн\w*|"
@@ -1960,7 +2040,7 @@ _JOURNAL_META_INSTRUCTION_RE = re.compile(
 _JOURNAL_PERIOD_SOURCE_RE = re.compile(r"\b(?:месячн\w*|менструац\w*|критическ\w*\s+дн\w*)\b", re.I)
 _JOURNAL_FOOD_COMPLETED_RE = re.compile(
     r"\b(?:съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|кушал\w*|"
-    r"скушал\w*|покушал\w*|пил[аи]?\b|выпил\w*|попробовал\w*|"
+    r"скушал\w*|покушал\w*|пил[аи]?\b|выпил\w*|попил\w*|попробовал\w*|"
     r"кусал\w*|куснул\w*)\b|"
     r"\b(?:на\s+)?(?:завтрак\w*|обед\w*|ужин\w*|перекус\w*)\b"
     r"(?:\s+у\s+меня)?\s*(?:был[аи]?|были|съел\w*|поел\w*|:|-)",
@@ -1968,7 +2048,7 @@ _JOURNAL_FOOD_COMPLETED_RE = re.compile(
 )
 _JOURNAL_FOOD_NEGATED_RE = re.compile(
     r"\bне\s+(?:съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|"
-    r"кушал\w*|скушал\w*|покушал\w*|пил[аи]?\b|выпил\w*|"
+    r"кушал\w*|скушал\w*|покушал\w*|пил[аи]?\b|выпил\w*|попил\w*|"
     r"попробовал\w*|кусал\w*|куснул\w*)\b",
     re.I,
 )
@@ -3059,6 +3139,7 @@ def B(text, cb, style=None):
 MENU_KB = InlineKeyboardMarkup([
     [B("Сводка", "today")],
     [B("Партнёр", "partner"), B("Выписка врачу", "history")],
+    [B("Настройки уведомлений", "more")],
 ])
 GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
 ONB_KB = InlineKeyboardMarkup([
@@ -3078,10 +3159,12 @@ NOCYCLE_KB = InlineKeyboardMarkup([
 GENERAL_MENU_KB = InlineKeyboardMarkup([
     [B("Сводка", "today")],
     [B("Партнёр", "partner"), B("Выписка врачу", "history")],
+    [B("Настройки уведомлений", "more")],
 ])
 MORE_KB = InlineKeyboardMarkup([
     [B("История и выписка", "history"), B("Гид", "guides")],
     [B("Время сводки", "set:time")],
+    [B("Утренние сводки: вкл/выкл", "toggle:summary")],
     [B("Назад", "menu")],
 ])
 EDIT_KB = InlineKeyboardMarkup([
@@ -4100,7 +4183,7 @@ async def send_rich_with_photo(bot, cid, md_text, png_bytes, reply_markup=None):
             except Exception as e:
                 last = e
         raise last
-    _LAST_SPOKEN[cid] = md_plain(md_text)
+    _remember_spoken(cid, md_text)
     return await asyncio.to_thread(_do)
 
 async def send_rich(bot, cid, md_text, reply_markup=None):
@@ -4108,7 +4191,7 @@ async def send_rich(bot, cid, md_text, reply_markup=None):
     таблицы, ### заголовки, списки, цитаты. Бросает исключение, если метод недоступен."""
     md_text = guard_aiwa_reply(cid, md_text)
     md_text = re.sub(r"(?m)^(\s*)•\s+", r"\1- ", str(md_text))   # любые «• » -> GFM-список, иначе рендер склеит/задвоит
-    _LAST_SPOKEN[cid] = md_plain(md_text)                            # rich не проходит через текстовый прокси озвучки
+    _remember_spoken(cid, md_text)  # rich bypasses the Telegram proxy
     data = {"chat_id": cid, "rich_message": json.dumps({"markdown": md_text})}
     if reply_markup is not None:
         data["reply_markup"] = reply_markup.to_json()
@@ -4239,9 +4322,18 @@ def chat_hint(cid):
         except Exception: pass
     return base or None
 _VOICE_TURN = {}   # cid -> True, если текущий вопрос пришёл голосом: тогда ответ дублируем голосом
-_LAST_SPOKEN = {}  # cid -> содержательный текст для озвучки (rich-отправки не видны текстовому прокси)
+_SPOKEN_COLLECTOR = contextvars.ContextVar("aiwa_spoken_collector", default=None)
+
+def _remember_spoken(cid, text):
+    """Record visible text in the current voice request, never in global chat state."""
+    collector = _SPOKEN_COLLECTOR.get()
+    if collector is not None and str(text or "").strip():
+        collector.append(_voice_plain_text(text))
+
 def _voice_reply_on():
-    return os.environ.get("AIWA_VOICE_REPLY", "1") in ("1", "true", "True", "yes", "on")
+    # TTS is opt-in until the provider path has proved text/audio parity in
+    # production. STT remains available and still returns the text answer.
+    return os.environ.get("AIWA_VOICE_REPLY", "0") in ("1", "true", "True", "yes", "on")
 
 def _voice_plain_text(value):
     """Prepare already-sent Telegram text for TTS without speaking HTML markup."""
@@ -4725,6 +4817,8 @@ def cycle_text_analysis(cid):
 async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None, user_generation=None):
     msg = update.message; general = not is_cycle(u); ev(cid, "manual", meta="intent_" + intent)
     turn_generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    if intent == "current_date":
+        return await msg.reply_text(current_date_text())
     if intent == "analysis":
         return await msg.reply_text(cycle_text_analysis(cid),
             reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
@@ -5337,6 +5431,9 @@ def _remove_daily_jobs(app, cid):
 
 def schedule_daily(app, cid, hhmm):
     _remove_daily_jobs(app, cid)
+    user = row(cid)
+    if user and not user.get("daily_summary_enabled", True):
+        return
     actual, _, _ = scheduled_hhmm(cid, hhmm)
     prepare_at = summary_prepare_hhmm(cid, actual)
     ph, pm = map(int, prepare_at.split(":"))
@@ -5349,6 +5446,16 @@ def schedule_daily(app, cid, hhmm):
         data={"delivery_hhmm": actual},
     )
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
+
+def set_daily_time(app, cid, hhmm):
+    """An explicit delivery-time choice also explicitly enables summaries."""
+    upsert(
+        cid,
+        send_time=hhmm,
+        daily_summary_enabled=1,
+        state=None,
+    )
+    schedule_daily(app, cid, hhmm)
 
 def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=False, enforce_spacing=False,
                               mutation_key=None, args_hash=None):
@@ -5483,6 +5590,9 @@ class _BCtx:
 
 async def summary_prepare_job(context: ContextTypes.DEFAULT_TYPE):
     cid = context.job.chat_id
+    if not (row(cid) or {}).get("daily_summary_enabled", True):
+        _remove_daily_jobs(context.application, cid)
+        return
     try:
         actual = ((context.job.data or {}).get("delivery_hhmm")
                   if getattr(context.job, "data", None) is not None else None)
@@ -5501,7 +5611,8 @@ async def summary_prepare_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     cid = context.job.chat_id
-    if (row(cid) or {}).get("push_suppressed_at"):
+    user = row(cid) or {}
+    if not user.get("daily_summary_enabled", True) or user.get("push_suppressed_at"):
         _remove_daily_jobs(context.application, cid)
         return
     if BCAST_Q is not None:
@@ -6127,7 +6238,7 @@ async def set_time_cmd(update, context):
     if not hhmm:
         upsert(cid, state="await_time")
         return await update.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
-    upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
+    set_daily_time(context.application, cid, hhmm)
     await update.message.reply_text(schedule_text(cid, hhmm))
 MODE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Цикл", callback_data="onb_cycle")],
@@ -6475,6 +6586,7 @@ async def on_voice(update, context):
     await update.message.reply_text(f"🎙 Расслышала: «{txt}»")
     _VOICE_TURN[cid] = True          # спросили голосом — ответим текстом и голосом
     sent_texts = []
+    collector_token = _SPOKEN_COLLECTOR.set(sent_texts)
     voice_context = _VoiceContextProxy(
         context, _VoiceBotProxy(context.bot, cid, sent_texts)
     )
@@ -6486,11 +6598,13 @@ async def on_voice(update, context):
         # Free-form AI answers speak inside send_answer(). Intent/state branches
         # often reply directly, so duplicate their final visible text here too.
         if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
-            spoken = _voice_plain_text(_LAST_SPOKEN.pop(cid, None) or (sent_texts[-1] if sent_texts else
-                                       "Готово. Результат отправила в чат."))
+            spoken = _voice_plain_text(
+                sent_texts[-1] if sent_texts else "Готово. Результат отправила в чат."
+            )
             if spoken:
                 await _send_voice_reply(context, cid, spoken)
     finally:
+        _SPOKEN_COLLECTOR.reset(collector_token)
         _VOICE_TURN.pop(cid, None)   # чтобы флаг не протёк на следующий текстовый вопрос
 
 def food_card(rec, added=True):
@@ -6750,7 +6864,7 @@ async def handle_text(update, context, txt):
     if state == "await_time":
         hhmm = parse_time(txt)
         if hhmm:
-            upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
+            set_daily_time(context.application, cid, hhmm)
             return await update.message.reply_text(schedule_text(cid, hhmm))
         upsert(cid, state=None)
     elif state == "await_period_date":
@@ -6799,7 +6913,7 @@ async def handle_text(update, context, txt):
 
     if is_onboarded(u):
         pre_intent = match_intent(txt)
-        if pre_intent in ("wipe", "unlink", "help"):
+        if pre_intent in ("wipe", "unlink", "help", "current_date"):
             return await dispatch_intent(context, update, cid, u, pre_intent, txt)
 
     m = match_meta(txt)
@@ -7024,8 +7138,23 @@ async def on_cb(update, context):
     elif data == "set:time":
         upsert(cid, state="await_time")
         await q.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
+    elif data == "toggle:summary":
+        if not is_onboarded(u):
+            return await need_onboard(q.message)
+        enabled = not bool((row(cid) or {}).get("daily_summary_enabled", True))
+        upsert(cid, daily_summary_enabled=int(enabled))
+        if enabled:
+            schedule_daily(context.application, cid, (row(cid) or {}).get("send_time") or "08:00")
+        else:
+            _remove_daily_jobs(context.application, cid)
+        ev(cid, "manual", meta=("summary_notifications_on" if enabled else "summary_notifications_off"))
+        await q.message.reply_text(
+            "Утренние сводки включены." if enabled else
+            "Утренние сводки выключены. Сводку по-прежнему можно открыть вручную в приложении или командой /today."
+        )
     elif data.startswith("tm:"):
-        hhmm = data.split(":", 1)[1]; upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
+        hhmm = data.split(":", 1)[1]
+        set_daily_time(context.application, cid, hhmm)
         await q.message.reply_text(schedule_text(cid, hhmm))
     elif data.startswith("ci:e:"):
         log_set(cid, today_s, energy=int(data.split(":")[2])); await safe_edit(q, "Настроение?", reply_markup=en_kb("m", MOOD))
@@ -7315,8 +7444,10 @@ async def on_startup(app):
     for cid in all_users():
         u = row(cid) or {}
         hhmm = u.get("send_time") or "08:00"
-        schedule_daily(app, cid, hhmm); n += 1
-        if should_catchup_broadcast(cid, hhmm):
+        schedule_daily(app, cid, hhmm)
+        if u.get("daily_summary_enabled", True):
+            n += 1
+        if u.get("daily_summary_enabled", True) and should_catchup_broadcast(cid, hhmm):
             if await enqueue_broadcast(cid):
                 catchup += 1
     log.info("Rescheduled %d, broadcast catchup queued %d", n, catchup)
@@ -7578,6 +7709,7 @@ def _api_data_sync(cid, body):
            "bot_username": BOT_USERNAME,
            "partner_linked": bool(partner_of(cid)),
            "proactive_enabled": bool(u.get("proactive_enabled", True)),
+           "daily_summary_enabled": bool(u.get("daily_summary_enabled", True)),
            "today_log": log_get(cid, dtoday().isoformat()) or {"symptoms": []},
            "send_time": u.get("send_time") or "08:00",
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
@@ -7789,6 +7921,25 @@ async def _api_proactive(request):
     upsert(cid, proactive_enabled=int(enabled))
     ev(cid, "manual", meta=("web_proactive_on" if enabled else "web_proactive_off"))
     return _cors(web.json_response({"ok": True, "proactive_enabled": enabled}))
+
+async def _api_daily_summary(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return _cors(web.json_response({"error": "bad_enabled"}, status=400))
+    upsert(cid, daily_summary_enabled=int(enabled))
+    if BOT_APP:
+        try:
+            if enabled:
+                schedule_daily(BOT_APP, cid, (row(cid) or {}).get("send_time") or "08:00")
+            else:
+                _remove_daily_jobs(BOT_APP, cid)
+        except Exception as exc:
+            log.warning("summary notification reschedule: %s", exc)
+    ev(cid, "manual", meta=("summary_notifications_on" if enabled else "summary_notifications_off"))
+    return _cors(web.json_response({"ok": True, "daily_summary_enabled": enabled}))
 async def _api_profile(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -8789,6 +8940,10 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     intent = match_intent(msg)
+    if intent == "current_date":
+        answer = current_date_text()
+        chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", answer)
+        return {"answer": answer, "suggestions": ["Что запланировано сегодня?"]}
     journal = None
     if intent not in _JOURNAL_MUTATION_INTENTS:
         journal = chat_mutation_route_preflight(cid, mutation_key)
@@ -9338,6 +9493,39 @@ def chat_mutation_preflight(cid, mutation_key, kind, args_hash):
     except (TypeError, ValueError): data = {}
     return {"status": status, "id": record_id, "created": False, "data": data}
 
+def _food_short_analysis(rec):
+    """Cheap, deterministic feedback after a verified food write.
+
+    It deliberately uses only persisted nutrients and category: no second LLM
+    call, no extra latency, and no claims about fibre/micronutrients that the
+    record does not actually contain.
+    """
+    protein = max(0.0, float(rec.get("protein") or 0))
+    fat = max(0.0, float(rec.get("fat") or 0))
+    carbs = max(0.0, float(rec.get("carbs") or 0))
+    kcal = max(0, int(rec.get("kcal") or 0))
+    fclass = str(rec.get("fclass") or "")
+    if fclass == "напиток":
+        if kcal == 0:
+            body = "напиток почти не добавляет энергии"
+        elif carbs >= 20 and protein < 8:
+            body = "в напитке заметная доля углеводов; учитывай его как часть приёма пищи"
+        else:
+            body = "напиток тоже учтён в калориях и КБЖУ дня"
+    elif protein >= 25:
+        body = "хороший вклад в белок"
+        if carbs < 15:
+            body += "; для более полного приёма можно добавить овощи или сложные углеводы"
+    elif carbs >= 50 and protein < 15:
+        body = "приём преимущественно углеводный; белковый продукт сделает его сытнее"
+    elif fat >= 30 and protein < 20:
+        body = "жиров здесь заметно больше белка; следующий приём лучше сделать легче и белковее"
+    elif protein >= 15 and carbs >= 15:
+        body = "по основным макронутриентам приём выглядит достаточно сбалансированным"
+    else:
+        body = "это небольшой вклад в дневной рацион; итог лучше оценивать по всему дню"
+    return "Короткий разбор: " + body + "."
+
 def _food_action_success(rec, mid, event_date):
     slot = rec.get("slot") or slot_for_now()
     sm = SLOT_RU.get(slot, "приём")
@@ -9349,6 +9537,7 @@ def _food_action_success(rec, mid, event_date):
         f"(Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). "
         "Порция и КБЖУ оценочные, запись уже видна в разделе «Питание»."
     )
+    text_out += " " + _food_short_analysis(rec)
     if rec.get("slot_guessed"):
         text_out += (
             f" Приём пищи определила по времени как «{sm}»; если это не так, "
@@ -9413,9 +9602,10 @@ def _workout_update_success(rec, wid, event_date):
     }
 
 _CHAT_DATE_RE = re.compile(
-    r"\b(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{4}-\d{2}-\d{2}|"
+    r"(?<![\d.,])(?:(?:0?[1-9]|[12]\d|3[01])[./-](?:0?[1-9]|1[0-2])"
+    r"(?:[./-](?:\d{2}|\d{4}))?|\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])|"
     r"\d{1,2}\s+(?:январ\w*|феврал\w*|март\w*|апрел\w*|ма[йяе]|июн\w*|июл\w*|"
-    r"август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)(?:\s+\d{4})?)\b",
+    r"август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)(?:\s+\d{4})?)(?![\d.,])",
     re.I,
 )
 _CHAT_RELATIVE_DATE_RE = re.compile(
@@ -9469,6 +9659,22 @@ def chat_event_date(text, max_past_days=366):
         return None, "too_old"
     return parsed, None
 
+def current_date_text():
+    """Canonical product date; never ask a language model what day it is."""
+    today = dtoday()
+    months = (
+        "", "января", "февраля", "марта", "апреля", "мая", "июня",
+        "июля", "августа", "сентября", "октября", "ноября", "декабря",
+    )
+    weekdays = (
+        "понедельник", "вторник", "среда", "четверг",
+        "пятница", "суббота", "воскресенье",
+    )
+    return (
+        f"Сегодня {today.day} {months[today.month]} {today.year} года, "
+        f"{weekdays[today.weekday()]}. В Айве используется московское время."
+    )
+
 def extract_food_log_text(text):
     """Убирает только служебные слова команды, сохраняя продукт, количество и жирность."""
     cleaned, _ = strip_aiwa_address(text)
@@ -9480,7 +9686,7 @@ def extract_food_log_text(text):
     )
     cleaned = re.sub(r"(?i)\bпожалуйста\b", " ", cleaned)
     cleaned = re.sub(
-        r"(?i)\b(?:я\s+)?(?:съел\w*|поел\w*|ел[аи]?|кушал\w*|скушал\w*|покушал\w*|выпил\w*)\b",
+        r"(?i)\b(?:я\s+)?(?:съел\w*|поел\w*|ел[аи]?|кушал\w*|скушал\w*|покушал\w*|выпил\w*|попил\w*|пил[аи]?)\b",
         " ",
         cleaned,
     )
@@ -9535,7 +9741,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
     ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage,
        user_generation=generation)
     rec = normalize_food(parsed, "text") if parsed else None
-    if not rec:
+    if not rec or not food_record_admissible(rec):
         return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «съела 200 г творога 5%, запиши»."}
     rec["slot"] = slot or slot_for_now()
     rec["slot_guessed"] = not bool(slot)
@@ -10211,7 +10417,7 @@ async def _api_food_text(request):
         return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "tokens", sum(usage), meta="food_text", calls=len(usage), usage=usage)
     rec = normalize_food(parsed, "text") if parsed else None
-    if not rec:
+    if not rec or not food_record_admissible(rec):
         return _cors(web.json_response({"ok": False, "message": "Не поняла блюдо. Уточни, например «200 г творога и банан»."}))
     _bslot = body.get("slot")
     _sl = slot_from_text(txt)
@@ -10492,10 +10698,14 @@ async def _api_settime(request):
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     t = parse_time(str(body.get("time") or ""))
     if not t: return _cors(web.json_response({"error": "bad_time", "text": "Время в формате 09:00."}, status=400))
-    upsert(cid, send_time=t)
     if BOT_APP:
-        try: schedule_daily(BOT_APP, cid, t)
-        except Exception as e: log.warning("reschedule: %s", e)
+        try:
+            set_daily_time(BOT_APP, cid, t)
+        except Exception as e:
+            log.warning("reschedule: %s", e)
+            upsert(cid, send_time=t, daily_summary_enabled=1, state=None)
+    else:
+        upsert(cid, send_time=t, daily_summary_enabled=1, state=None)
     ev(cid, "manual", meta="web_settime")
     return _cors(web.json_response({"ok": True, "send_time": t}))
 
@@ -11037,6 +11247,7 @@ def build_web():
     aio.router.add_post("/api/pa", _api_pa)
     aio.router.add_post("/api/checkin", _api_checkin)
     aio.router.add_post("/api/proactive", _api_proactive)
+    aio.router.add_post("/api/daily-summary", _api_daily_summary)
     aio.router.add_post("/api/profile", _api_profile)
     aio.router.add_post("/api/meal", _api_meal)
     aio.router.add_post("/api/partner", _api_partner)

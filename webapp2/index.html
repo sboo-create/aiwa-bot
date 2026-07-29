@@ -530,7 +530,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 <div id="hub" class="hubsheet hidden"></div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="cmic" aria-label="Голосом">🎤</button><button id="csend" aria-label="Отправить">→</button></div>
 <div id="tabs" aria-label="Разделы приложения"></div><input type="file" id="foodfile" accept="image/*" style="display:none">
-<script type="module" src="/assets/deslop/main.js?v=r18"></script>
+<script type="module" src="/assets/deslop/main.js?v=r21"></script>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp;
 const LOCAL_HOST=/^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/;
@@ -1343,12 +1343,13 @@ var TREX={
   'Своё':[]
  }},
  'Кардио':{w:false,flat:['Бег','Велотренажёр','Эллипс','Гребля','Скакалка']},
- 'Йога':{w:false,flat:['Виньяса','Хатха','Растяжка','Пилатес','Дыхание']},
+ 'Пилатес':{w:false,flat:['Мат','Реформер','Мобилити','Кор']},
+ 'Йога':{w:false,flat:['Виньяса','Хатха','Растяжка','Дыхание']},
  'Ходьба':{w:false,flat:['Прогулка','Скандинавская','Быстрая ходьба']},
  'Плавание':{w:false,flat:['Кроль','Брасс','На спине']},
  'Своё':{w:false,flat:[],custom:true}
 };
-var TRICON={'Силовая':'🏋️','Кардио':'🏃','Йога':'🧘','Ходьба':'🚶','Плавание':'🏊'};
+var TRICON={'Силовая':'🏋️','Кардио':'🏃','Пилатес':'🤸','Йога':'🧘','Ходьба':'🚶','Плавание':'🏊'};
 var TRAIN_STATE={}; var trcur={type:'Силовая',customType:'',dur:'45 мин',rpe:'Тяжело',ex:{}};
 var _trIdx=0;
 function streakHTML(){var n=(D&&D.streak)||0;if(n<2)return '';return "<div class='streakchip'>🔥 "+n+" дн. подряд</div>";}
