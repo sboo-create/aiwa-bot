@@ -194,6 +194,7 @@ class FoodAssetResolver:
             for label in manifest
         }
         self._generated: dict[str, str] = {}
+        self._generated_revision = 0
         self._generated_lock = threading.Lock()
         self._match_cache: dict[str, tuple[str, str, str] | None] = {}
         self._match_cache_lock = threading.Lock()
@@ -207,11 +208,18 @@ class FoodAssetResolver:
         if not food_id or not image_url:
             return
         with self._generated_lock:
+            if self._generated.get(food_id) == image_url:
+                return
             self._generated[food_id] = image_url
+            self._generated_revision += 1
 
     def generated_snapshot(self) -> dict[str, str]:
         with self._generated_lock:
             return dict(self._generated)
+
+    def generated_revision(self) -> int:
+        with self._generated_lock:
+            return self._generated_revision
 
     def _generated_url(self, food_id: str) -> str | None:
         with self._generated_lock:
