@@ -43,7 +43,11 @@ class MediaCatalogSeedTests(unittest.TestCase):
 
     def test_production_food_is_prioritized_then_curated_to_500(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "production.json"
+            root = Path(directory)
+            manifest = root / "webapp2/assets/food/manifest.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("{}", encoding="utf-8")
+            path = root / "production.json"
             path.write_text(json.dumps({
                 "schema": "aiwa-food-backfill-labels-v1",
                 "labels": [
@@ -54,7 +58,8 @@ class MediaCatalogSeedTests(unittest.TestCase):
                     }
                 ],
             }, ensure_ascii=False), encoding="utf-8")
-            rows = seeds._food_rows(path, 500)
+            with mock.patch.object(seeds, "ROOT", root):
+                rows = seeds._food_rows(path, 500)
         self.assertEqual(len(rows), 500)
         self.assertEqual(rows[0]["label"], "Редкое production-блюдо")
         self.assertEqual(
