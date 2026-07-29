@@ -614,7 +614,7 @@ def upsert(cid, *, user_generation=None, **kw):
     for k, v in kw.items(): c.execute(f"UPDATE users SET {k}=? WHERE chat_id=?", (v, cid))  # nosec B608
     c.commit(); c.close(); return True
 
-def record_onboarding_started(cid):
+def record_onboarding_started(cid, user_generation=None):
     """Emit one acquisition start per active privacy lifecycle.
 
     The marker, analytics event and Traction outbox item share one transaction.
@@ -632,7 +632,7 @@ def record_onboarding_started(cid):
         if not current or current[0]:
             return False
         c.execute("BEGIN IMMEDIATE")
-        if not _user_write_allowed(cid, conn=c):
+        if not _user_write_allowed(cid, user_generation, conn=c):
             c.rollback()
             return False
         claimed = c.execute(
@@ -3786,21 +3786,30 @@ def merge_summary_suggestions(u=None, st=None, extra=None):
     return items[:2]
 
 # ---------- senders ----------
-async def need_onboard(t):
+async def need_onboard(t, user_generation=None):
     cid = getattr(getattr(t, "chat", None), "id", None)
     if cid and is_partner(cid) and not is_onboarded(row(cid)):
         return await t.reply_text(PARTNER_INFO)
-    if cid: upsert(cid, state=None)
-    if cid: record_onboarding_started(cid)
+    if cid and user_generation is None:
+        user_generation = _user_generation(cid)
+    if cid: upsert(cid, user_generation=user_generation, state=None)
+    if cid: record_onboarding_started(cid, user_generation)
     await t.reply_text("Чтобы Айва давала персональные рекомендации, выбери, что сейчас ближе: ведёшь цикл или нет регулярного цикла.", reply_markup=ONB_KB)
 _last_start = {}
-async def begin_onboard(cid, msg, force=False):
+async def begin_onboard(cid, msg, force=False, user_generation=None):
     now = time.time()
     # дебаунс только для повторного /start; явный тап по кнопке (force) должен отвечать всегда
     if not force and now - _last_start.get(cid, 0) < 4: return
     _last_start[cid] = now
-    upsert(cid, state=None, pending_date=None)
-    record_onboarding_started(cid)
+    if user_generation is None:
+        user_generation = _user_generation(cid)
+    upsert(
+        cid,
+        user_generation=user_generation,
+        state=None,
+        pending_date=None,
+    )
+    record_onboarding_started(cid, user_generation)
     await msg.reply_text(START_TEXT, reply_markup=ONB_KB)
 
 _CARD_CACHE = {}
@@ -6410,9 +6419,9 @@ async def start(update, context):
     cid = update.effective_chat.id
     # /start is the only operation that begins a fresh lifecycle after /stop.
     # Incrementing the generation keeps older in-flight tasks permanently stale.
-    _activate_user(cid)
+    user_generation = _activate_user(cid)
     _sync_telegram_identity(update, allow_create=True)
-    record_onboarding_started(cid)
+    record_onboarding_started(cid, user_generation)
     if context.args and context.args[0].startswith("p_"):
         return await partner_join(context, cid, update.message, context.args[0][2:])
     if context.args and context.args[0] and not context.args[0].startswith("p_"):
@@ -6431,7 +6440,11 @@ async def start(update, context):
         return await update.message.reply_text(
             "У тебя уже всё настроено, данные на месте. Продолжить или начать настройку заново?",
             reply_markup=InlineKeyboardMarkup([[B("Продолжить", "keep", KBS.PRIMARY)], [B("Начать заново", "go_start", KBS.DANGER)]]))
-    await begin_onboard(cid, update.message)
+    await begin_onboard(
+        cid,
+        update.message,
+        user_generation=user_generation,
+    )
 async def today(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
     if not is_onboarded(row(cid)): return await need_onboard(update.message)

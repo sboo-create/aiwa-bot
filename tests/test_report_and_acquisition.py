@@ -177,6 +177,19 @@ class ReportAndAcquisitionTests(unittest.TestCase):
         self.assertEqual(self._onboarding_marker(711), 0)
         self.assertEqual(self._count_onboarding(711), 0)
 
+    def test_stale_lifecycle_cannot_claim_reactivated_user(self):
+        stale_generation = bot._activate_user(714)
+        bot.upsert(714, user_generation=stale_generation, state=None)
+        bot.del_user(714)
+        current_generation = bot._activate_user(714)
+        bot.upsert(714, user_generation=current_generation, state=None)
+
+        self.assertFalse(bot.record_onboarding_started(714, stale_generation))
+        self.assertEqual(self._onboarding_marker(714), 0)
+        self.assertEqual(self._count_onboarding(714), 0)
+        self.assertTrue(bot.record_onboarding_started(714, current_generation))
+        self.assertEqual(self._count_onboarding(714), 1)
+
     def test_event_failure_rolls_back_marker_for_retry(self):
         bot._activate_user(712)
         bot.upsert(712, state=None)
