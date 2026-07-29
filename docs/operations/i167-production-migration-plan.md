@@ -441,7 +441,181 @@ production, staging нужно вынести на маленькую отдел
 полностью: новым staging является `/srv/aiwa-staging` на i167. Он не должен
 оставаться платным «на всякий случай».
 
-## 7. Данные без PostgreSQL/Redis
+## 7. Дешёвый повторный переезд на другой сервер
+
+Первый переход на i167 должен одновременно создать переносимый deployment
+contract. Тогда i167 становится текущим хостом, а не уникальным «сервером,
+который умеет запускать AIWA».
+
+Цель: новый Linux-хост из чистой ОС должен быть подготовлен без ручного
+вспоминания команд за 1–2 часа, а плановый перенос AIWA после restore drill —
+за одно короткое окно с участием двух ответственных.
+
+### Что не должно быть привязано к i167
+
+- публичный Mini App использует стабильное доменное имя, а не IP сервера;
+- приложение обращается к Telegram по логическому
+  `api.telegram.org` через локальный relay frontend, а не знает IP relay;
+- SSH alias `i167` остаётся удобством оператора, но inventory содержит реальный
+  host ID, provider, region, IP и fingerprint;
+- systemd, Caddy/HAProxy, firewall, logrotate и backup policy создаются из
+  versioned templates;
+- CPU, memory, ports, release root и домены являются параметрами inventory;
+- release artifact не содержит writable state или секреты;
+- bot/provider secrets не существуют только на диске текущего хоста;
+- backup хранится off-host и не зависит от доступа к старому серверу.
+
+### Пять переносимых слоёв
+
+| Слой | Что переносится | Источник истины |
+|---|---|---|
+| Code | immutable artifact + SHA-256 + git SHA | GitHub Actions/artifact registry |
+| Host config | users, systemd, Caddy, HAProxy, firewall, quotas | Ansible/templates в repo |
+| State | SQLite Backup API snapshot, dynamic assets, manifests | encrypted off-host storage |
+| Secrets | bot/provider keys, deploy credentials | GitHub environment или secret manager |
+| Network | domains, relay endpoints, health checks | DNS + inventory, без IP в приложении |
+
+OpenTofu/Terraform может создавать VM, диски, DNS и firewall у поддерживаемого
+провайдера. Конфигурацию внутри VM лучше оставлять в provider-neutral Ansible:
+это позволяет переехать из Yandex Cloud к другому VPS/облаку без переписывания
+всего deployment процесса.
+
+Secret manager хранит значения, а репозиторий — только имена/ссылки и шаблоны.
+На новый хост secrets доставляются после production approval во временные
+файлы с узкими правами или systemd credentials; они не попадают в artifact,
+stdout, deployment manifest или backup.
+
+### Mobility kit, который нужно создать до первого cutover
+
+Планируемые versioned компоненты:
+
+```text
+deploy/portable/
+  inventory.example.yml
+  bootstrap.yml
+  roles/aiwa-host/
+  templates/aiwa.service.j2
+  templates/caddy-aiwa.conf.j2
+  templates/haproxy-telegram.cfg.j2
+  scripts/build-release
+  scripts/deploy-candidate
+  scripts/backup-state
+  scripts/restore-state
+  scripts/cutover
+  scripts/rollback
+  scripts/verify-host
+```
+
+Это состав будущей реализации, а не команды, которые уже существуют.
+
+`verify-host` должен машинно проверять:
+
+- ОС/архитектуру и поддерживаемую Python/runtime версию;
+- disk space, fsync, clock/NTP, ulimit, CPU/memory headroom;
+- Caddy, systemd, firewall и loopback bindings;
+- оба Telegram relay и TLS `api.telegram.org`;
+- доступ к off-host backup и secret references;
+- отсутствие второго poller;
+- точные владельцы/permissions каталогов;
+- restore тестовой SQLite и `pragma integrity_check`.
+
+### State bundle
+
+Каждый проверенный backup публикует небольшой manifest:
+
+```json
+{
+  "schema": "aiwa-state-bundle-v1",
+  "created_at": "UTC timestamp",
+  "release_sha": "40-char git sha",
+  "sqlite": {"file": "aiwa.db", "sha256": "...", "integrity": "ok"},
+  "assets": {"archive": "assets.tar.zst", "sha256": "..."},
+  "counts": {"users": 0, "meals": 0, "workouts": 0, "outbox": 0}
+}
+```
+
+Реальные counts формируются автоматически; пример не содержит production
+значений. Bundle шифруется до отправки во внешнее хранилище. Restore сверяет
+checksum, integrity, schema/version и контрольные counts до запуска process.
+Секреты и логи пользователей в manifest не попадают.
+
+Dynamic food/sport assets, review status и manifest входят в state bundle
+отдельно от code artifact. Curated статический каталог, который является
+частью git/release, повторно из state не копируется.
+
+### Повторный переезд: стандартный runbook
+
+#### T-2…T-1
+
+1. Создать target VM из IaC либо зарегистрировать существующий чистый host.
+2. Выполнить `bootstrap` и `verify-host`.
+3. Подключить target к тем же двум зарубежным relay отдельными restricted
+   keys. Сами relay одновременно с приложением не переносить.
+4. Развернуть exact production artifact в `candidate/no-poll` режиме.
+5. Восстановить последний state bundle во временный каталог.
+6. Прогнать health, Mini App, synthetic DB и relay failover.
+7. Подготовить DNS с низким TTL; стабильный домен позволяет не менять BotFather
+   Mini App URL.
+
+#### T0
+
+1. Включить короткий write freeze.
+2. Graceful-stop старого process и убедиться, что polling завершён.
+3. Сделать финальный SQLite Backup API snapshot и state bundle.
+4. Доставить bundle на target, проверить checksum/integrity/counts.
+5. Атомарно установить state и запустить ровно один target poller.
+6. Переключить DNS/reverse proxy на target.
+7. Выполнить Telegram/Mini App/cron/outbox smoke.
+8. Снять freeze и наблюдать.
+
+#### После T0
+
+- старый process остаётся выключенным, но хост не удаляется 24–72 часа;
+- rollback всегда начинается с остановки нового poller;
+- перед возвратом state с нового хоста переносится обратно тем же bundle;
+- после окна отката старый сервер очищается и выключается, чтобы не платить за
+  бессрочный standby.
+
+### Ограничение SQLite
+
+Пока production использует SQLite, плановый перенос является short
+active/passive cutover с write freeze. Нельзя безопасно «синхронизировать два
+живых файла» или запустить два writer/poller ради незаметного переключения.
+
+После отдельной PostgreSQL-миграции можно рассмотреть репликацию и меньшее
+окно записи, но это не требуется для переносимости code, secrets, assets,
+relay и host config. PostgreSQL/Redis по-прежнему не входят в текущий релиз.
+
+### Целевые трудозатраты следующего переезда
+
+После реализации mobility kit:
+
+| Работа | Оценка |
+|---|---:|
+| Новый host из чистой ОС | 1–2 часа automation + проверка |
+| Candidate restore/failover drill | 2–4 часа |
+| Подготовка окна и ответственных | 1–2 часа |
+| Финальный cutover | 30–90 минут |
+| Активное наблюдение | 4 часа, затем алерты 24–72 часа |
+
+Инженерная работа планового повторного переезда должна занимать примерно
+**1–2 дня**, а не повторять текущие 9–15 дней. Экстренное восстановление из
+готового bundle целится в RTO до 60 минут; это считается достигнутым только
+после реального restore drill на другом хосте.
+
+### Gate переносимости перед первым переходом на i167
+
+- [ ] Новый disposable host подготовлен из пустой ОС без ручного редактирования.
+- [ ] Exact artifact развернут по checksum.
+- [ ] State bundle восстановлен и проверен.
+- [ ] Secrets восстановлены из независимого источника, не с i167.
+- [ ] Stable domain переключён без изменения кода/BotFather URL.
+- [ ] Target использует relay A/B без hardcoded Telegram IP.
+- [ ] Старый и новый poller никогда не работали одновременно.
+- [ ] Rollback на старый host выполнен в rehearsal.
+- [ ] Время bootstrap/restore/cutover записано и укладывается в целевой RTO.
+
+## 8. Данные без PostgreSQL/Redis
 
 На первом этапе остаётся SQLite WAL и один writer.
 
@@ -459,7 +633,7 @@ production, staging нужно вынести на маленькую отдел
 - RPO на cutover: минуты; RTO: до 30 минут;
 - база не синхронизируется одновременно между Railway и i167.
 
-## 8. Воспроизводимый деплой для Сони и разработчиков
+## 9. Воспроизводимый деплой для Сони и разработчиков
 
 ### GitHub flow
 
@@ -508,7 +682,7 @@ Deploy job:
 
 Никакого `git pull` внутри активного каталога.
 
-## 9. Cutover Railway → i167
+## 10. Cutover Railway → i167
 
 ### T-7…T-2 дня
 
@@ -615,7 +789,7 @@ Telegram хранит неполученные updates ограниченное 
 и из off-host backup. Если команде нужен более длинный rollback window, его
 нужно явно согласовать как платное хранение, а не оставлять среду бессрочно.
 
-## 10. Откат
+## 11. Откат
 
 ### Код на i167
 
@@ -639,7 +813,7 @@ SQLite не откатывается вместе с кодом, если нет
 Никогда не запускать оба poller параллельно. Если восстановление БД не
 требуется, сначала откатывать только код/маршрут; restore теряет новые записи.
 
-## 11. Acceptance gates
+## 12. Acceptance gates
 
 ### До cutover
 
@@ -674,7 +848,7 @@ SQLite не откатывается вместе с кодом, если нет
 - [ ] Через 72 часа принято явное решение удалить или платно сохранить Railway.
 - [ ] После удаления Railway usage проверен: нет compute, Volume и баз среды.
 
-## 12. Оценка трудозатрат
+## 13. Оценка трудозатрат
 
 | Этап | Работа |
 |---|---:|
@@ -691,7 +865,7 @@ PostgreSQL/Redis, без разделения bot-edge и без нового н
 приложение не меняет архитектуру. Проверка network failover обязательна, но это
 не массовый тест AI/LLM.
 
-## 13. Что не делать
+## 14. Что не делать
 
 - не хардкодить IP Telegram;
 - не отключать TLS verification;
@@ -703,5 +877,8 @@ PostgreSQL/Redis, без разделения bot-edge и без нового н
 - не запускать два poller;
 - не смешивать перенос инфраструктуры с PostgreSQL/Redis;
 - не удалять Railway до доказанного backup/restore и окна наблюдения;
+- не хранить единственную копию secrets/backup/config на текущем сервере;
+- не оставлять systemd/Caddy/firewall как ручные изменения вне templates;
+- не переносить приложение и оба зарубежных relay в одно окно;
 - не считать остановленный compute полностью бесплатным, пока остаются Volume
   или другие тарифицируемые ресурсы.
