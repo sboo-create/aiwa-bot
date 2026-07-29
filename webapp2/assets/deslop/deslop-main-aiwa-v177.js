@@ -21149,7 +21149,8 @@ const aiwaTodayIso = () => {
   return zd(a?.fclass) === "напиток" || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(e) ? "/assets/food/drink-cup.svg?v=1" : uA;
 }, fA = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
 function iv({ mode: a, revision: e = 0 }) {
-  const [l, s, r] = px(rA, [a, e]), c = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, f = c?.mode === "male", [h, y] = E.useState(!1), [p, g] = E.useState({}), [v, b] = E.useState(""), [T, S] = E.useState(null), [selectedDayRevision, setSelectedDayRevision] = E.useState(0), [w, j] = E.useState(null), [M, D] = E.useState(!1), [A, R] = E.useState(null), [B, U] = E.useState(!1), [_, H] = E.useState(""), [P, K] = E.useState(null), [it, at] = E.useState(!1), I = E.useRef(null), selectedDayRequest = E.useRef(0), F = !!l.foodSection && !(l.foodSection.menu?.meals || []).length, Q = !!l.foodSection?.refreshing, et = E.useRef(0), aiwaAssetPoll = E.useRef({ revision: null, attempts: 0 }), aiwaAssetRows = [...l.foodSection?.menu?.meals || [], ...l.diary?.meals || [], ...Object.values(l.diary?.recent || {}).flatMap((rt) => rt?.meals || [])], aiwaAssetRefreshNeeded = aiwaAssetRows.some((rt) => rt?.asset_state === "missing" || rt?.image_source === "catalog_family" || rt?.image_source === "catalog_canonical"), aiwaPayloadAssetRevision = Math.max(Number(l.foodSection?.asset_revision || 0), Number(l.diary?.asset_revision || 0));
+  const [l, s, r] = px(rA, [a, e]), c = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, f = c?.mode === "male", [h, y] = E.useState(!1), [p, g] = E.useState({}), [v, b] = E.useState(""), [T, S] = E.useState(null), [selectedDayRevision, setSelectedDayRevision] = E.useState(0), [w, j] = E.useState(null), [M, D] = E.useState(!1), [A, R] = E.useState(null), [B, U] = E.useState(!1), [_, H] = E.useState(""), [P, K] = E.useState(null), [it, at] = E.useState(!1), I = E.useRef(null), selectedDayRequest = E.useRef(0), selectedDayRef = E.useRef(v), F = !!l.foodSection && !(l.foodSection.menu?.meals || []).length, Q = !!l.foodSection?.refreshing, et = E.useRef(0), aiwaAssetPoll = E.useRef({ revision: null, attempts: 0 }), aiwaAssetRows = [...l.foodSection?.menu?.meals || [], ...l.diary?.meals || [], ...Object.values(l.diary?.recent || {}).flatMap((rt) => rt?.meals || [])], aiwaAssetRefreshNeeded = aiwaAssetRows.some((rt) => rt?.asset_state === "missing" || rt?.image_source === "catalog_family" || rt?.image_source === "catalog_canonical"), aiwaPayloadAssetRevision = Math.max(Number(l.foodSection?.asset_revision || 0), Number(l.diary?.asset_revision || 0));
+  selectedDayRef.current = v;
   E.useEffect(() => {
     if (!Q) {
       et.current = 0;
@@ -21209,8 +21210,9 @@ function iv({ mode: a, revision: e = 0 }) {
       nt = !1;
     };
   }, [v, !!l.diary, selectedDayRevision]);
-  const N = async () => {
-    if (v && v !== aiwaTodayIso()) {
+  const N = async (rt = selectedDayRef.current) => {
+    if (rt !== selectedDayRef.current) return;
+    if (rt && rt !== aiwaTodayIso()) {
       setSelectedDayRevision((rt) => rt + 1);
       return;
     }
@@ -21251,8 +21253,14 @@ function iv({ mode: a, revision: e = 0 }) {
       }
     }
   }, ja = async (rt) => {
+    const selectedAtRequest = selectedDayRef.current;
     const Kt = await qt("/api/diary_del", { id: rt }).catch(() => null);
-    Kt && !Kt.error && (!v || v === aiwaTodayIso() ? r("diary", { ...l.diary, ...Kt }) : null, await N(), Ot("Приём удалён", { type: "success" }));
+    if (Kt && !Kt.error) {
+      if (selectedAtRequest === selectedDayRef.current) {
+        !selectedAtRequest || selectedAtRequest === aiwaTodayIso() ? r("diary", { ...l.diary, ...Kt }) : setSelectedDayRevision((ii) => ii + 1);
+      }
+      Ot("Приём удалён", { type: "success" });
+    }
   }, Aa = () => {
     K(null), H("add");
   }, Pr = async (rt) => {

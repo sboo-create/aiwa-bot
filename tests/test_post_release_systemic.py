@@ -228,6 +228,8 @@ class PostReleaseSystemicTests(unittest.TestCase):
             bundle,
         )
         self.assertIn("setSelectedDayRevision((rt) => rt + 1)", bundle)
+        self.assertIn("selectedDayRef = E.useRef(v)", bundle)
+        self.assertIn("selectedAtRequest === selectedDayRef.current", bundle)
         self.assertIn('r("diary", { ...l.diary, ...Kt })', bundle)
         self.assertIn(
             "diary: wt ? T || { meals: [], totals: {}, target: st } : Z",
@@ -262,6 +264,10 @@ class PostReleaseSystemicTests(unittest.TestCase):
             source.index('if not best.get("once"):'),
             source.index('_pa_mark(cid, best["key"])'),
         )
+        self.assertTrue(bot._pa_logrow(
+            self.cid, "streak_3", 56, 0, "shadow",
+        ))
+        self.assertTrue(bot._pa_logged_today(self.cid))
 
     def test_decimal_amount_is_not_mistaken_for_a_date(self):
         with mock.patch.object(bot, "dtoday", return_value=date(2026, 7, 29)):
