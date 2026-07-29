@@ -116,7 +116,7 @@ L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
 AIWA_VERSION = os.environ.get(
-    "AIWA_VERSION", "2026-07-29-v179-male-mode-systemic"
+    "AIWA_VERSION", "2026-07-29-v180-cx-day-diary"
 )
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
@@ -5663,6 +5663,23 @@ def _pa_recent(cid, key, days):
         return (dtoday() - date.fromisoformat(r[0][:10])).days < max(1, int(days))
     except Exception:
         return False
+def _pa_seen(cid, key):
+    """Return whether a lifetime milestone signal was already processed."""
+    try:
+        c = db()
+        r = c.execute(
+            "SELECT 1 FROM proactive_state WHERE chat_id=? AND signal=? LIMIT 1",
+            (cid, key),
+        ).fetchone()
+        c.close()
+        return bool(r)
+    except Exception:
+        return False
+def _pa_suppressed(cid, candidate):
+    """Apply lifetime semantics to milestones and cooldowns to recurring nudges."""
+    if candidate.get("once"):
+        return _pa_seen(cid, candidate["key"])
+    return _pa_recent(cid, candidate["key"], candidate.get("cooldown", 2))
 def _pa_mark(cid, key):
     try:
         c = db()
@@ -5790,7 +5807,7 @@ def _proactive_signals(cid, slot="eve"):
         except Exception:
             streak = 0
         if streak in (3, 7, 14, 30):
-            out.append({"key": "streak_%s" % streak, "score": 56, "cooldown": 1,
+            out.append({"key": "streak_%s" % streak, "score": 56, "once": True,
                         "topic": "коротко и по-взрослому отметь, что %s %s дней подряд ведёт отметки, и спокойно предложи продолжить — без слащавости, без фраз вроде порадуй себя" % (
                             "он" if male else "она", streak,
                         ),
@@ -5824,7 +5841,10 @@ async def _proactive_pick_and_send(cid, slot, shadow, context):
         return None
     if _pa_logged_today(cid):
         return None
-    cands = [c for c in _proactive_signals(cid, slot) if not _pa_recent(cid, c["key"], c.get("cooldown", 2))]
+    cands = [
+        c for c in _proactive_signals(cid, slot)
+        if not _pa_suppressed(cid, c)
+    ]
     cands = [c for c in cands if c["score"] >= PROACTIVE_MIN]
     if not cands:
         return None

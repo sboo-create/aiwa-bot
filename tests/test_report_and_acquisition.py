@@ -337,7 +337,9 @@ class ReportAndAcquisitionTests(unittest.TestCase):
         self.assertIn('y?.ok && y?.delivered', bundle)
         self.assertIn('A?.ok && A?.delivered', bundle)
         self.assertIn('label: reportBusy ? "Собираю…" : "Собрать выписку"', bundle)
-        self.assertIn("window.Telegram?.WebApp?.close?.()", bundle)
+        self.assertIn('title: "Выписка готова"', bundle)
+        self.assertIn("a.showPopup({", bundle)
+        self.assertIn("a?.close?.()", bundle)
 
 
 if __name__ == "__main__":

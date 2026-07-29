@@ -19681,7 +19681,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r23").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r24").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -19743,6 +19743,27 @@ const Rj = Object.fromEntries(
   const e = /* @__PURE__ */ new Date(`${a}T12:00:00`);
   return Number.isNaN(e.getTime()) ? a : zj.format(e);
 };
+function aiwaConfirmReportDelivered() {
+  const a = window.Telegram?.WebApp, e = "Выписка готова и отправлена в чат бота.";
+  Ot(e, { type: "success" });
+  if (typeof a?.showPopup == "function") {
+    try {
+      a.showPopup({
+        title: "Выписка готова",
+        message: "PDF уже отправлен в чат. Нажми «ОК», чтобы вернуться к нему.",
+        buttons: [{ id: "ok", type: "ok" }]
+      }, () => a.close?.());
+      return;
+    } catch {
+    }
+  }
+  setTimeout(() => {
+    try {
+      a?.close?.();
+    } catch {
+    }
+  }, 2200);
+}
 function Uj() {
   const [a, e] = E.useState(null), [l, s] = E.useState(!1), [r, c] = E.useState(!1);
   E.useEffect(() => {
@@ -19753,12 +19774,7 @@ function Uj() {
       c(!0);
       try {
         const y = await qt("/api/report", { period: "all" }).catch(() => null);
-        y?.ok && y?.delivered ? (Ot("PDF отправлен — открываю чат", { type: "success" }), setTimeout(() => {
-          try {
-            window.Telegram?.WebApp?.close?.();
-          } catch {
-          }
-        }, 650)) : Ot(y?.text || "Выписка временно недоступна", { type: "error" });
+        y?.ok && y?.delivered ? aiwaConfirmReportDelivered() : Ot(y?.text || "Выписка временно недоступна", { type: "error" });
       } finally {
         c(!1);
       }
@@ -20512,12 +20528,7 @@ function Yh({ isOpen: a, onClose: e }) {
     setReportBusy(!0);
     try {
       const A = await qt("/api/report", { period: y }).catch(() => null);
-      A?.ok && A?.delivered ? (Ot("PDF отправлен — открываю чат", { type: "success" }), setTimeout(() => {
-        try {
-          window.Telegram?.WebApp?.close?.();
-        } catch {
-        }
-      }, 650)) : Ot(A?.text || "Выписка временно недоступна", { type: "error" });
+      A?.ok && A?.delivered ? aiwaConfirmReportDelivered() : Ot(A?.text || "Выписка временно недоступна", { type: "error" });
     } finally {
       setReportBusy(!1);
     }
@@ -20993,7 +21004,7 @@ function aA({ isOpen: a, onClose: e, onSaved: l, editingMeal: s = null }) {
     r === "manual" ? /* @__PURE__ */ m.jsx(ev, { meal: null, onSaved: l, onClose: e }) : null
   ] }) }) }) });
 }
-function iA({ isOpen: a, onClose: e, diary: l, onAdd: s, onEdit: r, onDelete: c, onReco: f }) {
+function iA({ isOpen: a, onClose: e, diary: l, onAdd: s, onEdit: r, onDelete: c, onReco: f, canAdd: aiwaCanAdd = !0 }) {
   const h = l?.meals || [], y = l?.totals || {}, p = l?.target || {};
   return /* @__PURE__ */ m.jsx(bn, { isOpen: a, onClose: e, children: /* @__PURE__ */ m.jsxs(yt, { className: "aiwa-tma-blocks", children: [
     /* @__PURE__ */ m.jsx(yt.Item, { children: /* @__PURE__ */ m.jsx(pt, { tappable: !1, children: /* @__PURE__ */ m.jsx(
@@ -21027,10 +21038,10 @@ function iA({ isOpen: a, onClose: e, diary: l, onAdd: s, onEdit: r, onDelete: c,
           )
         },
         b.id
-      )) : /* @__PURE__ */ m.jsx(pt, { as: "button", type: "button", onClick: s, end: /* @__PURE__ */ m.jsx(pt.Part, { type: "Chevron" }), children: /* @__PURE__ */ m.jsx(pt.Text, { type: "Accent", title: "Добавить" }) }) }, g.value);
+      )) : aiwaCanAdd ? /* @__PURE__ */ m.jsx(pt, { as: "button", type: "button", onClick: s, end: /* @__PURE__ */ m.jsx(pt.Part, { type: "Chevron" }), children: /* @__PURE__ */ m.jsx(pt.Text, { type: "Accent", title: "Добавить" }) }) : /* @__PURE__ */ m.jsx(pt, { tappable: !1, children: /* @__PURE__ */ m.jsx(pt.Text, { title: "Нет записей" }) }) }, g.value);
     }),
     /* @__PURE__ */ m.jsx(yt.Item, { children: /* @__PURE__ */ m.jsx(pt, { tappable: !1, children: /* @__PURE__ */ m.jsxs("div", { className: "aiwa-cell-actions", children: [
-      /* @__PURE__ */ m.jsx(Wt, { variant: "filled", label: "Добавить приём", isFill: !0, ...se("Добавить приём", s) }),
+      aiwaCanAdd ? /* @__PURE__ */ m.jsx(Wt, { variant: "filled", label: "Добавить приём", isFill: !0, ...se("Добавить приём", s) }) : null,
       /* @__PURE__ */ m.jsx(Wt, { variant: "filled", label: "Совет по дневнику", isFill: !0, ...se("Совет по дневнику", f) })
     ] }) }) })
   ] }) });
@@ -21124,6 +21135,18 @@ const aiwaTodayIso = () => {
     e.push({ iso: r, date: String(s.getDate()), label: oA[s.getDay()], today: l === 0 });
   }
   return e;
+}, aiwaFoodHistoryStorageKey = "aiwa.food.selectedDate", aiwaReadFoodHistoryDate = () => {
+  try {
+    const a = sessionStorage.getItem(aiwaFoodHistoryStorageKey) || "";
+    return yx(30).some((e) => e.iso === a) ? a : "";
+  } catch {
+    return "";
+  }
+}, aiwaStoreFoodHistoryDate = (a) => {
+  try {
+    a && a !== aiwaTodayIso() ? sessionStorage.setItem(aiwaFoodHistoryStorageKey, a) : sessionStorage.removeItem(aiwaFoodHistoryStorageKey);
+  } catch {
+  }
 }, rA = ["foodSection", "diary"], uA = "/assets/food/meal-placeholder.svg", zd = (a) => String(a || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim(), Xf = "?v=2", av = (a, e) => {
   const l = zd(e).trim();
   if (!a || !l) return null;
@@ -21138,7 +21161,7 @@ const aiwaTodayIso = () => {
   return zd(a?.fclass) === "напиток" || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(e) ? "/assets/food/drink-cup.svg?v=1" : uA;
 }, fA = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
 function iv({ mode: a, revision: e = 0 }) {
-  const [l, s, r] = px(rA, [a, e]), c = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, f = c?.mode === "male", [h, y] = E.useState(!1), [p, g] = E.useState({}), [v, b] = E.useState(""), [T, S] = E.useState(null), [w, j] = E.useState(null), [M, D] = E.useState(!1), [A, R] = E.useState(null), [B, U] = E.useState(!1), [_, H] = E.useState(""), [P, K] = E.useState(null), [it, at] = E.useState(!1), I = E.useRef(null), F = !!l.foodSection && !(l.foodSection.menu?.meals || []).length, Q = !!l.foodSection?.refreshing, et = E.useRef(0), aiwaAssetPoll = E.useRef({ revision: null, attempts: 0 }), aiwaAssetRows = [...l.foodSection?.menu?.meals || [], ...l.diary?.meals || [], ...Object.values(l.diary?.recent || {}).flatMap((rt) => rt?.meals || [])], aiwaAssetRefreshNeeded = aiwaAssetRows.some((rt) => rt?.asset_state === "missing" || rt?.image_source === "catalog_family" || rt?.image_source === "catalog_canonical"), aiwaPayloadAssetRevision = Math.max(Number(l.foodSection?.asset_revision || 0), Number(l.diary?.asset_revision || 0));
+  const [l, s, r] = px(rA, [a, e]), c = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, f = c?.mode === "male", [h, y] = E.useState(!1), [p, g] = E.useState({}), [v, b] = E.useState(aiwaReadFoodHistoryDate), [T, S] = E.useState(null), [w, j] = E.useState(null), [M, D] = E.useState(!1), [A, R] = E.useState(null), [B, U] = E.useState(!1), [_, H] = E.useState(""), [P, K] = E.useState(null), [it, at] = E.useState(!1), I = E.useRef(null), selectedDayRequest = E.useRef(0), F = !!l.foodSection && !(l.foodSection.menu?.meals || []).length, Q = !!l.foodSection?.refreshing, et = E.useRef(0), aiwaAssetPoll = E.useRef({ revision: null, attempts: 0 }), aiwaAssetRows = [...l.foodSection?.menu?.meals || [], ...l.diary?.meals || [], ...Object.values(l.diary?.recent || {}).flatMap((rt) => rt?.meals || [])], aiwaAssetRefreshNeeded = aiwaAssetRows.some((rt) => rt?.asset_state === "missing" || rt?.image_source === "catalog_family" || rt?.image_source === "catalog_canonical"), aiwaPayloadAssetRevision = Math.max(Number(l.foodSection?.asset_revision || 0), Number(l.diary?.asset_revision || 0));
   E.useEffect(() => {
     if (!Q) {
       et.current = 0;
@@ -21179,8 +21202,29 @@ function iv({ mode: a, revision: e = 0 }) {
   }, [aiwaAssetRefreshNeeded, aiwaPayloadAssetRevision]), E.useEffect(() => {
     fetch("/assets/food/manifest.json?v=2").then((rt) => rt.ok ? rt.json() : {}).then((rt) => g(rt || {})).catch(() => {
     });
-  }, []);
-  const N = () => s("diary");
+  }, []), E.useEffect(() => {
+    if (!l.diary) return;
+    const rt = ++selectedDayRequest.current, Kt = v;
+    aiwaStoreFoodHistoryDate(Kt);
+    if (!Kt || Kt === aiwaTodayIso()) {
+      S(null);
+      return;
+    }
+    const ii = l.diary.recent?.[Kt];
+    if (ii) {
+      S(ii);
+      return;
+    }
+    let nt = !0;
+    return S(null), qt("/api/diary", { d: Kt }).catch(() => null).then((st) => {
+      nt && selectedDayRequest.current === rt && S(st || { meals: [], date: Kt });
+    }), () => {
+      nt = !1;
+    };
+  }, [v, l.diary]);
+  const N = async () => {
+    await s("diary");
+  };
   if (!l.foodSection || !l.diary) return /* @__PURE__ */ m.jsx(hx, { title: "Питание", variant: "food" });
   const V = l.foodSection, Z = l.diary, nt = Z.totals || {}, st = Z.target || {}, O = V.menu?.meals || [], tt = [
     { index: 0, value: "breakfast", label: "Завтрак" },
@@ -21202,20 +21246,9 @@ function iv({ mode: a, revision: e = 0 }) {
         U(!1);
       }
     }
-  }, Ea = async (rt) => {
+  }, Ea = (rt) => {
     const Kt = typeof rt == "string" ? rt : rt?.iso || "";
-    if (b(Kt), !Kt || Kt === _t) {
-      S(null);
-      return;
-    }
-    const ii = Z.recent?.[Kt];
-    if (ii) {
-      S(ii);
-      return;
-    }
-    S(null);
-    const nt = await qt("/api/diary", { d: Kt }).catch(() => null);
-    S(nt || { meals: [] });
+    aiwaStoreFoodHistoryDate(Kt), b(Kt);
   }, rn = async (rt, Kt) => {
     if (!M) {
       D(!0);
@@ -21228,7 +21261,7 @@ function iv({ mode: a, revision: e = 0 }) {
     }
   }, ja = async (rt) => {
     const Kt = await qt("/api/diary_del", { id: rt }).catch(() => null);
-    Kt && !Kt.error && (r("diary", { meals: Kt.meals || [], totals: Kt.totals || {}, target: Kt.target || st }), Ot("Приём удалён", { type: "success" }));
+    Kt && !Kt.error && (await N(), Ot("Приём удалён", { type: "success" }));
   }, Aa = () => {
     K(null), H("add");
   }, Pr = async (rt) => {
@@ -21330,7 +21363,7 @@ function iv({ mode: a, revision: e = 0 }) {
             image: rt.image_url || av(p, rt.title) || foodFallbackImage(rt) || cj,
             title: rt.title,
             description: `${_d(rt.kcal)} · Б${Math.round(rt.protein || 0)} · Ж${Math.round(rt.fat || 0)} · У${Math.round(rt.carbs || 0)}`,
-            onClick: wt ? void 0 : () => H("diary")
+            onClick: () => H("diary")
           },
           rt.id
         )) : it || wt && !T ? null : /* @__PURE__ */ m.jsx(
@@ -21390,7 +21423,8 @@ function iv({ mode: a, revision: e = 0 }) {
       {
         isOpen: _ === "diary",
         onClose: () => H(""),
-        diary: Z,
+        diary: wt ? T || { meals: [], totals: {}, target: st } : Z,
+        canAdd: !wt,
         onAdd: Aa,
         onEdit: (rt) => {
           K(rt), H("add");

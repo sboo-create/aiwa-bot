@@ -204,6 +204,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
         bundle = (
             root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
+        fallback = (root / "webapp2/index.html").read_text(encoding="utf-8")
         self.assertIn('qt("/api/daily-summary", { enabled: A })', bundle)
         self.assertIn('"Силовая", "Кардио", "Пилатес", "Йога"', bundle)
         self.assertIn('["пилатес", "Пилатес"]', bundle)
@@ -212,6 +213,40 @@ class PostReleaseSystemicTests(unittest.TestCase):
             for row in bot.MENU_KB.inline_keyboard
             for button in row
         ))
+
+    def test_cx_food_history_and_report_feedback_are_durable(self):
+        root = Path(__file__).resolve().parents[1]
+        bundle = (
+            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
+        ).read_text(encoding="utf-8")
+        fallback = (root / "webapp2/index.html").read_text(encoding="utf-8")
+        self.assertIn('sessionStorage.setItem(aiwaFoodHistoryStorageKey, a)', bundle)
+        self.assertIn("selectedDayRequest.current === rt", bundle)
+        self.assertIn(
+            "diary: wt ? T || { meals: [], totals: {}, target: st } : Z",
+            bundle,
+        )
+        self.assertIn("canAdd: !wt", bundle)
+        self.assertIn('title: "Выписка готова"', bundle)
+        self.assertIn("a.showPopup({", bundle)
+        self.assertNotIn(
+            'Ot("PDF отправлен — открываю чат", { type: "success" })',
+            bundle,
+        )
+        self.assertIn("function reportDelivered()", fallback)
+        self.assertIn("typeof tg.showPopup==='function'", fallback)
+        self.assertNotIn("},650)", fallback)
+
+    def test_streak_proactive_milestone_is_lifetime_once(self):
+        candidate = {"key": "streak_3", "score": 56, "once": True}
+        self.assertFalse(bot._pa_suppressed(self.cid, candidate))
+        self.assertTrue(bot._pa_mark(self.cid, candidate["key"]))
+        self.assertTrue(bot._pa_suppressed(self.cid, candidate))
+
+        recurring = {"key": "low_energy", "score": 70, "cooldown": 3}
+        with mock.patch.object(bot, "_pa_recent", return_value=True) as recent:
+            self.assertTrue(bot._pa_suppressed(self.cid, recurring))
+        recent.assert_called_once_with(self.cid, "low_energy", 3)
 
     def test_decimal_amount_is_not_mistaken_for_a_date(self):
         with mock.patch.object(bot, "dtoday", return_value=date(2026, 7, 29)):
@@ -295,17 +330,17 @@ class PostReleaseSystemicTests(unittest.TestCase):
         bundle = (
             root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
-        self.assertIn("main.js?v=r23", index)
-        self.assertIn('import "./deslop-main-aiwa-v177.js?v=r23";', entry)
+        self.assertIn("main.js?v=r24", index)
+        self.assertIn('import "./deslop-main-aiwa-v177.js?v=r24";', entry)
         self.assertIn(
-            'import("./AiwaWebUiChart-aiwa-v177.js?v=r23")',
+            'import("./AiwaWebUiChart-aiwa-v177.js?v=r24")',
             bundle,
         )
         chart_bundle = (
             root / "webapp2/assets/deslop/AiwaWebUiChart-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'from "./deslop-main-aiwa-v177.js?v=r23";',
+            'from "./deslop-main-aiwa-v177.js?v=r24";',
             chart_bundle,
         )
 
