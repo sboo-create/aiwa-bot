@@ -414,6 +414,15 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertEqual(missing.status, 404)
         self.assertEqual(missing.content_type, "application/octet-stream")
 
+        generated_request = SimpleNamespace(
+            path="/generated-food/example.webp",
+            headers={},
+        )
+        generated = asyncio.run(
+            bot._security_headers(generated_request, handler)
+        )
+        self.assertEqual(generated.content_type, "application/octet-stream")
+
     def test_public_asset_activation_is_atomic_idempotent_and_additive(self):
         root = Path(__file__).resolve().parents[1]
         script = root / "deploy/i167/activate-public-assets.sh"
@@ -490,6 +499,25 @@ class PostReleaseSystemicTests(unittest.TestCase):
         )
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("previously published asset disappeared", failed.stderr)
+        self.assertEqual(current.resolve(), partial.resolve())
+
+        symlink_sha = "3" * 40
+        release(symlink_sha)
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        symlink_target = (
+            Path(self.tmp.name) / "public-releases" / symlink_sha
+        )
+        symlink_target.symlink_to(outside, target_is_directory=True)
+        refused = subprocess.run(
+            [str(script), symlink_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("immutable-release symlink", refused.stderr)
+        self.assertTrue(symlink_target.is_symlink())
         self.assertEqual(current.resolve(), partial.resolve())
 
     def test_aiwa_upstream_serves_static_manifest_for_i167_proxy(self):

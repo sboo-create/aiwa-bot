@@ -26,6 +26,15 @@ target="$public_root/$sha"
 next_link="$staging_root/public-current.next"
 current_link="$staging_root/public-current"
 
+if [[ -L "$target" ]]; then
+  echo "refusing unexpected immutable-release symlink: $target" >&2
+  exit 1
+fi
+if [[ -e "$next_link" || -L "$next_link" ]]; then
+  echo "refusing to replace unexpected $next_link" >&2
+  exit 1
+fi
+
 test -d "$source_assets"
 test -f "$source_assets/food/manifest.json"
 test -f "$source_assets/train/manifest.json"
@@ -117,10 +126,6 @@ else
   candidate=""
 fi
 
-if [[ -e "$next_link" || -L "$next_link" ]]; then
-  echo "refusing to replace unexpected $next_link" >&2
-  exit 1
-fi
 ln -s "$target" "$next_link"
 python3 - "$next_link" "$current_link" <<'PY'
 import os
