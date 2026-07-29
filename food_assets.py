@@ -42,13 +42,17 @@ _TOKEN_ALIASES = {
     "куриная": "курица",
     "куриное": "курица",
     "куриный": "курица",
+    "курицей": "курица",
     "индейки": "индейка",
+    "индейкой": "индейка",
     "творожная": "творог",
     "творожный": "творог",
     "гречневая": "гречка",
     "гречневой": "гречка",
+    "гречкой": "гречка",
     "рисовая": "рис",
     "рисовый": "рис",
+    "рисом": "рис",
     "овощной": "овощи",
     "овощная": "овощи",
     "овощами": "овощи",
@@ -59,6 +63,11 @@ _TOKEN_ALIASES = {
     "ягодами": "ягоды",
     "грибами": "грибы",
     "сыром": "сыр",
+    "говядиной": "говядина",
+    "рыбой": "рыба",
+    "треской": "треска",
+    "салатом": "салат",
+    "яиц": "яйца",
     "тунцом": "тунец",
     "лососем": "лосось",
 }
@@ -88,6 +97,37 @@ _ANCHOR_GROUPS = (
     {"творог", "йогурт", "сыр", "кефир", "ряженка"},
     {"яблоко", "банан", "апельсин", "груша", "ягоды", "сухофрукты"},
 )
+# Deterministic family fallbacks are deliberately narrower than fuzzy
+# similarity. They reuse a reviewed catalog image only when the dish contains
+# an explicit main-food token. Side dishes cannot turn an unrelated unknown
+# snack into a pretty but false match, while common generated menu variants
+# such as “омлет из двух яиц” and “треска с капустой” still get honest,
+# category-correct artwork.
+_FAMILY_DEFAULTS = (
+    ({"омлет"}, "Омлет с овощами"),
+    ({"яичница"}, "Яичница глазунья"),
+    ({"яйца", "яйцо"}, "Яйца варёные"),
+    ({"треска"}, "Треска на пару"),
+    ({"лосось"}, "Лосось запечённый"),
+    ({"скумбрия"}, "Скумбрия запечённая"),
+    ({"сельдь"}, "Сельдь с картофелем"),
+    ({"тунец"}, "Тунец с салатом"),
+    ({"креветки"}, "Креветки с овощами"),
+    ({"рыба"}, "Рыба с картофелем"),
+    ({"говядина"}, "Говядина тушёная"),
+    ({"индейка"}, "Запечённая индейка с овощами"),
+    ({"курица"}, "Курица с овощами"),
+    ({"борщ"}, "Борщ"),
+    ({"щи"}, "Щи"),
+    ({"уха"}, "Уха"),
+    ({"суп"}, "Овощной суп"),
+    ({"творог"}, "Творог с ягодами"),
+    ({"йогурт"}, "Йогурт натуральный"),
+    ({"гречка"}, "Гречневая каша"),
+    ({"рис"}, "Рис с овощами"),
+    ({"картофель"}, "Картофель запечённый"),
+    ({"салат"}, "Овощной салат"),
+)
 
 
 def normalize_label(value: object) -> str:
@@ -114,6 +154,30 @@ def _anchor(tokens: Iterable[str]) -> str | None:
     for index, group in enumerate(_ANCHOR_GROUPS):
         if token_set.intersection(group):
             return str(index)
+    return None
+
+
+def _family_match(
+    label: object, manifest: dict[str, str],
+) -> tuple[str, str, str] | None:
+    # Generated menu labels use the head ingredient first (“салат с…”,
+    # “гречка с…”, “треска с…”). Resolve the first explicit family token in
+    # text order instead of whichever family happens to appear first in the
+    # defaults table. This keeps multi-ingredient dishes deterministic and
+    # prevents a secondary ingredient from stealing the image.
+    ordered_tokens = [
+        _TOKEN_ALIASES.get(word, word)
+        for word in normalize_label(label).split()
+        if word not in _STOP_WORDS and not word.isdigit()
+    ]
+    for token in ordered_tokens:
+        for required, catalog_label in _FAMILY_DEFAULTS:
+            if token in required and catalog_label in manifest:
+                return (
+                    catalog_label,
+                    manifest[catalog_label],
+                    "catalog_family",
+                )
     return None
 
 
@@ -173,7 +237,7 @@ class FoodAssetResolver:
         query_tokens = _tokens(label)
         query_anchor = _anchor(query_tokens)
         if not query_tokens or query_anchor is None:
-            result = None
+            result = _family_match(label, self.manifest)
             with self._match_cache_lock:
                 self._match_cache[normalized] = result
             return result
@@ -196,7 +260,7 @@ class FoodAssetResolver:
             if contained and score >= 0.60:
                 matches.append((score, len(common), candidate, self.manifest[candidate]))
         if not matches:
-            result = None
+            result = _family_match(label, self.manifest)
             with self._match_cache_lock:
                 if len(self._match_cache) >= 4096:
                     self._match_cache.clear()
