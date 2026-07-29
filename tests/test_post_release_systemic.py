@@ -2,6 +2,7 @@ import asyncio
 from datetime import date
 import inspect
 import json
+import mimetypes
 import os
 import tempfile
 import unittest
@@ -364,6 +365,18 @@ class PostReleaseSystemicTests(unittest.TestCase):
             'from "./deslop-main-aiwa-v177.js?v=r25";',
             chart_bundle,
         )
+
+    def test_i167_assets_are_proxied_without_broad_filesystem_access(self):
+        root = Path(__file__).resolve().parents[1]
+        caddy = (
+            root / "deploy/i167/aiwa-staging.caddy"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("handle /assets/*", caddy)
+        self.assertIn("reverse_proxy 127.0.0.1:9910", caddy)
+        self.assertNotIn("root * /srv/aiwa-staging/current", caddy)
+        self.assertNotIn("file_server", caddy)
+        self.assertEqual(mimetypes.guess_type("catalog.webp")[0], "image/webp")
 
 
 if __name__ == "__main__":

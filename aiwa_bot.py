@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
 import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue, atexit, contextvars
+import mimetypes
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -37,6 +38,8 @@ from aiohttp import web
 import requests
 import hmac as _hmac, hashlib as _hashlib
 from urllib.parse import parse_qsl as _pqsl, urlsplit as _urlsplit, quote as _urlquote
+
+mimetypes.add_type("image/webp", ".webp")
 
 import cycle as C
 import llm as L
