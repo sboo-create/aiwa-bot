@@ -12377,7 +12377,9 @@ async def _legacy_admin_removed(request):
 async def _security_headers(request, handler):
     response = await handler(request)
     if (
-        request.path.startswith(("/assets/food/", "/assets/train/"))
+        request.path.startswith(
+            ("/assets/food/catalog-v2/", "/assets/train/catalog-v2/")
+        )
         and request.path.casefold().endswith(".webp")
         and response.status == 200
         and response.content_type in {"", "application/octet-stream"}

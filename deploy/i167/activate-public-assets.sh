@@ -37,6 +37,23 @@ if [[ -z "$test_root" && "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+lock_dir="$staging_root/.public-assets-activation.lock"
+candidate=""
+if ! mkdir -- "$lock_dir"; then
+  echo "public asset activation already in progress: $lock_dir" >&2
+  exit 1
+fi
+chmod 0700 "$lock_dir"
+printf '%s\n' "$$" >"$lock_dir/pid"
+cleanup() {
+  if [[ -n "${candidate:-}" && -d "$candidate" ]]; then
+    rm -rf -- "$candidate"
+  fi
+  rm -f -- "$lock_dir/pid"
+  rmdir -- "$lock_dir" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 release="$staging_root/releases/$sha"
 source_assets="$release/webapp2/assets"
 public_root="$staging_root/public-releases"
@@ -69,12 +86,6 @@ fi
 
 install -d -o "$public_owner" -g "$public_group" -m 0750 "$public_root"
 candidate="$(mktemp -d "$public_root/.${sha}.candidate.XXXXXX")"
-cleanup() {
-  if [[ -n "${candidate:-}" && -d "$candidate" ]]; then
-    rm -rf -- "$candidate"
-  fi
-}
-trap cleanup EXIT
 
 cp -a "$source_assets" "$candidate/assets"
 chown -R "$public_owner:$public_group" "$candidate"

@@ -521,6 +521,19 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertTrue(symlink_target.is_symlink())
         self.assertEqual(current.resolve(), partial.resolve())
 
+        lock_dir = Path(self.tmp.name) / ".public-assets-activation.lock"
+        lock_dir.mkdir()
+        locked = subprocess.run(
+            [str(script), "4" * 40],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(locked.returncode, 0)
+        self.assertIn("activation already in progress", locked.stderr)
+        self.assertTrue(lock_dir.is_dir())
+        self.assertEqual(current.resolve(), partial.resolve())
+
     def test_aiwa_upstream_serves_static_manifest_for_i167_proxy(self):
         async def fetch_manifest():
             client = TestClient(TestServer(bot.build_web()))
