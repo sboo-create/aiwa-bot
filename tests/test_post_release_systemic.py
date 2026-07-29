@@ -367,16 +367,16 @@ class PostReleaseSystemicTests(unittest.TestCase):
             chart_bundle,
         )
 
-    def test_i167_assets_are_proxied_without_broad_filesystem_access(self):
+    def test_i167_assets_use_isolated_atomic_public_release(self):
         root = Path(__file__).resolve().parents[1]
         caddy = (
             root / "deploy/i167/aiwa-staging.caddy"
         ).read_text(encoding="utf-8")
 
         self.assertIn("handle /assets/*", caddy)
-        self.assertIn("reverse_proxy 127.0.0.1:9910", caddy)
+        self.assertIn("root * /srv/aiwa-staging/public-current", caddy)
+        self.assertIn("file_server", caddy)
         self.assertNotIn("root * /srv/aiwa-staging/current", caddy)
-        self.assertNotIn("file_server", caddy)
         self.assertEqual(mimetypes.guess_type("catalog.webp")[0], "image/webp")
 
     def test_webp_static_response_has_browser_safe_content_type(self):

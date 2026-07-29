@@ -56,6 +56,13 @@ transition an old client therefore continues to resolve old URLs, while a new
 client receives the cache-busted manifest only from an image that already
 contains every referenced `catalog-v2` file. No CDN purge is required.
 
+On i167, Caddy must not read from the application release directory. Build
+`/srv/aiwa-staging/public-releases/<sha>` with only `webapp2/assets`, grant the
+Caddy group read/traverse access to that public tree, and atomically replace
+`/srv/aiwa-staging/public-current` only after the complete tree validates.
+This keeps static assets available during application restarts without
+granting Caddy access to code, configuration, SQLite or provider credentials.
+
 After deployment:
 
 1. Confirm `/health` reports the merge version with a live event writer and
