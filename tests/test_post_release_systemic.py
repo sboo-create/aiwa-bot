@@ -16,6 +16,7 @@ os.environ.setdefault("AIWA_ANALYTICS_SALT", "test-analytics-salt")
 
 import aiwa_bot as bot
 import llm
+from aiohttp.test_utils import TestClient, TestServer
 
 
 class _JobQueue:
@@ -394,6 +395,29 @@ class PostReleaseSystemicTests(unittest.TestCase):
 
         self.assertEqual(response.content_type, "image/webp")
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+
+        async def explicit_handler(_request):
+            return bot.web.Response(body=b"text", content_type="text/plain")
+
+        explicit = asyncio.run(bot._security_headers(request, explicit_handler))
+        self.assertEqual(explicit.content_type, "text/plain")
+
+    def test_aiwa_upstream_serves_static_manifest_for_i167_proxy(self):
+        async def fetch_manifest():
+            client = TestClient(TestServer(bot.build_web()))
+            await client.start_server()
+            try:
+                response = await client.get("/assets/food/manifest.json")
+                return response.status, response.content_type, await response.json()
+            finally:
+                await client.close()
+
+        status, content_type, manifest = asyncio.run(fetch_manifest())
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(len(manifest), 611)
+        self.assertTrue(any("/catalog-v2/" in url for url in manifest.values()))
 
 
 if __name__ == "__main__":

@@ -12376,7 +12376,10 @@ async def _legacy_admin_removed(request):
 @web.middleware
 async def _security_headers(request, handler):
     response = await handler(request)
-    if request.path.casefold().endswith(".webp"):
+    if (
+        request.path.casefold().endswith(".webp")
+        and response.content_type in {"", "application/octet-stream"}
+    ):
         # Linux MIME databases are not guaranteed to know WebP. Combined
         # with nosniff, application/octet-stream would make an otherwise valid
         # catalog image unusable in Telegram WebView.
