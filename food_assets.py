@@ -158,12 +158,26 @@ def _anchor(tokens: Iterable[str]) -> str | None:
 
 
 def _family_match(
-    tokens: Iterable[str], manifest: dict[str, str],
+    label: object, manifest: dict[str, str],
 ) -> tuple[str, str, str] | None:
-    token_set = set(tokens)
-    for required, label in _FAMILY_DEFAULTS:
-        if token_set.intersection(required) and label in manifest:
-            return label, manifest[label], "catalog_family"
+    # Generated menu labels use the head ingredient first (“салат с…”,
+    # “гречка с…”, “треска с…”). Resolve the first explicit family token in
+    # text order instead of whichever family happens to appear first in the
+    # defaults table. This keeps multi-ingredient dishes deterministic and
+    # prevents a secondary ingredient from stealing the image.
+    ordered_tokens = [
+        _TOKEN_ALIASES.get(word, word)
+        for word in normalize_label(label).split()
+        if word not in _STOP_WORDS and not word.isdigit()
+    ]
+    for token in ordered_tokens:
+        for required, catalog_label in _FAMILY_DEFAULTS:
+            if token in required and catalog_label in manifest:
+                return (
+                    catalog_label,
+                    manifest[catalog_label],
+                    "catalog_family",
+                )
     return None
 
 
@@ -223,7 +237,7 @@ class FoodAssetResolver:
         query_tokens = _tokens(label)
         query_anchor = _anchor(query_tokens)
         if not query_tokens or query_anchor is None:
-            result = _family_match(query_tokens, self.manifest)
+            result = _family_match(label, self.manifest)
             with self._match_cache_lock:
                 self._match_cache[normalized] = result
             return result
@@ -246,7 +260,7 @@ class FoodAssetResolver:
             if contained and score >= 0.60:
                 matches.append((score, len(common), candidate, self.manifest[candidate]))
         if not matches:
-            result = _family_match(query_tokens, self.manifest)
+            result = _family_match(label, self.manifest)
             with self._match_cache_lock:
                 if len(self._match_cache) >= 4096:
                     self._match_cache.clear()

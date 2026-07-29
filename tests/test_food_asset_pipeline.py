@@ -41,7 +41,7 @@ class FoodAssetResolverTests(unittest.TestCase):
     def test_generated_menu_variants_use_category_correct_catalog_art(self):
         cases = {
             "Омлет из двух яиц": "Омлет с овощами",
-            "Гречка с отварной говядиной": "Говядина тушёная",
+            "Гречка с отварной говядиной": "Гречневая каша",
             "Треска с тушёной капустой": "Треска на пару",
         }
 
@@ -59,6 +59,21 @@ class FoodAssetResolverTests(unittest.TestCase):
 
         self.assertEqual(unknown["image_source"], "category")
         self.assertEqual(unknown["asset_state"], "missing")
+
+    def test_family_fallback_uses_label_head_not_secondary_ingredient(self):
+        cases = {
+            "Салат с говядиной и креветками": "Овощной салат",
+            "Суп с рыбой и говядиной": "Овощной суп",
+            "Рис с тунцом": "Рис с овощами",
+        }
+
+        for dish, catalog_label in cases.items():
+            with self.subTest(dish=dish):
+                result = assets.RESOLVER.resolve(dish)
+                self.assertEqual(result["image_source"], "catalog_family")
+                self.assertEqual(
+                    result["image_url"], assets.RESOLVER.manifest[catalog_label]
+                )
 
     def test_drink_uses_drink_placeholder_without_generation(self):
         result = assets.RESOLVER.resolve(
