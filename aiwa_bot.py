@@ -68,8 +68,10 @@ TRAIN_PENDING = set()
 ANNOUNCE_WAIT = set()   # админы в режиме рассылки: ждём следующее сообщение и копируем всем
 ALERT_LAST = {}
 CHAT_HIST = {}  # cid -> deque последних реплик диалога (память контекста)
-def hist_get(cid):
+def hist_get(cid, male=False):
     mem = list(CHAT_HIST.get(cid, []))
+    if mem and male:
+        mem = _male_safe_history(mem, text_key="content")
     if mem:
         return mem
     try:
@@ -77,6 +79,8 @@ def hist_get(cid):
         for m in chatlog_get(cid, 8):
             role = "assistant" if m.get("role") in ("ai", "assistant") else "user"
             out.append({"role": role, "content": (m.get("text") or "")[:1200]})
+        if male:
+            out = _male_safe_history(out, text_key="content")
         if out:
             dq = CHAT_HIST.setdefault(cid, deque(maxlen=6))
             for x in out[-6:]: dq.append(x)
@@ -112,7 +116,7 @@ L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
 AIWA_VERSION = os.environ.get(
-    "AIWA_VERSION", "2026-07-29-v178-acquisition-durability"
+    "AIWA_VERSION", "2026-07-29-v179-male-mode-systemic"
 )
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
@@ -236,6 +240,20 @@ PRIVACY_TEXT = ("🔒 Про данные: Айва хранит данные п
  "нагрузке и переписке, чтобы персонализировать ответы и работу приложения. Для генерации ответов, распознавания фото и речи "
  "необходимые данные могут передаваться подключённым ИИ- и речевым провайдерам. Данные не используются Айвой для рекламы. "
  "Удалить сохранённые данные и отключиться можно командой /stop в любой момент.")
+MALE_ABOUT_TEXT = (
+    "Я Айва — ИИ wellness-ассистент: самочувствие, питание и нагрузка.\n\n"
+    "Я подбираю питание и тренировки, отвечаю на вопросы о здоровье текстом "
+    "или голосом, веду дневники еды и активности, отслеживаю самочувствие и "
+    "собираю выписку для врача.\n\n"
+    "Опираюсь на медицинские рекомендации и твои отметки."
+)
+MALE_PRIVACY_TEXT = (
+    "🔒 Про данные: Айва хранит данные профиля и отмеченные тобой сведения о "
+    "самочувствии, питании, нагрузке и переписке, чтобы персонализировать ответы "
+    "и приложение. Для генерации ответов, распознавания фото и речи необходимая "
+    "часть запроса может передаваться подключённым ИИ- и речевым провайдерам. "
+    "Данные не используются Айвой для рекламы. Удалить их можно командой /stop."
+)
 PARTNER_HELLO = ("Ты подключился как партнёр в Айве.\n\n"
  "Каждое утро буду присылать короткую сводку:\n"
  "• что сейчас с её самочувствием\n"
@@ -249,6 +267,35 @@ TECH_TEXT = ("🤖 Я работаю на современных больших 
  "отвечать на вопросы, распознавать фото еды и голосовые. Необходимая часть запроса передаётся соответствующему ИИ-провайдеру, "
  "конкретные модели могут меняться — я выбираю те, что отвечают точнее и быстрее. "
  "Сохранённые в Айве данные можно удалить командой /stop.")
+
+def meta_text_for(u, kind):
+    if is_male_profile(u):
+        return {
+            "about": MALE_ABOUT_TEXT,
+            "privacy": MALE_PRIVACY_TEXT,
+            "tech": TECH_TEXT,
+        }[kind]
+    return {"about": ABOUT_TEXT, "privacy": PRIVACY_TEXT, "tech": TECH_TEXT}[kind]
+
+def partner_hello_for(u):
+    if is_male_profile(u):
+        return (
+            "Ты подключился как партнёр в Айве.\n\n"
+            "Каждое утро буду присылать короткую сводку о его самочувствии и "
+            "нагрузке и о том, как поддержать. Личные разделы тебе не видны. "
+            "Отключить: /unlink"
+        )
+    return PARTNER_HELLO
+
+def partner_info_for(partner_cid):
+    owner = row(woman_of_partner(partner_cid))
+    if is_male_profile(owner):
+        return (
+            "Ты в партнёрском режиме Айвы: здесь приходит короткая сводка о "
+            "его самочувствии и о том, как поддержать. Личные разделы доступны "
+            "только владельцу профиля. Отключить: /unlink"
+        )
+    return PARTNER_INFO
 PHASES_TEXT = (
  "🌸 Четыре фазы цикла\n\n"
  "🩸 Менструальная, дни 1-5\n"
@@ -1566,6 +1613,16 @@ def workouts_recent(cid, days=10, limit=8):
     c = db(); r = c.execute("SELECT d,type,items,duration,rpe FROM workouts WHERE chat_id=? AND d>=? ORDER BY ts DESC LIMIT ?", (cid, cut, limit)).fetchall(); c.close()
     return [{"d": x[0], "type": x[1], "items": json.loads(x[2] or "[]"), "duration": x[3], "rpe": x[4]} for x in r]
 
+def workouts_count_recent(cid, days=10):
+    cut = (dtoday() - timedelta(days=days)).isoformat()
+    c = db()
+    r = c.execute(
+        "SELECT COUNT(*) FROM workouts WHERE chat_id=? AND d>=?",
+        (cid, cut),
+    ).fetchone()
+    c.close()
+    return int((r or [0])[0] or 0)
+
 def workout_del(cid, wid):
     c = db()
     c.execute("DELETE FROM workouts WHERE chat_id=? AND id=?", (cid, int(wid)))
@@ -1867,11 +1924,126 @@ _UNVERIFIED_MUTATION_CLAIM_RE = re.compile(
     r"\bзапись\s+уже\s+(?:видна|в\s+дневнике)\b",
     re.I,
 )
+_MALE_REPRODUCTIVE_STRONG_RE = re.compile(
+    r"\b(?:фолликул\w*|лютеин\w*|овуляц\w*|месячн\w*|"
+    r"менструац\w*|пмс)\b",
+    re.I,
+)
+_MALE_CYCLE_CONTEXT_FORBIDDEN_RE = re.compile(
+    r"\b(?:день|фаз\w*|длин\w*|календар\w*|прогноз\w*|"
+    r"отслежив\w*)\b.{0,32}\bцикл\w*\b|"
+    r"\bцикл\w*\b.{0,32}\b(?:день|фаз\w*|длин\w*|месячн\w*|"
+    r"менструац\w*|овуляц\w*)\b|"
+    r"\b(?:по|о)\s+(?:мо(?:ему|ём)\s+)?цикл\w*\b",
+    re.I,
+)
+_MALE_CYCLE_FORBIDDEN_RE = re.compile(
+    _MALE_REPRODUCTIVE_STRONG_RE.pattern + r"|" +
+    _MALE_CYCLE_CONTEXT_FORBIDDEN_RE.pattern,
+    re.I,
+)
+_MALE_BENIGN_CYCLE_RE = re.compile(
+    r"\b(?:день|фаз\w*|длин\w*)?\s*"
+    r"(?:трениров\w*|нагрузоч\w*|восстановитель\w*|сон\w*|сна)\s+"
+    r"цикл\w*\b|"
+    r"\bцикл\w*\s+(?:трениров\w*|нагруз\w*|восстановлен\w*|сон\w*|сна)\b",
+    re.I,
+)
+_MALE_SUGGESTION_PERSONAL_CYCLE_RE = re.compile(
+    r"\bчто\s+сейчас\s+с\s+цикл\w*\b|"
+    r"\b(?:мой|твой|ваш)\s+цикл\w*\b",
+    re.I,
+)
+_MEDICAL_ESCALATION_RE = re.compile(
+    r"\b(?:врач\w*|скор\w+\s+помощ\w*|неотлож\w*|112|температур\w*|"
+    r"кровотеч\w*|резк\w+\s+ухудш\w*|сильн\w+\s+бол\w*)\b",
+    re.I,
+)
+MALE_PROFILE_FUNCTION_TEXT = (
+    "Эта функция недоступна для мужского профиля. "
+    "Можно вести дневник самочувствия, питание и нагрузку или собрать "
+    "выписку по самочувствию."
+)
+MALE_SAFE_SUGGESTIONS = (
+    "Что важно сегодня?",
+    "Открыть питание",
+    "Открыть нагрузку",
+)
+_MALE_CYCLE_MUTATION_KIND_RE = re.compile(
+    r"^(?:period(?:$|_)|cycle(?:$|_)|cyclelen$|addcycles$|"
+    r"ovulation(?:$|_)|menstruation(?:$|_))",
+    re.I,
+)
+
+def is_male_profile(u):
+    return bool(u and u.get("mode") == "male")
+
+def _male_cycle_content_forbidden(text):
+    """Block reproductive cycle copy without rejecting training/sleep cycles."""
+    value = str(text or "")
+    if _MALE_REPRODUCTIVE_STRONG_RE.search(value):
+        return True
+    without_benign_cycles = _MALE_BENIGN_CYCLE_RE.sub("", value)
+    return bool(_MALE_CYCLE_CONTEXT_FORBIDDEN_RE.search(without_benign_cycles))
+
+def _male_suggestion_forbidden(text):
+    value = str(text or "")
+    if _male_cycle_content_forbidden(value):
+        return True
+    without_benign_cycles = _MALE_BENIGN_CYCLE_RE.sub("", value)
+    return bool(_MALE_SUGGESTION_PERSONAL_CYCLE_RE.search(without_benign_cycles))
+
+def _male_reply_fallback(original=None, escalation_required=None):
+    text = (
+        "Для этого профиля я ориентируюсь на самочувствие, сон, питание, "
+        "восстановление и фактическую нагрузку. Напиши, что именно хочешь "
+        "разобрать, и я отвечу по этим данным."
+    )
+    if escalation_required is None:
+        escalation_required = bool(
+            _MEDICAL_ESCALATION_RE.search(str(original or ""))
+        )
+    if escalation_required:
+        text += (
+            " Если есть сильная или нарастающая боль, высокая температура, "
+            "кровотечение либо резкое ухудшение состояния, обратись к врачу; "
+            "при экстренных симптомах — за неотложной помощью."
+        )
+    return text
+
+def _male_safe_history(items, text_key="text"):
+    """Preserve ordering/user turns; rewrite unsafe assistant text consistently."""
+    out = []
+    for item in items or []:
+        safe_item = dict(item)
+        role = str(item.get("role") or "")
+        text = item.get(text_key)
+        if (
+            role in ("ai", "assistant")
+            and _male_cycle_content_forbidden(text)
+        ):
+            safe_item[text_key] = _male_reply_fallback(text)
+        out.append(safe_item)
+    return out
+
+def guard_aiwa_suggestions(cid, items):
+    """Male profiles never receive reproductive suggestions, even from an LLM."""
+    values = [str(item).strip() for item in (items or []) if str(item).strip()]
+    if not is_male_profile(row(cid)):
+        return values
+    safe = [item for item in values if not _male_suggestion_forbidden(item)]
+    for fallback in MALE_SAFE_SUGGESTIONS:
+        if len(safe) >= 2:
+            break
+        if fallback not in safe:
+            safe.append(fallback)
+    return safe
 
 def guard_aiwa_reply(cid, text, verified_mutation=False):
     """Final identity and write-truth invariants before model text reaches the user."""
+    u = row(cid)
     try:
-        guarded = L.guard_user_address(text, llm_profile_of(row(cid)))
+        guarded = L.guard_user_address(text, llm_profile_of(u))
     except Exception:
         guarded = text
     # Suggestions are protocol metadata.  Strip them again at the final
@@ -1881,6 +2053,14 @@ def guard_aiwa_reply(cid, text, verified_mutation=False):
         guarded = L.split_followups(guarded)[0]
     except Exception:
         pass
+    if is_male_profile(u) and _male_cycle_content_forbidden(guarded):
+        ev(cid, "fallback", meta="male_mode_content_guard")
+        return _male_reply_fallback(
+            guarded,
+            escalation_required=bool(
+                _MEDICAL_ESCALATION_RE.search(str(guarded or ""))
+            ),
+        )
     if not verified_mutation and _UNVERIFIED_MUTATION_CLAIM_RE.search(str(guarded or "")):
         ev(cid, "journal_claim_blocked", meta="unverified_model_claim")
         return (
@@ -1889,6 +2069,45 @@ def guard_aiwa_reply(cid, text, verified_mutation=False):
             "и я подтвержу результат только после проверки в приложении."
         )
     return guarded
+
+def guard_chat_payload(cid, payload):
+    """Final WebApp/voice boundary for generated text and button metadata."""
+    out = dict(payload or {})
+    out["answer"] = md_plain(guard_aiwa_reply(cid, out.get("answer") or ""))
+    out["suggestions"] = guard_aiwa_suggestions(cid, out.get("suggestions"))[:2]
+    if is_male_profile(row(cid)):
+        blocked_mutation = False
+        mutation = out.get("mutation") or {}
+        if _MALE_CYCLE_MUTATION_KIND_RE.search(str(mutation.get("kind") or "")):
+            out.pop("mutation", None)
+            blocked_mutation = True
+        raw_mutations = out.get("mutations") or []
+        mutations = [
+            item for item in raw_mutations
+            if isinstance(item, dict)
+            and not _MALE_CYCLE_MUTATION_KIND_RE.search(
+                str(item.get("kind") or "")
+            )
+        ]
+        blocked_mutation = blocked_mutation or len(mutations) < len(raw_mutations)
+        if mutations:
+            out["mutations"] = mutations
+        else:
+            out.pop("mutations", None)
+        if blocked_mutation:
+            out["mutation_blocked"] = "male_mode"
+            if mutations:
+                out["answer"] = (
+                    str(out.get("answer") or "").rstrip()
+                    + "\n\n"
+                    + MALE_PROFILE_FUNCTION_TEXT
+                ).strip()
+            else:
+                out["answer"] = MALE_PROFILE_FUNCTION_TEXT
+            out["suggestions"] = list(MALE_SAFE_SUGGESTIONS[:2])
+            ev(cid, "male_mode_block", meta="payload_cycle_mutation")
+    return out
+
 def diet_human(code_csv):
     if not code_csv: return "без ограничений"
     return ", ".join(DIETD.get(x, x) for x in code_csv.split(",") if x) or "без ограничений"
@@ -3356,10 +3575,21 @@ MORE_KB = InlineKeyboardMarkup([
     [B("Утренние сводки: вкл/выкл", "toggle:summary")],
     [B("Назад", "menu")],
 ])
+MALE_MORE_KB = InlineKeyboardMarkup([
+    [B("История и выписка", "history")],
+    [B("Время сводки", "set:time")],
+    [B("Утренние сводки: вкл/выкл", "toggle:summary")],
+    [B("Назад", "menu")],
+])
 EDIT_KB = InlineKeyboardMarkup([
     [B("Отметить месячные", "period")],
     [B("Длина цикла", "cyclelen"), B("Рост, вес, возраст", "profile_edit")],
     [B("История циклов", "addcycles")],
+    [B("Время рассылки", "set:time")],
+    [B("Назад", "menu")],
+])
+MALE_EDIT_KB = InlineKeyboardMarkup([
+    [B("Рост, вес, возраст", "profile_edit")],
     [B("Время рассылки", "set:time")],
     [B("Назад", "menu")],
 ])
@@ -3727,7 +3957,8 @@ def sugg_kb(cid, items, app_user=None, app_label=None, feedback_id=None, campaig
     def _short(t): return t if len(t) <= 28 else t[:26].rstrip(" ,.-") + "…"
     # единая точка сборки кнопок: каждый саджест с заглавной буквы (в т.ч. статичные)
     norm = getattr(L, "_norm_sugg1", None)
-    items = [(norm(t) if norm else t) for t in (items or []) if t]
+    items = guard_aiwa_suggestions(cid, items)
+    items = [(norm(t) if norm else t) for t in items if t]
     rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
     if app_user and AIWA_WEBAPP_URL:
         app_tab = {
@@ -3789,7 +4020,7 @@ def merge_summary_suggestions(u=None, st=None, extra=None):
 async def need_onboard(t, user_generation=None):
     cid = getattr(getattr(t, "chat", None), "id", None)
     if cid and is_partner(cid) and not is_onboarded(row(cid)):
-        return await t.reply_text(PARTNER_INFO)
+        return await t.reply_text(partner_info_for(cid))
     if cid and user_generation is None:
         user_generation = _user_generation(cid)
     if cid: upsert(cid, user_generation=user_generation, state=None)
@@ -5014,6 +5245,35 @@ def cycle_text_analysis(cid):
     import statistics as ST
     from collections import Counter
     u = row(cid); cyc = cycles_of(cid); logs = logs_of(cid)
+    if is_male_profile(u):
+        parts = ["📊 Анализ самочувствия"]
+        cnt = Counter()
+        for lg in logs:
+            for item in lg.get("symptoms", []):
+                cnt[item] += 1
+        if cnt:
+            top = ", ".join(SYM.get(code, code) for code, _ in cnt.most_common(3))
+            parts.append(f"• Чаще всего отмечено: {top}.")
+        energy = [lg["energy"] for lg in logs if lg.get("energy")]
+        mood = [lg["mood"] for lg in logs if lg.get("mood")]
+        if energy:
+            parts.append(f"• Средняя энергия по отметкам: {EN.get(round(ST.mean(energy)), '')}.")
+        if mood:
+            parts.append(f"• Среднее настроение: {MOOD.get(round(ST.mean(mood)), '')}.")
+        try:
+            recent_workout_count = workouts_count_recent(cid, days=14)
+        except Exception as exc:
+            log.warning("male wellbeing analysis workouts unavailable for %s: %s", cid, exc)
+            recent_workout_count = 0
+        if recent_workout_count:
+            parts.append(f"• Тренировок за последние 14 дней: {recent_workout_count}.")
+        if len(parts) == 1:
+            parts.append(
+                "Пока мало данных. Отмечай энергию, настроение, питание и "
+                "нагрузку — анализ станет точнее."
+            )
+        parts.append("\nПодробную выписку по самочувствию можно собрать кнопкой ниже.")
+        return "\n".join(parts)
     lens = []
     for i in range(1, len(cyc)):
         d = (date.fromisoformat(cyc[i]) - date.fromisoformat(cyc[i - 1])).days
@@ -5050,6 +5310,13 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
     turn_generation = _user_generation(cid) if user_generation is None else int(user_generation)
     if intent == "current_date":
         return await msg.reply_text(current_date_text())
+    if is_male_profile(u) and intent in {
+        "phases", "addcycles", "period_end", "cyclelen", "logperiod",
+        "calendar", "period",
+    }:
+        upsert(cid, state=None)
+        ev(cid, "male_mode_block", meta="intent_" + intent)
+        return await msg.reply_text(MALE_PROFILE_FUNCTION_TEXT)
     if intent == "analysis":
         return await msg.reply_text(cycle_text_analysis(cid),
             reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
@@ -5460,7 +5727,8 @@ def mem_text(cid, limit=16):
 def _with_memory(cid, q):
     mt = mem_text(cid)
     if mt:
-        return q + "\n\nЧто ты уже знаешь о ней из прошлых разговоров (долгая память) — учитывай, но не перечисляй вслух без надобности: " + mt
+        subject = "нём" if is_male_profile(row(cid)) else "ней"
+        return q + f"\n\nЧто ты уже знаешь о {subject} из прошлых разговоров (долгая память) — учитывай, но не перечисляй вслух без надобности: " + mt
     return q
 
 def _ref_touch(cid, src):
@@ -5479,13 +5747,14 @@ def _proactive_signals(cid, slot="eve"):
     out = []
     try:
         u = row(cid); _, st = status_of(cid); today = dtoday()
+        male = is_male_profile(u)
         tlog = log_get(cid, today.isoformat()) or {}
         ylog = log_get(cid, (today - timedelta(days=1)).isoformat()) or {}
         badY = (ylog.get("energy") == 1) or (ylog.get("mood") == 1) or any(x in (ylog.get("symptoms") or []) for x in ("anx", "low", "tired", "irrit"))
         checkedToday = bool(tlog.get("energy") or tlog.get("mood") or (tlog.get("symptoms")))
         if badY and not checkedToday:
             out.append({"key": "felt_bad", "score": 78, "cooldown": 2,
-                        "topic": "вчера ей было тяжело (низкая энергия/настроение или тревожные симптомы) — мягко спроси, как она сегодня, и предложи поддержку",
+                        "topic": (("вчера ему было тяжело" if male else "вчера ей было тяжело") + " (низкая энергия/настроение или тревожные симптомы) — мягко предложи поддержку"),
                         "data": "вчера энергия=%s, настроение=%s, симптомы=%s" % (ylog.get("energy"), ylog.get("mood"), ",".join(ylog.get("symptoms") or []))})
         if st and st.get("days_to_next") in (2, 3, 4) and (u.get("mode") in (None, "cycle")):
             out.append({"key": "pms_soon", "score": 66, "cooldown": 18,
@@ -5505,15 +5774,26 @@ def _proactive_signals(cid, slot="eve"):
                 gap = 99
             if gap >= 5:
                 out.append({"key": "no_move", "score": 46, "cooldown": 4,
-                            "topic": "давно не было тренировки (%s дн) — мягко пригласи подвигаться под её фазу" % gap,
-                            "data": "последняя тренировка %s дней назад, фаза %s" % (gap, (st or {}).get("phase_ru"))})
+                            "topic": (
+                                "давно не было тренировки (%s дн) — мягко пригласи "
+                                "подвигаться с учётом восстановления" % gap
+                                if male else
+                                "давно не было тренировки (%s дн) — мягко пригласи подвигаться под её фазу" % gap
+                            ),
+                            "data": (
+                                "последняя тренировка %s дней назад" % gap
+                                if male else
+                                "последняя тренировка %s дней назад, фаза %s" % (gap, (st or {}).get("phase_ru"))
+                            )})
         try:
             streak = streak_of(cid)
         except Exception:
             streak = 0
         if streak in (3, 7, 14, 30):
             out.append({"key": "streak_%s" % streak, "score": 56, "cooldown": 1,
-                        "topic": "коротко и по-взрослому отметь, что она %s дней подряд ведёт отметки, и спокойно предложи продолжить — без слащавости, без фраз вроде порадуй себя" % streak,
+                        "topic": "коротко и по-взрослому отметь, что %s %s дней подряд ведёт отметки, и спокойно предложи продолжить — без слащавости, без фраз вроде порадуй себя" % (
+                            "он" if male else "она", streak,
+                        ),
                         "data": "стрик %s дней" % streak})
         if slot == "eve":
             try:
@@ -5550,10 +5830,13 @@ async def _proactive_pick_and_send(cid, slot, shadow, context):
         return None
     best = max(cands, key=lambda x: x["score"])
     _u = []
-    text = await llm_to_thread(cid, "proactive_message", L.proactive_compose, best["topic"], best.get("data", ""), _u)
+    text = await llm_to_thread(
+        cid, "proactive_message", L.proactive_compose,
+        best["topic"], best.get("data", ""), u.get("mode"), _u,
+    )
     if _u:
         ev(cid, "tokens", sum(_u), meta="proactive_compose", calls=len(_u), usage=_u)
-    text = (text or "").strip()
+    text = guard_aiwa_reply(cid, (text or "").strip())
     if not text:
         return None
     if shadow:
@@ -5618,7 +5901,11 @@ async def _proactive_preview(compose_limit=4, scan_limit=500):
             if composed < compose_limit:
                 _u = []
                 try:
-                    text = await llm_to_thread(cid, "proactive_message", L.proactive_compose, best["topic"], best.get("data", ""), _u)
+                    text = await llm_to_thread(
+                        cid, "proactive_message", L.proactive_compose,
+                        best["topic"], best.get("data", ""), u.get("mode"), _u,
+                    )
+                    text = guard_aiwa_reply(cid, text)
                 except Exception:
                     text = ""
                 composed += 1
@@ -5710,7 +5997,7 @@ def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=Fals
     if not user:
         c.close(); return {"status": "stale"}
     mode = user[1] or "cycle"
-    if protect_modes and mode in ("preg", "meno"):
+    if protect_modes and mode in ("preg", "meno", "male"):
         c.commit(); c.close(); return {"status": "protected", "mode": mode}
     starts = [x[0] for x in c.execute(
         "SELECT start_date FROM cycles WHERE chat_id=? ORDER BY start_date", (cid,)
@@ -5770,7 +6057,11 @@ def _save_period_end_atomic(cid, end_iso, user_generation=None, mutation_key=Non
             except (TypeError, ValueError): saved_data = {}
             return dict(saved_data, status=status)
     user = c.execute("SELECT last_period,mode FROM users WHERE chat_id=?", (cid,)).fetchone()
-    if not user or (user[1] or "cycle") in ("irregular", "none", "meno", "preg", "male") or not user[0]:
+    if not user:
+        c.commit(); c.close(); return {"status": "missing"}
+    if (user[1] or "cycle") == "male":
+        c.commit(); c.close(); return {"status": "protected", "mode": "male"}
+    if (user[1] or "cycle") in ("irregular", "none", "meno", "preg") or not user[0]:
         c.commit(); c.close(); return {"status": "missing"}
     start_iso = user[0]
     length = (event_date - date.fromisoformat(start_iso)).days + 1
@@ -5792,7 +6083,9 @@ def _save_period_end_atomic(cid, end_iso, user_generation=None, mutation_key=Non
 
 def db_mark_period(cid, iso, user_generation=None):
     """Записывает старт месячных атомарно. Без планировщика, безопасно из веб-обработчика."""
-    return _save_period_start_atomic(cid, iso, user_generation=user_generation).get("status") in (
+    return _save_period_start_atomic(
+        cid, iso, user_generation=user_generation, protect_modes=True,
+    ).get("status") in (
         "created", "duplicate",
     )
 def mark_period(context, cid, iso, user_generation=None):
@@ -6118,7 +6411,19 @@ async def food_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     log.info("food reminder queued: %d", n)
 
 def finish_onboarding(context, cid, last_period_iso, n):
-    upsert(cid, last_period=last_period_iso, cycle_len=n, state=None, pending_date=None)
+    # Switch into cycle mode only after both onboarding inputs are valid.
+    # Until then an existing male profile must remain isolated from cycle state.
+    upsert(
+        cid,
+        mode="cycle",
+        last_period=last_period_iso,
+        cycle_len=n,
+        period_end=None,
+        period_len=None,
+        state=None,
+        pending_date=None,
+    )
+    _invalidate_mode_dependent_state(cid)
     cyc_add(cid, last_period_iso); schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
 
 async def welcome_finish(context, cid, msg):
@@ -6343,6 +6648,27 @@ async def push_partner(context, woman_cid):
     if not pid: return
     u = row(woman_cid)
     hint = last_hint(woman_cid)
+    if is_male_profile(u):
+        log_today = log_get(woman_cid, dtoday().isoformat()) or {}
+        details = []
+        if log_today.get("energy"):
+            details.append("энергия: " + EN.get(log_today["energy"], "не отмечена"))
+        if log_today.get("mood"):
+            details.append("настроение: " + MOOD.get(log_today["mood"], "не отмечено"))
+        if hint:
+            details.append("последняя отметка: " + hint)
+        facts = "; ".join(details) if details else "сегодняшних отметок пока нет"
+        text = (
+            "💛 Сводка поддержки Айвы\n\n"
+            f"• {facts}.\n"
+            "• Можно спросить, нужна ли помощь с едой, отдыхом или планом "
+            "нагрузки, без давления и непрошеных советов."
+        )
+        try:
+            await context.bot.send_message(pid, text)
+        except Exception as exc:
+            log.warning("partner male push: %s", exc)
+        return
     if u and u.get("mode") == "preg" and u.get("last_period"):
         try:
             _preg = C.preg_status(u["last_period"]); _pu = []
@@ -6379,11 +6705,18 @@ async def push_partner(context, woman_cid):
         log.warning("partner push: %s", e)
 
 async def addcycles_entry(context, cid, msg):
+    if is_male_profile(row(cid)):
+        upsert(cid, state=None)
+        ev(cid, "male_mode_block", meta="addcycles_entry")
+        return await msg.reply_text(MALE_PROFILE_FUNCTION_TEXT)
     upsert(cid, state="await_cycles")
     await msg.reply_text(ADDCYCLES_TEXT)
 async def addcycles_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
-    if not is_onboarded(row(cid)): return await need_onboard(update.message)
+    u = row(cid)
+    if not is_onboarded(u): return await need_onboard(update.message)
+    if is_male_profile(u):
+        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
     await addcycles_entry(context, cid, update.message)
 async def partner_entry(context, cid, msg):
     global BOT_USERNAME
@@ -6396,8 +6729,15 @@ async def partner_entry(context, cid, msg):
     link = f"https://t.me/{BOT_USERNAME}?start=p_{code}" if BOT_USERNAME else None
     linked = partner_of(cid)
     body = "Перешли партнёру эту ссылку:\n" + (link if link else f"Код подключения: {code}")
-    body += ("\n\nОн откроет бота и будет получать по утрам короткую сводку: день цикла, общее состояние "
-             "и как поддержать. Календарь и личные разделы он не увидит.")
+    if is_male_profile(u):
+        body += (
+            "\n\nПартнёр откроет бота и будет получать короткую сводку об "
+            "общем самочувствии, нагрузке и о том, как поддержать. Личные "
+            "разделы он не увидит."
+        )
+    else:
+        body += ("\n\nОн откроет бота и будет получать по утрам короткую сводку: день цикла, общее состояние "
+                 "и как поддержать. Календарь и личные разделы он не увидит.")
     body += ("\n\nПартнёр уже подключён. Отключить: /unlink" if linked else "\n\nПартнёр пока не подключён.")
     await msg.reply_text(body)
 
@@ -6408,7 +6748,7 @@ async def partner_join(context, partner_cid, msg, code):
     if woman == partner_cid:
         return await msg.reply_text("Это твоя же ссылка, перешли её партнёру.")
     link_partner(partner_cid, woman); ev(partner_cid, "goal", meta="partner_link")
-    await msg.reply_text(PARTNER_HELLO)
+    await msg.reply_text(partner_hello_for(row(woman)))
     await push_partner(context, woman)  # сразу первый апдейт, не ждать утра
     try:
         await context.bot.send_message(woman, "Партнёр подключился и будет получать утреннюю сводку поддержки. Отключить: /unlink или в Меню, кнопка «Партнёр».")
@@ -6431,7 +6771,7 @@ async def start(update, context):
     if is_partner(cid) and not is_onboarded(row(cid)):
         # Партнёр может завести и собственный профиль (например, мужской режим) —
         # партнёрские сводки при этом продолжают приходить.
-        await update.message.reply_text(PARTNER_INFO)
+        await update.message.reply_text(partner_info_for(cid))
         return await update.message.reply_text(
             "Кстати, Айва может вести и твои питание, тренировки и сводки — параллельно с партнёрской сводкой.",
             reply_markup=InlineKeyboardMarkup([[B("Настроить мой профиль", "go_start", KBS.PRIMARY)]]))
@@ -6454,6 +6794,8 @@ async def id_cmd(update, context):
 async def calendar_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command"); u, st = status_of(cid)
     if not is_onboarded(u): return await need_onboard(update.message)
+    if is_male_profile(u):
+        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
     if st is None: return await update.message.reply_text("Пока не вижу данных цикла. Отметь последние месячные командой /period или кнопкой «Отметить месячные», и я покажу фазы и календарь.")
     if st["status"] != "normal": return await send_delay(context, cid, st)
     await send_infographic(context.bot, cid)
@@ -6469,7 +6811,11 @@ async def checkin_cmd(update, context):
     await update.message.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
 async def period_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
-    if not is_onboarded(row(cid)): return await need_onboard(update.message)
+    u = row(cid)
+    if not is_onboarded(u): return await need_onboard(update.message)
+    if is_male_profile(u):
+        upsert(cid, state=None)
+        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
     if context.args:
         d = parse_date(context.args[0])
         if d:
@@ -6488,6 +6834,7 @@ async def set_time_cmd(update, context):
     set_daily_time(context.application, cid, hhmm)
     await update.message.reply_text(schedule_text(cid, hhmm))
 MODE_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Мужчина", callback_data="mode:male")],
     [InlineKeyboardButton("Цикл", callback_data="onb_cycle")],
     [InlineKeyboardButton("Нерегулярный цикл", callback_data="mode:irregular")],
     [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
@@ -6509,9 +6856,13 @@ async def profile_cmd(update, context):
     upsert(cid, state="await_profile_edit")
     await update.message.reply_text("Обновим данные. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.")
 async def guide_cmd(update, context):
-    ev(update.effective_chat.id, "command"); await send_guide(context, update.effective_chat.id, GUIDES[0])
+    cid = update.effective_chat.id; ev(cid, "command")
+    if is_male_profile(row(cid)):
+        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+    await send_guide(context, cid, GUIDES[0])
 async def about_cmd(update, context):
-    ev(update.effective_chat.id, "command"); await update.message.reply_text(ABOUT_TEXT)
+    cid = update.effective_chat.id; ev(cid, "command")
+    await update.message.reply_text(meta_text_for(row(cid), "about"))
 async def report_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
     u = row(cid)
@@ -6539,6 +6890,7 @@ async def stop(update, context):
     _remove_daily_jobs(context.application, cid)
     del_user(cid); await update.message.reply_text("Отключила сводки и удалила данные. Вернуться: /start")
 async def help_cmd(update, context):
+    male = is_male_profile(row(update.effective_chat.id))
     await update.message.reply_text(
         "Команды AIWA:\n"
         "/menu: открыть меню\n"
@@ -6548,7 +6900,12 @@ async def help_cmd(update, context):
         "/partner: подключить партнёра\n"
         "/unlink: отключить партнёра\n"
         "/stop: стереть все данные и отключить бота\n\n"
-        "Календарь, симптомы, питание, нагрузка и статистика живут в приложении. Ещё можно писать словами: «как изменить вес», «поменять время рассылки», «как удалить данные», «отключить партнёра»."
+        + (
+            "Самочувствие, питание, нагрузка и статистика живут в приложении. "
+            if male else
+            "Календарь, симптомы, питание, нагрузка и статистика живут в приложении. "
+        )
+        + "Ещё можно писать словами: «как изменить вес», «поменять время рассылки», «как удалить данные», «отключить партнёра»."
     )
 
 # ---------- stats ----------
@@ -6944,6 +7301,12 @@ async def handle_text(update, context, txt):
         return await update.message.reply_text(
             f"Я тут. Напиши вопрос или открой меню, и я помогу с {topics}."
         )
+    if is_male_profile(u) and state in {
+        "await_period_date", "await_cycle_len", "await_cycles",
+    }:
+        upsert(cid, state=None, pending_date=None)
+        ev(cid, "male_mode_block", meta="stale_state_" + state)
+        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
 
     if state == "await_food_text":
         pending_at = None
@@ -7001,7 +7364,7 @@ async def handle_text(update, context, txt):
         wid = woman_of_partner(cid); wu = row(wid); _, wst = status_of(wid)
         mt = match_meta(txt)
         if mt:
-            return await update.message.reply_text({"about": ABOUT_TEXT, "privacy": PRIVACY_TEXT, "tech": TECH_TEXT}[mt])
+            return await update.message.reply_text(meta_text_for(u, mt))
         if is_gibberish(txt):
             return await update.message.reply_text("Не поняла вопрос. Напиши словами, например: «как её поддержать сегодня» или «что ей купить».")
         await context.bot.send_chat_action(cid, "typing")
@@ -7011,7 +7374,7 @@ async def handle_text(update, context, txt):
         elif wst:
             ans = await llm_to_thread(cid, "partner_answer", L.partner_answer, wst, txt, last_hint(wid), usage=usage)
         else:
-            return await update.message.reply_text(PARTNER_INFO)
+            return await update.message.reply_text(partner_info_for(cid))
         ev(cid, "answered", tokens=sum(usage), meta="partner_q", ms=int((time.monotonic()-t0)*1000), n=len(txt), calls=len(usage), usage=usage)
         return await context.bot.send_message(cid, ans)
 
@@ -7166,7 +7529,7 @@ async def handle_text(update, context, txt):
     m = match_meta(txt)
     if m:
         ev(cid, "manual", meta="meta", n=len(txt))
-        return await update.message.reply_text({"about": ABOUT_TEXT, "privacy": PRIVACY_TEXT, "tech": TECH_TEXT}[m])
+        return await update.message.reply_text(meta_text_for(u, m))
 
     low = txt.lower()
     if is_onboarded(u) and re.search(r"(где.*сводк|пришл\w*\s*сводк|покажи\s*сводк|моя\s*сводк|^сводк|что там сегодня|что сегодня по циклу)", low):
@@ -7203,7 +7566,7 @@ async def handle_text(update, context, txt):
         if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
+        ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid, male=is_male_profile(u)), usage=usage)
         ev(cid, "answered", meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
@@ -7214,7 +7577,7 @@ async def handle_text(update, context, txt):
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.answer_question, st, txt, llm_profile_of(u), hist_get(cid), usage=usage)
+        ans = await think_llm(context, cid, L.answer_question, st, txt, llm_profile_of(u), hist_get(cid, male=is_male_profile(u)), usage=usage)
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
@@ -7262,8 +7625,20 @@ async def on_cb(update, context):
         _u = row(cid)
         if not is_onboarded(_u):
             return await q.message.reply_text("Сначала настрой Айву: /start.")
-        _QQ = {"train": "Собери мне короткую тренировку примерно на 10 минут под мою фазу цикла и сегодняшнее самочувствие. Дай конкретные упражнения с подходами и повторами.",
-               "food": "Что съесть, чтобы добрать белок к ужину, под мою фазу? Дай 2-3 конкретных варианта."}
+        if is_male_profile(_u):
+            _QQ = {
+                "train": (
+                    "Собери мне короткую тренировку примерно на 10 минут с "
+                    "учётом сегодняшнего самочувствия и восстановления. Дай "
+                    "конкретные упражнения с подходами и повторами."
+                ),
+                "food": "Что съесть, чтобы добрать белок к ужину? Дай 2-3 конкретных варианта.",
+            }
+        else:
+            _QQ = {
+                "train": "Собери мне короткую тренировку примерно на 10 минут под мою фазу цикла и сегодняшнее самочувствие. Дай конкретные упражнения с подходами и повторами.",
+                "food": "Что съесть, чтобы добрать белок к ужину, под мою фазу? Дай 2-3 конкретных варианта.",
+            }
         _query = _QQ.get(_intent)
         if not _query:
             return
@@ -7276,6 +7651,7 @@ async def on_cb(update, context):
             log.warning("pado reply: %s", _e); _ans = None
         if not _ans:
             _ans = "Не получилось собрать прямо сейчас, попробуй ещё раз чуть позже."
+        _ans = guard_aiwa_reply(cid, _ans)
         _wu = webapp_url(_u) or AIWA_WEBAPP_URL
         _kb = InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Айву", web_app=WebAppInfo(url=_wu))]]) if _wu else None
         sent = await context.bot.send_message(cid, _ans, reply_markup=_kb)
@@ -7288,6 +7664,8 @@ async def on_cb(update, context):
     if data == "onb_female":
         return await q.message.reply_text(FEMALE_START_TEXT, reply_markup=FEMALE_ONB_KB)
     if data == "onb_cycle":
+        # Defer the mode transition until finish_onboarding has valid cycle
+        # inputs. Cancelling this step must not expose cycle state.
         upsert(cid, state="await_date", pending_date=None)
         return await q.message.reply_text(
             "Напиши дату начала последних месячных — например 25.05.2026 или 26 мая 2026.\n\n"
@@ -7313,11 +7691,17 @@ async def on_cb(update, context):
             "Айва работает и без регулярного цикла: при нерегулярных месячных, беременности и менопаузе.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
         m = data.split(":")[1]; upsert(cid, mode=m)
-        _evict_today_cache(cid); _evict_week_food_cache(cid); menu_cache_clear(cid); dc_del(cid); prepared_summary_clear(cid)
+        _invalidate_mode_dependent_state(cid)
         if m == "male":
             # тестовые/старые аккаунты: дата цикла от прежнего профиля не должна
             # включать циклическую логику в ответах и сводках
-            upsert(cid, last_period=None, cycle_len=None)
+            upsert(
+                cid,
+                last_period=None,
+                cycle_len=None,
+                period_end=None,
+                period_len=None,
+            )
         schedule_daily(context.application, cid, row(cid)["send_time"] or "08:00")
         if m == "preg":
             upsert(cid, state="await_preg_date")
@@ -7334,6 +7718,12 @@ async def on_cb(update, context):
         return await need_onboard(q.message)
     general = st is None
     today_s = dtoday().isoformat()
+    if is_male_profile(u) and data in {
+        "calendar", "addcycles", "cyclelen", "period", "period_today", "guides",
+    }:
+        upsert(cid, state=None, pending_date=None)
+        ev(cid, "male_mode_block", meta="callback_" + data)
+        return await q.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
     if data == "menu":
         _rows = []
         if AIWA_WEBAPP_URL:
@@ -7344,9 +7734,15 @@ async def on_cb(update, context):
     elif data == "today":
         await push_summary(context, cid)
     elif data == "more":
-        await q.message.reply_text("Ещё возможности:", reply_markup=MORE_KB)
+        await q.message.reply_text(
+            "Ещё возможности:",
+            reply_markup=(MALE_MORE_KB if is_male_profile(u) else MORE_KB),
+        )
     elif data == "edit":
-        await q.message.reply_text("Что изменить?", reply_markup=EDIT_KB)
+        await q.message.reply_text(
+            "Что изменить?",
+            reply_markup=(MALE_EDIT_KB if is_male_profile(u) else EDIT_KB),
+        )
     elif data == "profile_edit":
         upsert(cid, state="await_profile_edit")
         await q.message.reply_text("Обновим данные. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.")
@@ -7427,11 +7823,11 @@ async def on_cb(update, context):
         ev(cid, "user_message", meta="suggest", n=len(question))
         await context.bot.send_chat_action(cid, "typing")
         if general:
-            usage = []; ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid, male=is_male_profile(u)), usage=usage)
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, None, question, usage=usage, quote=question)
         else:
-            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, llm_profile_of(u), hist_get(cid), usage=usage)
+            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, llm_profile_of(u), hist_get(cid, male=is_male_profile(u)), usage=usage)
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, st, question, usage=usage, quote=question)
 
@@ -7830,6 +8226,18 @@ def _evict_week_food_cache(cid):
         _WEEK_FOOD_CACHE.pop(k, None)
     dc_del(cid, "week_food")
 
+def _invalidate_mode_dependent_state(cid):
+    """Drop every derived answer that may have been built for another mode."""
+    _evict_today_cache(cid)
+    _evict_week_food_cache(cid)
+    menu_cache_clear(cid)
+    section_cache_clear(cid)
+    prepared_summary_clear(cid)
+    dc_del(cid)
+    CHAT_HIST.pop(cid, None)
+    for key in [key for key in list(_CARD_CACHE) if key and key[0] == cid]:
+        _CARD_CACHE.pop(key, None)
+
 async def _api_week_food_review(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -7908,7 +8316,7 @@ async def _api_recipe(request):
         return _cors(web.json_response({"error": "generation"}, status=502))
 
 async def _api_food_prompt(request):
-    """Кнопка «Текстом» в питании: бот спрашивает в чате, что она ела — ответ запишется в дневник."""
+    """Кнопка «Текстом»: бот просит нейтрально описать приём пищи."""
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     u = row(cid)
@@ -7921,7 +8329,11 @@ async def _api_food_prompt(request):
             pending_date=datetime.now(TZ).isoformat(),
         )
         if BOT_APP:
-            await BOT_APP.bot.send_message(cid, "Что ты скушала? Напиши обычным текстом — например «200 г творога и банан» — я посчитаю КБЖУ и запишу в дневник.")
+            question = (
+                "Что было в приёме пищи? Напиши обычным текстом — например "
+                "«200 г творога и банан» — я посчитаю КБЖУ и запишу в дневник."
+            )
+            await BOT_APP.bot.send_message(cid, question)
         return _cors(web.json_response({"ok": True}))
     except Exception as e:
         upsert(cid, state=None, pending_date=None)
@@ -7973,11 +8385,14 @@ def _api_data_sync(cid, body):
         if campaign.split(":", 1)[0] == "daily_summary":
             ev(cid, "summary_open", meta="daily_summary")
     cycle_user = is_cycle(u)
+    chatlog = chatlog_get(cid, 60)
+    if is_male_profile(u):
+        chatlog = _male_safe_history(chatlog, text_key="text")
     out = {"onboarded": True, "cycle": bool(cycle_user and u.get("last_period")),
            "today": dtoday().isoformat(), "timezone": str(TZ),
            "last_period": (u.get("last_period") if cycle_user else None),
            "cycle_len": ((u.get("cycle_len") or 28) if cycle_user else None),
-           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog_get(cid, 60),
+           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog,
            "bot_username": BOT_USERNAME,
            "partner_linked": bool(partner_of(cid)),
            "proactive_enabled": bool(u.get("proactive_enabled", True)),
@@ -7987,10 +8402,10 @@ def _api_data_sync(cid, body):
            "profile": {"height": u.get("height"), "weight": u.get("weight"), "age": u.get("age"),
                        "activity": u.get("activity"), "diet": u.get("diet") or "", "diet_note": u.get("diet_note") or "", "kcal_goal": u.get("kcal_goal")}}
     out["sym_log"] = logs_of(cid, (dtoday() - timedelta(days=45)).isoformat())
-    out["past_periods"] = periods_of(cid)
+    out["past_periods"] = [] if is_male_profile(u) else periods_of(cid)
     try:
         _pr = profile_of(u)
-        out["kcal_base"] = calc_calories(_pr["height"], _pr["weight"], _pr["age"], _pr["activity"])[0] if _pr else None
+        out["kcal_base"] = profile_kcal(_pr)[0] if _pr else None
     except Exception:
         out["kcal_base"] = None
     try:
@@ -8043,6 +8458,12 @@ def _api_data_sync(cid, body):
 async def _api_period(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    if is_male_profile(row(cid)):
+        ev(cid, "male_mode_block", meta="api_period")
+        return _cors(web.json_response(
+            {"ok": False, "error": "profile_mode", "text": MALE_PROFILE_FUNCTION_TEXT},
+            status=409,
+        ))
     _evict_today_cache(cid)
     action = body.get("action"); ds = body.get("date")
     try: d = date.fromisoformat(ds) if ds else dtoday()
@@ -8227,6 +8648,14 @@ async def _api_profile(request):
     except Exception:
         return _cors(web.json_response({"error": "bad_profile", "text": "Нужны рост, вес и возраст."}, status=400))
     upsert(cid, height=int(cm), weight=kg, age=age)
+    if is_male_profile(u):
+        upsert(
+            cid,
+            last_period=None,
+            cycle_len=None,
+            period_end=None,
+            period_len=None,
+        )
     if "kcal_goal" in body:
         g = body.get("kcal_goal")
         if g in (None, "", 0, "0"):
@@ -8250,10 +8679,11 @@ async def _api_profile(request):
     menu_cache_clear(cid)
     ev(cid, "manual", meta="web_profile")
     _u2 = row(cid)
+    _profile = profile_of(_u2)
     return _cors(web.json_response({"ok": True,
         "profile": {"height": int(cm), "weight": kg, "age": age, "kcal_goal": _u2.get("kcal_goal")},
         "cycle_len": (_u2.get("cycle_len") if is_cycle(_u2) else None),
-        "kcal_base": calc_calories(int(cm), kg, age, _u2.get("activity") or 2)[0]}))
+        "kcal_base": (profile_kcal(_profile)[0] if _profile else None)}))
 async def _api_meal(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -9016,13 +9446,6 @@ def _release_food_vision_slot():
     _ensure_food_vision_semaphore().release()
 
 
-_MALE_TODAY_FORBIDDEN_RE = re.compile(
-    r"\b(?:цикл\w*|фолликул\w*|лютеин\w*|овуляц\w*|месячн\w*|"
-    r"менструац\w*|пмс|эстроген\w*|прогестерон\w*|гинеколог\w*)\b",
-    re.I,
-)
-
-
 def _today_note_mode_guard(mode, note):
     """Never expose cycle-derived content in a male profile, even if an LLM errs."""
     if not isinstance(note, dict):
@@ -9041,7 +9464,7 @@ def _today_note_mode_guard(mode, note):
                 clean[key] = note[key]
         return clean
     visible = " ".join([clean["summary"], *clean["suggestions"]])
-    if _MALE_TODAY_FORBIDDEN_RE.search(visible):
+    if _male_suggestion_forbidden(visible):
         return {
             "summary": (
                 "Сегодня ориентируйся на уровень энергии, качество сна и "
@@ -9450,6 +9873,11 @@ async def _api_chat(request):
     if not msg: return _cors(web.json_response({"answer": "Напиши вопрос.", "suggestions": []}))
     msg, addressed = strip_aiwa_address(msg)
     if addressed and not msg:
+        if is_male_profile(u):
+            return _cors(web.json_response({
+                "answer": "Я тут. Напиши вопрос про питание, нагрузку или самочувствие.",
+                "suggestions": ["Что съесть сегодня?", "Собери тренировку"],
+            }))
         return _cors(web.json_response({"answer": "Я тут. Напиши вопрос про цикл, питание, нагрузку или самочувствие.", "suggestions": ["Когда овуляция?", "Что есть сегодня?"]}))
     ev(cid, "user_message", meta="webapp", n=len(msg))
     reply = await _chat_reply(
@@ -9458,6 +9886,7 @@ async def _api_chat(request):
         require_mutation_key=True,
         channel="webapp",
     )
+    reply = guard_chat_payload(cid, reply)
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "assistant_message", meta="webapp")
@@ -9476,35 +9905,41 @@ async def _api_feedback(request):
         return _cors(web.json_response({"error": "bad_feedback"}, status=400))
     return _cors(web.json_response({"ok": True, "duplicate": feedback_result == "duplicate"}))
 
-def _agent_tools_spec():
-    return [
-        {"type": "function", "function": {"name": "cycle_status",
-            "description": "Текущая фаза цикла, день цикла, сколько дней до месячных, задержка. Вызывай для вопросов про цикл, фазу, овуляцию, ПМС, самочувствие.",
-            "parameters": {"type": "object", "properties": {}}}},
+def _agent_tools_spec(mode=None):
+    tools = [
         {"type": "function", "function": {"name": "recent_symptoms",
             "description": "Отметки самочувствия за последние дни: симптомы, энергия, настроение.",
             "parameters": {"type": "object", "properties": {"days": {"type": "integer", "description": "за сколько дней, по умолчанию 14"}}}}},
         {"type": "function", "function": {"name": "today_diary",
-            "description": "Что пользовательница ела сегодня: калории и БЖУ, цель по калориям. Вызывай для вопросов про питание и калории.",
+            "description": "Что пользователь ел сегодня: калории и БЖУ, цель по калориям. Вызывай для вопросов про питание и калории.",
             "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "recent_workouts",
-            "description": "Последние тренировки пользовательницы. Вызывай для вопросов про нагрузку.",
+            "description": "Последние тренировки пользователя. Вызывай для вопросов про нагрузку.",
             "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "user_profile",
-            "description": "Профиль: рост, вес, возраст, активность, цель по калориям, режим (цикл/менопауза/беременность).",
+            "description": "Профиль: рост, вес, возраст, активность, цель по калориям и режим.",
             "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "recall",
-            "description": "Достать, что ассистент уже знает о пользовательнице из долгой памяти (её предпочтения, цели, что ей не подходит, важные факты). Вызывай в начале, если персональный контекст поможет ответить точнее.",
+            "description": "Достать, что ассистент уже знает о пользователе из долгой памяти: предпочтения, цели, ограничения и важные факты.",
             "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "remember",
-            "description": "Сохранить в долгую память ОДИН устойчивый факт о пользовательнице (предпочтение, цель, ограничение, что плохо переносит, привычка). НЕ сохраняй разовое, сиюминутное или уже известное.",
+            "description": "Сохранить в долгую память один устойчивый факт о пользователе. Не сохраняй разовое, сиюминутное или уже известное.",
             "parameters": {"type": "object", "properties": {"key": {"type": "string", "description": "короткий ярлык факта, напр. 'цель', 'не любит', 'плохо переносит'"}, "value": {"type": "string", "description": "сам факт кратко"}}, "required": ["key", "value"]}}},
     ]
+    if mode != "male":
+        tools.insert(0, {"type": "function", "function": {
+            "name": "cycle_status",
+            "description": "Текущая фаза, день, прогноз следующего начала и задержка. Вызывай только для репродуктивных вопросов.",
+            "parameters": {"type": "object", "properties": {}},
+        }})
+    return tools
 
 def _agent_exec(cid, name, args):
     args = args or {}
     try:
         if name == "cycle_status":
+            if is_male_profile(row(cid)):
+                return {"available": False, "note": "недоступно для этого профиля"}
             _, st = status_of(cid)
             if not st:
                 return {"tracked": False, "note": "цикл сейчас не отслеживается"}
@@ -9551,14 +9986,22 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None, ch
     1) модель через инструменты сама добывает реальные данные пользовательницы (реальные тул-колы);
     2) финальный ответ пишется прежним качественным промптом (answer_question/general_answer) с этими данными.
     Возвращает текст или None (тогда вызывающий откатывается к обычному ответу)."""
-    plan_sys = ("Ты — планировщик ассистента по женскому здоровью. Реши, какие инструменты нужны, чтобы ответить "
-                "на вопрос пользовательницы по её РЕАЛЬНЫМ данным (цикл, симптомы, дневник еды, тренировки, профиль), и вызови их. "
-                "Если она спрашивает, сохранилась ли еда или что именно есть в дневнике, обязательно вызови today_diary. "
-                "Если спрашивает о сохранённой тренировке, обязательно вызови recent_workouts. "
-                "Если это приветствие, благодарность, болтовня или общий вопрос не про её здоровье и данные (фильмы, быт, отношения, работа) — НЕ вызывай НИКАКИЕ инструменты, включая cycle_status. "
-                "Если вопрос общий и данные не нужны — не вызывай инструменты. Сам развёрнутый ответ не пиши, только выбери инструменты.")
+    male = is_male_profile(u)
+    plan_sys = (
+                ("Ты — планировщик wellness-ассистента для мужчины. "
+                 "Женская репродуктивная физиология и соответствующие инструменты запрещены. "
+                 if male else
+                 "Ты — планировщик ассистента по женскому здоровью. ")
+                + "Реши, какие инструменты нужны, чтобы ответить "
+                + ("на вопрос пользователя по его реальным данным (самочувствие, дневник еды, тренировки, профиль), и вызови их. "
+                   if male else
+                   "на вопрос пользовательницы по её реальным данным (цикл, симптомы, дневник еды, тренировки, профиль), и вызови их. ")
+                + "Если вопрос о том, сохранилась ли еда или что именно есть в дневнике, обязательно вызови today_diary. "
+                + "Если вопрос о сохранённой тренировке, обязательно вызови recent_workouts. "
+                + "Если это приветствие, благодарность, болтовня или общий вопрос не про здоровье и данные (фильмы, быт, отношения, работа) — НЕ вызывай НИКАКИЕ инструменты. "
+                + "Если вопрос общий и данные не нужны — не вызывай инструменты. Сам развёрнутый ответ не пиши, только выбери инструменты.")
     messages = [{"role": "system", "content": plan_sys}, {"role": "user", "content": msg}]
-    tools = _agent_tools_spec()
+    tools = _agent_tools_spec(u.get("mode"))
     gathered = []
     successful_tools = 0
 
@@ -9612,12 +10055,15 @@ async def _agent_final(cid, u, msg, gathered, usage, request_id, user_generation
     _, st = status_of(cid); prof = llm_profile_of(u)
     q = msg
     if gathered:
-        q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про здоровье, цикл, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
+        if is_male_profile(u):
+            q = msg + "\n\nВот его актуальные данные из приложения — когда отвечаешь про здоровье, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Женскую репродуктивную физиологию не упоминай. Если вопрос не про эти данные, отвечай по теме и данные не перечисляй: " + " | ".join(gathered)
+        else:
+            q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про здоровье, цикл, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
     q = _with_memory(cid, q)
     if st is not None:
-        return await llm_to_thread(cid, "final_answer", L.answer_question, st, q, prof, hist_get(cid), usage=usage,
+        return await llm_to_thread(cid, "final_answer", L.answer_question, st, q, prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
                                    request_id=request_id, user_generation=user_generation)
-    return await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid), usage=usage,
+    return await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid, male=is_male_profile(u)), usage=usage,
                                request_id=request_id, user_generation=user_generation)
 
 async def _memory_learn(cid, umsg, amsg, user_generation=None):
@@ -9653,6 +10099,16 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
             )
         if journal:
             intent = journal["intent"]
+    if is_male_profile(u) and intent in {
+        "phases", "period", "addcycles", "cyclelen", "logperiod",
+        "period_end", "calendar",
+    }:
+        upsert(cid, state=None, pending_date=None)
+        ev(cid, "male_mode_block", meta="chat_" + intent)
+        return {
+            "answer": MALE_PROFILE_FUNCTION_TEXT,
+            "suggestions": list(MALE_SAFE_SUGGESTIONS[:2]),
+        }
     if intent == "phases":
         _pu = []
         _pa = None
@@ -9866,16 +10322,16 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
                   "Какая физическая активность мне сегодня подходит и почему? Дай 2-3 конкретных варианта. Отвечай про тренировки, тему цикла не разворачивай.")
             fq = _with_memory(cid, fq)
             if st is not None:
-                ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, fq, prof, hist_get(cid), usage=usage,
+                ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, fq, prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
                                           request_id=request_id, user_generation=generation)
             else:
-                ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid), usage=usage,
+                ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid, male=is_male_profile(u)), usage=usage,
                                           request_id=request_id, user_generation=generation)
         elif st is not None:
-            ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid), usage=usage,
+            ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
                                       request_id=request_id, user_generation=generation)
         else:
-            ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid), usage=usage,
+            ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid, male=is_male_profile(u)), usage=usage,
                                       request_id=request_id, user_generation=generation)
     current = _user_write_allowed(cid, generation)
     clean, sugg = L.split_followups(ans)
@@ -9895,7 +10351,9 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
             asyncio.create_task(_memory_learn(cid, msg, clean, generation))
         except Exception:
             pass
-    return {"answer": md_plain(clean), "suggestions": sugg[:2]}
+    return guard_chat_payload(
+        cid, {"answer": md_plain(clean), "suggestions": sugg[:2]},
+    )
 
 async def _api_voice(request):
     try:
@@ -9933,6 +10391,7 @@ async def _api_voice(request):
         require_mutation_key=True,
         channel="webapp",
     )
+    reply = guard_chat_payload(cid, reply)
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
     ev(cid, "assistant_message", meta="webapp")
@@ -10015,7 +10474,10 @@ def diary_reco_summary(cid):
 async def answer_diary(cid, usage=None):
     summ = diary_reco_summary(cid)
     if not summ:
-        return "За сегодня в дневнике пусто. Сфоткай еду или напиши, что съела — посчитаю калории и подскажу, чего добрать."
+        return (
+            "За сегодня в дневнике пусто. Сфотографируй еду или опиши приём "
+            "текстом — посчитаю калории и подскажу, чего добрать."
+        )
     return await llm_to_thread(cid, "diary_recommendation", L.diary_reco, summ, (usage if usage is not None else []))
 
 def chat_mutation_key(channel, request_id):
@@ -10427,7 +10889,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         return {"ok": False, "text": "Не стала записывать: укажи сегодняшнюю дату или один из последних 31 дней."}
     food = str(preparsed_food_text or "").strip()[:500] or extract_food_log_text(text)
     if not food:
-        return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «съела 200 г творога, запиши»."}
+        return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «200 г творога, запиши»."}
     usage = []
     parsed = preparsed_food_record if isinstance(preparsed_food_record, dict) else None
     if parsed is None:
@@ -10442,7 +10904,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
        user_generation=generation)
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec or not food_record_admissible(rec):
-        return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «съела 200 г творога 5%, запиши»."}
+        return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «200 г творога 5%, запиши»."}
     rec["slot"] = slot or slot_for_now()
     rec["slot_guessed"] = not bool(slot)
     saved = meal_add(
@@ -10935,6 +11397,9 @@ async def log_workout_update_action(cid, u, text, target_id, user_generation=Non
 
 async def log_period_action(cid, u, text, context=None, user_generation=None, mutation_key=None):
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    if is_male_profile(row(cid)):
+        ev(cid, "male_mode_block", meta="period_start")
+        return {"ok": False, "text": MALE_PROFILE_FUNCTION_TEXT}
     args_hash = chat_mutation_args_hash("period_start", text)
     event_date, date_error = chat_event_date(text, max_past_days=366)
     if date_error:
@@ -10947,6 +11412,8 @@ async def log_period_action(cid, u, text, context=None, user_generation=None, mu
     if saved["status"] == "mismatch":
         return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
     if saved["status"] == "protected":
+        if saved.get("mode") == "male":
+            return {"ok": False, "text": MALE_PROFILE_FUNCTION_TEXT}
         label = "беременности" if saved.get("mode") == "preg" else "менопаузы"
         return {"ok": False, "text": f"Сейчас включён режим {label}, поэтому я не стала менять календарь автоматически. Сначала переключи режим в приложении, если это неактуально."}
     if saved["status"] == "duplicate":
@@ -10971,6 +11438,9 @@ async def log_period_action(cid, u, text, context=None, user_generation=None, mu
 
 async def log_period_end_action(cid, u, text, user_generation=None, mutation_key=None):
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    if is_male_profile(row(cid)):
+        ev(cid, "male_mode_block", meta="period_end")
+        return {"ok": False, "text": MALE_PROFILE_FUNCTION_TEXT}
     args_hash = chat_mutation_args_hash("period_end", text)
     event_date, date_error = chat_event_date(text, max_past_days=31)
     if date_error:
@@ -10981,6 +11451,8 @@ async def log_period_end_action(cid, u, text, user_generation=None, mutation_key
     )
     if saved["status"] == "mismatch":
         return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved["status"] == "protected":
+        return {"ok": False, "text": MALE_PROFILE_FUNCTION_TEXT}
     if saved["status"] == "duplicate":
         saved_end = date.fromisoformat(saved.get("end") or event_date.isoformat())
         return {
@@ -11103,7 +11575,7 @@ async def _api_food_text(request):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте."}, status=403))
     generation = _user_generation(cid)
     txt = (body.get("text") or "").strip()
-    if not txt: return _cors(web.json_response({"ok": False, "message": "Напиши, что съела."}))
+    if not txt: return _cors(web.json_response({"ok": False, "message": "Опиши приём пищи."}))
     ev(cid, "flow_start", meta="food")
     prof = profile_of(u); usage = []
     try:
@@ -11347,12 +11819,21 @@ async def _api_mode(request):
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
     m = body.get("mode")
-    if m not in ("cycle", "irregular", "meno", "none", "preg"):
+    if m not in ("male", "cycle", "irregular", "meno", "none", "preg"):
         return _cors(web.json_response({"error": "bad_mode"}, status=400))
     if m in ("cycle", "preg") and not u.get("last_period"):
         return _cors(web.json_response({"error": "need_period",
             "text": "Сначала отметь дату последних месячных — без неё этот режим не включить."}, status=400))
-    upsert(cid, mode=m, state=None)
+    upsert(
+        cid,
+        mode=m,
+        state=None,
+        last_period=(None if m == "male" else u.get("last_period")),
+        cycle_len=(None if m == "male" else u.get("cycle_len")),
+        period_end=(None if m == "male" else u.get("period_end")),
+        period_len=(None if m == "male" else u.get("period_len")),
+    )
+    _invalidate_mode_dependent_state(cid)
     if BOT_APP:
         try: schedule_daily(BOT_APP, cid, row(cid).get("send_time") or "08:00")
         except Exception as e: log.warning("reschedule: %s", e)
