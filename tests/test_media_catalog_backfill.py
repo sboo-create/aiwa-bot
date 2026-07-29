@@ -108,6 +108,7 @@ class StaticCatalogReleaseTests(unittest.TestCase):
                     with Image.open(path) as image:
                         self.assertEqual(image.format, "WEBP")
                         self.assertEqual(image.size, (512, 512))
+                        self.assertFalse(image.getexif())
 
 
 class SportAssetTests(unittest.TestCase):

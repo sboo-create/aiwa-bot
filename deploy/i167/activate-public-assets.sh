@@ -56,7 +56,7 @@ fi
 test -d "$source_assets"
 test -f "$source_assets/food/manifest.json"
 test -f "$source_assets/train/manifest.json"
-if [[ "$public_group" =~ ^[0-9]+$ ]]; then
+if [[ -n "$test_root" ]]; then
   :
 elif command -v getent >/dev/null 2>&1; then
   getent group "$public_group" >/dev/null

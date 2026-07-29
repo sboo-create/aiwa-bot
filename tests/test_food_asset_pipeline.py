@@ -29,6 +29,11 @@ class FoodAssetResolverTests(unittest.TestCase):
         self.assertEqual(exact["image_source"], "catalog_exact")
         self.assertEqual(extended["image_source"], "catalog_exact")
         self.assertEqual(extended["asset_state"], "ready")
+        self.assertEqual(
+            extended["image_url"],
+            "/assets/food/catalog-v2/"
+            "445a7df943bbd2442c7f5d72d01c9461816376395ae7b345d36e901e4d9a4401.webp",
+        )
         self.assertNotEqual(extended["image_url"], exact["image_url"])
         self.assertEqual(reordered["image_url"], assets.RESOLVER.manifest["Запеканка творожная"])
 

@@ -423,6 +423,15 @@ class PostReleaseSystemicTests(unittest.TestCase):
         )
         self.assertEqual(generated.content_type, "application/octet-stream")
 
+        unrelated_asset_request = SimpleNamespace(
+            path="/assets/deslop/example.webp",
+            headers={},
+        )
+        unrelated = asyncio.run(
+            bot._security_headers(unrelated_asset_request, handler)
+        )
+        self.assertEqual(unrelated.content_type, "application/octet-stream")
+
     def test_public_asset_activation_is_atomic_idempotent_and_additive(self):
         root = Path(__file__).resolve().parents[1]
         script = root / "deploy/i167/activate-public-assets.sh"
