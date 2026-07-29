@@ -65,6 +65,7 @@ AIWA_FOOD_ASSET_PUBLIC_BASE=/generated-food
 | `AIWA_FOOD_ASSET_RESOLVER` | `1` | `0` возвращает прежний client fallback |
 | `AIWA_FOOD_SECTION_REFRESH` | `1` | `0` запрещает food polling |
 | `AIWA_FOOD_DYNAMIC_SECTION` | `0` | `0` сохраняет текущий cache namespace и статичный card text |
+| `AIWA_FOOD_DYNAMIC_SECTION_PERCENT` | `0` | стабильный canary-процент; boolean без процента ничего не включает |
 | `AIWA_FOOD_ASSET_GENERATION` | `0` | `0` не запускает image workers |
 
 Изменение любого флага требует обычного restart/deploy, но не миграции и не
@@ -84,13 +85,16 @@ AIWA_FOOD_ASSET_PUBLIC_BASE=/generated-food
 
 ### После пика
 
-1. На staging включить `DYNAMIC_SECTION=1`, генератор ещё оставить `0`.
+1. На staging включить `DYNAMIC_SECTION=1`,
+   `DYNAMIC_SECTION_PERCENT=100`, генератор ещё оставить `0`.
 2. Проверить новый день/профиль, ограничения питания, male/non-cycle/cycle,
    fallback провайдера и отсутствие второго model call.
 3. Включить staging generator с `WORKERS=1`, `DAILY_MAX=5`; проверить
    дедупликацию, retry, WebP, restart recovery и появление asset после
    повторного открытия без polling по картинке.
-4. В production сначала включить dynamic section. После суток стабильности —
+4. В production увеличивать stable cohort `1% → 5% → 25% → 100%`.
+   Только новые когорты переходят с cache namespace v2 на v3, поэтому процент
+   нельзя сразу менять на 100 во время пика. После суток стабильности —
    generator canary с `WORKERS=1`, `DAILY_MAX=10`.
 5. Поднимать budget только по фактическим cache-hit, стоимости, reject-rate и
    latency; request latency не должна меняться.

@@ -334,6 +334,15 @@ def generated_public_base() -> str:
         or parsed.fragment
     ):
         raise ValueError("food_asset_public_base")
+    allowed_hosts = {
+        host.strip().casefold()
+        for host in os.environ.get(
+            "AIWA_FOOD_ASSET_ALLOWED_HOSTS", ""
+        ).split(",")
+        if host.strip()
+    }
+    if not parsed.hostname or parsed.hostname.casefold() not in allowed_hosts:
+        raise ValueError("food_asset_public_host")
     return base
 
 
@@ -416,8 +425,10 @@ def _safe_webp(raw: bytes) -> bytes:
         y = (512 - image.height) // 2
         canvas.alpha_composite(image, (x, y))
         output = io.BytesIO()
+        # Omitting icc_profile is the cross-version Pillow contract for
+        # excluding it. Passing None is not accepted consistently by libwebp.
         canvas.convert("RGB").save(
-            output, "WEBP", quality=82, method=6, exif=b"", icc_profile=None
+            output, "WEBP", quality=82, method=6, exif=b""
         )
         result = output.getvalue()
     if not result or len(result) > 512 * 1024:
