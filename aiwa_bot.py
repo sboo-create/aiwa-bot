@@ -5860,7 +5860,12 @@ async def _proactive_pick_and_send(cid, slot, shadow, context):
     if not text:
         return None
     if shadow:
-        _pa_mark(cid, best["key"]); _pa_logrow(cid, best["key"], best["score"], 0, text)
+        # Shadow evaluation must not consume a lifetime milestone before the
+        # user has actually received it. Recurring cooldown signals keep the
+        # old marking behaviour so shadow runs stay bounded.
+        if not best.get("once"):
+            _pa_mark(cid, best["key"])
+        _pa_logrow(cid, best["key"], best["score"], 0, text)
         ev(cid, "proactive", meta="shadow:" + best["key"])
     else:
         _campaign = campaign_id("proactive_" + best["key"])

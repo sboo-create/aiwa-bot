@@ -1,5 +1,6 @@
 import asyncio
 from datetime import date
+import inspect
 import json
 import os
 import tempfile
@@ -204,7 +205,6 @@ class PostReleaseSystemicTests(unittest.TestCase):
         bundle = (
             root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
-        fallback = (root / "webapp2/index.html").read_text(encoding="utf-8")
         self.assertIn('qt("/api/daily-summary", { enabled: A })', bundle)
         self.assertIn('"Силовая", "Кардио", "Пилатес", "Йога"', bundle)
         self.assertIn('["пилатес", "Пилатес"]', bundle)
@@ -220,8 +220,15 @@ class PostReleaseSystemicTests(unittest.TestCase):
             root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         fallback = (root / "webapp2/index.html").read_text(encoding="utf-8")
-        self.assertIn('sessionStorage.setItem(aiwaFoodHistoryStorageKey, a)', bundle)
+        self.assertNotIn("aiwa.food.selectedDate", bundle)
         self.assertIn("selectedDayRequest.current === rt", bundle)
+        self.assertIn("[v, !!l.diary, selectedDayRevision]", bundle)
+        self.assertIn(
+            "selectedDayRevision ? null : l.diary.recent?.[Kt]",
+            bundle,
+        )
+        self.assertIn("setSelectedDayRevision((rt) => rt + 1)", bundle)
+        self.assertIn('r("diary", { ...l.diary, ...Kt })', bundle)
         self.assertIn(
             "diary: wt ? T || { meals: [], totals: {}, target: st } : Z",
             bundle,
@@ -247,6 +254,14 @@ class PostReleaseSystemicTests(unittest.TestCase):
         with mock.patch.object(bot, "_pa_recent", return_value=True) as recent:
             self.assertTrue(bot._pa_suppressed(self.cid, recurring))
         recent.assert_called_once_with(self.cid, "low_energy", 3)
+
+    def test_shadow_run_does_not_consume_lifetime_milestone(self):
+        source = inspect.getsource(bot._proactive_pick_and_send)
+        self.assertIn('if not best.get("once"):', source)
+        self.assertLess(
+            source.index('if not best.get("once"):'),
+            source.index('_pa_mark(cid, best["key"])'),
+        )
 
     def test_decimal_amount_is_not_mistaken_for_a_date(self):
         with mock.patch.object(bot, "dtoday", return_value=date(2026, 7, 29)):

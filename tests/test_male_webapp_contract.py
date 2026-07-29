@@ -256,7 +256,10 @@ class MaleWebappStaticContractTests(unittest.TestCase):
     def test_webapp_uses_prefetched_diary_for_recent_days(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
 
-        self.assertIn("const ii = l.diary.recent?.[Kt]", bundle)
+        self.assertIn(
+            "const ii = selectedDayRevision ? null : l.diary.recent?.[Kt]",
+            bundle,
+        )
         self.assertIn("S(ii);", bundle)
 
     def test_webapp_uses_server_moscow_day_instead_of_utc_day(self):
