@@ -38,68 +38,27 @@ if [[ -z "$test_root" && "$(id -u)" -ne 0 ]]; then
 fi
 
 lock_file="$staging_root/.public-assets-activation.lock"
-lock_claim="$staging_root/.public-assets-activation.lock.$$.$sha"
 candidate=""
-process_start_token() {
-  local pid="$1"
-  if [[ -r "/proc/$pid/stat" ]]; then
-    awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true
-  else
-    ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true
-  fi
-}
-claim_start="$(process_start_token "$$")"
-if [[ -z "$claim_start" ]]; then
-  echo "cannot identify activation process start time" >&2
-  exit 1
-fi
-printf '%s\n%s\n' "$$" "$claim_start" >"$lock_claim"
-chmod 0600 "$lock_claim"
-lock_acquired=0
-for _attempt in 1 2 3; do
-  if ln -- "$lock_claim" "$lock_file" 2>/dev/null; then
-    lock_acquired=1
-    break
-  fi
-  owner_pid="$(sed -n '1p' "$lock_file" 2>/dev/null || true)"
-  owner_start="$(sed -n '2p' "$lock_file" 2>/dev/null || true)"
-  current_start=""
-  if [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
-    current_start="$(process_start_token "$owner_pid")"
-  fi
-  if [[ -n "$owner_start" && "$current_start" == "$owner_start" ]]; then
-    rm -f -- "$lock_claim"
-    echo "public asset activation already in progress: $lock_file (pid $owner_pid)" >&2
-    exit 1
-  fi
-  # Re-sample immediately before the atomic move so a process that appeared
-  # during the first /proc/ps lookup cannot have its live lock reclaimed.
-  if [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
-    current_start="$(process_start_token "$owner_pid")"
-  fi
-  if [[ -n "$owner_start" && "$current_start" == "$owner_start" ]]; then
-    rm -f -- "$lock_claim"
-    echo "public asset activation already in progress: $lock_file (pid $owner_pid)" >&2
-    exit 1
-  fi
-  stale_lock="$lock_file.stale.$sha.$$"
-  if mv -- "$lock_file" "$stale_lock" 2>/dev/null; then
-    rm -f -- "$stale_lock"
-    echo "reclaimed stale public asset activation lock (pid ${owner_pid:-unknown})" >&2
-  fi
-done
-rm -f -- "$lock_claim"
-if [[ "$lock_acquired" != 1 ]]; then
-  echo "could not acquire public asset activation lock: $lock_file" >&2
+# The shell keeps fd 9 open for the whole activation. fcntl locks belong to
+# that inherited open-file description, so they are released by the kernel on
+# every exit path, SIGKILL and reboot; the harmless lock file may remain.
+exec 9>"$lock_file"
+if ! python3 - 9 <<'PY'
+import fcntl
+import sys
+
+try:
+    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(1)
+PY
+then
+  echo "public asset activation already in progress: $lock_file" >&2
   exit 1
 fi
 cleanup() {
   if [[ -n "${candidate:-}" && -d "$candidate" ]]; then
     rm -rf -- "$candidate"
-  fi
-  if [[ "$(sed -n '1p' "$lock_file" 2>/dev/null || true)" == "$$" ]] &&
-     [[ "$(sed -n '2p' "$lock_file" 2>/dev/null || true)" == "$claim_start" ]]; then
-    rm -f -- "$lock_file"
   fi
 }
 trap cleanup EXIT

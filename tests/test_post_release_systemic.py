@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -549,35 +550,40 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertEqual(current.resolve(), partial.resolve())
 
         lock_file = Path(self.tmp.name) / ".public-assets-activation.lock"
-        if Path(f"/proc/{os.getpid()}/stat").is_file():
-            process_start = Path(
-                f"/proc/{os.getpid()}/stat"
-            ).read_text(encoding="ascii").split()[21]
-        else:
-            process_start = subprocess.check_output(
-                ["ps", "-o", "lstart=", "-p", str(os.getpid())],
-                text=True,
-            ).strip()
-        lock_file.write_text(
-            f"{os.getpid()}\n{process_start}\n",
-            encoding="ascii",
-        )
-        locked = subprocess.run(
-            [str(script), first_sha],
-            env=env,
-            capture_output=True,
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import fcntl,sys,time;"
+                    "f=open(sys.argv[1],'w');"
+                    "fcntl.flock(f,fcntl.LOCK_EX);"
+                    "print('locked',flush=True);"
+                    "time.sleep(30)"
+                ),
+                str(lock_file),
+            ],
+            stdout=subprocess.PIPE,
             text=True,
         )
-        self.assertNotEqual(locked.returncode, 0)
-        self.assertIn("activation already in progress", locked.stderr)
-        self.assertTrue(lock_file.is_file())
-        self.assertEqual(current.resolve(), partial.resolve())
+        try:
+            self.assertIsNotNone(holder.stdout)
+            self.assertEqual(holder.stdout.readline().strip(), "locked")
+            holder.stdout.close()
+            locked = subprocess.run(
+                [str(script), first_sha],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(locked.returncode, 0)
+            self.assertIn("activation already in progress", locked.stderr)
+            self.assertTrue(lock_file.is_file())
+            self.assertEqual(current.resolve(), partial.resolve())
+        finally:
+            holder.terminate()
+            holder.wait(timeout=5)
 
-        # A recycled live PID with a different start time is stale too.
-        lock_file.write_text(
-            f"{os.getpid()}\nnot-the-current-process-start\n",
-            encoding="ascii",
-        )
         recovered = subprocess.run(
             [str(script), first_sha],
             env=env,
@@ -589,8 +595,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
             0,
             recovered.stdout + recovered.stderr,
         )
-        self.assertIn("reclaimed stale", recovered.stderr)
-        self.assertFalse(lock_file.exists())
+        self.assertTrue(lock_file.exists())
         self.assertEqual(current.resolve(), partial.resolve())
 
     def test_aiwa_upstream_serves_static_manifest_for_i167_proxy(self):
