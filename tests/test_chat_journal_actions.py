@@ -493,6 +493,7 @@ class ChatJournalActionTests(unittest.TestCase):
         with (
             mock.patch.object(bot.L, "classify_journal_event", return_value=classified),
             mock.patch.object(bot.L, "analyze_food_text", return_value=parsed_food),
+            mock.patch.object(bot, "slot_for_now", return_value="snack"),
         ):
             first = asyncio.run(bot._chat_reply(
                 self.cid,

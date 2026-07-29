@@ -41,6 +41,7 @@ from urllib.parse import parse_qsl as _pqsl, urlsplit as _urlsplit, quote as _ur
 import cycle as C
 import llm as L
 import analytics_v2 as A2
+import food_assets as FA
 
 class KBS:
     PRIMARY = "primary"
@@ -110,7 +111,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-29-v171-post-release")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-29-v172-food-assets-hybrid")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 
@@ -380,6 +381,51 @@ def _migrate_db_on_connection(c):
         expires_at TEXT,
         reported_cost REAL DEFAULT 0
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS food_assets(
+        canonical_id TEXT NOT NULL,
+        style_version TEXT NOT NULL,
+        canonical_label TEXT NOT NULL,
+        status TEXT NOT NULL,
+        source TEXT NOT NULL,
+        image_url TEXT,
+        content_hash TEXT,
+        prompt_version TEXT,
+        retry_after TEXT,
+        last_error_class TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(canonical_id,style_version)
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS food_asset_jobs(
+        job_id TEXT PRIMARY KEY,
+        canonical_id TEXT NOT NULL,
+        style_version TEXT NOT NULL,
+        canonical_label TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        available_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        last_error_class TEXT,
+        UNIQUE(canonical_id,style_version)
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS food_asset_attempts(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        started_at TEXT NOT NULL
+    )""")
+    _catalog_now = datetime.now(TZ).isoformat()
+    for _catalog_label, _catalog_url in FA.RESOLVER.manifest.items():
+        c.execute(
+            """INSERT OR IGNORE INTO food_assets(
+                   canonical_id,style_version,canonical_label,status,source,
+                   image_url,updated_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                FA.canonical_id(_catalog_label), FA.STYLE_VERSION,
+                _catalog_label, "ready", "catalog", _catalog_url, _catalog_now,
+            ),
+        )
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
                 "tok_in INTEGER DEFAULT 0", "tok_out INTEGER DEFAULT 0", "model TEXT"):
@@ -404,7 +450,9 @@ def _migrate_db_on_connection(c):
                 "CREATE INDEX IF NOT EXISTS ix_workouts_cid_d ON workouts(chat_id, d)",
                 "CREATE INDEX IF NOT EXISTS ix_prepared_summary_date ON prepared_summaries(summary_date)",
                 "CREATE INDEX IF NOT EXISTS ix_ai_jobs_pick ON ai_jobs(status,priority,available_at,created_at)",
-                "CREATE INDEX IF NOT EXISTS ix_ai_jobs_user_kind ON ai_jobs(chat_id,kind,created_at)"):
+                "CREATE INDEX IF NOT EXISTS ix_ai_jobs_user_kind ON ai_jobs(chat_id,kind,created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_food_asset_jobs_pick ON food_asset_jobs(status,available_at,created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_food_asset_attempts_started ON food_asset_attempts(started_at)"):
         try: c.execute(_ix)
         except sqlite3.OperationalError: pass
     for col in ("state TEXT", "pending_date TEXT", "height INTEGER", "weight REAL", "age INTEGER",
@@ -993,14 +1041,14 @@ def _meal_row_payload(x):
         [str(x[2] or "")]
         + [str(item.get("name") or "") for item in items if isinstance(item, dict)]
     )
-    return {
+    return FA.decorate({
         "id": x[0], "ts": x[1], "title": x[2], "kcal": x[3],
         "protein": x[4], "fat": x[5], "carbs": x[6], "grams": x[7],
         "items": items, "source": x[9],
         "slot": (x[10] or "snack"),
         "fclass": L.food_class_norm(x[11], x[4], x[5], x[6], class_evidence),
         "slot_guessed": bool(x[12]),
-    }
+    })
 
 
 def meals_of(cid, d=None):
@@ -3793,11 +3841,28 @@ async def send_training_card(context, cid, st):
     except Exception as e:
         log.warning("training img: %s", e)
 
+def _feature_on(name, default="0"):
+    return os.environ.get(name, default).strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _food_dynamic_section_on():
+    # Off by default during the event rollout. Enabling it changes only the
+    # daily cache namespace and never blocks the fast fallback response.
+    return _feature_on("AIWA_FOOD_DYNAMIC_SECTION", "0")
+
+
+def _food_section_refresh_on():
+    return _feature_on("AIWA_FOOD_SECTION_REFRESH", "1")
+
+
 _MENU_CACHE = {}
 def _menu_key(cid, st, prof, mode):
     diet = ((prof.get("diet") if prof else "") or "", (prof.get("diet_note") if prof else "") or "")
     phase = (st.get("phase") if st else ("mode:" + str(mode)))
-    return (cid, dtoday().isoformat(), phase, diet)
+    version = "food-section-v3" if _food_dynamic_section_on() else "food-section-v2"
+    return (cid, dtoday().isoformat(), phase, diet, version)
 def dc_get(cid, kind, key=""):
     """Дневной кэш в SQLite: чтобы деплой/рестарт не заставлял модель генерить всё заново."""
     c = db(); r = c.execute("SELECT js FROM day_cache WHERE chat_id=? AND d=? AND kind=? AND k=?",
@@ -7333,6 +7398,7 @@ async def traction_worker():
 async def on_startup(app):
     global BOT_USERNAME, BCAST_Q, FOOD_Q, TRAIN_Q, _AI_JOB_WAKE, _AI_JOB_TASKS
     global _AI_BACKGROUND_SEM, _FOOD_VISION_SEM, _FOOD_VISION_WAITERS
+    global _FOOD_ASSET_CANDIDATES, _FOOD_ASSET_TASKS, _FOOD_ASSET_EXECUTOR
     # Fail before scheduling/sending anything if the boundary protecting real
     # users from synthetic load identities is malformed.
     _synthetic_user_id_min()
@@ -7384,6 +7450,30 @@ async def on_startup(app):
     ]
     _AI_JOB_WAKE.set()
     log.info("durable today workers started: %d", _AI_TODAY_WORKERS)
+    loaded_assets = await asyncio.to_thread(_load_generated_food_assets)
+    if FA.generation_enabled():
+        import concurrent.futures
+        recovered_assets = await asyncio.to_thread(_recover_food_asset_jobs)
+        _FOOD_ASSET_CANDIDATES = asyncio.Queue(maxsize=_FOOD_ASSET_QUEUE_MAX)
+        _FOOD_ASSET_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_FOOD_ASSET_WORKERS,
+            thread_name_prefix="aiwa-food-assets",
+        )
+        _FOOD_ASSET_TASKS = [
+            asyncio.create_task(
+                _food_asset_worker(i), name=f"aiwa-food-asset-worker-{i}"
+            )
+            for i in range(_FOOD_ASSET_WORKERS)
+        ]
+        log.info(
+            "food asset workers started: workers=%d daily_max=%d loaded=%d recovered=%d",
+            _FOOD_ASSET_WORKERS, _FOOD_ASSET_DAILY_MAX, loaded_assets,
+            recovered_assets,
+        )
+    else:
+        _FOOD_ASSET_CANDIDATES = None
+        _FOOD_ASSET_TASKS = []
+        log.info("food asset generation disabled; loaded=%d", loaded_assets)
     BCAST_Q = asyncio.Queue()
     _bw = max(1, min(20, int(os.environ.get("AIWA_BROADCAST_WORKERS", "10"))))
     for _ in range(_bw):
@@ -8053,6 +8143,12 @@ def _recent_syms_text(cid):
 _SECTION_CACHE = {}
 _SECTION_TASKS = {}
 _SECTION_FAST_WAIT_SECONDS = 0.75
+_SECTION_PENDING_LIMIT = max(
+    8, min(512, int(os.environ.get("AIWA_SECTION_PENDING_MAX", "96")))
+)
+_SECTION_RETRY_AFTER_MS = max(
+    3_000, min(120_000, int(os.environ.get("AIWA_SECTION_RETRY_AFTER_MS", "8000")))
+)
 
 def section_cache_clear(cid):
     for key in [key for key in list(_SECTION_CACHE) if key and key[0] == cid]:
@@ -8123,7 +8219,7 @@ def _section_fallback(cid, kind, u, st):
         menu = json.loads(json.dumps(L.CURATED_MENU.get(
             phase_key, L.CURATED_MENU["follicular"]
         ), ensure_ascii=False))
-        out["menu"] = L._scale_menu(menu, target)
+        out["menu"] = FA.decorate_menu(L._scale_menu(menu, target))
     return out
 
 async def _generate_section(cid, kind, u, st, key):
@@ -8141,23 +8237,26 @@ async def _generate_section(cid, kind, u, st, key):
             )
             if usage:
                 ev(cid, "tokens", sum(usage), meta="menu", calls=len(usage), usage=usage)
+            menu = FA.decorate_menu(menu)
+            _offer_food_asset_candidates(menu.get("meals") or [])
             if target:
                 menu["macros"] = {
                     "protein": f"{target[1]} г", "fat": f"{target[2]} г",
                     "carbs": f"{target[3]} г",
                 }
-            text = (st["content"]["food"] if st is not None
-                    else _section_fallback(cid, "food", u, st)["text"])
-            sugg_usage = []
-            suggestions = await llm_to_thread(
-                cid, "food_suggestions", L.food_suggestions,
-                [m.get("dish", "") for m in (menu.get("meals") or [])],
-                _food_ctx(u, st), sugg_usage,
-                user_generation=generation,
-            )
-            if sugg_usage:
-                ev(cid, "tokens", sum(sugg_usage), meta="food_suggest",
-                   calls=len(sugg_usage), usage=sugg_usage)
+            fallback = _section_fallback(cid, "food", u, st)
+            dynamic = _food_dynamic_section_on()
+            text = str(
+                menu.get("summary") if dynamic else fallback["text"]
+            ).strip() or fallback["text"]
+            suggestions = [
+                str(item).strip()
+                for item in (
+                    (menu.get("suggestions") or fallback["suggestions"])
+                    if dynamic else fallback["suggestions"]
+                )
+                if str(item).strip()
+            ][:3]
             payload = {"menu": menu, "kcal": (target[0] if target else None),
                        "text": text, "suggestions": suggestions}
             try:
@@ -8212,6 +8311,15 @@ async def _api_section(request):
         return _cors(web.json_response(dict(cached, cached=True, refreshing=False)))
     task = _SECTION_TASKS.get(key)
     if task is None:
+        if len(_SECTION_TASKS) >= _SECTION_PENDING_LIMIT:
+            payload = _section_fallback(cid, kind, u, st)
+            return _cors(web.json_response(dict(
+                payload,
+                cached=False,
+                refreshing=False,
+                capacity_limited=True,
+                retry_after_ms=_SECTION_RETRY_AFTER_MS,
+            )))
         task = asyncio.create_task(_generate_section(cid, kind, u, st, key))
         _SECTION_TASKS[key] = task
     # A tab must never inherit the provider's 30-60 second timeout. Give a warm
@@ -8222,10 +8330,367 @@ async def _api_section(request):
         return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
     except asyncio.TimeoutError:
         payload = _section_fallback(cid, kind, u, st)
-        return _cors(web.json_response(dict(payload, cached=False, refreshing=True)))
+        return _cors(web.json_response(dict(
+            payload,
+            cached=False,
+            refreshing=(
+                _food_section_refresh_on()
+                if kind == "food" else True
+            ),
+            retry_after_ms=_SECTION_RETRY_AFTER_MS,
+        )))
     except Exception:
         payload = _section_fallback(cid, kind, u, st)
         return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
+
+
+# Food images use their own durable queue and executor. The interactive path
+# only offers a tiny canonical tuple to a bounded asyncio queue; it never waits
+# for SQLite, the image provider, conversion, or storage.
+_FOOD_ASSET_CANDIDATES = None
+_FOOD_ASSET_TASKS = []
+_FOOD_ASSET_EXECUTOR = None
+_FOOD_ASSET_SEEN = set()
+_FOOD_ASSET_QUEUE_MAX = max(
+    16, min(2048, int(os.environ.get("AIWA_FOOD_ASSET_QUEUE_MAX", "256")))
+)
+_FOOD_ASSET_WORKERS = max(
+    1, min(4, int(os.environ.get("AIWA_FOOD_ASSET_WORKERS", "1")))
+)
+_FOOD_ASSET_DAILY_MAX = max(
+    1, min(500, int(os.environ.get("AIWA_FOOD_ASSET_DAILY_MAX", "40")))
+)
+_FOOD_ASSET_MAX_ATTEMPTS = max(
+    1, min(5, int(os.environ.get("AIWA_FOOD_ASSET_MAX_ATTEMPTS", "3")))
+)
+
+
+def _offer_food_asset_candidates(records):
+    if not FA.generation_enabled() or _FOOD_ASSET_CANDIDATES is None:
+        return 0
+    offered = 0
+    for record in records or []:
+        if not isinstance(record, dict) or record.get("asset_state") != "missing":
+            continue
+        food_id = str(record.get("canonical_id") or "")
+        label = FA.reviewed_generation_label(
+            record.get("canonical_label") or record.get("dish") or record.get("title")
+        )
+        key = (food_id, FA.STYLE_VERSION)
+        if not food_id or not label or key in _FOOD_ASSET_SEEN:
+            continue
+        try:
+            _FOOD_ASSET_CANDIDATES.put_nowait((food_id, label))
+            _FOOD_ASSET_SEEN.add(key)
+            offered += 1
+        except asyncio.QueueFull:
+            break
+    if len(_FOOD_ASSET_SEEN) > _FOOD_ASSET_QUEUE_MAX * 4:
+        _FOOD_ASSET_SEEN.clear()
+    return offered
+
+
+def _enqueue_food_asset_job(food_id, label):
+    now = datetime.now(TZ).isoformat()
+    job_id = secrets.token_hex(12)
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        asset = c.execute(
+            """SELECT status,retry_after FROM food_assets
+               WHERE canonical_id=? AND style_version=?""",
+            (food_id, FA.STYLE_VERSION),
+        ).fetchone()
+        if asset and asset[0] == "ready":
+            c.commit()
+            return False
+        if asset and asset[1] and asset[1] > now:
+            c.commit()
+            return False
+        existing_job = c.execute(
+            """SELECT job_id,status FROM food_asset_jobs
+               WHERE canonical_id=? AND style_version=?""",
+            (food_id, FA.STYLE_VERSION),
+        ).fetchone()
+        if existing_job and existing_job[1] in {"queued", "running", "completed"}:
+            c.commit()
+            return False
+        if existing_job:
+            c.execute(
+                """UPDATE food_asset_jobs SET status='queued',attempts=0,
+                       canonical_label=?,available_at=?,started_at=NULL,
+                       finished_at=NULL,last_error_class=NULL
+                   WHERE job_id=?""",
+                (label, now, existing_job[0]),
+            )
+        else:
+            c.execute(
+                """INSERT INTO food_asset_jobs(
+                       job_id,canonical_id,style_version,canonical_label,status,
+                       created_at,available_at
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (job_id, food_id, FA.STYLE_VERSION, label, "queued", now, now),
+            )
+        c.execute(
+            """INSERT INTO food_assets(
+                   canonical_id,style_version,canonical_label,status,source,
+                   updated_at
+               ) VALUES(?,?,?,?,?,?)
+               ON CONFLICT(canonical_id,style_version) DO UPDATE SET
+                   canonical_label=excluded.canonical_label,
+                   status=CASE WHEN food_assets.status='ready'
+                               THEN food_assets.status ELSE 'pending' END,
+                   updated_at=excluded.updated_at""",
+            (food_id, FA.STYLE_VERSION, label, "pending", "generated", now),
+        )
+        c.commit()
+        return True
+    finally:
+        c.close()
+
+
+def _claim_food_asset_job():
+    now = datetime.now(TZ)
+    day_start = datetime.combine(now.date(), dtime.min, tzinfo=TZ).isoformat()
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        attempts_today = c.execute(
+            """SELECT COUNT(*) FROM food_asset_attempts
+               WHERE started_at>=?""",
+            (day_start,),
+        ).fetchone()[0]
+        if attempts_today >= _FOOD_ASSET_DAILY_MAX:
+            c.commit()
+            return None
+        row_ = c.execute(
+            """SELECT job_id,canonical_id,canonical_label,attempts
+               FROM food_asset_jobs
+               WHERE status='queued' AND available_at<=?
+               ORDER BY created_at LIMIT 1""",
+            (now.isoformat(),),
+        ).fetchone()
+        if not row_:
+            c.commit()
+            return None
+        changed = c.execute(
+            """UPDATE food_asset_jobs
+               SET status='running',started_at=?,attempts=attempts+1
+               WHERE job_id=? AND status='queued'""",
+            (now.isoformat(), row_[0]),
+        ).rowcount
+        if changed:
+            c.execute(
+                "INSERT INTO food_asset_attempts(job_id,started_at) VALUES(?,?)",
+                (row_[0], now.isoformat()),
+            )
+            c.execute(
+                """UPDATE food_assets SET status='generating',updated_at=?
+                   WHERE canonical_id=? AND style_version=?
+                     AND status!='ready'""",
+                (now.isoformat(), row_[1], FA.STYLE_VERSION),
+            )
+            c.execute(
+                "DELETE FROM food_asset_attempts WHERE started_at<?",
+                ((now - timedelta(days=14)).isoformat(),),
+            )
+        c.commit()
+        if not changed:
+            return None
+        return {
+            "job_id": row_[0],
+            "canonical_id": row_[1],
+            "canonical_label": row_[2],
+            "attempts": int(row_[3] or 0) + 1,
+        }
+    finally:
+        c.close()
+
+
+def _finish_food_asset_job(job, result=None, error=None):
+    now = datetime.now(TZ)
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        if result:
+            c.execute(
+                """UPDATE food_asset_jobs SET status='completed',finished_at=?,
+                       last_error_class=NULL WHERE job_id=?""",
+                (now.isoformat(), job["job_id"]),
+            )
+            c.execute(
+                """UPDATE food_assets SET status='ready',source='generated',
+                       image_url=?,content_hash=?,prompt_version=?,
+                       retry_after=NULL,last_error_class=NULL,updated_at=?
+                   WHERE canonical_id=? AND style_version=?""",
+                (
+                    result["image_url"], result["content_hash"], "food-icon-v1",
+                    now.isoformat(), job["canonical_id"], FA.STYLE_VERSION,
+                ),
+            )
+            c.commit()
+            return "completed"
+        error_class = str(error or "generation_failed")[:80]
+        if job["attempts"] < _FOOD_ASSET_MAX_ATTEMPTS:
+            delay = min(3600, 30 * (2 ** (job["attempts"] - 1)))
+            available = (now + timedelta(seconds=delay)).isoformat()
+            c.execute(
+                """UPDATE food_asset_jobs SET status='queued',available_at=?,
+                       started_at=NULL,last_error_class=? WHERE job_id=?""",
+                (available, error_class, job["job_id"]),
+            )
+            c.execute(
+                """UPDATE food_assets SET status='pending',last_error_class=?,
+                       updated_at=? WHERE canonical_id=? AND style_version=?""",
+                (
+                    error_class, now.isoformat(), job["canonical_id"],
+                    FA.STYLE_VERSION,
+                ),
+            )
+            status = "queued"
+        else:
+            retry_after = (now + timedelta(days=7)).isoformat()
+            c.execute(
+                """UPDATE food_asset_jobs SET status='rejected',finished_at=?,
+                       last_error_class=? WHERE job_id=?""",
+                (now.isoformat(), error_class, job["job_id"]),
+            )
+            c.execute(
+                """UPDATE food_assets SET status='rejected',retry_after=?,
+                       last_error_class=?,updated_at=?
+                   WHERE canonical_id=? AND style_version=?""",
+                (
+                    retry_after, error_class, now.isoformat(),
+                    job["canonical_id"], FA.STYLE_VERSION,
+                ),
+            )
+            status = "rejected"
+        c.commit()
+        return status
+    finally:
+        c.close()
+
+
+def _load_generated_food_assets():
+    c = db()
+    try:
+        rows = c.execute(
+            """SELECT canonical_id,image_url FROM food_assets
+               WHERE status='ready' AND source='generated'
+                     AND image_url IS NOT NULL"""
+        ).fetchall()
+    finally:
+        c.close()
+    for food_id, image_url in rows:
+        FA.RESOLVER.publish_generated(food_id, image_url)
+    return len(rows)
+
+
+def _recover_food_asset_jobs():
+    """Make provider jobs durable across a process or host restart."""
+    now = datetime.now(TZ).isoformat()
+    c = db()
+    try:
+        changed = c.execute(
+            """UPDATE food_asset_jobs
+               SET status='queued',started_at=NULL,available_at=?
+               WHERE status='running'""",
+            (now,),
+        ).rowcount
+        c.execute(
+            """UPDATE food_assets SET status='pending',updated_at=?
+               WHERE status='generating'
+                 AND EXISTS (
+                     SELECT 1 FROM food_asset_jobs j
+                     WHERE j.canonical_id=food_assets.canonical_id
+                       AND j.style_version=food_assets.style_version
+                       AND j.status='queued'
+                 )""",
+            (now,),
+        )
+        c.commit()
+        return int(changed or 0)
+    finally:
+        c.close()
+
+
+async def _food_asset_worker(worker_no):
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            food_id, label = await asyncio.wait_for(
+                _FOOD_ASSET_CANDIDATES.get(), timeout=1.0
+            )
+            try:
+                await asyncio.to_thread(_enqueue_food_asset_job, food_id, label)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _FOOD_ASSET_SEEN.discard((food_id, FA.STYLE_VERSION))
+                log.warning(
+                    "food asset enqueue failed: worker=%s error=%s",
+                    worker_no, type(exc).__name__,
+                )
+            finally:
+                _FOOD_ASSET_CANDIDATES.task_done()
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            raise
+        try:
+            job = await asyncio.to_thread(_claim_food_asset_job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning(
+                "food asset claim failed: worker=%s error=%s",
+                worker_no, type(exc).__name__,
+            )
+            await asyncio.sleep(1)
+            continue
+        if not job:
+            continue
+        try:
+            result = await loop.run_in_executor(
+                _FOOD_ASSET_EXECUTOR,
+                FA.generate_and_store,
+                job["canonical_label"],
+            )
+            await asyncio.to_thread(_finish_food_asset_job, job, result, None)
+            FA.RESOLVER.publish_generated(job["canonical_id"], result["image_url"])
+            log.info(
+                "food asset ready: worker=%s canonical_id=%s",
+                worker_no, job["canonical_id"],
+            )
+        except Exception as exc:
+            error = type(exc).__name__
+            try:
+                await asyncio.to_thread(
+                    _finish_food_asset_job, job, None, error
+                )
+            except Exception as persistence_exc:
+                log.error(
+                    "food asset failure persistence failed: worker=%s error=%s",
+                    worker_no, type(persistence_exc).__name__,
+                )
+            log.warning(
+                "food asset failed: worker=%s canonical_id=%s error=%s",
+                worker_no, job["canonical_id"], error,
+            )
+
+
+async def _shutdown_food_asset_workers():
+    global _FOOD_ASSET_TASKS, _FOOD_ASSET_EXECUTOR
+    tasks = list(_FOOD_ASSET_TASKS)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _FOOD_ASSET_TASKS = []
+    executor = _FOOD_ASSET_EXECUTOR
+    _FOOD_ASSET_EXECUTOR = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 # Сводка дня в мини-аппе: кэш на день, чтобы апп открывался сразу, а не ждал модель.
 _TODAY_CACHE = {}
 _AI_JOB_WAKE = None
@@ -10552,6 +11017,10 @@ async def _api_diary(request):
             if _dd > dtoday() or (dtoday() - _dd).days > 92: _d = None
         except Exception: _d = None
     payload = await asyncio.to_thread(_diary_payload_with_recent, cid, _d)
+    _offer_food_asset_candidates(payload.get("meals") or [])
+    for recent in (payload.get("recent") or {}).values():
+        if isinstance(recent, dict):
+            _offer_food_asset_candidates(recent.get("meals") or [])
     return _cors(web.json_response(payload))
 
 async def _api_diary_del(request):
@@ -11203,6 +11672,16 @@ async def _health(request):
                 ))
             ),
             "food_vision_waiting": _FOOD_VISION_WAITERS,
+            "food_asset_generation_enabled": FA.generation_enabled(),
+            "food_asset_workers": sum(
+                1 for task in _FOOD_ASSET_TASKS if not task.done()
+            ),
+            "food_asset_queue": (
+                _FOOD_ASSET_CANDIDATES.qsize()
+                if _FOOD_ASSET_CANDIDATES is not None else 0
+            ),
+            "section_pending": len(_SECTION_TASKS),
+            "section_pending_limit": _SECTION_PENDING_LIMIT,
         },
         status=status,
     )
@@ -11219,6 +11698,14 @@ def build_web():
     _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
         aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды
+    _generated_base = FA.generated_public_base()
+    if _generated_base.startswith("/") and "://" not in _generated_base:
+        _generated_dir = FA.generated_asset_dir()
+        _generated_dir.mkdir(parents=True, exist_ok=True)
+        aio.router.add_static(
+            _generated_base + "/", path=str(_generated_dir),
+            show_index=False, append_version=False,
+        )
     aio.router.add_get("/health", _health)
     aio.router.add_route("*", "/admin", _legacy_admin_removed)
     aio.router.add_route("*", "/admin/login", _legacy_admin_removed)
@@ -11318,6 +11805,7 @@ async def run_all():
         # Stop accepting new work before draining analytics produced by the last
         # in-flight handlers. This is the explicit SIGINT/SIGTERM deploy path;
         # atexit remains a final fallback only.
+        await _shutdown_food_asset_workers()
         for name, shutdown in (
             ("telegram polling", app.updater.stop),
             ("telegram application", app.stop),
