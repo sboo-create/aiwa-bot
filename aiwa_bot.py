@@ -112,7 +112,7 @@ L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
 AIWA_VERSION = os.environ.get(
-    "AIWA_VERSION", "2026-07-29-v175-validated-food-assets"
+    "AIWA_VERSION", "2026-07-29-v176-food-assets-live-refresh"
 )
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
@@ -8376,6 +8376,13 @@ async def _generate_section(cid, kind, u, st, key):
         if _SECTION_TASKS.get(key) is asyncio.current_task():
             _SECTION_TASKS.pop(key, None)
 
+def _section_with_current_food_assets(payload, kind):
+    result = dict(payload or {})
+    if kind == "food" and isinstance(result.get("menu"), dict):
+        result["menu"] = FA.decorate_menu(result["menu"])
+    result["asset_revision"] = FA.RESOLVER.generated_revision()
+    return result
+
 async def _api_section(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -8389,11 +8396,14 @@ async def _api_section(request):
     key = _section_key(cid, kind, u, st)
     cached = _SECTION_CACHE.get(key)
     if cached is not None:
-        return _cors(web.json_response(dict(cached, cached=True, refreshing=False)))
+        payload = _section_with_current_food_assets(cached, kind)
+        return _cors(web.json_response(dict(payload, cached=True, refreshing=False)))
     task = _SECTION_TASKS.get(key)
     if task is None:
         if len(_SECTION_TASKS) >= _SECTION_PENDING_LIMIT:
-            payload = _section_fallback(cid, kind, u, st)
+            payload = _section_with_current_food_assets(
+                _section_fallback(cid, kind, u, st), kind
+            )
             return _cors(web.json_response(dict(
                 payload,
                 cached=False,
@@ -8408,9 +8418,12 @@ async def _api_section(request):
     # while the single shared task keeps preparing the personal result.
     try:
         payload = await asyncio.wait_for(asyncio.shield(task), timeout=_SECTION_FAST_WAIT_SECONDS)
+        payload = _section_with_current_food_assets(payload, kind)
         return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
     except asyncio.TimeoutError:
-        payload = _section_fallback(cid, kind, u, st)
+        payload = _section_with_current_food_assets(
+            _section_fallback(cid, kind, u, st), kind
+        )
         return _cors(web.json_response(dict(
             payload,
             cached=False,
@@ -8421,8 +8434,22 @@ async def _api_section(request):
             retry_after_ms=_SECTION_RETRY_AFTER_MS,
         )))
     except Exception:
-        payload = _section_fallback(cid, kind, u, st)
+        payload = _section_with_current_food_assets(
+            _section_fallback(cid, kind, u, st), kind
+        )
         return _cors(web.json_response(dict(payload, cached=False, refreshing=False)))
+
+async def _api_food_asset_revision(request):
+    body = await request.json()
+    if not _verify_init(body.get("initData", "")):
+        return _cors(web.json_response({"error": "auth"}, status=401))
+    response = _cors(
+        web.json_response(
+            {"revision": FA.RESOLVER.generated_revision()}
+        )
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 # Food images use their own durable queue and executor. The interactive path
@@ -11124,6 +11151,7 @@ async def _api_diary(request):
             if _dd > dtoday() or (dtoday() - _dd).days > 92: _d = None
         except Exception: _d = None
     payload = await asyncio.to_thread(_diary_payload_with_recent, cid, _d)
+    payload["asset_revision"] = FA.RESOLVER.generated_revision()
     _offer_food_asset_candidates(payload.get("meals") or [])
     for recent in (payload.get("recent") or {}).values():
         if isinstance(recent, dict):
@@ -11825,6 +11853,7 @@ def build_web():
     aio.router.add_route("*", "/api/admin_stats", _legacy_admin_removed)
     aio.router.add_post("/api/data", _api_data)
     aio.router.add_post("/api/section", _api_section)
+    aio.router.add_post("/api/food-assets/revision", _api_food_asset_revision)
     aio.router.add_post("/api/today", _api_today)
     aio.router.add_post("/api/chat", _api_chat)
     aio.router.add_post("/api/feedback", _api_feedback)

@@ -36,6 +36,15 @@ class FoodVisualFallbackTests(unittest.TestCase):
         self.assertIn('document.visibilityState !== "visible"', source)
         self.assertIn("Math.max(5e3", source)
 
+    def test_generated_food_images_refresh_without_polling_heavy_payloads(self):
+        source = BUNDLE.read_text(encoding="utf-8")
+        self.assertIn('qt("/api/food-assets/revision", {})', source)
+        self.assertIn("aiwaAssetPoll.current.attempts >= 30", source)
+        self.assertIn("6e4 + Math.floor(Math.random() * 2e4)", source)
+        self.assertIn('await s("foodSection", "diary")', source)
+        self.assertIn("document.visibilityState ===", source)
+        self.assertIn("aiwaPayloadAssetRevision = Math.max", source)
+
 
 if __name__ == "__main__":
     unittest.main()

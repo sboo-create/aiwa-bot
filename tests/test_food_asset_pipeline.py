@@ -76,6 +76,16 @@ class FoodAssetResolverTests(unittest.TestCase):
         self.assertEqual(exact_catalog["image_source"], "catalog_exact")
         self.assertNotEqual(exact_catalog["image_url"], generated_url)
 
+    def test_generated_revision_changes_only_when_overlay_changes(self):
+        resolver = assets.FoodAssetResolver(assets.RESOLVER.manifest)
+        self.assertEqual(resolver.generated_revision(), 0)
+        resolver.publish_generated("food:test", "/generated-food/one.webp")
+        self.assertEqual(resolver.generated_revision(), 1)
+        resolver.publish_generated("food:test", "/generated-food/one.webp")
+        self.assertEqual(resolver.generated_revision(), 1)
+        resolver.publish_generated("food:test", "/generated-food/two.webp")
+        self.assertEqual(resolver.generated_revision(), 2)
+
     def test_family_fallback_uses_label_head_not_secondary_ingredient(self):
         cases = {
             "Салат с говядиной и креветками": "Овощной салат",
@@ -566,6 +576,26 @@ class FoodSectionLoadContracts(unittest.TestCase):
         with mock.patch.dict(os.environ, configured, clear=False):
             app = bot.build_web()
         self.assertIsNotNone(app)
+
+    def test_food_asset_revision_endpoint_is_authenticated_and_no_store(self):
+        class Request:
+            async def json(self):
+                return {"initData": "signed"}
+
+        async def scenario():
+            with mock.patch.object(bot, "_verify_init", return_value=1001):
+                response = await bot._api_food_asset_revision(Request())
+            payload = json.loads(response.text)
+            self.assertEqual(
+                payload["revision"], assets.RESOLVER.generated_revision()
+            )
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+            with mock.patch.object(bot, "_verify_init", return_value=None):
+                rejected = await bot._api_food_asset_revision(Request())
+            self.assertEqual(rejected.status, 401)
+
+        asyncio.run(scenario())
 
     def test_sqlite_asset_queue_has_one_writer(self):
         self.assertEqual(bot._FOOD_ASSET_WORKERS, 1)

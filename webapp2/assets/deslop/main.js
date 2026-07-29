@@ -1,2 +1,2 @@
 // Keep the transitive import versioned too: Caddy serves /assets as immutable.
-import "./deslop-main-aiwa-v163.js?v=r21";
+import "./deslop-main-aiwa-v163.js?v=r22";

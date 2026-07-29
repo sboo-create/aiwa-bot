@@ -213,31 +213,32 @@ def generate(input_path: Path, output_dir: Path, workers: int, attempts: int) ->
 def _review_one(
     row: dict[str, object], repair_attempts: int,
 ) -> dict[str, object]:
-    if row.get("status") == "failed":
-        return row
-    path = assets.generated_asset_dir() / str(row["filename"])
     errors = []
-    try:
-        review_score = assets._validate_generated_image(
-            str(row["label"]),
-            str(row["literal_description"]),
-            path.read_bytes(),
-        )
-        return {
-            **row,
-            "review_status": "approved",
-            "review_score": review_score,
-            "review_repairs": 0,
-        }
-    except Exception as exc:
-        errors.append(f"{type(exc).__name__}:{str(exc)[:120]}")
+    if row.get("status") != "failed":
+        path = assets.generated_asset_dir() / str(row["filename"])
+        try:
+            review_score = assets._validate_generated_image(
+                str(row["label"]),
+                str(row["literal_description"]),
+                path.read_bytes(),
+            )
+            return {
+                **row,
+                "review_status": "approved",
+                "review_score": review_score,
+                "review_repairs": 0,
+            }
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}:{str(exc)[:120]}")
+    else:
+        errors.extend(str(error)[:120] for error in row.get("errors") or [])
 
-    # Review failures enter their own repair queue. A repaired image must pass
-    # the normal generation gate and this second independent review.
+    # Both generation failures and review failures enter the repair queue. A
+    # repaired image must pass the normal gate and this second review.
     for repair in range(1, repair_attempts + 1):
         try:
             replacement = assets.generate_and_store(
-                row["label"], attempt=repair + 1
+                row["label"], attempt=3 + repair
             )
             replacement_path = (
                 assets.generated_asset_dir()

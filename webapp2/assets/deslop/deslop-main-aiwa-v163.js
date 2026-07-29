@@ -19681,7 +19681,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v163.js?v=r21").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v163.js?v=r22").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -21121,7 +21121,7 @@ const aiwaTodayIso = () => {
   return zd(a?.fclass) === "напиток" || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(e) ? "/assets/food/drink-cup.svg?v=1" : uA;
 }, fA = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
 function iv({ mode: a, revision: e = 0 }) {
-  const [l, s, r] = px(rA, [a, e]), c = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, f = c?.mode === "male", [h, y] = E.useState(!1), [p, g] = E.useState({}), [v, b] = E.useState(""), [T, S] = E.useState(null), [w, j] = E.useState(null), [M, D] = E.useState(!1), [A, R] = E.useState(null), [B, U] = E.useState(!1), [_, H] = E.useState(""), [P, K] = E.useState(null), [it, at] = E.useState(!1), I = E.useRef(null), F = !!l.foodSection && !(l.foodSection.menu?.meals || []).length, Q = !!l.foodSection?.refreshing, et = E.useRef(0);
+  const [l, s, r] = px(rA, [a, e]), c = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, f = c?.mode === "male", [h, y] = E.useState(!1), [p, g] = E.useState({}), [v, b] = E.useState(""), [T, S] = E.useState(null), [w, j] = E.useState(null), [M, D] = E.useState(!1), [A, R] = E.useState(null), [B, U] = E.useState(!1), [_, H] = E.useState(""), [P, K] = E.useState(null), [it, at] = E.useState(!1), I = E.useRef(null), F = !!l.foodSection && !(l.foodSection.menu?.meals || []).length, Q = !!l.foodSection?.refreshing, et = E.useRef(0), aiwaAssetPoll = E.useRef({ revision: null, attempts: 0 }), aiwaAssetRows = [...l.foodSection?.menu?.meals || [], ...l.diary?.meals || [], ...Object.values(l.diary?.recent || {}).flatMap((rt) => rt?.meals || [])], aiwaAssetRefreshNeeded = aiwaAssetRows.some((rt) => rt?.asset_state === "missing" || rt?.image_source === "catalog_family" || rt?.image_source === "catalog_canonical"), aiwaPayloadAssetRevision = Math.max(Number(l.foodSection?.asset_revision || 0), Number(l.diary?.asset_revision || 0));
   E.useEffect(() => {
     if (!Q) {
       et.current = 0;
@@ -21134,6 +21134,32 @@ function iv({ mode: a, revision: e = 0 }) {
     }, rt);
     return () => clearTimeout(Kt);
   }, [Q, l.foodSection]), E.useEffect(() => {
+    if (!aiwaAssetRefreshNeeded) {
+      aiwaAssetPoll.current = { revision: null, attempts: 0 };
+      return;
+    }
+    if (aiwaAssetPoll.current.revision === null)
+      aiwaAssetPoll.current.revision = aiwaPayloadAssetRevision;
+    let rt = !0, Kt = null;
+    const ii = async () => {
+      if (!rt || aiwaAssetPoll.current.attempts >= 30) return;
+      if (document.visibilityState === "visible") {
+        const nt = await qt("/api/food-assets/revision", {}).catch(() => null), st = Number(nt?.revision);
+        if (Number.isFinite(st)) {
+          const O = aiwaAssetPoll.current.revision;
+          aiwaAssetPoll.current.revision = st;
+          if (O !== null && st !== O)
+            await s("foodSection", "diary");
+        }
+        aiwaAssetPoll.current.attempts += 1;
+      }
+      if (rt && aiwaAssetPoll.current.attempts < 30)
+        Kt = setTimeout(ii, 6e4 + Math.floor(Math.random() * 2e4));
+    };
+    return Kt = setTimeout(ii, 15e3 + Math.floor(Math.random() * 2e4)), () => {
+      rt = !1, Kt && clearTimeout(Kt);
+    };
+  }, [aiwaAssetRefreshNeeded, aiwaPayloadAssetRevision]), E.useEffect(() => {
     fetch("/assets/food/manifest.json?v=2").then((rt) => rt.ok ? rt.json() : {}).then((rt) => g(rt || {})).catch(() => {
     });
   }, []);
