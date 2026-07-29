@@ -2256,8 +2256,12 @@ def menu_today(st, profile=None, target=None, usage=None):
               "Завтрак обязательно белковый (яйца, омлет, сыр, греческий йогурт, рыба), а не сладкая каша как основа. "
               "Только обычные, доступные в России продукты и простые блюда. Не предлагай тофу, батат, киноа, булгур, протеиновые порошки и экзотику. Никаких странных сочетаний вроде яблока с маслом. "
               "Учитывай нутриенты под фазу." + extra +
-              " Все четыре блюда разные, без повторов и без дублей между приёмами. Блюда короткие, до 5 слов. Ответь строго JSON без обрамления: "
-              '{"macros":{"protein":"NN г","fat":"NN г","carbs":"NNN г"},'
+              " Все четыре блюда разные, без повторов и без дублей между приёмами. Блюда короткие, до 5 слов. "
+              "Добавь персональную краткую сводку питания на сегодня в 1-2 предложения и три коротких вопроса-подсказки по конкретным блюдам меню. "
+              "Ответь строго JSON без обрамления: "
+              '{"summary":"почему такой рацион подходит сегодня и один практичный фокус",'
+              '"suggestions":["короткий вопрос","короткий вопрос","короткий вопрос"],'
+              '"macros":{"protein":"NN г","fat":"NN г","carbs":"NNN г"},'
               '"meals":[{"time":"08:00","dish":"...","note":"нутриент","kcal":"NNN ккал"}]}')
     out = _call([{"role": "system", "content": "Ты нутрициолог femtech-приложения. Отвечай строго JSON, по-русски."},
                  {"role": "user", "content": prompt}], max_tokens=900, usage=usage)
@@ -2267,6 +2271,10 @@ def menu_today(st, profile=None, target=None, usage=None):
             meals = data.get("meals") or []
             dishes = [(m.get("dish") or "").strip().lower() for m in meals]
             if len(meals) >= 4 and len(set(d for d in dishes if d)) >= 3:
+                data["summary"] = str(data.get("summary") or "").strip()
+                data["suggestions"] = _parse_str_list(
+                    json.dumps(data.get("suggestions") or [], ensure_ascii=False), 3
+                )
                 return _scale_menu(data, target)
         except Exception:
             pass
@@ -2433,8 +2441,11 @@ def general_menu(profile, mode, target=None, usage=None):
               "Четыре приёма: завтрак ~08:00, обед ~13:00, перекус ~16:00, ужин ~20:00. "
               "Завтрак обязательно белковый (яйца, омлет, сыр, греческий йогурт, рыба). "
               "Только обычные, доступные в России продукты и простые блюда. Не предлагай тофу, батат, киноа, булгур, протеиновые порошки и экзотику." + extra +
-              " Блюда короткие, до 5 слов. Ответь строго JSON без обрамления: "
-              '{"macros":{"protein":"NN г","fat":"NN г","carbs":"NNN г"},'
+              " Блюда короткие, до 5 слов. Добавь персональную краткую сводку питания на сегодня в 1-2 предложения "
+              "и три коротких вопроса-подсказки по конкретным блюдам меню. Ответь строго JSON без обрамления: "
+              '{"summary":"почему такой рацион подходит сегодня и один практичный фокус",'
+              '"suggestions":["короткий вопрос","короткий вопрос","короткий вопрос"],'
+              '"macros":{"protein":"NN г","fat":"NN г","carbs":"NNN г"},'
               '"meals":[{"time":"08:00","dish":"...","note":"нутриент","kcal":"NNN ккал"}]}')
     system = (
         "Ты нутрициолог приложения для мужского профиля. Никогда не упоминай "
@@ -2451,6 +2462,10 @@ def general_menu(profile, mode, target=None, usage=None):
             meals = data.get("meals") or []
             dishes = [(m.get("dish") or "").strip().lower() for m in meals]
             if len(meals) >= 4 and len(set(d for d in dishes if d)) >= 3:
+                data["summary"] = str(data.get("summary") or "").strip()
+                data["suggestions"] = _parse_str_list(
+                    json.dumps(data.get("suggestions") or [], ensure_ascii=False), 3
+                )
                 return _scale_menu(data, target)
         except Exception:
             pass

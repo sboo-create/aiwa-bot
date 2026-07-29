@@ -21121,18 +21121,19 @@ const aiwaTodayIso = () => {
   return zd(a?.fclass) === "напиток" || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(e) ? "/assets/food/drink-cup.svg?v=1" : uA;
 }, fA = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
 function iv({ mode: a, revision: e = 0 }) {
-  const [l, s, r] = px(rA, [a, e]), c = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, f = c?.mode === "male", [h, y] = E.useState(!1), [p, g] = E.useState({}), [v, b] = E.useState(""), [T, S] = E.useState(null), [w, j] = E.useState(null), [M, D] = E.useState(!1), [A, R] = E.useState(null), [B, U] = E.useState(!1), [_, H] = E.useState(""), [P, K] = E.useState(null), [it, at] = E.useState(!1), I = E.useRef(null), F = !!l.foodSection && !(l.foodSection.menu?.meals || []).length, et = E.useRef(0);
+  const [l, s, r] = px(rA, [a, e]), c = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, f = c?.mode === "male", [h, y] = E.useState(!1), [p, g] = E.useState({}), [v, b] = E.useState(""), [T, S] = E.useState(null), [w, j] = E.useState(null), [M, D] = E.useState(!1), [A, R] = E.useState(null), [B, U] = E.useState(!1), [_, H] = E.useState(""), [P, K] = E.useState(null), [it, at] = E.useState(!1), I = E.useRef(null), F = !!l.foodSection && !(l.foodSection.menu?.meals || []).length, Q = !!l.foodSection?.refreshing, et = E.useRef(0);
   E.useEffect(() => {
-    if (!F) {
+    if (!Q) {
       et.current = 0;
       return;
     }
-    if (et.current >= 5) return;
-    const rt = [1500, 3e3, 5e3, 9e3, 15e3][et.current], Kt = setTimeout(() => {
+    if (et.current >= 3) return;
+    const rt = Math.max(5e3, Number(l.foodSection?.retry_after_ms || 8e3)) + Math.floor(Math.random() * 2500), Kt = setTimeout(() => {
+      if (document.visibilityState !== "visible") return;
       et.current += 1, s("foodSection");
     }, rt);
     return () => clearTimeout(Kt);
-  }, [F, l.foodSection]), E.useEffect(() => {
+  }, [Q, l.foodSection]), E.useEffect(() => {
     fetch("/assets/food/manifest.json?v=2").then((rt) => rt.ok ? rt.json() : {}).then((rt) => g(rt || {})).catch(() => {
     });
   }, []);
@@ -21269,7 +21270,7 @@ function iv({ mode: a, revision: e = 0 }) {
       tt.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: "Меню на сегодня", children: tt.map((rt) => /* @__PURE__ */ m.jsx(
         Yt,
         {
-          image: rt.meal.image || av(p, rt.meal.dish) || uA,
+          image: rt.meal.image_url || rt.meal.image || av(p, rt.meal.dish) || uA,
           title: rt.meal.dish || "Рекомендация Айвы",
           description: [rt.label, rt.meal.kcal, rt.meal.note].filter(Boolean).join(" · "),
           onClick: () => j(rt)
@@ -21283,7 +21284,7 @@ function iv({ mode: a, revision: e = 0 }) {
         Xt.length ? Xt.map((rt) => /* @__PURE__ */ m.jsx(
           Yt,
           {
-            image: av(p, rt.title) || foodFallbackImage(rt) || cj,
+            image: rt.image_url || av(p, rt.title) || foodFallbackImage(rt) || cj,
             title: rt.title,
             description: `${_d(rt.kcal)} · Б${Math.round(rt.protein || 0)} · Ж${Math.round(rt.fat || 0)} · У${Math.round(rt.carbs || 0)}`,
             onClick: wt ? void 0 : () => H("diary")
