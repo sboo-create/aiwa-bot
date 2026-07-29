@@ -139,7 +139,7 @@ class ReportAndAcquisitionTests(unittest.TestCase):
     def test_current_mini_app_confirms_delivery_and_returns_to_chat(self):
         bundle = (
             Path(__file__).resolve().parents[1]
-            / "webapp2/assets/deslop/deslop-main-aiwa-v163.js"
+            / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         self.assertIn('y?.ok && y?.delivered', bundle)
         self.assertIn('A?.ok && A?.delivered', bundle)

@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUNDLE = ROOT / "webapp2/assets/deslop/deslop-main-aiwa-v163.js"
+BUNDLE = ROOT / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
 PLACEHOLDER = ROOT / "webapp2/assets/food/meal-placeholder.svg"
 
 

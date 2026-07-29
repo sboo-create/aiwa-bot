@@ -17,9 +17,9 @@ import llm
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "deslop-main-aiwa-v163.js"
+BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "deslop-main-aiwa-v177.js"
 WRAPPER = ROOT / "webapp2" / "assets" / "deslop" / "main.js"
-CHART_BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "AiwaWebUiChart-aiwa-v163.js"
+CHART_BUNDLE = ROOT / "webapp2" / "assets" / "deslop" / "AiwaWebUiChart-aiwa-v177.js"
 V163_CSS = ROOT / "webapp2" / "assets" / "deslop" / "aiwa-v163.css"
 INDEX = ROOT / "webapp2" / "index.html"
 
@@ -276,32 +276,32 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         chart_bundle = CHART_BUNDLE.read_text(encoding="utf-8")
         index = INDEX.read_text(encoding="utf-8")
 
-        self.assertIn('deslop-main-aiwa-v163.js', wrapper)
-        self.assertIn('AiwaWebUiChart-aiwa-v163.js', bundle)
-        self.assertIn('deslop-main-aiwa-v163.js', chart_bundle)
+        self.assertIn('deslop-main-aiwa-v177.js', wrapper)
+        self.assertIn('AiwaWebUiChart-aiwa-v177.js', bundle)
+        self.assertIn('deslop-main-aiwa-v177.js', chart_bundle)
         self.assertIn('main.js?v=r23', index)
         self.assertIn(
-            'deslop-main-aiwa-v163.js?v=r23',
+            'import "./deslop-main-aiwa-v177.js";',
             wrapper,
         )
         self.assertIn(
-            'import "./deslop-main-aiwa-v163.js?v=r23";',
-            wrapper,
-        )
-        self.assertIn(
-            'import("./AiwaWebUiChart-aiwa-v163.js?v=r23")',
+            'import("./AiwaWebUiChart-aiwa-v177.js")',
             bundle,
         )
         self.assertIn(
-            'from "./deslop-main-aiwa-v163.js?v=r23";',
+            'from "./deslop-main-aiwa-v177.js";',
             chart_bundle,
         )
         self.assertNotIn(
-            'import("./AiwaWebUiChart-aiwa-v163.js")',
+            'deslop-main-aiwa-v177.js?v=',
+            wrapper,
+        )
+        self.assertNotIn(
+            'AiwaWebUiChart-aiwa-v177.js?v=',
             bundle,
         )
         self.assertNotIn(
-            'from "./deslop-main-aiwa-v163.js";',
+            'deslop-main-aiwa-v177.js?v=',
             chart_bundle,
         )
         self.assertIn("aiwaCacheTs", bundle)

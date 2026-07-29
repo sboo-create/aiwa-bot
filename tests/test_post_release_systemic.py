@@ -202,7 +202,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
     def test_current_ui_exposes_summary_toggle_and_pilates_type(self):
         root = Path(__file__).resolve().parents[1]
         bundle = (
-            root / "webapp2/assets/deslop/deslop-main-aiwa-v163.js"
+            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         self.assertIn('qt("/api/daily-summary", { enabled: A })', bundle)
         self.assertIn('"Силовая", "Кардио", "Пилатес", "Йога"', bundle)
@@ -281,7 +281,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
     def test_unknown_food_does_not_fuzzy_match_an_unrelated_dish(self):
         root = Path(__file__).resolve().parents[1]
         bundle = (
-            root / "webapp2/assets/deslop/deslop-main-aiwa-v163.js"
+            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         self.assertNotIn("return h >= 0.5 ? c + Xf : null", bundle)
         self.assertIn("if (zd(y) === l) return p + Xf", bundle)
@@ -293,27 +293,27 @@ class PostReleaseSystemicTests(unittest.TestCase):
             root / "webapp2/assets/deslop/main.js"
         ).read_text(encoding="utf-8")
         bundle = (
-            root / "webapp2/assets/deslop/deslop-main-aiwa-v163.js"
+            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         self.assertIn("main.js?v=r23", index)
-        self.assertIn("deslop-main-aiwa-v163.js?v=r23", entry)
+        self.assertIn('import "./deslop-main-aiwa-v177.js";', entry)
         self.assertIn(
-            'import("./AiwaWebUiChart-aiwa-v163.js?v=r23")',
+            'import("./AiwaWebUiChart-aiwa-v177.js")',
             bundle,
         )
         chart_bundle = (
-            root / "webapp2/assets/deslop/AiwaWebUiChart-aiwa-v163.js"
+            root / "webapp2/assets/deslop/AiwaWebUiChart-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'from "./deslop-main-aiwa-v163.js?v=r23";',
+            'from "./deslop-main-aiwa-v177.js";',
             chart_bundle,
         )
         self.assertNotIn(
-            'import("./AiwaWebUiChart-aiwa-v163.js")',
+            'AiwaWebUiChart-aiwa-v177.js?v=',
             bundle,
         )
         self.assertNotIn(
-            'from "./deslop-main-aiwa-v163.js";',
+            'deslop-main-aiwa-v177.js?v=',
             chart_bundle,
         )
 
