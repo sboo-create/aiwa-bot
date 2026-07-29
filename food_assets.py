@@ -258,13 +258,13 @@ class FoodAssetResolver:
             common = query_tokens.intersection(candidate_tokens)
             if not common:
                 continue
-            # Only accept containment around the same semantic anchor. This
-            # handles “омлет с сыром и зеленью”, but cannot turn unrelated
-            # snacks into the same pretty picture as the former fuzzy matcher.
-            contained = (
-                candidate_tokens.issubset(query_tokens)
-                or query_tokens.issubset(candidate_tokens)
-            )
+            # A reviewed candidate may be a less-specific subset of what the
+            # user named, but never a more-specific superset. The latter would
+            # invent ingredients or preparation methods (for example mapping
+            # “рис с тунцом” to “тунец НА ГРИЛЕ с рисом”). Queries without a
+            # safe subset use a family/neutral image and may receive a reviewed
+            # exact image asynchronously.
+            contained = candidate_tokens.issubset(query_tokens)
             union = query_tokens.union(candidate_tokens)
             score = len(common) / max(1, len(union))
             if contained and score >= 0.60:
@@ -279,6 +279,10 @@ class FoodAssetResolver:
         matches.sort(reverse=True)
         best = matches[0]
         if len(matches) > 1 and matches[1][:2] == best[:2]:
+            # Ambiguous catalog matches fail closed. Common, manually reviewed
+            # formulations belong in _EXPLICIT_ALIASES; unknown combinations
+            # keep the neutral fallback and can receive an exact generated
+            # asset asynchronously.
             result = None
         else:
             result = (best[2], best[3], "catalog_canonical")

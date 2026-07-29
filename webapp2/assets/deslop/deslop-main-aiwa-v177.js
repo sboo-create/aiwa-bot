@@ -19681,7 +19681,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r24").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r25").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -21189,7 +21189,7 @@ function iv({ mode: a, revision: e = 0 }) {
       rt = !1, Kt && clearTimeout(Kt);
     };
   }, [aiwaAssetRefreshNeeded, aiwaPayloadAssetRevision]), E.useEffect(() => {
-    fetch("/assets/food/manifest.json?v=2").then((rt) => rt.ok ? rt.json() : {}).then((rt) => g(rt || {})).catch(() => {
+    fetch("/assets/food/manifest.json?v=3").then((rt) => rt.ok ? rt.json() : {}).then((rt) => g(rt || {})).catch(() => {
     });
   }, []), E.useEffect(() => {
     if (!l.diary) return;
@@ -21693,7 +21693,7 @@ const yA = ["trainingSection", "train"], gA = (a) => {
 function xA({ mode: a, revision: e = 0 }) {
   const [l, s] = px(yA, [a, e]), r = typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData, c = r?.mode === "male", [f, h] = E.useState(!1), [y, p] = E.useState(""), [g, v] = E.useState(null), [b, T] = E.useState({}), [S, w] = E.useState(""), [j, M] = E.useState(null);
   E.useEffect(() => {
-    fetch("/assets/train/manifest.json?v=1").then((V) => V.ok ? V.json() : {}).then((V) => T(V || {})).catch(() => {
+    fetch("/assets/train/manifest.json?v=2").then((V) => V.ok ? V.json() : {}).then((V) => T(V || {})).catch(() => {
     });
   }, []);
   const D = () => s("train");

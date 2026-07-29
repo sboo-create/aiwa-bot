@@ -21,26 +21,35 @@ import food_assets as assets
 
 class FoodAssetResolverTests(unittest.TestCase):
     def test_catalog_and_safe_canonical_aliases_are_reused(self):
-        self.assertEqual(len(assets.RESOLVER.manifest), 105)
+        self.assertGreaterEqual(len(assets.RESOLVER.manifest), 105)
         exact = assets.RESOLVER.resolve("Омлет с сыром")
         extended = assets.RESOLVER.resolve("омлет с сыром и зеленью")
         reordered = assets.RESOLVER.resolve("творожная запеканка")
 
         self.assertEqual(exact["image_source"], "catalog_exact")
-        self.assertEqual(extended["image_url"], exact["image_url"])
+        self.assertEqual(extended["image_source"], "catalog_exact")
+        self.assertEqual(extended["asset_state"], "ready")
+        self.assertEqual(
+            extended["image_url"],
+            "/assets/food/catalog-v2/"
+            "445a7df943bbd2442c7f5d72d01c9461816376395ae7b345d36e901e4d9a4401.webp",
+        )
+        self.assertNotEqual(extended["image_url"], exact["image_url"])
         self.assertEqual(reordered["image_url"], assets.RESOLVER.manifest["Запеканка творожная"])
 
     def test_unrelated_unknown_foods_do_not_share_a_catalog_match(self):
         dried = assets.RESOLVER.resolve("курага")
         snack = assets.RESOLVER.resolve("неизвестные кукурузные снеки")
 
-        self.assertEqual(dried["image_url"], assets.RESOLVER.manifest["Сухофрукты"])
+        self.assertEqual(dried["image_source"], "catalog_exact")
+        self.assertEqual(dried["asset_state"], "ready")
         self.assertEqual(snack["image_source"], "category")
         self.assertEqual(snack["asset_state"], "missing")
+        self.assertNotEqual(dried["image_url"], snack["image_url"])
 
     def test_generated_menu_variants_use_category_correct_catalog_art(self):
         cases = {
-            "Омлет из двух яиц": "Омлет с овощами",
+            "Омлет из двух яиц": "Омлет из двух яиц",
             "Гречка с отварной говядиной": "Гречневая каша",
             "Треска с тушёной капустой": "Треска на пару",
         }
@@ -48,7 +57,12 @@ class FoodAssetResolverTests(unittest.TestCase):
         for dish, catalog_label in cases.items():
             with self.subTest(dish=dish):
                 result = assets.RESOLVER.resolve(dish)
-                self.assertEqual(result["image_source"], "catalog_family")
+                expected_source = (
+                    "catalog_exact"
+                    if dish in assets.RESOLVER.manifest
+                    else "catalog_family"
+                )
+                self.assertEqual(result["image_source"], expected_source)
                 self.assertEqual(
                     result["image_url"], assets.RESOLVER.manifest[catalog_label]
                 )
@@ -59,6 +73,20 @@ class FoodAssetResolverTests(unittest.TestCase):
 
         self.assertEqual(unknown["image_source"], "category")
         self.assertEqual(unknown["asset_state"], "missing")
+
+    def test_equal_reviewed_subsets_fail_closed_without_explicit_alias(self):
+        resolver = assets.FoodAssetResolver({
+            "Омлет с сыром": "/assets/food/catalog-v2/cheese.webp",
+            "Омлет с грибами": "/assets/food/catalog-v2/mushroom.webp",
+        })
+
+        detailed = resolver.resolve("омлет с сыром и грибами")
+        underspecified = resolver.resolve("омлет")
+
+        self.assertEqual(detailed["image_source"], "category")
+        self.assertEqual(detailed["asset_state"], "missing")
+        self.assertEqual(underspecified["image_source"], "category")
+        self.assertEqual(underspecified["asset_state"], "missing")
 
     def test_validated_exact_label_overrides_only_a_broad_catalog_fallback(self):
         resolver = assets.FoodAssetResolver(assets.RESOLVER.manifest)
@@ -88,15 +116,18 @@ class FoodAssetResolverTests(unittest.TestCase):
 
     def test_family_fallback_uses_label_head_not_secondary_ingredient(self):
         cases = {
-            "Салат с говядиной и креветками": "Овощной салат",
-            "Суп с рыбой и говядиной": "Овощной суп",
-            "Рис с тунцом": "Рис с овощами",
+            "Салат с говядиной и креветками": ("catalog_family", "Овощной салат"),
+            "Суп с рыбой и говядиной": ("catalog_family", "Овощной суп"),
+            "Рис с тунцом": (
+                "catalog_family",
+                "Рис с овощами",
+            ),
         }
 
-        for dish, catalog_label in cases.items():
+        for dish, (image_source, catalog_label) in cases.items():
             with self.subTest(dish=dish):
                 result = assets.RESOLVER.resolve(dish)
-                self.assertEqual(result["image_source"], "catalog_family")
+                self.assertEqual(result["image_source"], image_source)
                 self.assertEqual(
                     result["image_url"], assets.RESOLVER.manifest[catalog_label]
                 )
@@ -317,7 +348,7 @@ class FoodAssetQueueTests(unittest.TestCase):
             conn.execute(
                 "SELECT COUNT(*) FROM food_assets WHERE source='catalog'"
             ).fetchone()[0],
-            105,
+            len(assets.RESOLVER.manifest),
         )
         conn.close()
 

@@ -5,6 +5,10 @@ service:
 
 - release: `/srv/aiwa-staging/releases/<git-sha>`;
 - current symlink: `/srv/aiwa-staging/current`;
+- static assets: `/srv/aiwa-staging/public-releases/<git-sha>` with atomic
+  `/srv/aiwa-staging/public-current`; activate only after the full release is
+  extracted:
+  `sudo /srv/aiwa-staging/releases/<git-sha>/deploy/i167/activate-public-assets.sh <git-sha>`;
 - SQLite: `/srv/aiwa-staging/data/aiwa.db`;
 - configuration: `/srv/aiwa-staging/config/app.env`;
 - bot token: systemd credential in `/srv/aiwa-staging/secrets/bot-token`;

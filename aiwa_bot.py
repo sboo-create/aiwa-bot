@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
 import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue, atexit, contextvars
+import mimetypes
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -37,6 +38,8 @@ from aiohttp import web
 import requests
 import hmac as _hmac, hashlib as _hashlib
 from urllib.parse import parse_qsl as _pqsl, urlsplit as _urlsplit, quote as _urlquote
+
+mimetypes.add_type("image/webp", ".webp")
 
 import cycle as C
 import llm as L
@@ -12370,6 +12373,31 @@ async def _legacy_admin_removed(request):
         headers={"Cache-Control": "no-store"},
     )
 
+_REVIEWED_CATALOG_FILE_RE = re.compile(r"^[0-9a-f]{64}\.webp$")
+
+async def _serve_reviewed_catalog_file(request):
+    """Serve only content-addressed reviewed art with an explicit MIME type."""
+    kind = request.match_info.get("kind", "")
+    filename = request.match_info.get("filename", "")
+    if kind not in {"food", "train"} or not _REVIEWED_CATALOG_FILE_RE.fullmatch(filename):
+        raise web.HTTPNotFound()
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "webapp2",
+        "assets",
+        kind,
+        "catalog-v2",
+        filename,
+    )
+    if not os.path.isfile(path) or os.path.islink(path):
+        raise web.HTTPNotFound()
+    response = web.FileResponse(
+        path,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+    response.content_type = "image/webp"
+    return response
+
 @web.middleware
 async def _security_headers(request, handler):
     response = await handler(request)
@@ -12456,6 +12484,13 @@ def build_web():
     aio.router.add_post("/api/week_food_review", _api_week_food_review)
     _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
+        # Keep this strict content-addressed route before the broad static
+        # mount: Railway/aiohttp then gets an explicit WebP MIME type, while
+        # i167 Caddy serves the same immutable path directly.
+        aio.router.add_get(
+            "/assets/{kind}/catalog-v2/{filename}",
+            _serve_reviewed_catalog_file,
+        )
         aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды
     try:
         _generated_base = FA.generated_public_base()

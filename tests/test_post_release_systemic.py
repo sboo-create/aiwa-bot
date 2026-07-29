@@ -2,7 +2,10 @@ import asyncio
 from datetime import date
 import inspect
 import json
+import mimetypes
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +18,7 @@ os.environ.setdefault("AIWA_ANALYTICS_SALT", "test-analytics-salt")
 
 import aiwa_bot as bot
 import llm
+from aiohttp.test_utils import TestClient, TestServer
 
 
 class _JobQueue:
@@ -351,19 +355,294 @@ class PostReleaseSystemicTests(unittest.TestCase):
         bundle = (
             root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
-        self.assertIn("main.js?v=r24", index)
-        self.assertIn('import "./deslop-main-aiwa-v177.js?v=r24";', entry)
+        self.assertIn("main.js?v=r25", index)
+        self.assertIn('import "./deslop-main-aiwa-v177.js?v=r25";', entry)
         self.assertIn(
-            'import("./AiwaWebUiChart-aiwa-v177.js?v=r24")',
+            'import("./AiwaWebUiChart-aiwa-v177.js?v=r25")',
             bundle,
         )
         chart_bundle = (
             root / "webapp2/assets/deslop/AiwaWebUiChart-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'from "./deslop-main-aiwa-v177.js?v=r24";',
+            'from "./deslop-main-aiwa-v177.js?v=r25";',
             chart_bundle,
         )
+
+    def test_i167_assets_use_isolated_atomic_public_release(self):
+        root = Path(__file__).resolve().parents[1]
+        caddy = (
+            root / "deploy/i167/aiwa-staging.caddy"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("handle /assets/*", caddy)
+        self.assertIn("root * /srv/aiwa-staging/public-current", caddy)
+        self.assertIn("file_server", caddy)
+        self.assertNotIn("root * /srv/aiwa-staging/current", caddy)
+        self.assertEqual(mimetypes.guess_type("catalog.webp")[0], "image/webp")
+
+    def test_security_headers_never_relabel_synthesized_webp_responses(self):
+        request = SimpleNamespace(
+            path="/assets/food/catalog-v2/example.webp",
+            headers={},
+        )
+
+        async def handler(_request):
+            return bot.web.Response(
+                body=b"webp",
+                content_type="application/octet-stream",
+            )
+
+        response = asyncio.run(bot._security_headers(request, handler))
+
+        self.assertEqual(response.content_type, "application/octet-stream")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+
+        async def explicit_handler(_request):
+            return bot.web.Response(body=b"text", content_type="text/plain")
+
+        explicit = asyncio.run(bot._security_headers(request, explicit_handler))
+        self.assertEqual(explicit.content_type, "text/plain")
+
+        async def missing_handler(_request):
+            return bot.web.Response(
+                status=404,
+                body=b"not found",
+                content_type="application/octet-stream",
+            )
+
+        missing = asyncio.run(bot._security_headers(request, missing_handler))
+        self.assertEqual(missing.status, 404)
+        self.assertEqual(missing.content_type, "application/octet-stream")
+
+        generated_request = SimpleNamespace(
+            path="/generated-food/example.webp",
+            headers={},
+        )
+        generated = asyncio.run(
+            bot._security_headers(generated_request, handler)
+        )
+        self.assertEqual(generated.content_type, "application/octet-stream")
+
+        unrelated_asset_request = SimpleNamespace(
+            path="/assets/deslop/example.webp",
+            headers={},
+        )
+        unrelated = asyncio.run(
+            bot._security_headers(unrelated_asset_request, handler)
+        )
+        self.assertEqual(unrelated.content_type, "application/octet-stream")
+
+    def test_public_asset_activation_is_atomic_idempotent_and_additive(self):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "deploy/i167/activate-public-assets.sh"
+        first_sha = "1" * 40
+        second_sha = "2" * 40
+        env = {
+            **os.environ,
+            "AIWA_PUBLIC_ASSET_TEST_ROOT": self.tmp.name,
+        }
+
+        def release(sha, *, include_old=True):
+            assets = (
+                Path(self.tmp.name) / "releases" / sha / "webapp2" / "assets"
+            )
+            for kind in ("food", "train"):
+                catalog = assets / kind / "catalog-v2"
+                catalog.mkdir(parents=True)
+                manifest = {}
+                if include_old:
+                    image = catalog / f"{kind}-old.webp"
+                    image.write_bytes(b"old")
+                    manifest[f"{kind} old"] = (
+                        f"/assets/{kind}/catalog-v2/{kind}-old.webp"
+                    )
+                (assets / kind / "manifest.json").write_text(
+                    json.dumps(manifest or {f"{kind} new": (
+                        f"/assets/{kind}/catalog-v2/{kind}-new.webp"
+                    )}),
+                    encoding="utf-8",
+                )
+                if not include_old:
+                    (catalog / f"{kind}-new.webp").write_bytes(b"new")
+
+        release(first_sha)
+        partial = Path(self.tmp.name) / "public-releases" / first_sha
+        partial.mkdir(parents=True)
+        (partial / "partial").write_text("interrupted", encoding="utf-8")
+
+        first = subprocess.run(
+            [str(script), first_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        current = Path(self.tmp.name) / "public-current"
+        self.assertEqual(current.resolve(), partial.resolve())
+        self.assertTrue((partial / ".activation-complete").is_file())
+        self.assertIn("quarantined incomplete", first.stderr)
+
+        subprocess.run(
+            [str(script), first_sha],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(current.resolve(), partial.resolve())
+
+        release(second_sha, include_old=False)
+        failed = subprocess.run(
+            [str(script), second_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("previously published asset disappeared", failed.stderr)
+        self.assertEqual(current.resolve(), partial.resolve())
+
+        symlink_sha = "3" * 40
+        release(symlink_sha)
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        symlink_target = (
+            Path(self.tmp.name) / "public-releases" / symlink_sha
+        )
+        symlink_target.symlink_to(outside, target_is_directory=True)
+        refused = subprocess.run(
+            [str(script), symlink_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("immutable-release symlink", refused.stderr)
+        self.assertTrue(symlink_target.is_symlink())
+        self.assertEqual(current.resolve(), partial.resolve())
+
+        traversal_sha = "5" * 40
+        release(traversal_sha)
+        traversal_manifest = (
+            Path(self.tmp.name)
+            / "releases"
+            / traversal_sha
+            / "webapp2"
+            / "assets"
+            / "food"
+            / "manifest.json"
+        )
+        traversal_manifest.write_text(
+            json.dumps({
+                "escape": "/assets/food/../../../../../../etc/passwd",
+            }),
+            encoding="utf-8",
+        )
+        traversal = subprocess.run(
+            [str(script), traversal_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(traversal.returncode, 0)
+        self.assertIn("unsafe asset URL", traversal.stderr)
+        self.assertEqual(current.resolve(), partial.resolve())
+
+        lock_file = Path(self.tmp.name) / ".public-assets-activation.lock"
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import fcntl,sys,time;"
+                    "f=open(sys.argv[1],'w');"
+                    "fcntl.flock(f,fcntl.LOCK_EX);"
+                    "print('locked',flush=True);"
+                    "time.sleep(30)"
+                ),
+                str(lock_file),
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertIsNotNone(holder.stdout)
+            self.assertEqual(holder.stdout.readline().strip(), "locked")
+            holder.stdout.close()
+            locked = subprocess.run(
+                [str(script), first_sha],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(locked.returncode, 0)
+            self.assertIn("activation already in progress", locked.stderr)
+            self.assertTrue(lock_file.is_file())
+            self.assertEqual(current.resolve(), partial.resolve())
+        finally:
+            holder.terminate()
+            holder.wait(timeout=5)
+
+        recovered = subprocess.run(
+            [str(script), first_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            recovered.returncode,
+            0,
+            recovered.stdout + recovered.stderr,
+        )
+        self.assertTrue(lock_file.exists())
+        self.assertEqual(current.resolve(), partial.resolve())
+
+    def test_aiwa_upstream_serves_static_manifest_for_i167_proxy(self):
+        async def fetch_manifest():
+            client = TestClient(TestServer(bot.build_web()))
+            await client.start_server()
+            try:
+                response = await client.get("/assets/food/manifest.json")
+                manifest = await response.json()
+                image = await client.get(
+                    "/assets/food/catalog-v2/"
+                    "445a7df943bbd2442c7f5d72d01c9461816376395ae7b345d36e901e4d9a4401.webp"
+                )
+                await image.read()
+                return (
+                    response.status,
+                    response.content_type,
+                    manifest,
+                    image.status,
+                    image.content_type,
+                    image.headers.get("Cache-Control"),
+                    image.headers.get("ETag"),
+                )
+            finally:
+                await client.close()
+
+        (
+            status,
+            content_type,
+            manifest,
+            image_status,
+            image_type,
+            image_cache,
+            image_etag,
+        ) = asyncio.run(fetch_manifest())
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(len(manifest), 612)
+        self.assertTrue(any("/catalog-v2/" in url for url in manifest.values()))
+        self.assertEqual(image_status, 200)
+        self.assertEqual(image_type, "image/webp")
+        self.assertEqual(
+            image_cache,
+            "public, max-age=31536000, immutable",
+        )
+        self.assertTrue(image_etag)
 
 
 if __name__ == "__main__":
