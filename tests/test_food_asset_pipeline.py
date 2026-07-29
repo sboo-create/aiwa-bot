@@ -124,6 +124,20 @@ class FoodAssetResolverTests(unittest.TestCase):
         self.assertNotIn("chat_id", json.dumps(request["json"]))
         self.assertNotIn("profile", json.dumps(request["json"]))
 
+    def test_external_public_base_requires_exact_host_allowlist(self):
+        configured = {
+            "AIWA_FOOD_ASSET_PUBLIC_BASE": "https://cdn.example/food",
+            "AIWA_FOOD_ASSET_ALLOWED_HOSTS": "assets.example",
+        }
+        with mock.patch.dict(os.environ, configured, clear=False):
+            with self.assertRaisesRegex(ValueError, "public_host"):
+                assets.generated_public_base()
+        configured["AIWA_FOOD_ASSET_ALLOWED_HOSTS"] = "cdn.example"
+        with mock.patch.dict(os.environ, configured, clear=False):
+            self.assertEqual(
+                assets.generated_public_base(), "https://cdn.example/food"
+            )
+
 
 class FoodAssetQueueTests(unittest.TestCase):
     def setUp(self):
@@ -134,7 +148,7 @@ class FoodAssetQueueTests(unittest.TestCase):
         bot.DB = os.path.join(self.tmp.name, "assets.db")
         bot._DB_SCHEMA_PATH = None
         bot.ensure_db_schema()
-        bot._FOOD_ASSET_SEEN = set()
+        bot._FOOD_ASSET_SEEN = {}
 
     def tearDown(self):
         bot._FOOD_ASSET_CANDIDATES = self.old_queue
@@ -178,6 +192,25 @@ class FoodAssetQueueTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AIWA_FOOD_ASSET_GENERATION": "0"}):
             self.assertEqual(bot._offer_food_asset_candidates([record]), 0)
         self.assertTrue(bot._FOOD_ASSET_CANDIDATES.empty())
+
+    def test_candidate_dedupe_expires_instead_of_blacklisting_for_process_lifetime(self):
+        record = assets.decorate({"title": "неизвестная чечевичная тарелка"})
+        bot._FOOD_ASSET_CANDIDATES = asyncio.Queue(maxsize=4)
+        with (
+            mock.patch.dict(os.environ, {"AIWA_FOOD_ASSET_GENERATION": "1"}),
+            mock.patch.object(bot.time, "monotonic", return_value=10.0),
+        ):
+            self.assertEqual(bot._offer_food_asset_candidates([record]), 1)
+            self.assertEqual(bot._offer_food_asset_candidates([record]), 0)
+        bot._FOOD_ASSET_CANDIDATES.get_nowait()
+        with (
+            mock.patch.dict(os.environ, {"AIWA_FOOD_ASSET_GENERATION": "1"}),
+            mock.patch.object(
+                bot.time, "monotonic",
+                return_value=10.0 + bot._FOOD_ASSET_SEEN_TTL_SECONDS + 1,
+            ),
+        ):
+            self.assertEqual(bot._offer_food_asset_candidates([record]), 1)
 
     def test_running_job_is_recovered_after_restart(self):
         record = assets.decorate({"title": "неизвестная бобовая тарелка"})
@@ -301,7 +334,10 @@ class FoodSectionLoadContracts(unittest.TestCase):
             key = (1002, "day", "food", "hash")
             with (
                 mock.patch.dict(
-                    os.environ, {"AIWA_FOOD_DYNAMIC_SECTION": "1"}
+                    os.environ, {
+                        "AIWA_FOOD_DYNAMIC_SECTION": "1",
+                        "AIWA_FOOD_DYNAMIC_SECTION_PERCENT": "100",
+                    }
                 ),
                 mock.patch.object(bot, "llm_to_thread", side_effect=model_call) as call,
                 mock.patch.object(bot, "profile_of", return_value=user),
@@ -315,6 +351,38 @@ class FoodSectionLoadContracts(unittest.TestCase):
             self.assertTrue(all(meal.get("image_url") for meal in payload["menu"]["meals"]))
 
         asyncio.run(scenario())
+
+    def test_dynamic_section_requires_an_explicit_stable_cohort(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AIWA_FOOD_DYNAMIC_SECTION": "1",
+                "AIWA_FOOD_DYNAMIC_SECTION_PERCENT": "0",
+            },
+        ):
+            self.assertFalse(bot._food_dynamic_section_on(1001))
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AIWA_FOOD_DYNAMIC_SECTION": "1",
+                "AIWA_FOOD_DYNAMIC_SECTION_PERCENT": "100",
+            },
+        ):
+            self.assertTrue(bot._food_dynamic_section_on(1001))
+            self.assertTrue(bot._food_dynamic_section_on(9999))
+
+    def test_invalid_optional_asset_route_does_not_crash_startup(self):
+        configured = {
+            "AIWA_FOOD_ASSET_GENERATION": "0",
+            "AIWA_FOOD_ASSET_PUBLIC_BASE": "https://unexpected.example/food",
+            "AIWA_FOOD_ASSET_ALLOWED_HOSTS": "",
+        }
+        with mock.patch.dict(os.environ, configured, clear=False):
+            app = bot.build_web()
+        self.assertIsNotNone(app)
+
+    def test_sqlite_asset_queue_has_one_writer(self):
+        self.assertEqual(bot._FOOD_ASSET_WORKERS, 1)
 
 
 if __name__ == "__main__":

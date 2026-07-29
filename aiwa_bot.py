@@ -111,7 +111,7 @@ if os.path.dirname(DB): os.makedirs(os.path.dirname(DB), exist_ok=True)
 L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
-AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-29-v172-food-assets-hybrid")
+AIWA_VERSION = os.environ.get("AIWA_VERSION", "2026-07-29-v173-food-assets-hardening")
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 
@@ -3847,10 +3847,22 @@ def _feature_on(name, default="0"):
     }
 
 
-def _food_dynamic_section_on():
+def _food_dynamic_section_on(cid=None):
     # Off by default during the event rollout. Enabling it changes only the
     # daily cache namespace and never blocks the fast fallback response.
-    return _feature_on("AIWA_FOOD_DYNAMIC_SECTION", "0")
+    if not _feature_on("AIWA_FOOD_DYNAMIC_SECTION", "0") or cid is None:
+        return False
+    percent = max(
+        0, min(100, int(os.environ.get(
+            "AIWA_FOOD_DYNAMIC_SECTION_PERCENT", "0"
+        )))
+    )
+    if percent <= 0:
+        return False
+    cohort = int(_hashlib.sha256(
+        f"food-section:{int(cid)}".encode("utf-8")
+    ).hexdigest()[:8], 16) % 100
+    return cohort < percent
 
 
 def _food_section_refresh_on():
@@ -3861,7 +3873,10 @@ _MENU_CACHE = {}
 def _menu_key(cid, st, prof, mode):
     diet = ((prof.get("diet") if prof else "") or "", (prof.get("diet_note") if prof else "") or "")
     phase = (st.get("phase") if st else ("mode:" + str(mode)))
-    version = "food-section-v3" if _food_dynamic_section_on() else "food-section-v2"
+    version = (
+        "food-section-v3"
+        if _food_dynamic_section_on(cid) else "food-section-v2"
+    )
     return (cid, dtoday().isoformat(), phase, diet, version)
 def dc_get(cid, kind, key=""):
     """Дневной кэш в SQLite: чтобы деплой/рестарт не заставлял модель генерить всё заново."""
@@ -8245,7 +8260,7 @@ async def _generate_section(cid, kind, u, st, key):
                     "carbs": f"{target[3]} г",
                 }
             fallback = _section_fallback(cid, "food", u, st)
-            dynamic = _food_dynamic_section_on()
+            dynamic = _food_dynamic_section_on(cid)
             text = str(
                 menu.get("summary") if dynamic else fallback["text"]
             ).strip() or fallback["text"]
@@ -8350,12 +8365,15 @@ async def _api_section(request):
 _FOOD_ASSET_CANDIDATES = None
 _FOOD_ASSET_TASKS = []
 _FOOD_ASSET_EXECUTOR = None
-_FOOD_ASSET_SEEN = set()
+_FOOD_ASSET_SEEN = {}
 _FOOD_ASSET_QUEUE_MAX = max(
     16, min(2048, int(os.environ.get("AIWA_FOOD_ASSET_QUEUE_MAX", "256")))
 )
-_FOOD_ASSET_WORKERS = max(
-    1, min(4, int(os.environ.get("AIWA_FOOD_ASSET_WORKERS", "1")))
+# The durable queue is SQLite-backed. Keep a single writer until the planned
+# PostgreSQL/Redis phase provides row-level claims.
+_FOOD_ASSET_WORKERS = 1
+_FOOD_ASSET_SEEN_TTL_SECONDS = max(
+    30, min(3600, int(os.environ.get("AIWA_FOOD_ASSET_SEEN_TTL_SECONDS", "300")))
 )
 _FOOD_ASSET_DAILY_MAX = max(
     1, min(500, int(os.environ.get("AIWA_FOOD_ASSET_DAILY_MAX", "40")))
@@ -8368,6 +8386,13 @@ _FOOD_ASSET_MAX_ATTEMPTS = max(
 def _offer_food_asset_candidates(records):
     if not FA.generation_enabled() or _FOOD_ASSET_CANDIDATES is None:
         return 0
+    now = time.monotonic()
+    expired = [
+        key for key, expires_at in _FOOD_ASSET_SEEN.items()
+        if expires_at <= now
+    ]
+    for key in expired:
+        _FOOD_ASSET_SEEN.pop(key, None)
     offered = 0
     for record in records or []:
         if not isinstance(record, dict) or record.get("asset_state") != "missing":
@@ -8377,16 +8402,17 @@ def _offer_food_asset_candidates(records):
             record.get("canonical_label") or record.get("dish") or record.get("title")
         )
         key = (food_id, FA.STYLE_VERSION)
-        if not food_id or not label or key in _FOOD_ASSET_SEEN:
+        if (
+            not food_id or not label
+            or _FOOD_ASSET_SEEN.get(key, 0) > now
+        ):
             continue
         try:
             _FOOD_ASSET_CANDIDATES.put_nowait((food_id, label))
-            _FOOD_ASSET_SEEN.add(key)
+            _FOOD_ASSET_SEEN[key] = now + _FOOD_ASSET_SEEN_TTL_SECONDS
             offered += 1
         except asyncio.QueueFull:
             break
-    if len(_FOOD_ASSET_SEEN) > _FOOD_ASSET_QUEUE_MAX * 4:
-        _FOOD_ASSET_SEEN.clear()
     return offered
 
 
@@ -8626,7 +8652,7 @@ async def _food_asset_worker(worker_no):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                _FOOD_ASSET_SEEN.discard((food_id, FA.STYLE_VERSION))
+                _FOOD_ASSET_SEEN.pop((food_id, FA.STYLE_VERSION), None)
                 log.warning(
                     "food asset enqueue failed: worker=%s error=%s",
                     worker_no, type(exc).__name__,
@@ -11698,7 +11724,13 @@ def build_web():
     _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
         aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды
-    _generated_base = FA.generated_public_base()
+    try:
+        _generated_base = FA.generated_public_base()
+    except ValueError as exc:
+        # A disabled or previously used optional image feature must never
+        # prevent Telegram, diary, cron jobs, or the whole web app from booting.
+        log.warning("generated food assets route disabled: %s", exc)
+        _generated_base = ""
     if _generated_base.startswith("/") and "://" not in _generated_base:
         _generated_dir = FA.generated_asset_dir()
         _generated_dir.mkdir(parents=True, exist_ok=True)
