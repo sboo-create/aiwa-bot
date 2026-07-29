@@ -170,6 +170,18 @@ class PostReleaseSystemicTests(unittest.TestCase):
             {str(self.cid), f"prepare:{self.cid}"},
         )
 
+    def test_explicit_time_change_reenables_summary_delivery(self):
+        queue = _JobQueue()
+        app = SimpleNamespace(job_queue=queue)
+        bot.upsert(self.cid, daily_summary_enabled=0)
+
+        bot.set_daily_time(app, self.cid, "09:30")
+
+        user = bot.row(self.cid)
+        self.assertTrue(user["daily_summary_enabled"])
+        self.assertEqual(user["send_time"], "09:30")
+        self.assertEqual(len(queue.daily), 2)
+
     def test_summary_notification_api_is_separate_from_proactive(self):
         app = SimpleNamespace(job_queue=_JobQueue())
         bot.upsert(self.cid, proactive_enabled=1, daily_summary_enabled=1)
@@ -216,6 +228,16 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertIn("29 июля 2026", answer)
         self.assertIn("среда", answer)
         self.assertIn("московское время", answer)
+
+    def test_current_date_does_not_shadow_a_journal_write(self):
+        self.assertEqual(
+            bot.match_intent("Какое сегодня число, запиши тренировку"),
+            "logworkout",
+        )
+        self.assertNotEqual(
+            bot.match_intent("Какая сегодня дата, я съел творог"),
+            "current_date",
+        )
 
     def test_completed_drink_with_popil_is_journal_candidate(self):
         text = "В 2 часа я попил сладкой воды 200 миллилитров"

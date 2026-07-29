@@ -58,15 +58,24 @@ image generation is intentionally not part of the journal path.
 
 The post-release image pipeline should be hybrid:
 
-1. map the cleaned record to a stable taxonomy and canonical food id;
+1. map the cleaned record to a stable taxonomy and canonical food id, keeping
+   the original display title separate from the cache key;
 2. render a local category asset immediately;
-3. enqueue one deduplicated background generation only when the canonical id
-   has no approved image;
+3. after the meal transaction commits, enqueue one deduplicated background
+   generation only when the canonical id has no approved image;
 4. validate dimensions/content, convert to bounded WebP and publish through a
    versioned content-addressed cache;
 5. reuse that asset across users and phrasings;
 6. apply daily spend/concurrency limits plus a negative cache for generic,
    unsafe or unclassifiable labels.
+
+The queue state should be durable and unique on
+`(canonical_food_id, style_version)`, with `pending`, `ready`, `rejected` and
+`retry_after` states. Multiple users asking for `курага`, `сушёная курага` or
+`абрикосы сушёные` must converge on one asset job. Low-confidence
+canonicalization stays on the category placeholder and does not spend money.
+The client keeps the same placeholder until a later diary refresh observes a
+`ready` asset; no polling or generation latency is added to the write request.
 
 Only the canonical food id and reviewed style prompt may leave the application;
 raw user text, profile and chat history must not be sent to the image job.
@@ -119,11 +128,15 @@ Automated checks:
 
 - Python compile check;
 - JavaScript syntax check;
-- 258 application and statistics tests;
-- 18 focused regressions for the reported post-release cases.
+- 260 application and statistics tests;
+- 20 focused regressions for the reported post-release cases.
 
 The automated suite uses mocks and local SQLite databases: external AI calls
 and test-model spend are `$0`.
+
+The ordinary PR review for the first revision used one Sonnet request and
+reported an estimated cost of `$0.1745`. That review cost is tracked separately
+from staging product-call spend.
 
 Staging acceptance on i167:
 

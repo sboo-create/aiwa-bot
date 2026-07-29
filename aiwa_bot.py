@@ -1863,17 +1863,29 @@ def _journal_explicit_first_person_event(text):
 def match_intent(t):
     raw_t = str(t or "")
     t = t.lower()
-    if re.search(
-        r"\b(?:какая\s+(?:сегодня\s+)?дата|какое\s+(?:сегодня\s+)?число|"
-        r"сегодня\s+какое\s+число|какой\s+сегодня\s+день(?!\s+цикл))\b",
-        t,
-    ):
-        return "current_date"
     _mutation_denied = bool(re.search(
         r"\b(?:не|не\s+надо|не\s+нужно)\s+(?:запис\w*|запиш\w*|добав\w*|внос\w*|"
         r"внес\w*|занос\w*|занес\w*|отмеч\w*|отмет\w*|фиксир\w*|зафиксир\w*)",
         t,
     ))
+    _date_question = re.search(
+        r"\b(?:какая\s+(?:сегодня\s+)?дата|какое\s+(?:сегодня\s+)?число|"
+        r"сегодня\s+какое\s+число|какой\s+сегодня\s+день(?!\s+цикл))\b",
+        t,
+    )
+    _journal_signal = bool(
+        re.search(
+            r"\b(?:запис\w*|запиш\w*|добав\w*|внес\w*|занес\w*|отмет\w*|"
+            r"зафиксир\w*|залогир\w*|логни)\b",
+            t,
+        )
+        or _JOURNAL_SEMANTIC_CANDIDATE_RE.search(raw_t)
+    )
+    # A deterministic date answer is safe only for a standalone question.
+    # Combined messages must continue through journal routing so a write is
+    # never discarded merely because the same sentence mentions today's date.
+    if _date_question and (not _journal_signal or _mutation_denied):
+        return "current_date"
     _mutation_context_blocked = bool(
         _journal_third_party_source(raw_t)
         or "?" in t
@@ -5435,6 +5447,16 @@ def schedule_daily(app, cid, hhmm):
     )
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ), chat_id=cid, name=str(cid))
 
+def set_daily_time(app, cid, hhmm):
+    """An explicit delivery-time choice also explicitly enables summaries."""
+    upsert(
+        cid,
+        send_time=hhmm,
+        daily_summary_enabled=1,
+        state=None,
+    )
+    schedule_daily(app, cid, hhmm)
+
 def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=False, enforce_spacing=False,
                               mutation_key=None, args_hash=None):
     """Одна транзакция для cycles + users, включая проверку lifecycle и текущего режима."""
@@ -6216,7 +6238,7 @@ async def set_time_cmd(update, context):
     if not hhmm:
         upsert(cid, state="await_time")
         return await update.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
-    upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
+    set_daily_time(context.application, cid, hhmm)
     await update.message.reply_text(schedule_text(cid, hhmm))
 MODE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Цикл", callback_data="onb_cycle")],
@@ -6842,7 +6864,7 @@ async def handle_text(update, context, txt):
     if state == "await_time":
         hhmm = parse_time(txt)
         if hhmm:
-            upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
+            set_daily_time(context.application, cid, hhmm)
             return await update.message.reply_text(schedule_text(cid, hhmm))
         upsert(cid, state=None)
     elif state == "await_period_date":
@@ -7117,6 +7139,8 @@ async def on_cb(update, context):
         upsert(cid, state="await_time")
         await q.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
     elif data == "toggle:summary":
+        if not is_onboarded(u):
+            return await need_onboard(q.message)
         enabled = not bool((row(cid) or {}).get("daily_summary_enabled", True))
         upsert(cid, daily_summary_enabled=int(enabled))
         if enabled:
@@ -7129,7 +7153,8 @@ async def on_cb(update, context):
             "Утренние сводки выключены. Сводку по-прежнему можно открыть вручную в приложении или командой /today."
         )
     elif data.startswith("tm:"):
-        hhmm = data.split(":", 1)[1]; upsert(cid, send_time=hhmm, state=None); schedule_daily(context.application, cid, hhmm)
+        hhmm = data.split(":", 1)[1]
+        set_daily_time(context.application, cid, hhmm)
         await q.message.reply_text(schedule_text(cid, hhmm))
     elif data.startswith("ci:e:"):
         log_set(cid, today_s, energy=int(data.split(":")[2])); await safe_edit(q, "Настроение?", reply_markup=en_kb("m", MOOD))
@@ -10673,10 +10698,14 @@ async def _api_settime(request):
     if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
     t = parse_time(str(body.get("time") or ""))
     if not t: return _cors(web.json_response({"error": "bad_time", "text": "Время в формате 09:00."}, status=400))
-    upsert(cid, send_time=t)
     if BOT_APP:
-        try: schedule_daily(BOT_APP, cid, t)
-        except Exception as e: log.warning("reschedule: %s", e)
+        try:
+            set_daily_time(BOT_APP, cid, t)
+        except Exception as e:
+            log.warning("reschedule: %s", e)
+            upsert(cid, send_time=t, daily_summary_enabled=1, state=None)
+    else:
+        upsert(cid, send_time=t, daily_summary_enabled=1, state=None)
     ev(cid, "manual", meta="web_settime")
     return _cors(web.json_response({"ok": True, "send_time": t}))
 
