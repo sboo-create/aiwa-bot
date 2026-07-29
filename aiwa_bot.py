@@ -112,7 +112,7 @@ L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
 AIWA_VERSION = os.environ.get(
-    "AIWA_VERSION", "2026-07-29-v177-stats-report-acquisition"
+    "AIWA_VERSION", "2026-07-29-v178-acquisition-durability"
 )
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
@@ -311,6 +311,8 @@ def _migrate_db_on_connection(c):
         modules TEXT DEFAULT 'phase,general,food,training',
         state TEXT, pending_date TEXT, created TEXT,
         onboarding_started INTEGER DEFAULT 0)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS schema_migrations(
+        name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)""")
     c.execute("CREATE TABLE IF NOT EXISTS sugg(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, q TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS cycles(chat_id INTEGER, start_date TEXT, PRIMARY KEY(chat_id,start_date))")
     c.execute("CREATE TABLE IF NOT EXISTS intimacy(chat_id INTEGER, d TEXT, PRIMARY KEY(chat_id,d))")
@@ -493,10 +495,30 @@ def _migrate_db_on_connection(c):
                 "last_phase_notified TEXT", "last_reactivation TEXT",
                 "proactive_enabled INTEGER DEFAULT 1",
                 "daily_summary_enabled INTEGER DEFAULT 1", "tg_first_name TEXT",
-                "push_suppressed_at TEXT", "push_suppression_reason TEXT",
-                "onboarding_started INTEGER DEFAULT 0"):
+                "push_suppressed_at TEXT", "push_suppression_reason TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
+    # v177 introduced the marker without a durable migration marker. Production
+    # can therefore already have the column while legacy rows still contain 0.
+    # Backfill once under the schema transaction: rows created after this
+    # migration retain the DEFAULT 0 and are counted by record_onboarding_started.
+    _onboarding_migration = "2026-07-29-onboarding-started-backfill-v1"
+    if not c.execute(
+        "SELECT 1 FROM schema_migrations WHERE name=?",
+        (_onboarding_migration,),
+    ).fetchone():
+        _user_columns = {
+            item[1] for item in c.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "onboarding_started" not in _user_columns:
+            c.execute(
+                "ALTER TABLE users ADD COLUMN onboarding_started INTEGER DEFAULT 0"
+            )
+        c.execute("UPDATE users SET onboarding_started=1")
+        c.execute(
+            "INSERT INTO schema_migrations(name,applied_at) VALUES(?,?)",
+            (_onboarding_migration, datetime.now(timezone.utc).isoformat()),
+        )
     c.commit()
     return c
 
@@ -595,43 +617,53 @@ def upsert(cid, *, user_generation=None, **kw):
 def record_onboarding_started(cid):
     """Emit one acquisition start per active privacy lifecycle.
 
-    Existing fully onboarded profiles are marked without being recounted.
-    `/stop` removes both the user row and analytics lifecycle, so a later
-    explicit `/start` correctly begins a new, separately consented lifecycle.
+    The marker, analytics event and Traction outbox item share one transaction.
+    `/stop` removes the row and analytics lifecycle, so a later explicit
+    `/start` correctly begins a new, separately consented lifecycle.
     """
     c = db()
     try:
+        # The overwhelmingly common path is read-only and takes no write lock.
+        current = c.execute(
+            """SELECT COALESCE(onboarding_started,0)
+               FROM users WHERE chat_id=?""",
+            (cid,),
+        ).fetchone()
+        if not current or current[0]:
+            return False
         c.execute("BEGIN IMMEDIATE")
         if not _user_write_allowed(cid, conn=c):
             c.rollback()
             return False
-        user = c.execute(
-            """SELECT last_period,cycle_len,mode,
-                      COALESCE(onboarding_started,0)
-               FROM users WHERE chat_id=?""",
+        claimed = c.execute(
+            """UPDATE users SET onboarding_started=1
+               WHERE chat_id=? AND COALESCE(onboarding_started,0)=0""",
             (cid,),
-        ).fetchone()
-        if not user:
+        ).rowcount
+        if claimed != 1:
             c.rollback()
             return False
-        already_onboarded = (
-            user[2] in ("irregular", "none", "meno", "preg", "male")
-            or bool(user[0] and user[1])
+        event_id = A2.insert_event_v2(
+            c,
+            cid,
+            "signup",
+            app_version=AIWA_VERSION,
+            occurred_at=datetime.now(timezone.utc).isoformat(),
         )
-        if user[3]:
-            c.commit()
+        if not event_id:
+            c.rollback()
             return False
-        c.execute(
-            "UPDATE users SET onboarding_started=1 WHERE chat_id=?",
-            (cid,),
-        )
         c.commit()
+        return True
+    except Exception as exc:
+        try:
+            c.rollback()
+        except sqlite3.Error:
+            pass
+        log.warning("onboarding acquisition write failed for %s: %s", cid, exc)
+        return False
     finally:
         c.close()
-    if already_onboarded:
-        return False
-    ev(cid, "signup")
-    return True
 
 def _clean_telegram_first_name(value):
     """Telegram profile label used only for addressing, never inferred from chat."""

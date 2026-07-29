@@ -1,6 +1,8 @@
 import asyncio
+import concurrent.futures
 import json
 import os
+import sqlite3
 import tempfile
 import types
 import unittest
@@ -40,6 +42,30 @@ class ReportAndAcquisitionTests(unittest.TestCase):
             message=types.SimpleNamespace(reply_text=mock.AsyncMock()),
         )
 
+    @staticmethod
+    def _count_onboarding(cid):
+        c = bot.db()
+        try:
+            key = bot.A2.user_key(cid)
+            return c.execute(
+                """SELECT COUNT(*) FROM events_v2
+                   WHERE user_key=? AND event_name='onboarding_started'""",
+                (key,),
+            ).fetchone()[0]
+        finally:
+            c.close()
+
+    @staticmethod
+    def _onboarding_marker(cid):
+        c = bot.db()
+        try:
+            found = c.execute(
+                "SELECT onboarding_started FROM users WHERE chat_id=?", (cid,)
+            ).fetchone()
+            return found[0] if found else None
+        finally:
+            c.close()
+
     def test_new_start_records_acquisition_before_identity_row_hides_newness(self):
         update = self._start_update(701)
         context = types.SimpleNamespace(args=[])
@@ -50,21 +76,25 @@ class ReportAndAcquisitionTests(unittest.TestCase):
             asyncio.run(bot.start(update, context))
 
         self.assertEqual(bot.row(701)["tg_first_name"], "Новый")
-        event.assert_any_call(701, "signup")
+        self.assertEqual(self._count_onboarding(701), 1)
         event.assert_any_call(701, "command", meta="start")
         begin.assert_awaited_once()
 
     def test_existing_start_does_not_duplicate_acquisition(self):
         bot._activate_user(702)
         bot.upsert(702, mode="male", tg_first_name="Денис")
+        c = bot.db()
+        c.execute(
+            "UPDATE users SET onboarding_started=1 WHERE chat_id=?", (702,)
+        )
+        c.commit()
+        c.close()
         update = self._start_update(702, "Денис")
         context = types.SimpleNamespace(args=[])
         with mock.patch.object(bot, "ev") as event:
             asyncio.run(bot.start(update, context))
 
-        self.assertFalse(any(
-            call.args == (702, "signup") for call in event.call_args_list
-        ))
+        self.assertEqual(self._count_onboarding(702), 0)
 
     def test_existing_incomplete_profile_records_acquisition_exactly_once(self):
         bot._activate_user(706)
@@ -76,16 +106,98 @@ class ReportAndAcquisitionTests(unittest.TestCase):
             mock.patch.object(bot, "begin_onboard", new=mock.AsyncMock()),
         ):
             asyncio.run(bot.start(update, context))
-        first_event.assert_any_call(706, "signup")
+        self.assertEqual(self._count_onboarding(706), 1)
 
         with (
             mock.patch.object(bot, "ev") as second_event,
             mock.patch.object(bot, "begin_onboard", new=mock.AsyncMock()),
         ):
             asyncio.run(bot.start(update, context))
-        self.assertFalse(any(
-            call.args == (706, "signup") for call in second_event.call_args_list
-        ))
+        self.assertEqual(self._count_onboarding(706), 1)
+
+    def test_legacy_rows_are_backfilled_without_new_acquisition(self):
+        legacy_db = os.path.join(self.tmp.name, "legacy.db")
+        c = sqlite3.connect(legacy_db)
+        c.execute(
+            """CREATE TABLE users(
+                chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
+                send_time TEXT, modules TEXT, state TEXT, pending_date TEXT,
+                created TEXT, mode TEXT)"""
+        )
+        c.execute(
+            """INSERT INTO users(
+                chat_id,last_period,cycle_len,created,mode
+            ) VALUES(?,?,?,?,?)""",
+            (708, None, None, "2026-07-01T00:00:00+00:00", "male"),
+        )
+        c.commit()
+        c.close()
+        bot.DB = legacy_db
+
+        self.assertEqual(self._onboarding_marker(708), 1)
+        self.assertFalse(bot.record_onboarding_started(708))
+        self.assertEqual(self._count_onboarding(708), 0)
+
+    def test_stop_then_start_begins_new_privacy_lifecycle(self):
+        update = self._start_update(709)
+        context = types.SimpleNamespace(args=[])
+        with (
+            mock.patch.object(bot, "ev"),
+            mock.patch.object(bot, "begin_onboard", new=mock.AsyncMock()),
+        ):
+            asyncio.run(bot.start(update, context))
+        self.assertEqual(self._count_onboarding(709), 1)
+
+        bot.del_user(709)
+        self.assertIsNone(bot.row(709))
+        with (
+            mock.patch.object(bot, "ev"),
+            mock.patch.object(bot, "begin_onboard", new=mock.AsyncMock()),
+        ):
+            asyncio.run(bot.start(update, context))
+        self.assertEqual(self._count_onboarding(709), 1)
+
+    def test_need_onboard_creates_and_counts_brand_new_user(self):
+        message = types.SimpleNamespace(
+            chat=types.SimpleNamespace(id=710),
+            reply_text=mock.AsyncMock(),
+        )
+        asyncio.run(bot.need_onboard(message))
+
+        self.assertEqual(self._onboarding_marker(710), 1)
+        self.assertEqual(self._count_onboarding(710), 1)
+        message.reply_text.assert_awaited_once()
+
+    def test_write_disallowed_does_not_claim_marker(self):
+        bot._activate_user(711)
+        bot.upsert(711, state=None)
+        with mock.patch.object(bot, "_user_write_allowed", return_value=False):
+            self.assertFalse(bot.record_onboarding_started(711))
+
+        self.assertEqual(self._onboarding_marker(711), 0)
+        self.assertEqual(self._count_onboarding(711), 0)
+
+    def test_event_failure_rolls_back_marker_for_retry(self):
+        bot._activate_user(712)
+        bot.upsert(712, state=None)
+        with mock.patch.object(bot.A2, "insert_event_v2", return_value=None):
+            self.assertFalse(bot.record_onboarding_started(712))
+
+        self.assertEqual(self._onboarding_marker(712), 0)
+        self.assertTrue(bot.record_onboarding_started(712))
+        self.assertEqual(self._onboarding_marker(712), 1)
+        self.assertEqual(self._count_onboarding(712), 1)
+
+    def test_concurrent_acquisition_calls_emit_once(self):
+        bot._activate_user(713)
+        bot.upsert(713, state=None)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(
+                lambda _index: bot.record_onboarding_started(713), range(16)
+            ))
+
+        self.assertEqual(sum(bool(result) for result in results), 1)
+        self.assertEqual(self._count_onboarding(713), 1)
 
     def test_send_report_returns_confirmed_delivery_status(self):
         bot._activate_user(703)

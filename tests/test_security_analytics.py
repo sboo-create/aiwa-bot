@@ -448,6 +448,12 @@ class SecurityAnalyticsTests(unittest.TestCase):
                 self.statements.append(statement)
                 return self
 
+            def fetchone(self):
+                return None
+
+            def fetchall(self):
+                return []
+
             def commit(self):
                 self.committed = True
 
