@@ -99,6 +99,17 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 current = Path(sys.argv[2])
+resolved_root = root.resolve()
+
+def checked_asset_path(kind, url):
+    prefix = f"/assets/{kind}/"
+    if not url.startswith(prefix):
+        raise SystemExit(f"unsafe asset URL: {kind}: {url}")
+    path = (root / url.removeprefix("/")).resolve()
+    if path != resolved_root and resolved_root not in path.parents:
+        raise SystemExit(f"unsafe asset URL: {kind}: {url}")
+    return path
+
 for kind in ("food", "train"):
     manifest = json.loads(
         (root / "assets" / kind / "manifest.json").read_text(encoding="utf-8")
@@ -108,14 +119,14 @@ for kind in ("food", "train"):
     for label, url in manifest.items():
         if not isinstance(label, str) or not isinstance(url, str):
             raise SystemExit(f"invalid manifest row: {kind}")
-        path = root / url.removeprefix("/")
+        path = checked_asset_path(kind, url)
         if not path.is_file():
             raise SystemExit(f"missing asset: {kind}: {url}")
     previous_manifest = current / "assets" / kind / "manifest.json"
     if previous_manifest.is_file():
         previous = json.loads(previous_manifest.read_text(encoding="utf-8"))
         for previous_url in previous.values():
-            previous_path = root / str(previous_url).removeprefix("/")
+            previous_path = checked_asset_path(kind, str(previous_url))
             if not previous_path.is_file():
                 raise SystemExit(
                     f"previously published asset disappeared: {kind}: {previous_url}"

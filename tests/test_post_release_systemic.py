@@ -380,7 +380,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertNotIn("root * /srv/aiwa-staging/current", caddy)
         self.assertEqual(mimetypes.guess_type("catalog.webp")[0], "image/webp")
 
-    def test_webp_static_response_has_browser_safe_content_type(self):
+    def test_security_headers_never_relabel_synthesized_webp_responses(self):
         request = SimpleNamespace(
             path="/assets/food/catalog-v2/example.webp",
             headers={},
@@ -394,7 +394,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
 
         response = asyncio.run(bot._security_headers(request, handler))
 
-        self.assertEqual(response.content_type, "image/webp")
+        self.assertEqual(response.content_type, "application/octet-stream")
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 
         async def explicit_handler(_request):
@@ -521,6 +521,33 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertTrue(symlink_target.is_symlink())
         self.assertEqual(current.resolve(), partial.resolve())
 
+        traversal_sha = "5" * 40
+        release(traversal_sha)
+        traversal_manifest = (
+            Path(self.tmp.name)
+            / "releases"
+            / traversal_sha
+            / "webapp2"
+            / "assets"
+            / "food"
+            / "manifest.json"
+        )
+        traversal_manifest.write_text(
+            json.dumps({
+                "escape": "/assets/food/../../../../../../etc/passwd",
+            }),
+            encoding="utf-8",
+        )
+        traversal = subprocess.run(
+            [str(script), traversal_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(traversal.returncode, 0)
+        self.assertIn("unsafe asset URL", traversal.stderr)
+        self.assertEqual(current.resolve(), partial.resolve())
+
         lock_dir = Path(self.tmp.name) / ".public-assets-activation.lock"
         lock_dir.mkdir()
         locked = subprocess.run(
@@ -540,16 +567,32 @@ class PostReleaseSystemicTests(unittest.TestCase):
             await client.start_server()
             try:
                 response = await client.get("/assets/food/manifest.json")
-                return response.status, response.content_type, await response.json()
+                manifest = await response.json()
+                image = await client.get(
+                    "/assets/food/catalog-v2/"
+                    "445a7df943bbd2442c7f5d72d01c9461816376395ae7b345d36e901e4d9a4401.webp"
+                )
+                await image.read()
+                return (
+                    response.status,
+                    response.content_type,
+                    manifest,
+                    image.status,
+                    image.content_type,
+                )
             finally:
                 await client.close()
 
-        status, content_type, manifest = asyncio.run(fetch_manifest())
+        status, content_type, manifest, image_status, image_type = asyncio.run(
+            fetch_manifest()
+        )
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
         self.assertEqual(len(manifest), 612)
         self.assertTrue(any("/catalog-v2/" in url for url in manifest.values()))
+        self.assertEqual(image_status, 200)
+        self.assertEqual(image_type, "image/webp")
 
 
 if __name__ == "__main__":
