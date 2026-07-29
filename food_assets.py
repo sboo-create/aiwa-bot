@@ -81,6 +81,7 @@ _EXPLICIT_ALIASES = {
     "запеченная куриная грудка": "Куриная грудка запечённая",
     "вареные яйца": "Яйца варёные",
     "салат тунец": "Салат с тунцом",
+    "омлет с сыром и зеленью": "Омлет с сыром",
     "курага": "Сухофрукты",
 }
 _DRINK_RE = re.compile(
@@ -279,23 +280,11 @@ class FoodAssetResolver:
         matches.sort(reverse=True)
         best = matches[0]
         if len(matches) > 1 and matches[1][:2] == best[:2]:
-            tied = [match for match in matches if match[:2] == best[:2]]
-            # Several reviewed catalog labels can be equally good subsets of
-            # a more detailed user label (for example “омлет с сыром и
-            # зеленью” matches both “омлет с сыром” and “омлет с зеленью”).
-            # Either image is truthful, so use a stable label ordering.
-            # Keep rejecting ambiguous supersets: those could add an
-            # ingredient the user never mentioned.
-            safe_subsets = all(
-                self._tokens[match[2]].issubset(query_tokens)
-                for match in tied
-            )
-            if safe_subsets:
-                tied.sort(key=lambda match: match[2].casefold())
-                chosen = tied[0]
-                result = (chosen[2], chosen[3], "catalog_canonical")
-            else:
-                result = None
+            # Ambiguous catalog matches fail closed. Common, manually reviewed
+            # formulations belong in _EXPLICIT_ALIASES; unknown combinations
+            # keep the neutral fallback and can receive an exact generated
+            # asset asynchronously.
+            result = None
         else:
             result = (best[2], best[3], "catalog_canonical")
         with self._match_cache_lock:

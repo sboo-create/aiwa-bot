@@ -43,7 +43,18 @@ Before merge:
 2. Run the full Python test suite and JavaScript syntax check.
 3. Verify that every manifest path exists, every new file is WebP 512×512,
    hashes are unique and no image exceeds the configured asset-size ceiling.
-4. Run ordinary PR checks and exactly one deep review.
+4. Deploy the exact PR head to staging. Fetch both versioned manifests and a
+   sample of old and new asset URLs, then open food and training screens in
+   Telegram. The staging smoke must prove that manifests and assets are
+   published atomically before `main` is merged.
+5. Run ordinary PR checks and exactly one deep review. For PRs above GitHub's
+   300-file diff limit, the deep-review workflow must use a checked-out
+   base/head diff instead of the single REST diff endpoint.
+
+Old manifest entries and their files are preserved. During an edge-cache
+transition an old client therefore continues to resolve old URLs, while a new
+client receives the cache-busted manifest only from an image that already
+contains every referenced `catalog-v2` file. No CDN purge is required.
 
 After deployment:
 

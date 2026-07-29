@@ -27,8 +27,8 @@ class FoodAssetResolverTests(unittest.TestCase):
         reordered = assets.RESOLVER.resolve("творожная запеканка")
 
         self.assertEqual(exact["image_source"], "catalog_exact")
-        self.assertEqual(extended["image_source"], "catalog_canonical")
-        self.assertEqual(extended["canonical_label"], "Омлет с зеленью")
+        self.assertEqual(extended["image_source"], "catalog_alias")
+        self.assertEqual(extended["image_url"], exact["image_url"])
         self.assertEqual(reordered["image_url"], assets.RESOLVER.manifest["Запеканка творожная"])
 
     def test_unrelated_unknown_foods_do_not_share_a_catalog_match(self):
@@ -68,17 +68,17 @@ class FoodAssetResolverTests(unittest.TestCase):
         self.assertEqual(unknown["image_source"], "category")
         self.assertEqual(unknown["asset_state"], "missing")
 
-    def test_equal_reviewed_subsets_use_stable_semantic_label_order(self):
+    def test_equal_reviewed_subsets_fail_closed_without_explicit_alias(self):
         resolver = assets.FoodAssetResolver({
             "Омлет с сыром": "/assets/food/catalog-v2/cheese.webp",
-            "Омлет с зеленью": "/assets/food/catalog-v2/herbs.webp",
+            "Омлет с грибами": "/assets/food/catalog-v2/mushroom.webp",
         })
 
-        detailed = resolver.resolve("омлет с сыром и зеленью")
+        detailed = resolver.resolve("омлет с сыром и грибами")
         underspecified = resolver.resolve("омлет")
 
-        self.assertEqual(detailed["image_source"], "catalog_canonical")
-        self.assertEqual(detailed["canonical_label"], "Омлет с зеленью")
+        self.assertEqual(detailed["image_source"], "category")
+        self.assertEqual(detailed["asset_state"], "missing")
         self.assertEqual(underspecified["image_source"], "category")
         self.assertEqual(underspecified["asset_state"], "missing")
 
