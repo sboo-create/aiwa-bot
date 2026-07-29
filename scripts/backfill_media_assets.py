@@ -191,7 +191,6 @@ def generate(
             if canonical_id not in expected_ids:
                 raise ValueError("media_backfill_resume_input")
             if _valid_existing(assets, output_dir, row):
-                canonical_id = str(row.get("canonical_id"))
                 completed[canonical_id] = row
 
     lock = threading.Lock()
@@ -338,6 +337,20 @@ def review(
         raise ValueError("media_backfill_manifest_schema")
     rows = source.get("assets")
     rows = _validated_rows(kind, rows)
+    for row in rows:
+        status = row.get("status")
+        if status not in {"ready", "failed"}:
+            raise ValueError("media_backfill_manifest_status")
+        description = row.get("literal_description")
+        if (
+            status == "ready"
+            and (
+                not isinstance(description, str)
+                or not description.strip()
+                or len(description) > 1_000
+            )
+        ):
+            raise ValueError("media_backfill_manifest_description")
     _require_validation(kind)
     if output_path.resolve().parent != input_path.resolve().parent:
         raise ValueError("media_review_output_directory")

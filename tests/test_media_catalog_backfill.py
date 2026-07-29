@@ -206,6 +206,7 @@ class ResumableBackfillTests(unittest.TestCase):
                     "status": "ready",
                     "content_hash": "a" * 64,
                     "filename": f"{'a' * 64}.webp",
+                    "literal_description": "Падел на закрытом корте",
                 }],
             }), encoding="utf-8")
             with mock.patch.object(
@@ -213,6 +214,37 @@ class ResumableBackfillTests(unittest.TestCase):
             ), mock.patch.object(
                 sport_assets, "generate_and_store"
             ) as generate, self.assertRaises(FileNotFoundError):
+                backfill.review(
+                    "sport",
+                    manifest,
+                    root / "reviewed-manifest.json",
+                    1,
+                    2,
+                )
+            generate.assert_not_called()
+
+    def test_review_rejects_ready_row_without_literal_description(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            content_hash, filename = _write_webp(root)
+            manifest = root / "backfill-manifest.json"
+            manifest.write_text(json.dumps({
+                "schema": "aiwa-sport-backfill-assets-v1",
+                "assets": [{
+                    "label": "Падел",
+                    "canonical_id": sport_assets.canonical_id("Падел"),
+                    "status": "ready",
+                    "content_hash": content_hash,
+                    "filename": filename,
+                }],
+            }), encoding="utf-8")
+            with mock.patch.object(
+                sport_assets, "validation_enabled", return_value=True
+            ), mock.patch.object(
+                sport_assets, "generate_and_store"
+            ) as generate, self.assertRaisesRegex(
+                ValueError, "manifest_description"
+            ):
                 backfill.review(
                     "sport",
                     manifest,
