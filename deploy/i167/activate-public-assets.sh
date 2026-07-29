@@ -40,7 +40,20 @@ fi
 lock_file="$staging_root/.public-assets-activation.lock"
 lock_claim="$staging_root/.public-assets-activation.lock.$$.$sha"
 candidate=""
-printf '%s\n' "$$" >"$lock_claim"
+process_start_token() {
+  local pid="$1"
+  if [[ -r "/proc/$pid/stat" ]]; then
+    awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true
+  else
+    ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true
+  fi
+}
+claim_start="$(process_start_token "$$")"
+if [[ -z "$claim_start" ]]; then
+  echo "cannot identify activation process start time" >&2
+  exit 1
+fi
+printf '%s\n%s\n' "$$" "$claim_start" >"$lock_claim"
 chmod 0600 "$lock_claim"
 lock_acquired=0
 for _attempt in 1 2 3; do
@@ -48,8 +61,13 @@ for _attempt in 1 2 3; do
     lock_acquired=1
     break
   fi
-  owner_pid="$(cat -- "$lock_file" 2>/dev/null || true)"
-  if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+  owner_pid="$(sed -n '1p' "$lock_file" 2>/dev/null || true)"
+  owner_start="$(sed -n '2p' "$lock_file" 2>/dev/null || true)"
+  current_start=""
+  if [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
+    current_start="$(process_start_token "$owner_pid")"
+  fi
+  if [[ -n "$owner_start" && "$current_start" == "$owner_start" ]]; then
     rm -f -- "$lock_claim"
     echo "public asset activation already in progress: $lock_file (pid $owner_pid)" >&2
     exit 1
@@ -69,7 +87,8 @@ cleanup() {
   if [[ -n "${candidate:-}" && -d "$candidate" ]]; then
     rm -rf -- "$candidate"
   fi
-  if [[ "$(cat -- "$lock_file" 2>/dev/null || true)" == "$$" ]]; then
+  if [[ "$(sed -n '1p' "$lock_file" 2>/dev/null || true)" == "$$" ]] &&
+     [[ "$(sed -n '2p' "$lock_file" 2>/dev/null || true)" == "$claim_start" ]]; then
     rm -f -- "$lock_file"
   fi
 }

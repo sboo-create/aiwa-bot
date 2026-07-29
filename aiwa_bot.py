@@ -12481,6 +12481,9 @@ def build_web():
     aio.router.add_post("/api/week_food_review", _api_week_food_review)
     _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
+        # Keep this strict content-addressed route before the broad static
+        # mount: Railway/aiohttp then gets an explicit WebP MIME type, while
+        # i167 Caddy serves the same immutable path directly.
         aio.router.add_get(
             "/assets/{kind}/catalog-v2/{filename}",
             _serve_reviewed_catalog_file,

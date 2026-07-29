@@ -549,7 +549,19 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertEqual(current.resolve(), partial.resolve())
 
         lock_file = Path(self.tmp.name) / ".public-assets-activation.lock"
-        lock_file.write_text(str(os.getpid()), encoding="ascii")
+        if Path(f"/proc/{os.getpid()}/stat").is_file():
+            process_start = Path(
+                f"/proc/{os.getpid()}/stat"
+            ).read_text(encoding="ascii").split()[21]
+        else:
+            process_start = subprocess.check_output(
+                ["ps", "-o", "lstart=", "-p", str(os.getpid())],
+                text=True,
+            ).strip()
+        lock_file.write_text(
+            f"{os.getpid()}\n{process_start}\n",
+            encoding="ascii",
+        )
         locked = subprocess.run(
             [str(script), first_sha],
             env=env,
@@ -561,7 +573,11 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertTrue(lock_file.is_file())
         self.assertEqual(current.resolve(), partial.resolve())
 
-        lock_file.write_text("99999999", encoding="ascii")
+        # A recycled live PID with a different start time is stale too.
+        lock_file.write_text(
+            f"{os.getpid()}\nnot-the-current-process-start\n",
+            encoding="ascii",
+        )
         recovered = subprocess.run(
             [str(script), first_sha],
             env=env,
