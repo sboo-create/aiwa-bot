@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
@@ -471,3 +472,29 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(second_status, "hit")
         self.assertEqual(cached["overview"]["dau"], 1)
         self.assertLess(elapsed, 50)
+
+    def test_dashboard_cache_singleflights_same_window(self):
+        self.module._DASHBOARD_CACHE.clear()
+        gate = threading.Barrier(4)
+        calls = []
+        statuses = []
+
+        def compute(days, source):
+            calls.append((days, source))
+            time.sleep(.05)
+            return {"overview": {"dau": 1}}
+
+        def request():
+            gate.wait()
+            statuses.append(self.module._cached_dashboard(30, "mixed")[1])
+
+        with mock.patch.object(self.module, "compute_dashboard", side_effect=compute):
+            threads = [threading.Thread(target=request) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(2)
+
+        self.assertEqual(calls, [(30, "mixed")])
+        self.assertEqual(statuses.count("miss"), 1)
+        self.assertEqual(statuses.count("hit"), 3)

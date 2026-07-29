@@ -19681,7 +19681,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v163.js?v=r22").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v163.js?v=r23").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -19753,7 +19753,12 @@ function Uj() {
       c(!0);
       try {
         const y = await qt("/api/report", { period: "all" }).catch(() => null);
-        y?.ok ? Ot("Выписка отправлена в чат бота", { type: "success" }) : Ot(y?.text || "Выписка временно недоступна", { type: "error" });
+        y?.ok && y?.delivered ? (Ot("PDF отправлен — открываю чат", { type: "success" }), setTimeout(() => {
+          try {
+            window.Telegram?.WebApp?.close?.();
+          } catch {
+          }
+        }, 650)) : Ot(y?.text || "Выписка временно недоступна", { type: "error" });
       } finally {
         c(!1);
       }
@@ -20470,7 +20475,7 @@ function Wi({ label: a, options: e, value: l, onChange: s }) {
   ] });
 }
 function Yh({ isOpen: a, onClose: e }) {
-  const [l, s] = E.useState("main"), [r, c] = E.useState(() => le("aiwaData") || {}), [f, h] = E.useState(null), [y, p] = E.useState("3"), [g, v] = E.useState({});
+  const [l, s] = E.useState("main"), [r, c] = E.useState(() => le("aiwaData") || {}), [f, h] = E.useState(null), [y, p] = E.useState("3"), [g, v] = E.useState({}), [reportBusy, setReportBusy] = E.useState(!1);
   E.useEffect(() => {
     if (!a) return;
     const A = le("aiwaData") || {};
@@ -20502,8 +20507,20 @@ function Yh({ isOpen: a, onClose: e }) {
     }).catch(() => null), B = await qt("/api/settime", { time: g.send_time }).catch(() => null);
     A?.ok && R?.ok && B?.ok ? (Ot("Данные сохранены", { type: "success" }), vn("reloadAfterEdit"), s("main")) : Ot(A?.text || "Проверь рост, вес, возраст и время", { type: "error" });
   }, S = async () => {
-    const A = await qt("/api/report", { period: y }).catch(() => null);
-    A?.ok ? (Ot("Выписка отправлена в чат бота", { type: "success" }), s("main")) : Ot(A?.text || "Выписка временно недоступна", { type: "error" });
+    if (reportBusy)
+      return;
+    setReportBusy(!0);
+    try {
+      const A = await qt("/api/report", { period: y }).catch(() => null);
+      A?.ok && A?.delivered ? (Ot("PDF отправлен — открываю чат", { type: "success" }), setTimeout(() => {
+        try {
+          window.Telegram?.WebApp?.close?.();
+        } catch {
+        }
+      }, 650)) : Ot(A?.text || "Выписка временно недоступна", { type: "error" });
+    } finally {
+      setReportBusy(!1);
+    }
   }, w = async (A) => {
     const R = g.proactive_enabled !== !1;
     v((U) => ({ ...U, proactive_enabled: A })), (await qt("/api/proactive", { enabled: A }).catch(() => null))?.ok || (v((U) => ({ ...U, proactive_enabled: R })), Ot("Не получилось изменить настройку", { type: "error" }));
@@ -20624,7 +20641,7 @@ function Yh({ isOpen: a, onClose: e }) {
               onChange: p
             }
           ),
-          /* @__PURE__ */ m.jsx(Wt, { variant: "filled", label: "Собрать выписку", isFill: !0, ...se("Собрать выписку", S) })
+          /* @__PURE__ */ m.jsx(Wt, { variant: "filled", label: reportBusy ? "Собираю…" : "Собрать выписку", isFill: !0, disabled: reportBusy, ...se("Собрать выписку", S) })
         ] }) : null,
         l === "partner" ? /* @__PURE__ */ m.jsxs("div", { className: "aiwa-form-stack", children: [
           /* @__PURE__ */ m.jsxs("div", { className: "aiwa-paper-card", children: [

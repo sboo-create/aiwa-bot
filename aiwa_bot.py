@@ -112,7 +112,7 @@ L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
 AIWA_VERSION = os.environ.get(
-    "AIWA_VERSION", "2026-07-29-v176-food-assets-live-refresh"
+    "AIWA_VERSION", "2026-07-29-v177-stats-report-acquisition"
 )
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
@@ -6057,8 +6057,12 @@ async def welcome_finish(context, cid, msg):
 
 async def send_report(context, cid, period):
     u = row(cid)
-    if not is_onboarded(u): return await context.bot.send_message(cid, "Сначала пройди настройку: /start.")
-    if not RPT: return await context.bot.send_message(cid, "Выписка временно недоступна.")
+    if not is_onboarded(u):
+        await context.bot.send_message(cid, "Сначала пройди настройку: /start.")
+        return {"ok": False, "delivered": False, "error": "onboard"}
+    if not RPT:
+        await context.bot.send_message(cid, "Выписка временно недоступна.")
+        return {"ok": False, "delivered": False, "error": "unavailable"}
     _, st = status_of(cid)
     await context.bot.send_chat_action(cid, "upload_document")
     since, label = RPT.period_since(period)
@@ -6074,8 +6078,15 @@ async def send_report(context, cid, period):
         await context.bot.send_document(cid, document=bio, filename="AIWA_vypiska.pdf",
             caption=report_caption(u, label))
         ev(cid, "goal", meta="report")
+        return {"ok": True, "delivered": True}
     except Exception as e:
-        log.warning("report: %s", e); await context.bot.send_message(cid, "Не удалось собрать выписку, попробуй позже.")
+        log.warning("report: %s", e)
+        ev(cid, "error", meta="report_delivery")
+        try:
+            await context.bot.send_message(cid, "Не удалось собрать выписку, попробуй позже.")
+        except Exception as notify_exc:
+            log.warning("report failure notice: %s", notify_exc)
+        return {"ok": False, "delivered": False, "error": "delivery_failed"}
 
 PARTNER_TIPS = {
     "menstrual": "Идут месячные, может болеть живот и не быть сил. Грелка, тёплый чай, еда с железом и спокойный режим зайдут, на марафон лучше не звать.",
@@ -6324,7 +6335,13 @@ async def start(update, context):
     # /start is the only operation that begins a fresh lifecycle after /stop.
     # Incrementing the generation keeps older in-flight tasks permanently stale.
     _activate_user(cid)
+    is_new_user = row(cid) is None
     _sync_telegram_identity(update, allow_create=True)
+    # Identity sync creates the user row before begin_onboard() runs. Record the
+    # acquisition event from the pre-sync state, otherwise every genuinely new
+    # /start disappears from the activation funnel.
+    if is_new_user:
+        ev(cid, "signup")
     if context.args and context.args[0].startswith("p_"):
         return await partner_join(context, cid, update.message, context.args[0][2:])
     if context.args and context.args[0] and not context.args[0].startswith("p_"):
@@ -11320,12 +11337,29 @@ async def _api_report(request):
     if not (BOT_APP and RPT):
         return _cors(web.json_response({"error": "unavail", "text": "Выписка временно недоступна."}, status=503))
     period = str(body.get("period") or "all")
+    if period not in {"3", "6", "all"}:
+        return _cors(web.json_response({"error": "period", "text": "Выбери период выписки."}, status=400))
+    ev(cid, "manual", meta="web_report_requested")
     try:
-        await send_report(_BCtx(BOT_APP), cid, period)
-        return _cors(web.json_response({"ok": True}))
+        result = await send_report(_BCtx(BOT_APP), cid, period)
+        if result.get("ok") and result.get("delivered"):
+            return _cors(web.json_response({
+                "ok": True,
+                "delivered": True,
+                "text": "PDF отправлен в чат бота.",
+            }))
+        return _cors(web.json_response({
+            "error": result.get("error") or "fail",
+            "delivered": False,
+            "text": "Не удалось отправить выписку. Попробуй ещё раз.",
+        }, status=502))
     except Exception as e:
-        log.warning("web report %s: %s", cid, e)
-        return _cors(web.json_response({"error": "fail", "text": "Не удалось собрать выписку."}, status=500))
+        log.warning("web report: %s", e)
+        return _cors(web.json_response({
+            "error": "fail",
+            "delivered": False,
+            "text": "Не удалось отправить выписку. Попробуй ещё раз.",
+        }, status=500))
 
 async def _api_opts(request): return _cors(web.Response())
 
