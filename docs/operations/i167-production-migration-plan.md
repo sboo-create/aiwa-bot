@@ -333,6 +333,114 @@ SQLite.
 отдельная VM. Сохранить имя `i167` можно как operator alias, но production IP
 и hostname должны быть описаны в inventory, а не в памяти команды.
 
+### Staging после переноса production
+
+Staging сохраняется. Для AIWA он нужен не только как проверка HTTP, потому что
+релиз одновременно затрагивает Telegram handlers, Mini App, Bot API, фоновые
+задачи, SQLite и кэш браузера Telegram.
+
+Рекомендуемая схема на первом этапе:
+
+```mermaid
+flowchart LR
+    PR["PR exact head<br/>CI artifact"]
+    ST["i167 staging<br/>test bot + test DB"]
+    GATE["automated + human gate"]
+    MAIN["merge exact head to main"]
+    PROD["i167 production<br/>production bot + production DB"]
+
+    PR --> ST --> GATE --> MAIN --> PROD
+```
+
+Staging и production могут жить на одном i167 в начале, но остаются двумя
+полностью раздельными окружениями:
+
+| Контур | Staging | Production |
+|---|---|---|
+| Unix user/unit | `aiwa-staging` / `aiwa-staging.service` | `aiwa` / `aiwa.service` |
+| Release root | `/srv/aiwa-staging` | `/srv/aiwa` |
+| Telegram | отдельный test bot/token | production bot/token |
+| Mini App | отдельный HTTPS origin и BotFather menu | production origin |
+| SQLite/assets | только test/synthetic данные | production данные |
+| Port/Caddy route | отдельные | отдельные |
+| Cron/push | test recipients или dry-run | реальные получатели |
+| AI/media workers | минимальные лимиты, backfill off | production limits |
+| Relay frontend/keys | отдельные loopback ports и keys | отдельные ports и keys |
+
+Ни token, ни SQLite, ни writable asset directory, ни scheduler state между
+контурами не разделяются. Staging не использует production Telegram token даже
+«на минуту»: два `getUpdates` процесса дадут конфликт, а тестовый cron может
+отправить реальные сообщения.
+
+#### Что проверяется на каждом релизе
+
+1. CI создаёт immutable artifact exact PR head и его checksum.
+2. Этот artifact включается на i167 staging атомарным symlink.
+3. Автоматические проверки:
+   - `/health` и полный `release_sha`;
+   - один test-bot poller, нет `getUpdates Conflict`;
+   - Telegram text/callback;
+   - Mini App init data, три основных экрана и API;
+   - запись/чтение/редактирование/удаление тестовой еды и тренировки;
+   - male/female fixtures;
+   - voice/photo на малых тестовых файлах;
+   - cron-canary только для synthetic/test chat;
+   - outbox/stats и отсутствие новых browser-console/404 ошибок.
+4. При изменении UI выполняется короткий human smoke в Telegram iOS и Android:
+   safe areas, клавиатура, возврат из чата, смена даты, светлая/тёмная тема и
+   cache refresh.
+5. PR можно merge только при exact head, который прошёл staging.
+6. Перед production deploy проверяется, что merge tree идентичен проверенному
+   head. Если `main` изменился или runtime tree отличается, новый merge SHA
+   сначала снова проходит staging.
+7. Production получает тот же проверенный artifact/tree, а не новую ручную
+   сборку.
+
+Полный массовый load test не запускается на каждый релиз. Он нужен только при
+изменении concurrency, очередей, AI/media pipeline, SQLite write path, relay
+или resource limits. Обычный релиз получает малый smoke и regression suite.
+
+#### Что staging на том же i167 не доказывает
+
+Такой staging хорошо ловит application/UI/Telegram regressions, но не
+подтверждает:
+
+- отказ самого i167, диска, Caddy или общей сети;
+- реальную независимость от production relay;
+- production capacity, если staging и production делят 4 vCPU;
+- корректность disaster recovery в другом хосте.
+
+Поэтому инфраструктурные изменения проверяются отдельно:
+
+- relay failover game day A→B и B→A;
+- восстановление backup в disposable VM/каталог;
+- отдельное окно нагрузочного теста с жёсткими квотами либо временной VM;
+- проверка production candidate без production polling и реальных cron.
+
+До миграции требуется добавить явный `candidate/no-poll` режим, если его ещё
+нет: кандидат может поднять HTTP, Mini App, SQLite read-only/synthetic checks и
+health, но не вызывает `getUpdates`, не запускает broadcasts/cron и не пишет в
+production SQLite. Это позволяет проверить systemd/Caddy/release layout до
+T0, не создавая второго production bot process.
+
+#### Ресурсы и стоимость
+
+Постоянный i167 staging — рекомендуемый дешёвый вариант после миграции:
+
+- небольшие CPU/memory quotas;
+- media backfill и фоновые генераторы выключены по умолчанию;
+- реальные AI-вызовы только в bounded smoke;
+- сервис можно останавливать вне тестовых окон, если мешает production
+  headroom, сохраняя test DB и immutable releases.
+
+Если i167 остаётся общим 4-vCPU сервером и staging регулярно влияет на
+production, staging нужно вынести на маленькую отдельную Yandex VM. Это
+операционная изоляция, а не обязательное условие первого cutover.
+
+Прежний Railway staging после проверенного off-Railway backup удаляется
+полностью: новым staging является `/srv/aiwa-staging` на i167. Он не должен
+оставаться платным «на всякий случай».
+
 ## 7. Данные без PostgreSQL/Redis
 
 На первом этапе остаётся SQLite WAL и один writer.
@@ -542,6 +650,10 @@ SQLite не откатывается вместе с кодом, если нет
 - [ ] Exact SHA отображается в health.
 - [ ] Full test suite green.
 - [ ] Staging smoke green.
+- [ ] Staging использует отдельные test bot/token, domain, SQLite и cron targets.
+- [ ] PR artifact/tree после staging совпадает с production candidate.
+- [ ] Candidate/no-poll режим проверяет production layout без второго poller.
+- [ ] Telegram Mini App smoke выполнен на iOS и Android.
 - [ ] Backup/restore drill green.
 - [ ] Capacity headroom i167 и соседних сервисов подтверждён.
 - [ ] Runbook выполнен другим разработчиком без Codex.
