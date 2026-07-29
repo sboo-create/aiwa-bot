@@ -37,20 +37,41 @@ if [[ -z "$test_root" && "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-lock_dir="$staging_root/.public-assets-activation.lock"
+lock_file="$staging_root/.public-assets-activation.lock"
+lock_claim="$staging_root/.public-assets-activation.lock.$$.$sha"
 candidate=""
-if ! mkdir -- "$lock_dir"; then
-  echo "public asset activation already in progress: $lock_dir" >&2
+printf '%s\n' "$$" >"$lock_claim"
+chmod 0600 "$lock_claim"
+lock_acquired=0
+for _attempt in 1 2 3; do
+  if ln -- "$lock_claim" "$lock_file" 2>/dev/null; then
+    lock_acquired=1
+    break
+  fi
+  owner_pid="$(cat -- "$lock_file" 2>/dev/null || true)"
+  if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    rm -f -- "$lock_claim"
+    echo "public asset activation already in progress: $lock_file (pid $owner_pid)" >&2
+    exit 1
+  fi
+  stale_lock="$lock_file.stale.$sha.$$"
+  if mv -- "$lock_file" "$stale_lock" 2>/dev/null; then
+    rm -f -- "$stale_lock"
+    echo "reclaimed stale public asset activation lock (pid ${owner_pid:-unknown})" >&2
+  fi
+done
+rm -f -- "$lock_claim"
+if [[ "$lock_acquired" != 1 ]]; then
+  echo "could not acquire public asset activation lock: $lock_file" >&2
   exit 1
 fi
-chmod 0700 "$lock_dir"
-printf '%s\n' "$$" >"$lock_dir/pid"
 cleanup() {
   if [[ -n "${candidate:-}" && -d "$candidate" ]]; then
     rm -rf -- "$candidate"
   fi
-  rm -f -- "$lock_dir/pid"
-  rmdir -- "$lock_dir" 2>/dev/null || true
+  if [[ "$(cat -- "$lock_file" 2>/dev/null || true)" == "$$" ]]; then
+    rm -f -- "$lock_file"
+  fi
 }
 trap cleanup EXIT
 

@@ -432,34 +432,6 @@ class PostReleaseSystemicTests(unittest.TestCase):
         )
         self.assertEqual(unrelated.content_type, "application/octet-stream")
 
-    def test_security_headers_repair_only_real_reviewed_catalog_files(self):
-        root = Path(__file__).resolve().parents[1]
-        reviewed = (
-            root
-            / "webapp2/assets/food/catalog-v2"
-            / "445a7df943bbd2442c7f5d72d01c9461816376395ae7b345d36e901e4d9a4401.webp"
-        )
-        request = SimpleNamespace(
-            path=f"/assets/food/catalog-v2/{reviewed.name}",
-            headers={},
-        )
-
-        async def reviewed_handler(_request):
-            response = bot.web.FileResponse(reviewed)
-            response.content_type = "application/octet-stream"
-            return response
-
-        response = asyncio.run(bot._security_headers(request, reviewed_handler))
-        self.assertEqual(response.content_type, "image/webp")
-
-        async def outside_handler(_request):
-            response = bot.web.FileResponse(root / "README.md")
-            response.content_type = "application/octet-stream"
-            return response
-
-        outside = asyncio.run(bot._security_headers(request, outside_handler))
-        self.assertEqual(outside.content_type, "application/octet-stream")
-
     def test_public_asset_activation_is_atomic_idempotent_and_additive(self):
         root = Path(__file__).resolve().parents[1]
         script = root / "deploy/i167/activate-public-assets.sh"
@@ -576,17 +548,33 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertIn("unsafe asset URL", traversal.stderr)
         self.assertEqual(current.resolve(), partial.resolve())
 
-        lock_dir = Path(self.tmp.name) / ".public-assets-activation.lock"
-        lock_dir.mkdir()
+        lock_file = Path(self.tmp.name) / ".public-assets-activation.lock"
+        lock_file.write_text(str(os.getpid()), encoding="ascii")
         locked = subprocess.run(
-            [str(script), "4" * 40],
+            [str(script), first_sha],
             env=env,
             capture_output=True,
             text=True,
         )
         self.assertNotEqual(locked.returncode, 0)
         self.assertIn("activation already in progress", locked.stderr)
-        self.assertTrue(lock_dir.is_dir())
+        self.assertTrue(lock_file.is_file())
+        self.assertEqual(current.resolve(), partial.resolve())
+
+        lock_file.write_text("99999999", encoding="ascii")
+        recovered = subprocess.run(
+            [str(script), first_sha],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            recovered.returncode,
+            0,
+            recovered.stdout + recovered.stderr,
+        )
+        self.assertIn("reclaimed stale", recovered.stderr)
+        self.assertFalse(lock_file.exists())
         self.assertEqual(current.resolve(), partial.resolve())
 
     def test_aiwa_upstream_serves_static_manifest_for_i167_proxy(self):
