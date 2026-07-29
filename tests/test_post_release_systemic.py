@@ -428,17 +428,9 @@ class PostReleaseSystemicTests(unittest.TestCase):
         script = root / "deploy/i167/activate-public-assets.sh"
         first_sha = "1" * 40
         second_sha = "2" * 40
-        operator = subprocess.run(
-            ["id", "-un"], check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        group = subprocess.run(
-            ["id", "-gn"], check=True, capture_output=True, text=True,
-        ).stdout.strip()
         env = {
             **os.environ,
-            "AIWA_STAGING_ROOT": self.tmp.name,
-            "AIWA_PUBLIC_OWNER": operator,
-            "AIWA_PUBLIC_GROUP": group,
+            "AIWA_PUBLIC_ASSET_TEST_ROOT": self.tmp.name,
         }
 
         def release(sha, *, include_old=True):

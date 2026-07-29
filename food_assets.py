@@ -81,7 +81,6 @@ _EXPLICIT_ALIASES = {
     "запеченная куриная грудка": "Куриная грудка запечённая",
     "вареные яйца": "Яйца варёные",
     "салат тунец": "Салат с тунцом",
-    "омлет с сыром и зеленью": "Омлет с сыром",
     "курага": "Сухофрукты",
 }
 _DRINK_RE = re.compile(
@@ -259,9 +258,9 @@ class FoodAssetResolver:
             common = query_tokens.intersection(candidate_tokens)
             if not common:
                 continue
-            # Only accept containment around the same semantic anchor. This
-            # handles “омлет с сыром и зеленью”, but cannot turn unrelated
-            # snacks into the same pretty picture as the former fuzzy matcher.
+            # Only accept containment around the same semantic anchor. A query
+            # with two equally good reviewed subsets fails closed below rather
+            # than dropping one of its explicitly named ingredients.
             contained = (
                 candidate_tokens.issubset(query_tokens)
                 or query_tokens.issubset(candidate_tokens)

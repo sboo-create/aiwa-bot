@@ -7,14 +7,32 @@ if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
-staging_root="${AIWA_STAGING_ROOT:-/srv/aiwa-staging}"
-public_owner="${AIWA_PUBLIC_OWNER:-root}"
-public_group="${AIWA_PUBLIC_GROUP:-caddy}"
-if [[ "$staging_root" != /* ]]; then
-  echo "AIWA_STAGING_ROOT must be absolute" >&2
-  exit 1
+test_root="${AIWA_PUBLIC_ASSET_TEST_ROOT:-}"
+if [[ -n "$test_root" ]]; then
+  staging_root="$(python3 - "$test_root" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+)"
+  case "$staging_root" in
+    /tmp/*|/private/tmp/*|/var/folders/*/T/*|/private/var/folders/*/T/*) ;;
+    *)
+      echo "AIWA_PUBLIC_ASSET_TEST_ROOT must resolve below a temporary directory" >&2
+      exit 1
+      ;;
+  esac
+  test -d "$staging_root"
+  test ! -L "$staging_root"
+  public_owner="$(id -un)"
+  public_group="$(id -gn)"
+else
+  staging_root="/srv/aiwa-staging"
+  public_owner="root"
+  public_group="caddy"
 fi
-if [[ "$public_owner" == "root" && "$(id -u)" -ne 0 ]]; then
+if [[ -z "$test_root" && "$(id -u)" -ne 0 ]]; then
   echo "run as root" >&2
   exit 1
 fi
