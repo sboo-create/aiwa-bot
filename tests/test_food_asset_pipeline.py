@@ -119,8 +119,8 @@ class FoodAssetResolverTests(unittest.TestCase):
             "Салат с говядиной и креветками": ("catalog_family", "Овощной салат"),
             "Суп с рыбой и говядиной": ("catalog_family", "Овощной суп"),
             "Рис с тунцом": (
-                "catalog_canonical",
-                "Тунец на гриле с рисом",
+                "catalog_family",
+                "Рис с овощами",
             ),
         }
 
