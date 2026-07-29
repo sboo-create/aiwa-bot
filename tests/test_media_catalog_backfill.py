@@ -82,7 +82,7 @@ class StaticCatalogReleaseTests(unittest.TestCase):
     def test_all_catalog_v2_assets_are_content_addressed_bounded_webp(self):
         root = Path(__file__).resolve().parents[1] / "webapp2"
         hashes: set[str] = set()
-        expected = {"food": 506, "train": 215}
+        expected = {"food": 507, "train": 215}
 
         for kind, expected_count in expected.items():
             manifest = json.loads(

@@ -5,7 +5,7 @@
 This release adds immutable, visually reviewed media without consuming the
 production runtime generation limit:
 
-- 506 food images, raising the static food catalog from 105 to 611 entries;
+- 507 food images, raising the static food catalog from 105 to 612 entries;
 - 215 sport and exercise images, raising the static training catalog from 20
   to 235 entries;
 - cache revisions for both manifests and the Telegram Mini App module graph;
@@ -22,14 +22,19 @@ The selection pool contained 522 food and 225 sport candidates that had
 already passed byte, dimension, content-hash and automated semantic checks.
 Every candidate was then visually inspected.
 
-- Food: 506 approved, 16 rejected.
+- Food: 507 approved, 16 rejected.
 - Sport: 215 approved, 10 rejected.
-- Total promoted: 721 approved images.
+- Total promoted: 722 approved images.
 
 Food rejections covered visible brands/text, misleading preparation or an
 unrelated ingredient. Sport rejections covered visible text, missing required
 equipment/environment, unsafe or anatomically wrong exercises and an
 incorrect activity. Rejected files were not copied into the application.
+The final ordinary review exposed one common exact-label gap, “Омлет с сыром
+и зеленью”. A dedicated card showing both visible melted cheese and herbs was
+generated, normalized to the same 512×512 content-addressed WebP contract,
+visually inspected, and added as the 507th food image. It replaces neither an
+existing image nor an ambiguous resolver alias.
 
 The signed-off source manifests and decision ledgers remain in the
 operator-owned 2026-07-29 backfill workspace. The checked-in manifests plus
@@ -73,7 +78,7 @@ After deployment:
 1. Confirm `/health` reports the merge version with a live event writer and
    no failed/dropped events.
 2. Fetch `/assets/food/manifest.json?v=3` and
-   `/assets/train/manifest.json?v=2`; expect 611 and 235 entries.
+   `/assets/train/manifest.json?v=2`; expect 612 and 235 entries.
 3. Fetch sample new assets and confirm HTTP 200 with `image/webp`.
 4. Open food and training screens in Telegram and confirm that the new module
    revision `r25` is loaded.

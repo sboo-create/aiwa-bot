@@ -27,8 +27,8 @@ class FoodAssetResolverTests(unittest.TestCase):
         reordered = assets.RESOLVER.resolve("творожная запеканка")
 
         self.assertEqual(exact["image_source"], "catalog_exact")
-        self.assertEqual(extended["image_source"], "category")
-        self.assertEqual(extended["asset_state"], "missing")
+        self.assertEqual(extended["image_source"], "catalog_exact")
+        self.assertEqual(extended["asset_state"], "ready")
         self.assertNotEqual(extended["image_url"], exact["image_url"])
         self.assertEqual(reordered["image_url"], assets.RESOLVER.manifest["Запеканка творожная"])
 

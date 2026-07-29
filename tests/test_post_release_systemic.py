@@ -526,7 +526,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
-        self.assertEqual(len(manifest), 611)
+        self.assertEqual(len(manifest), 612)
         self.assertTrue(any("/catalog-v2/" in url for url in manifest.values()))
 
 
