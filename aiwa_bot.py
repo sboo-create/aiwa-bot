@@ -442,21 +442,20 @@ def _migrate_db_on_connection(c):
             ).fetchall()
         ]
         if _legacy_generated:
-            _marks = ",".join("?" for _ in _legacy_generated)
-            c.execute(
-                f"""UPDATE food_assets SET status='rejected',image_url=NULL,
-                           content_hash=NULL,retry_after=NULL,
-                           last_error_class='legacy_unvalidated',
-                           updated_at=?
-                    WHERE canonical_id IN ({_marks})
-                      AND source='generated'""",
-                (datetime.now(TZ).isoformat(), *_legacy_generated),
+            _legacy_now = datetime.now(TZ).isoformat()
+            c.executemany(
+                """UPDATE food_assets SET status='rejected',image_url=NULL,
+                          content_hash=NULL,retry_after=NULL,
+                          last_error_class='legacy_unvalidated',
+                          updated_at=?
+                   WHERE canonical_id=? AND source='generated'""",
+                ((_legacy_now, food_id) for food_id in _legacy_generated),
             )
-            c.execute(
-                f"""UPDATE food_asset_jobs SET status='rejected',
-                           last_error_class='legacy_unvalidated'
-                    WHERE canonical_id IN ({_marks})""",
-                tuple(_legacy_generated),
+            c.executemany(
+                """UPDATE food_asset_jobs SET status='rejected',
+                          last_error_class='legacy_unvalidated'
+                   WHERE canonical_id=?""",
+                ((food_id,) for food_id in _legacy_generated),
             )
     A2.init_schema(c)
     for col in ("meta TEXT", "ms INTEGER DEFAULT 0", "n INTEGER DEFAULT 0", "calls INTEGER DEFAULT 0",
