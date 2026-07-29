@@ -2,6 +2,7 @@ import asyncio
 from datetime import date
 import inspect
 import json
+import logging
 import mimetypes
 import os
 import subprocess
@@ -345,6 +346,62 @@ class PostReleaseSystemicTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotIn("return h >= 0.5 ? c + Xf : null", bundle)
         self.assertIn("if (zd(y) === l) return p + Xf", bundle)
+
+    def test_fallback_ui_has_no_missing_legacy_otf_requests(self):
+        root = Path(__file__).resolve().parents[1]
+        index = (root / "webapp2/index.html").read_text(encoding="utf-8")
+        main_css = (
+            root / "webapp2/assets/deslop/main.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn(".otf", index.casefold())
+        self.assertIn(".woff2", main_css.casefold())
+
+    def test_scheduler_startup_noise_is_not_logged_at_info(self):
+        self.assertEqual(
+            logging.getLogger("apscheduler").level,
+            logging.WARNING,
+        )
+
+    def test_release_sha_is_exact_and_never_accepts_arbitrary_metadata(self):
+        release = "a" * 40
+        railway = "b" * 40
+        self.assertEqual(
+            bot._detected_release_sha(
+                {"AIWA_RELEASE_SHA": release},
+                "/srv/aiwa/releases/not-a-sha/aiwa_bot.py",
+            ),
+            release,
+        )
+        self.assertEqual(
+            bot._detected_release_sha(
+                {"RAILWAY_GIT_COMMIT_SHA": railway},
+                "/app/aiwa_bot.py",
+            ),
+            railway,
+        )
+        self.assertEqual(
+            bot._detected_release_sha(
+                {},
+                f"/srv/aiwa/releases/{release}/aiwa_bot.py",
+            ),
+            release,
+        )
+        self.assertEqual(
+            bot._detected_release_sha(
+                {"AIWA_RELEASE_SHA": "main; rm -rf /"},
+                "/app/aiwa_bot.py",
+            ),
+            "",
+        )
+
+    def test_health_exposes_exact_release_sha_separately_from_version(self):
+        release = "c" * 40
+        with mock.patch.object(bot, "AIWA_RELEASE_SHA", release):
+            response = asyncio.run(bot._health(None))
+        payload = json.loads(response.text)
+        self.assertEqual(payload["version"], bot.AIWA_VERSION)
+        self.assertEqual(payload["release_sha"], release)
 
     def test_nested_immutable_asset_has_matching_cache_version(self):
         root = Path(__file__).resolve().parents[1]

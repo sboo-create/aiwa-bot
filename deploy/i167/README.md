@@ -41,6 +41,13 @@ keys, so replacing either listener cannot silently decrypt a bot token,
 OpenRouter key or request body. Keep the listeners bound to loopback, the hosts
 file read-only inside the service, and certificate verification enabled.
 
+The single `gigatool-tg-tunnel` relay is acceptable for isolated staging but is
+not a production high-availability design. Production migration requires two
+independent relay providers/ASNs, application-level TLS health checks and
+automatic loopback failover. Do not hardcode a Telegram IP or place the bot
+token on a relay. The complete cutover and rollback design is documented in
+`docs/operations/i167-production-migration-plan.md`.
+
 `providers.env` must contain credentials only. In particular it must not
 override `OPENROUTER_BASE_URL` or model ids from `config/app.env`.
 
