@@ -12373,9 +12373,41 @@ async def _legacy_admin_removed(request):
         headers={"Cache-Control": "no-store"},
     )
 
+def _is_reviewed_catalog_webp(response):
+    """Only identify real files from the two immutable reviewed catalogs."""
+    if not isinstance(response, web.FileResponse):
+        return False
+    try:
+        path = os.path.realpath(os.fspath(response._path))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if not path.casefold().endswith(".webp"):
+        return False
+    assets = os.path.realpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
+    )
+    for kind in ("food", "train"):
+        catalog = os.path.join(assets, kind, "catalog-v2")
+        try:
+            if os.path.commonpath((path, catalog)) == catalog:
+                return True
+        except ValueError:
+            continue
+    return False
+
 @web.middleware
 async def _security_headers(request, handler):
     response = await handler(request)
+    if (
+        response.status == 200
+        and response.content_type in {"", "application/octet-stream"}
+        and _is_reviewed_catalog_webp(response)
+    ):
+        # Some Linux MIME databases do not know WebP. This is intentionally
+        # limited to FileResponse objects rooted in our reviewed catalogs:
+        # synthetic responses, errors and generated/user-controlled files are
+        # never relabelled.
+        response.content_type = "image/webp"
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     if request.path == "/":

@@ -432,6 +432,34 @@ class PostReleaseSystemicTests(unittest.TestCase):
         )
         self.assertEqual(unrelated.content_type, "application/octet-stream")
 
+    def test_security_headers_repair_only_real_reviewed_catalog_files(self):
+        root = Path(__file__).resolve().parents[1]
+        reviewed = (
+            root
+            / "webapp2/assets/food/catalog-v2"
+            / "445a7df943bbd2442c7f5d72d01c9461816376395ae7b345d36e901e4d9a4401.webp"
+        )
+        request = SimpleNamespace(
+            path=f"/assets/food/catalog-v2/{reviewed.name}",
+            headers={},
+        )
+
+        async def reviewed_handler(_request):
+            response = bot.web.FileResponse(reviewed)
+            response.content_type = "application/octet-stream"
+            return response
+
+        response = asyncio.run(bot._security_headers(request, reviewed_handler))
+        self.assertEqual(response.content_type, "image/webp")
+
+        async def outside_handler(_request):
+            response = bot.web.FileResponse(root / "README.md")
+            response.content_type = "application/octet-stream"
+            return response
+
+        outside = asyncio.run(bot._security_headers(request, outside_handler))
+        self.assertEqual(outside.content_type, "application/octet-stream")
+
     def test_public_asset_activation_is_atomic_idempotent_and_additive(self):
         root = Path(__file__).resolve().parents[1]
         script = root / "deploy/i167/activate-public-assets.sh"
