@@ -46,11 +46,18 @@ class MediaCatalogSeedTests(unittest.TestCase):
             root = Path(directory)
             manifest = root / "webapp2/assets/food/manifest.json"
             manifest.parent.mkdir(parents=True)
-            manifest.write_text("{}", encoding="utf-8")
+            manifest.write_text(json.dumps({
+                "Уже в каталоге": "/assets/food/already.webp",
+            }, ensure_ascii=False), encoding="utf-8")
             path = root / "production.json"
             path.write_text(json.dumps({
                 "schema": "aiwa-food-backfill-labels-v1",
                 "labels": [
+                    {
+                        "label": "Уже в каталоге",
+                        "canonical_id": "food:already",
+                        "frequency": 100,
+                    },
                     {
                         "label": "Редкое production-блюдо",
                         "canonical_id": "food:production",
@@ -68,6 +75,39 @@ class MediaCatalogSeedTests(unittest.TestCase):
         )
         self.assertEqual(rows[0]["origin"], "production_aggregate")
         self.assertEqual(rows[-1]["origin"], "curated_taxonomy")
+        self.assertNotIn("Уже в каталоге", {row["label"] for row in rows})
+
+
+class StaticCatalogReleaseTests(unittest.TestCase):
+    def test_all_catalog_v2_assets_are_content_addressed_bounded_webp(self):
+        root = Path(__file__).resolve().parents[1] / "webapp2"
+        hashes: set[str] = set()
+        expected = {"food": 506, "train": 215}
+
+        for kind, expected_count in expected.items():
+            manifest = json.loads(
+                (root / "assets" / kind / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            catalog = [
+                (label, url)
+                for label, url in manifest.items()
+                if "/catalog-v2/" in url
+            ]
+            self.assertEqual(len(catalog), expected_count)
+            for label, url in catalog:
+                with self.subTest(kind=kind, label=label):
+                    path = root / url.removeprefix("/")
+                    raw = path.read_bytes()
+                    digest = hashlib.sha256(raw).hexdigest()
+                    self.assertEqual(path.stem, digest)
+                    self.assertNotIn(digest, hashes)
+                    hashes.add(digest)
+                    self.assertLessEqual(len(raw), 512 * 1024)
+                    with Image.open(path) as image:
+                        self.assertEqual(image.format, "WEBP")
+                        self.assertEqual(image.size, (512, 512))
 
 
 class SportAssetTests(unittest.TestCase):
