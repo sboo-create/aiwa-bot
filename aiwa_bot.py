@@ -12391,7 +12391,10 @@ async def _serve_reviewed_catalog_file(request):
     )
     if not os.path.isfile(path) or os.path.islink(path):
         raise web.HTTPNotFound()
-    response = web.FileResponse(path)
+    response = web.FileResponse(
+        path,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
     response.content_type = "image/webp"
     return response
 

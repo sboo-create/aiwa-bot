@@ -611,13 +611,21 @@ class PostReleaseSystemicTests(unittest.TestCase):
                     manifest,
                     image.status,
                     image.content_type,
+                    image.headers.get("Cache-Control"),
+                    image.headers.get("ETag"),
                 )
             finally:
                 await client.close()
 
-        status, content_type, manifest, image_status, image_type = asyncio.run(
-            fetch_manifest()
-        )
+        (
+            status,
+            content_type,
+            manifest,
+            image_status,
+            image_type,
+            image_cache,
+            image_etag,
+        ) = asyncio.run(fetch_manifest())
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
@@ -625,6 +633,11 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertTrue(any("/catalog-v2/" in url for url in manifest.values()))
         self.assertEqual(image_status, 200)
         self.assertEqual(image_type, "image/webp")
+        self.assertEqual(
+            image_cache,
+            "public, max-age=31536000, immutable",
+        )
+        self.assertTrue(image_etag)
 
 
 if __name__ == "__main__":

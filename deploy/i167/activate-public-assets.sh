@@ -72,6 +72,16 @@ for _attempt in 1 2 3; do
     echo "public asset activation already in progress: $lock_file (pid $owner_pid)" >&2
     exit 1
   fi
+  # Re-sample immediately before the atomic move so a process that appeared
+  # during the first /proc/ps lookup cannot have its live lock reclaimed.
+  if [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
+    current_start="$(process_start_token "$owner_pid")"
+  fi
+  if [[ -n "$owner_start" && "$current_start" == "$owner_start" ]]; then
+    rm -f -- "$lock_claim"
+    echo "public asset activation already in progress: $lock_file (pid $owner_pid)" >&2
+    exit 1
+  fi
   stale_lock="$lock_file.stale.$sha.$$"
   if mv -- "$lock_file" "$stale_lock" 2>/dev/null; then
     rm -f -- "$stale_lock"
