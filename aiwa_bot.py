@@ -112,7 +112,7 @@ L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
 AIWA_VERSION = os.environ.get(
-    "AIWA_VERSION", "2026-07-29-v177-stats-report-acquisition"
+    "AIWA_VERSION", "2026-07-29-v178-acquisition-durability"
 )
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
@@ -309,7 +309,10 @@ def _migrate_db_on_connection(c):
     c.execute("""CREATE TABLE IF NOT EXISTS users(chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
         send_time TEXT DEFAULT '08:00', daily_summary_enabled INTEGER DEFAULT 1,
         modules TEXT DEFAULT 'phase,general,food,training',
-        state TEXT, pending_date TEXT, created TEXT)""")
+        state TEXT, pending_date TEXT, created TEXT,
+        onboarding_started INTEGER DEFAULT 0)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS schema_migrations(
+        name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)""")
     c.execute("CREATE TABLE IF NOT EXISTS sugg(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, q TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS cycles(chat_id INTEGER, start_date TEXT, PRIMARY KEY(chat_id,start_date))")
     c.execute("CREATE TABLE IF NOT EXISTS intimacy(chat_id INTEGER, d TEXT, PRIMARY KEY(chat_id,d))")
@@ -495,6 +498,27 @@ def _migrate_db_on_connection(c):
                 "push_suppressed_at TEXT", "push_suppression_reason TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
+    # v177 introduced the marker without a durable migration marker. Production
+    # can therefore already have the column while legacy rows still contain 0.
+    # Backfill once under the schema transaction: rows created after this
+    # migration retain the DEFAULT 0 and are counted by record_onboarding_started.
+    _onboarding_migration = "2026-07-29-onboarding-started-backfill-v1"
+    if not c.execute(
+        "SELECT 1 FROM schema_migrations WHERE name=?",
+        (_onboarding_migration,),
+    ).fetchone():
+        _user_columns = {
+            item[1] for item in c.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "onboarding_started" not in _user_columns:
+            c.execute(
+                "ALTER TABLE users ADD COLUMN onboarding_started INTEGER DEFAULT 0"
+            )
+        c.execute("UPDATE users SET onboarding_started=1")
+        c.execute(
+            "INSERT INTO schema_migrations(name,applied_at) VALUES(?,?)",
+            (_onboarding_migration, datetime.now(timezone.utc).isoformat()),
+        )
     c.commit()
     return c
 
@@ -589,6 +613,57 @@ def upsert(cid, *, user_generation=None, **kw):
     # Dynamic identifier is safe because every key was checked against _USER_UPDATE_COLUMNS.
     for k, v in kw.items(): c.execute(f"UPDATE users SET {k}=? WHERE chat_id=?", (v, cid))  # nosec B608
     c.commit(); c.close(); return True
+
+def record_onboarding_started(cid, user_generation=None):
+    """Emit one acquisition start per active privacy lifecycle.
+
+    The marker, analytics event and Traction outbox item share one transaction.
+    `/stop` removes the row and analytics lifecycle, so a later explicit
+    `/start` correctly begins a new, separately consented lifecycle.
+    """
+    c = db()
+    try:
+        # The overwhelmingly common path is read-only and takes no write lock.
+        current = c.execute(
+            """SELECT COALESCE(onboarding_started,0)
+               FROM users WHERE chat_id=?""",
+            (cid,),
+        ).fetchone()
+        if not current or current[0]:
+            return False
+        c.execute("BEGIN IMMEDIATE")
+        if not _user_write_allowed(cid, user_generation, conn=c):
+            c.rollback()
+            return False
+        claimed = c.execute(
+            """UPDATE users SET onboarding_started=1
+               WHERE chat_id=? AND COALESCE(onboarding_started,0)=0""",
+            (cid,),
+        ).rowcount
+        if claimed != 1:
+            c.rollback()
+            return False
+        event_id = A2.insert_event_v2(
+            c,
+            cid,
+            "signup",
+            app_version=AIWA_VERSION,
+            occurred_at=datetime.now(timezone.utc).isoformat(),
+        )
+        if not event_id:
+            c.rollback()
+            return False
+        c.commit()
+        return True
+    except Exception as exc:
+        try:
+            c.rollback()
+        except sqlite3.Error:
+            pass
+        log.warning("onboarding acquisition write failed for %s: %s", cid, exc)
+        return False
+    finally:
+        c.close()
 
 def _clean_telegram_first_name(value):
     """Telegram profile label used only for addressing, never inferred from chat."""
@@ -3290,6 +3365,7 @@ EDIT_KB = InlineKeyboardMarkup([
 ])
 PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
 SKIP_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Пропустить", callback_data="prof_skip")]])
+REPORT_PERIODS = frozenset({"3", "6", "all"})
 HIST_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("3 месяца", callback_data="rep:3"), InlineKeyboardButton("6 месяцев", callback_data="rep:6")],
     [InlineKeyboardButton("Весь период", callback_data="rep:all")],
@@ -3710,21 +3786,30 @@ def merge_summary_suggestions(u=None, st=None, extra=None):
     return items[:2]
 
 # ---------- senders ----------
-async def need_onboard(t):
+async def need_onboard(t, user_generation=None):
     cid = getattr(getattr(t, "chat", None), "id", None)
     if cid and is_partner(cid) and not is_onboarded(row(cid)):
         return await t.reply_text(PARTNER_INFO)
-    if cid and not row(cid): ev(cid, "signup")
-    if cid: upsert(cid, state=None)
+    if cid and user_generation is None:
+        user_generation = _user_generation(cid)
+    if cid: upsert(cid, user_generation=user_generation, state=None)
+    if cid: record_onboarding_started(cid, user_generation)
     await t.reply_text("Чтобы Айва давала персональные рекомендации, выбери, что сейчас ближе: ведёшь цикл или нет регулярного цикла.", reply_markup=ONB_KB)
 _last_start = {}
-async def begin_onboard(cid, msg, force=False):
+async def begin_onboard(cid, msg, force=False, user_generation=None):
     now = time.time()
     # дебаунс только для повторного /start; явный тап по кнопке (force) должен отвечать всегда
     if not force and now - _last_start.get(cid, 0) < 4: return
     _last_start[cid] = now
-    if not row(cid): ev(cid, "signup")
-    upsert(cid, state=None, pending_date=None)
+    if user_generation is None:
+        user_generation = _user_generation(cid)
+    upsert(
+        cid,
+        user_generation=user_generation,
+        state=None,
+        pending_date=None,
+    )
+    record_onboarding_started(cid, user_generation)
     await msg.reply_text(START_TEXT, reply_markup=ONB_KB)
 
 _CARD_CACHE = {}
@@ -6334,14 +6419,9 @@ async def start(update, context):
     cid = update.effective_chat.id
     # /start is the only operation that begins a fresh lifecycle after /stop.
     # Incrementing the generation keeps older in-flight tasks permanently stale.
-    _activate_user(cid)
-    is_new_user = row(cid) is None
+    user_generation = _activate_user(cid)
     _sync_telegram_identity(update, allow_create=True)
-    # Identity sync creates the user row before begin_onboard() runs. Record the
-    # acquisition event from the pre-sync state, otherwise every genuinely new
-    # /start disappears from the activation funnel.
-    if is_new_user:
-        ev(cid, "signup")
+    record_onboarding_started(cid, user_generation)
     if context.args and context.args[0].startswith("p_"):
         return await partner_join(context, cid, update.message, context.args[0][2:])
     if context.args and context.args[0] and not context.args[0].startswith("p_"):
@@ -6360,7 +6440,11 @@ async def start(update, context):
         return await update.message.reply_text(
             "У тебя уже всё настроено, данные на месте. Продолжить или начать настройку заново?",
             reply_markup=InlineKeyboardMarkup([[B("Продолжить", "keep", KBS.PRIMARY)], [B("Начать заново", "go_start", KBS.DANGER)]]))
-    await begin_onboard(cid, update.message)
+    await begin_onboard(
+        cid,
+        update.message,
+        user_generation=user_generation,
+    )
 async def today(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
@@ -11337,7 +11421,7 @@ async def _api_report(request):
     if not (BOT_APP and RPT):
         return _cors(web.json_response({"error": "unavail", "text": "Выписка временно недоступна."}, status=503))
     period = str(body.get("period") or "all")
-    if period not in {"3", "6", "all"}:
+    if period not in REPORT_PERIODS:
         return _cors(web.json_response({"error": "period", "text": "Выбери период выписки."}, status=400))
     ev(cid, "manual", meta="web_report_requested")
     try:
