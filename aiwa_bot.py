@@ -5669,6 +5669,13 @@ async def push_checkin(context, cid, campaign=None):
 
 # ================= Проактивный движок =================
 PROACTIVE_MIN = int(os.environ.get("AIWA_PROACTIVE_MIN", "40"))
+def _candidate_mode():
+    # candidate/no-poll: кандидат production-раскладки поднимает HTTP, Mini App
+    # и health, но не вызывает getUpdates, не запускает cron/broadcast/AI
+    # workers и не пишет в Telegram (menu button, команды). Позволяет проверить
+    # systemd/Caddy/release layout, пока действующий production ещё поллит.
+    return os.environ.get("AIWA_CANDIDATE", "0") in ("1", "true", "True", "yes", "on")
+
 def _proactive_enabled():
     return os.environ.get("AIWA_PROACTIVE", "0") in ("1", "true", "True", "yes", "on")
 def _proactive_preference_on(cid):
@@ -5813,7 +5820,7 @@ def _proactive_signals(cid, slot="eve"):
         lowe = [l for l in logs if l.get("energy") == 1]
         if len(lowe) >= 2:
             out.append({"key": "low_energy", "score": 70, "cooldown": 3,
-                        "topic": "несколько дней подряд низкая энергия — поддержи и мягко предложи разгрузку или дыхательную практику",
+                        "topic": "несколько дней подряд низкая энергия — поддержи и мягко предложи разгрузку: снизить нагрузку, прогуляться или лечь спать пораньше",
                         "data": "низкая энергия в %s из последних дней" % len(lowe)})
         rw = workouts_recent(cid, days=12, limit=3) or []
         if rw:
@@ -12464,6 +12471,7 @@ async def _health(request):
             # The repository is public; this non-secret marker lets deploy
             # automation prove which immutable revision actually took traffic.
             "release_sha": AIWA_RELEASE_SHA or None,
+            "candidate": _candidate_mode(),
             "journal_router": "v2" if journal_v2_enabled() else "v1",
             "event_queue": _EVENT_WRITE_Q.qsize(),
             "event_writer_alive": bool(
@@ -12628,7 +12636,11 @@ async def run_all():
     site = web.TCPSite(
         runner, bind_host, port, backlog=http_backlog
     ); await site.start()  # nosec B104
-    await app.initialize(); await on_startup(app); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    await app.initialize()
+    if _candidate_mode():
+        log.warning("AIWA_CANDIDATE=1: no polling, no jobs, no Telegram writes")
+    else:
+        await on_startup(app); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     global APP_READY; APP_READY = True
     log.info("AIWA bot + web on :%s", port)
     try:

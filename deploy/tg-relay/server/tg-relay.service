@@ -1,0 +1,32 @@
+[Unit]
+Description=AIWA fixed-destination mTLS egress relay (telegram + openrouter)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=tg-relay
+Group=tg-relay
+ExecStart=/usr/bin/stunnel /etc/tg-relay/stunnel.conf
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+MemoryMax=64M
+CPUQuota=30%
+TasksMax=64
+LimitNOFILE=4096
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

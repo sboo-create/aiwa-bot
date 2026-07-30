@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Выпускает server- или client-сертификат relay-контура.
+#   issue-cert <ca-dir> server <dns-name>   # например relay-a.aiwa.egress
+#   issue-cert <ca-dir> client <name>       # например i167-staging
+# Срок 397 дней; ротация — просто повторный выпуск и перезапуск unit.
+set -euo pipefail
+CA=${1:?usage: issue-cert <ca-dir> server|client <name>}
+KIND=${2:?usage: issue-cert <ca-dir> server|client <name>}
+NAME=${3:?usage: issue-cert <ca-dir> server|client <name>}
+OUT="$CA/issued/$NAME"
+mkdir -p "$OUT"
+chmod 700 "$OUT"
+openssl ecparam -name prime256v1 -genkey -noout -out "$OUT/key.pem"
+chmod 600 "$OUT/key.pem"
+openssl req -new -key "$OUT/key.pem" -subj "/CN=$NAME" -out "$OUT/csr.pem"
+case "$KIND" in
+  server) EXT="extendedKeyUsage=serverAuth
+subjectAltName=DNS:$NAME" ;;
+  client) EXT="extendedKeyUsage=clientAuth" ;;
+  *) echo "kind must be server|client" >&2; exit 1 ;;
+esac
+openssl x509 -req -in "$OUT/csr.pem" -CA "$CA/ca.pem" -CAkey "$CA/ca-key.pem" \
+  -CAcreateserial -days 397 -sha256 \
+  -extfile <(printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature\n%s\n' "$EXT") \
+  -out "$OUT/cert.pem"
+rm -f "$OUT/csr.pem"
+openssl verify -CAfile "$CA/ca.pem" "$OUT/cert.pem"
+echo "issued: $OUT/cert.pem (+ key.pem)"
