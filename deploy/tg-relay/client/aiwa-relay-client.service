@@ -1,0 +1,32 @@
+[Unit]
+Description=AIWA mTLS relay client (loopback -> fixed-destination relay)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=aiwa-relay
+Group=aiwa-relay
+ExecStart=/usr/bin/stunnel /etc/aiwa-relay/stunnel.conf
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+MemoryMax=64M
+CPUQuota=20%
+TasksMax=64
+LimitNOFILE=4096
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
