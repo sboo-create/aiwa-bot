@@ -1,0 +1,84 @@
+name: Deploy to i167
+
+# Ручной запуск: репозиторий публичный, поэтому workflow_dispatch доступен
+# только пользователям с write-доступом, а секреты недоступны форкам.
+# Артефакты не создаются: релиз собирается git archive и уходит по SSH
+# прямо на сервер, поэтому storage GitHub не расходуется.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA или ветка для выкатки"
+        required: true
+        default: main
+      confirm:
+        description: 'Введите "deploy" для подтверждения'
+        required: true
+        default: ""
+
+concurrency:
+  group: deploy-i167
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # TODO(admin): создать GitHub environment `production` с required reviewers
+    # и добавить сюда `environment: production` — нужны admin-права на репозиторий.
+    steps:
+      - name: Check confirmation
+        if: inputs.confirm != 'deploy'
+        run: echo "confirm must be exactly 'deploy'" && exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Resolve exact SHA
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify SHA is on main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "${{ steps.sha.outputs.sha }}" origin/main \
+            || { echo "refusing: commit is not on origin/main"; exit 1; }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Tests must pass for the exact deployed tree
+        run: |
+          python -m py_compile aiwa_bot.py llm.py analytics_v2.py cycle.py image.py report.py
+          python -m unittest discover -s tests
+
+      - name: Add SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.I167_DEPLOY_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.I167_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Ship release and activate
+        run: |
+          SHA="${{ steps.sha.outputs.sha }}"
+          git archive --format=tar.gz "$SHA" \
+            | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                aiwa-deployer@${{ secrets.I167_HOST }} "deploy $SHA"
+
+      - name: Verify from outside
+        run: |
+          SHA="${{ steps.sha.outputs.sha }}"
+          BODY=$(curl -fsS --max-time 15 https://worker-production-505e.up.railway.app/health)
+          echo "$BODY" | head -c 300
+          echo "$BODY" | grep -q "\"release_sha\": \"$SHA\"" \
+            || { echo "public endpoint does not serve $SHA"; exit 1; }
+
+      - name: Clean key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
