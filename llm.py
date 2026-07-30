@@ -1251,8 +1251,8 @@ def _ctx_note(st, profile):
         if profile.get("age"): bits.append(f"возраст {profile['age']}")
         a = _ACT.get(profile.get("activity"))
         if a: bits.append(f"активность {a}")
-        d = profile.get("diet") or profile.get("diet_note")
-        if d: bits.append("есть пищевые ограничения")
+        d = diet_restrictions(profile)
+        if d: bits.append("СТРОГИЕ пищевые ограничения: " + d + " — не предлагай запрещённые продукты ни в каких советах по еде")
         if bits:
             note += " Данные пользовательницы: " + ", ".join(bits) + ". Используй их для персональных расчётов (например калорий по формуле Миффлина-Сан Жеора для женщин)."
     return (note.rstrip() + "\n" + _identity_note(profile)).strip()
@@ -1983,9 +1983,8 @@ def _gen_ctx(profile, mode):
     band = _age_band(profile.get("age") if profile else None)
     age = (profile.get("age") if profile else None) or "не указан"
     diet = ""
-    parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
-    if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
-    if parts: diet = f" Пищевые ограничения: {', '.join(parts)}."
+    _d = diet_restrictions(profile)
+    if _d: diet = f" Пищевые ограничения: {_d}."
     if mode == "male":
         return (
             "Профиль мужчины. Обращайся к пользователю только в мужском роде. "
@@ -2274,9 +2273,8 @@ def menu_today(st, profile=None, target=None, usage=None):
     if target:
         extra += (f" Ориентир по дню: примерно {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, "
                   f"углеводы {target[3]} г, распредели по приёмам.")
-    parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
-    if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
-    if parts: extra += f" Строго учитывай пищевые ограничения: {', '.join(parts)}. Не предлагай запрещённые продукты."
+    _d = diet_restrictions(profile)
+    if _d: extra += f" Строго учитывай пищевые ограничения: {_d}. Не предлагай запрещённые продукты."
     prompt = (f"Составь меню на день под {st['subphase']} {st['phase_ru'].lower()} фазу (день {st['day']} цикла). "
               "Четыре приёма: завтрак ~08:00, обед ~13:00, перекус ~16:00, ужин ~20:00. "
               "Завтрак обязательно белковый (яйца, омлет, сыр, греческий йогурт, рыба), а не сладкая каша как основа. "
@@ -2322,9 +2320,8 @@ def replace_meal(
     k = slots[idx]
     if True:   # замену блюда тоже всегда делает модель; пул — фолбэк ниже
         extra = ""
-        parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
-        if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
-        if parts: extra += f" Ограничения: {', '.join(parts)}."
+        _d = diet_restrictions(profile)
+        if _d: extra += f" Ограничения: {_d}. Не предлагай запрещённые продукты."
         if target:
             extra += f" Ориентир дня: {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, углеводы {target[3]} г."
         physiology = (
@@ -2460,9 +2457,8 @@ def general_menu(profile, mode, target=None, usage=None):
     if target:
         extra += (f" Ориентир по дню: примерно {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, "
                   f"углеводы {target[3]} г, распредели по приёмам.")
-    parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
-    if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
-    if parts: extra += f" Строго учитывай пищевые ограничения: {', '.join(parts)}. Не предлагай запрещённые продукты."
+    _d = diet_restrictions(profile)
+    if _d: extra += f" Строго учитывай пищевые ограничения: {_d}. Не предлагай запрещённые продукты."
     prompt = (f"Составь меню на день. Контекст питания: {ctx}. "
               "Четыре приёма: завтрак ~08:00, обед ~13:00, перекус ~16:00, ужин ~20:00. "
               "Завтрак обязательно белковый (яйца, омлет, сыр, греческий йогурт, рыба). "
