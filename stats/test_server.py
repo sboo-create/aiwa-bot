@@ -85,5 +85,50 @@ class CalendarOverviewTests(unittest.TestCase):
         self.assertEqual(result["overview"]["tools_per_dau"], 1)
 
 
+class DashboardCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        with server.DB_LOCK:
+            server._db.execute("DELETE FROM events")
+            server._db.commit()
+        with server.CACHE_LOCK:
+            server._DASHBOARD_CACHE.clear()
+
+    def add(self, event_id: str, device: str, name: str) -> None:
+        with server.DB_LOCK:
+            server._db.execute(
+                "INSERT INTO events("
+                "event_id,ts,device_id,name,properties,ingested_at,"
+                "provenance,confidence,payload_version"
+                ") VALUES (?,?,?,?,?,?,?,?,?)",
+                (event_id, server.time.time(), device, name, "{}",
+                 server.time.time(), "observed", "high", 2),
+            )
+            server._db.commit()
+
+    def test_write_during_compute_does_not_park_stale_dashboard(self) -> None:
+        real = server.compute_dashboard
+        raced = []
+
+        def racing_compute(days: float, source: str) -> dict:
+            value = real(days, source)
+            if not raced:
+                raced.append(True)
+                self.add("mid-compute", "dev-a", "app_opened")
+            return value
+
+        with patch("server.compute_dashboard", new=racing_compute):
+            stale, status, _ = server._cached_dashboard(1, "mixed")
+        self.assertEqual(status, "miss")
+        self.assertEqual(stale["events"], 0)
+
+        fresh, status, _ = server._cached_dashboard(1, "mixed")
+        self.assertEqual(status, "miss")
+        self.assertEqual(fresh["events"], 1)
+
+        cached, status, _ = server._cached_dashboard(1, "mixed")
+        self.assertEqual(status, "hit")
+        self.assertEqual(cached["events"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

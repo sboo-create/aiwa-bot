@@ -228,7 +228,7 @@ _db.commit()
 DB_LOCK = threading.RLock()
 CACHE_LOCK = threading.RLock()
 _EVENT_ROWS_CACHE: dict[str, Any] = {"changes": -1, "rows": None}
-_DASHBOARD_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+_DASHBOARD_CACHE: dict[tuple[int, str], tuple[float, int, dict[str, Any]]] = {}
 _DASHBOARD_KEY_LOCKS: dict[tuple[int, str], threading.Lock] = {}
 DASHBOARD_CACHE_SECONDS = max(1.0, float(os.environ.get("STATS_DASHBOARD_CACHE_SECONDS", "15")))
 
@@ -237,16 +237,6 @@ def _no_store(value: object, status: int = 200, headers: dict[str, str] | None =
     response_headers = {"Cache-Control": "no-store"}
     response_headers.update(headers or {})
     return JSONResponse(value, status_code=status, headers=response_headers)
-
-
-def _invalidate_dashboard_cache() -> None:
-    """Make accepted telemetry visible on the next read.
-
-    Per-window single-flight still bounds recalculation when several dashboards
-    observe the same ingest batch simultaneously.
-    """
-    with CACHE_LOCK:
-        _DASHBOARD_CACHE.clear()
 
 
 def _canonical(name: str) -> str:
@@ -1295,7 +1285,6 @@ async def ingest(request: Request) -> JSONResponse:
                      payload_version=excluded.payload_version
                    WHERE excluded.payload_version >= events.payload_version""", rows)
             _db.commit()
-            _invalidate_dashboard_cache()
 
     await run_in_threadpool(_write)
     return _no_store({"ok": True, "ingested": len(rows), "deleted": len(deletions)})
@@ -1321,7 +1310,6 @@ async def delete_migration_batch(batch_id: str, request: Request) -> JSONRespons
                     ids.append(event_id)
             _db.executemany("DELETE FROM events WHERE event_id=?", [(x,) for x in ids])
             _db.commit()
-            _invalidate_dashboard_cache()
             return len(ids)
 
     removed = await run_in_threadpool(_delete)
@@ -1329,15 +1317,25 @@ async def delete_migration_batch(batch_id: str, request: Request) -> JSONRespons
 
 
 def _cached_dashboard(days: float, source: str) -> tuple[dict[str, Any], str, float]:
-    """Keep the live dashboard responsive while bounding staleness to a few seconds."""
+    """Keep the live dashboard responsive while bounding staleness to a few seconds.
+
+    An entry is served only for the exact database state it was computed from:
+    it stores the connection's total_changes token (the same signal
+    _EVENT_ROWS_CACHE uses), captured before compute_dashboard reads its
+    snapshot. A write racing a computation therefore cannot park a pre-write
+    dashboard in the cache — the next read sees a newer token and recomputes.
+    Accepted telemetry stays visible on the next read without the write path
+    having to invalidate anything.
+    """
     key = (max(1, min(int(math.ceil(float(days))), 365)),
            "observed" if str(source).lower() == "observed" else "mixed")
     started = time.monotonic()
-    now_mono = started
+    with DB_LOCK:
+        changes = _db.total_changes
     with CACHE_LOCK:
         cached = _DASHBOARD_CACHE.get(key)
-        if cached and cached[0] > now_mono:
-            return cached[1], "hit", (time.monotonic() - started) * 1000
+        if cached and cached[0] > started and cached[1] == changes:
+            return cached[2], "hit", (time.monotonic() - started) * 1000
         key_lock = _DASHBOARD_KEY_LOCKS.setdefault(key, threading.Lock())
     # A hub poll and several open dashboards often request the same window at
     # once. Let one request compute it while the others wait for and reuse the
@@ -1345,11 +1343,11 @@ def _cached_dashboard(days: float, source: str) -> tuple[dict[str, Any], str, fl
     with key_lock:
         with CACHE_LOCK:
             cached = _DASHBOARD_CACHE.get(key)
-            if cached and cached[0] > time.monotonic():
-                return cached[1], "hit", (time.monotonic() - started) * 1000
+            if cached and cached[0] > time.monotonic() and cached[1] == changes:
+                return cached[2], "hit", (time.monotonic() - started) * 1000
         value = compute_dashboard(key[0], key[1])
         with CACHE_LOCK:
-            _DASHBOARD_CACHE[key] = (time.monotonic() + DASHBOARD_CACHE_SECONDS, value)
+            _DASHBOARD_CACHE[key] = (time.monotonic() + DASHBOARD_CACHE_SECONDS, changes, value)
         return value, "miss", (time.monotonic() - started) * 1000
 
 
