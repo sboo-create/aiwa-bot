@@ -10,10 +10,12 @@
 Production-приложение, Mini App, SQLite, фоновые задачи и генераторы переносим
 на i167 как один активный экземпляр. Telegram-трафик не выпускаем напрямую с
 российского IP и не привязываем к IP Telegram: на i167 работают два независимых
-TLS-прозрачных туннеля через два зарубежных relay у разных провайдеров/ASN, а
-локальный TCP-balancer выбирает здоровый путь. Бот продолжает обращаться к
-`api.telegram.org`, проверяет официальный TLS-сертификат и хранит токен только
-на i167. На переходный период Railway сохраняется выключенной точкой отката.
+клиента fixed-destination mTLS relay-сервиса, развёрнутого на двух зарубежных
+VPS у разных провайдеров/ASN, а локальный TCP-balancer выбирает здоровый путь.
+Это не SSH-туннель и не VPN: i167 не получает shell, SSH-ключ или сетевой доступ
+к relay-хостам. Бот продолжает обращаться к `api.telegram.org`, проверяет
+официальный TLS-сертификат и хранит токен только на i167. На переходный период
+Railway сохраняется выключенной точкой отката.
 
 Это наиболее короткий путь к полной миграции без разделения текущего монолита.
 Долгосрочно bot-edge можно отделить от AIWA core через долговечную очередь, но
@@ -40,6 +42,20 @@ TLS-прозрачных туннеля через два зарубежных r
 - production использует Telegram long polling;
 - одновременно запускать Railway и i167 с одним `BOT_TOKEN` нельзя.
 
+### Публичный домен Mini App
+
+Read-only аудит Railway от 2026-07-30:
+
+- production имеет только принадлежащий провайдеру service domain
+  `worker-production-505e.up.railway.app`;
+- Railway custom domain отсутствует;
+- `AIWA_WEBAPP_URL` указывает на тот же Railway service domain;
+- `AIWA_ALLOWED_ORIGINS` явно не задан; приложение сейчас добавляет origin из
+  `AIWA_WEBAPP_URL`.
+
+Этот домен нельзя перенести на i167. Собственный стабильный домен проекта
+является **блокирующим prerequisite**, а не косметическим follow-up.
+
 ### Telegram-связность i167
 
 Read-only smoke от 2026-07-30:
@@ -50,7 +66,7 @@ Read-only smoke от 2026-07-30:
 | i167 → `api.telegram.org:443`, IPv6 | соединение не устанавливается |
 | i167 → `127.0.0.1:8443` → relay → Telegram | TLS и HTTP проходят |
 
-Текущий relay:
+Текущий временный transport:
 
 - i167 unit: `gigatool-tg-tunnel.service`;
 - relay: `hetz2`, Германия, `167.233.64.107`;
@@ -64,8 +80,46 @@ Read-only smoke от 2026-07-30:
 - приложение подключается к публичному имени `api.telegram.org` и проверяет
   публичную цепочку TLS.
 
-Текущая схема не раскрывает bot token relay-серверу, но relay один и поэтому
-является единой точкой отказа.
+Текущая схема не раскрывает bot token relay-серверу, а restricted key не даёт
+интерактивный shell. Но она всё равно создаёт SSH trust и эксплуатационную
+зависимость i167 от личного `hetz2`; relay один и поэтому является единой точкой
+отказа. Это допустимый уже существующий smoke/аварийный мост, но **не целевая
+production-архитектура**. Новая схема должна работать без `hetz2`.
+
+### Статус реализации на дату аудита
+
+Уже готово:
+
+- load-safety и reviewed media release находятся в `main`; Railway production
+  обслуживает merge SHA `5a9ece0476f260763b19c8f2c252baa0ef1293c2` одной
+  репликой со статусом deployment `SUCCESS`;
+- i167 staging имеет отдельные test bot/SQLite, immutable release directories,
+  atomic public assets и service-specific routing;
+- Railway staging compute остановлен; его Volume пока сохранён для
+  контролируемого backup/удаления;
+- production media catalog, bounded food background generation, системный
+  male-mode audit и post-release fixes выпущены до этого migration-плана.
+
+Ещё не реализовано и блокирует migration cutover:
+
+- PR `#67` остаётся draft; его operational changes ещё не находятся в `main`;
+- `deploy/portable/` и `deploy/tg-relay/` пока описаны только в этом документе;
+- два project-owned mTLS relay, certificates, local HAProxy failover и game day
+  отсутствуют; текущий staging использует один SSH transport через `hetz2`;
+- собственного production custom domain пока нет: Mini App использует
+  Railway service domain;
+- production layout/unit/Caddy/secrets на i167 и candidate/no-poll режим не
+  подготовлены;
+- GitHub deploy workflow с staging exact-head gate, production approval,
+  immutable artifact и атомарным rollback на i167 не создан;
+- off-host state bundle, automated restore и rehearsal на disposable host не
+  выполнены;
+- capacity isolation i167, финальный backup, cutover/rollback rehearsal и
+  human Telegram iOS/Android smoke exact candidate не пройдены.
+
+Следовательно, **переезд сейчас начинать нельзя**. Текущий документ задаёт
+последовательность реализации; acceptance gates в разделе 12 остаются
+авторитетным go/no-go списком.
 
 ## 2. Почему обычный NAT Yandex Cloud не решает задачу
 
@@ -90,7 +144,7 @@ Telegram должен иметь дополнительный зарубежны
 
 ## 3. Варианты Telegram-архитектуры
 
-### Вариант A — два прозрачных relay, приложение целиком на i167
+### Вариант A — два fixed-destination mTLS relay, приложение целиком на i167
 
 **Рекомендуемый первый production-вариант.**
 
@@ -98,29 +152,44 @@ Telegram должен иметь дополнительный зарубежны
 flowchart LR
     TG["Telegram Bot API"]
     LB["i167: local TCP failover<br/>127.0.0.1:8443"]
+    CA["i167: relay client A<br/>outer mTLS"]
+    CB["i167: relay client B<br/>outer mTLS"]
     APP["AIWA bot + Mini App + jobs<br/>один active process"]
     DB[("SQLite + WAL")]
-    RA["Relay A<br/>provider/ASN 1"]
-    RB["Relay B<br/>provider/ASN 2"]
+    RA["Fixed relay service A<br/>provider/ASN 1"]
+    RB["Fixed relay service B<br/>provider/ASN 2"]
 
-    APP -->|"HTTPS api.telegram.org:8443<br/>TLS verified end-to-end"| LB
-    LB -->|"tunnel A"| RA
-    LB -->|"tunnel B"| RB
-    RA -->|"resolve api.telegram.org"| TG
-    RB -->|"resolve api.telegram.org"| TG
+    APP -->|"inner HTTPS: api.telegram.org<br/>public TLS verified end-to-end"| LB
+    LB -->|"primary"| CA
+    LB -->|"backup"| CB
+    CA -->|"outer mTLS only"| RA
+    CB -->|"outer mTLS only"| RB
+    RA -->|"raw inner TLS<br/>fixed destination only"| TG
+    RB -->|"raw inner TLS<br/>fixed destination only"| TG
     APP --> DB
 ```
 
 Реализация:
 
-1. Существующий relay оставить как A.
-2. Relay B создать у другого провайдера и желательно в другой стране/ASN.
-   Конкретного поставщика выбирают по доступности аккаунта, оплате и договору;
-   критично не размещать оба relay в Hetzner или одном дата-центре.
-3. Два systemd-туннеля слушают разные loopback-порты, например `18443` и
-   `28443`.
-4. HAProxy в `mode tcp` слушает `127.0.0.1:8443`, проверяет оба backend
-   полноценным TLS handshake с SNI `api.telegram.org` и системным CA bundle.
+1. Создать маленький воспроизводимый `tg-relay` package: unprivileged
+   `stunnel`-совместимый TLS wrapper, systemd/container unit, firewall,
+   health-check, сертификаты, Ansible/OpenTofu module и runbook
+   установки/ротации. Он принимает только mTLS-клиентов AIWA и всегда
+   подключается ровно к `api.telegram.org:443`; HTTP `CONNECT`, SOCKS и выбор
+   произвольного upstream отсутствуют.
+2. Развернуть один и тот же immutable package как relay A и B на двух
+   служебных VPS в разных provider/ASN и желательно разных странах. Оба узла
+   принадлежат проекту/компании, а не личному серверу разработчика. Конкретных
+   поставщиков выбирают по доступности аккаунта, оплате и договору; нельзя
+   размещать оба relay в Hetzner или одном дата-центре.
+3. На i167 два unprivileged mTLS client unit слушают разные loopback-порты,
+   например `18443` и `28443`. У них есть только клиентские сертификаты к
+   service port relay; SSH-ключей, shell-доступа и маршрута в private network
+   relay нет.
+4. HAProxy в `mode tcp` слушает `127.0.0.1:8443`: A объявлен primary, B —
+   `backup`. Проверка каждого backend выполняет **внутренний** TLS handshake с
+   SNI `api.telegram.org` и системным CA bundle, то есть проверяет не только
+   открытый relay port, но и реальный путь до Telegram.
 5. Приложение сохраняет:
    - `AIWA_TELEGRAM_API_ORIGIN=https://api.telegram.org:8443`;
    - `AIWA_TELEGRAM_BOT_BASE_URL=https://api.telegram.org:8443/bot`;
@@ -129,20 +198,57 @@ flowchart LR
    `127.0.0.1`; системный `/etc/hosts` не меняется.
 7. При отказе A новые TCP-соединения идут через B. Long polling получает
    транспортную ошибку и переподключается; второй процесс AIWA не запускается.
+8. Внешний TLS защищает и аутентифицирует transport i167→relay. Внутренний TLS
+   остаётся end-to-end до Telegram, поэтому relay не расшифровывает bot token,
+   сообщения или health data. Он видит только сетевые метаданные и объём.
+9. DNS имени `api.telegram.org` разрешается на каждом relay при новом
+   соединении, а IP Telegram не попадает в конфигурацию.
 
 Плюсы:
 
 - минимальные изменения приложения;
 - relay не видит токен и health data внутри TLS;
+- на i167 нет SSH-доступа или network-level туннеля к relay-хосту;
+- fixed destination существенно уже generic proxy;
 - нет IP Telegram в конфигурации;
 - failover не требует релиза AIWA;
+- один package можно поднять у нового провайдера за часы, а не переписывать
+  приложение;
 - легко проверить и откатить.
 
 Минусы:
 
 - два маленьких внешних VPS всё равно нужно эксплуатировать;
 - переключение обрывает текущий long-poll, поэтому возможна короткая пауза;
-- SSH-control path и HAProxy становятся частью обязательного мониторинга.
+- TLS-over-TLS добавляет ещё один handshake и небольшой сетевой overhead;
+- нужны автоматическая выдача, ротация и отзыв mTLS-сертификатов;
+- неоднозначный обрыв после отправки `sendMessage` нельзя слепо повторять:
+  ответ мог потеряться после принятия запроса, поэтому исходящие операции
+  требуют существующего outbox/retry policy и контроля дублей;
+- локальные mTLS clients, HAProxy и оба relay становятся частью обязательного
+  мониторинга.
+
+Два relay нужны в первую очередь для доступности, а не для throughput. Для
+одного long-polling bot process режим primary/backup безопаснее round-robin:
+он не создаёт второй poller и сохраняет предсказуемый исходящий IP до отказа.
+Обычные Bot API запросы также идут по активному пути. Если позже proxy CPU или
+bandwidth окажутся реальным bottleneck, capacity масштабируется отдельно от
+failover только после измерений.
+
+#### Нужен ли старый SSH-туннель на `hetz2`
+
+Для steady state — нет. Новый A/B mTLS transport покрывает ту же функцию без
+SSH trust и без личного сервера. Возможны два режима cutover:
+
+- **строгий:** сначала проверить A/B на staging, затем production переключить
+  сразу на них; `hetz2` не входит в rollback;
+- **консервативный:** с явного согласия владельца сохранить уже ограниченный
+  SSH transport как третий выключенный fallback только на 24–72 часа, после
+  чего удалить ключ i167 из `authorized_keys` и остановить
+  `gigatool-tg-tunnel.service`.
+
+Рекомендуется строгий режим. Консервативный не делает `hetz2` частью целевой
+архитектуры и не допускает автоматического переключения на личный хост.
 
 ### Вариант B — временно оставить bot-edge на Railway
 
@@ -224,36 +330,55 @@ IP Telegram может измениться, IPv4/IPv6 могут вести с�
 
 - отдельный минимальный VPS без приложений и пользовательских данных;
 - другой провайдер/ASN относительно второго relay;
-- только SSH с ключами, без паролей;
-- отдельный `tgrelay` с `nologin`;
-- authorized key:
-  `restrict,port-forwarding,permitopen="api.telegram.org:443",command="/bin/false"`;
-- firewall разрешает SSH только с i167 и аварийного operator IP/VPN;
-- `GatewayPorts=no`;
-- без agent/X11/TTY forwarding;
+- project/company ownership; личные VPS запрещены для steady state;
+- один публичный service port с обязательным mTLS; management plane отделён и
+  доступен только операторам с их устройств/VPN/provider console, не с i167;
+- уникальный client certificate для staging и production; утечка одного не
+  открывает второй контур;
+- server/client certificate chain проверяется, hostname relay сверяется,
+  просроченный или отозванный client certificate не принимается;
+- unprivileged `tg-relay` process с фиксированным
+  `connect=api.telegram.org:443`; нет shell/exec, HTTP `CONNECT`, SOCKS,
+  динамического destination и доступа во внутреннюю сеть relay;
+- firewall разрешает service port; source-IP allowlist i167 допустим только
+  как дополнительный слой, потому что production host IP должен быть заменяем;
+- egress relay разрешает DNS/NTP/update endpoints и Telegram 443; доступ к
+  metadata endpoint и private/RFC1918 ranges закрыт;
+- DNS Telegram разрешается при новом соединении;
 - автоматические security updates или фиксированное еженедельное окно;
-- disk/log limits;
+- connection/rate/maxconn limits, disk/log limits и защита от restart loop;
 - node exporter или минимальный signed heartbeat;
 - DNS-resolve и TLS-smoke к `api.telegram.org` каждые 30–60 секунд;
 - отсутствие bot token, SQLite, пользовательских сообщений и provider keys.
 
-Для туннеля:
+Для i167 relay clients:
 
-- `ExitOnForwardFailure=yes`;
-- `ServerAliveInterval=30`;
-- `ServerAliveCountMax=3`;
-- `StrictHostKeyChecking=yes`;
-- отдельный pinned `known_hosts`;
+- outer TLS 1.2+ и обязательная проверка server chain/hostname;
+- отдельный client certificate на relay/environment или ограниченная
+  project CA с коротким сроком жизни;
+- ключи читаются только service account и не лежат в repo/artifact;
 - `Restart=always`, ограничение restart burst;
-- отдельный ключ на каждый relay;
 - `MemoryMax`, `TasksMax`, `NoNewPrivileges`.
 
-WireGuard — допустимая альтернатива SSH. Он удобен, если через relay пойдёт
-несколько разрешённых upstream, но требует policy routing и firewall. Для
-единственного `api.telegram.org:443` SSH `permitopen` даёт более узкий и
-проверяемый capability. WireGuard `PersistentKeepalive` поддерживается
-официально, но сам по себе не даёт application-level health check:
-[WireGuard Quick Start](https://www.wireguard.com/quickstart/).
+[`stunnel`](https://www.stunnel.org/auth.html) документирует взаимную
+проверку server/client certificates; нельзя отключать verification.
+`delay = yes` позволяет
+[разрешать DNS при каждом новом соединении](https://www.stunnel.org/faq.html).
+HAProxy поддерживает TCP health checks, включая
+[external checks](https://www.haproxy.com/documentation/haproxy-configuration-manual/new/3-1r1/);
+для AIWA проверка должна доходить до TLS Telegram, а не ограничиваться портом
+relay.
+
+Альтернативы:
+
+- raw TLS passthrough с allowlist IP i167 проще, но слабее аутентифицирует
+  клиента и привязывает перенос к IP — не рекомендуется;
+- WireGuard убирает SSH, но даёт более широкий network tunnel и требует
+  policy routing/firewall — избыточно для одного fixed upstream;
+- HTTPS reverse proxy проще наблюдать, но завершает внутренний TLS и видит bot
+  token/содержимое — не использовать;
+- внешний webhook-edge с очередью архитектурно сильнее, но меняет delivery
+  semantics и остаётся отдельным последующим проектом.
 
 ## 5. Мониторинг Telegram-пути
 
@@ -268,7 +393,7 @@ WireGuard — допустимая альтернатива SSH. Он удобе
 - `telegram_updates_last_id` и lag;
 - `getUpdates Conflict` — всегда авария;
 - очередь исходящих сообщений и возраст старейшего элемента;
-- NRestarts AIWA, tunnel A/B и HAProxy.
+- NRestarts AIWA, mTLS client A/B и HAProxy.
 
 ### Readiness
 
@@ -304,7 +429,7 @@ deduplication и небольшим timeout достаточно. Отдельн
   config/hosts
   secrets/bot-token
   secrets/providers.env
-  tunnel/
+  relay-client/
 ```
 
 Production не переиспользует `/srv/aiwa-staging`, тестовый token или staging
@@ -332,6 +457,52 @@ SQLite.
 Для ожидаемых всплесков и эксплуатационной независимости предпочтительна
 отдельная VM. Сохранить имя `i167` можно как operator alias, но production IP
 и hostname должны быть описаны в inventory, а не в памяти команды.
+
+### Переезд публичного домена: Railway → стабильный домен → i167
+
+Рекомендуемый production hostname — принадлежащее проекту имя вида
+`app.<project-domain>`; staging использует отдельное
+`staging.app.<project-domain>`. Аккаунт регистратора/DNS и recovery-доступ
+принадлежат проекту/компании, а не одному разработчику.
+
+Безопасный порядок намеренно состоит из двух этапов:
+
+1. **До инфраструктурного cutover** добавить стабильный production custom
+   domain к ещё работающему Railway service и направить DNS на Railway.
+2. Задать `AIWA_WEBAPP_URL=https://app.<project-domain>/` и явно
+   `AIWA_ALLOWED_ORIGINS=https://app.<project-domain>`; обновить Mini App/menu
+   domain в BotFather, где применимо, и дать боту обновить
+   `setChatMenuButton`.
+3. Проверить Telegram iOS/Android, initData, CORS, три экрана, deep links,
+   возврат из выписки в чат и cache-busted assets, пока приложение ещё работает
+   на Railway. Так доменная регрессия отделена от переезда сервера.
+4. Больше hostname не менять. На cutover i167 меняется только его DNS target;
+   ссылки приложения и BotFather второй раз не меняются.
+
+За 24–48 часов до T0:
+
+- снизить TTL A/AAAA/CNAME до 300 секунд;
+- удалить stale AAAA, если на i167 нет проверенного IPv6;
+- подготовить Caddy route, HTTP→HTTPS redirect и сертификат стабильного
+  домена; предпочтительна предварительная выдача через ACME DNS-01, чтобы
+  первый production request не ждал сертификат;
+- проверить exact candidate через `curl --resolve` или эквивалентный
+  Host/TLS-test без перевода публичного трафика;
+- проверить security headers, upload/body limits и immutable asset cache;
+- сохранить Railway custom-domain attachment на всё окно rollback.
+
+В T0 стабильный hostname переключается с Railway на i167. Readiness проверяется
+через минимум два внешних resolver и из Telegram iOS/Android. Rollback сначала
+останавливает i167 poller, при необходимости возвращает актуальный state,
+запускает одну Railway replica и направляет **тот же** hostname обратно.
+
+Старые inline-кнопки, уже отправленные с URL
+`worker-production-505e.up.railway.app`, сохраняют его навсегда — DNS их не
+перепишет. До удаления Railway этот хвост нужно явно измерить и принять.
+Варианты: ограниченное время держать минимальный redirect service, отправить
+активным пользователям новые навигационные сообщения либо согласиться, что
+исторические кнопки перестанут работать, а актуальное меню останется верным.
+Railway service domain не должен оставаться долгосрочной публичной identity.
 
 ### Staging после переноса production
 
@@ -365,7 +536,7 @@ Staging и production могут жить на одном i167 в начале, 
 | Port/Caddy route | отдельные | отдельные |
 | Cron/push | test recipients или dry-run | реальные получатели |
 | AI/media workers | минимальные лимиты, backfill off | production limits |
-| Relay frontend/keys | отдельные loopback ports и keys | отдельные ports и keys |
+| Relay frontend/mTLS identity | отдельные loopback ports и client cert | отдельные ports и client cert |
 
 Ни token, ни SQLite, ни writable asset directory, ни scheduler state между
 контурами не разделяются. Staging не использует production Telegram token даже
@@ -456,8 +627,8 @@ contract. Тогда i167 становится текущим хостом, а �
 - публичный Mini App использует стабильное доменное имя, а не IP сервера;
 - приложение обращается к Telegram по логическому
   `api.telegram.org` через локальный relay frontend, а не знает IP relay;
-- SSH alias `i167` остаётся удобством оператора, но inventory содержит реальный
-  host ID, provider, region, IP и fingerprint;
+- SSH alias `i167` остаётся удобством оператора для application host, но
+  inventory содержит реальный host ID, provider, region, IP и fingerprint;
 - systemd, Caddy/HAProxy, firewall, logrotate и backup policy создаются из
   versioned templates;
 - CPU, memory, ports, release root и домены являются параметрами inventory;
@@ -497,6 +668,7 @@ deploy/portable/
   templates/aiwa.service.j2
   templates/caddy-aiwa.conf.j2
   templates/haproxy-telegram.cfg.j2
+  roles/tg-relay-client/
   scripts/build-release
   scripts/deploy-candidate
   scripts/backup-state
@@ -507,6 +679,22 @@ deploy/portable/
 ```
 
 Это состав будущей реализации, а не команды, которые уже существуют.
+
+Relay-сервис поставляется отдельным provider-neutral package:
+
+```text
+deploy/tg-relay/
+  inventory.example.yml
+  bootstrap.yml
+  templates/stunnel-server.conf.j2
+  templates/tg-relay.service.j2
+  scripts/issue-client-cert
+  scripts/revoke-client-cert
+  scripts/verify-relay
+```
+
+Один и тот же package разворачивается у разных провайдеров; различаются только
+inventory, DNS и сертификаты. Это позволяет заменить relay без изменения AIWA.
 
 `verify-host` должен машинно проверять:
 
@@ -549,8 +737,9 @@ Dynamic food/sport assets, review status и manifest входят в state bundl
 
 1. Создать target VM из IaC либо зарегистрировать существующий чистый host.
 2. Выполнить `bootstrap` и `verify-host`.
-3. Подключить target к тем же двум зарубежным relay отдельными restricted
-   keys. Сами relay одновременно с приложением не переносить.
+3. Выдать target новый короткоживущий client certificate и подключить к тем же
+   двум зарубежным relay. SSH trust не создаётся. Сами relay одновременно с
+   приложением не переносить.
 4. Развернуть exact production artifact в `candidate/no-poll` режиме.
 5. Восстановить последний state bundle во временный каталог.
 6. Прогнать health, Mini App, synthetic DB и relay failover.
@@ -599,7 +788,7 @@ relay и host config. PostgreSQL/Redis по-прежнему не входят �
 | Активное наблюдение | 4 часа, затем алерты 24–72 часа |
 
 Инженерная работа планового повторного переезда должна занимать примерно
-**1–2 дня**, а не повторять текущие 9–15 дней. Экстренное восстановление из
+**1–2 дня**, а не повторять текущие 12–21 день. Экстренное восстановление из
 готового bundle целится в RTO до 60 минут; это считается достигнутым только
 после реального restore drill на другом хосте.
 
@@ -611,6 +800,7 @@ relay и host config. PostgreSQL/Redis по-прежнему не входят �
 - [ ] Secrets восстановлены из независимого источника, не с i167.
 - [ ] Stable domain переключён без изменения кода/BotFather URL.
 - [ ] Target использует relay A/B без hardcoded Telegram IP.
+- [ ] Target не имеет SSH credential или network-level tunnel к relay-хостам.
 - [ ] Старый и новый poller никогда не работали одновременно.
 - [ ] Rollback на старый host выполнен в rehearsal.
 - [ ] Время bootstrap/restore/cutover записано и укладывается в целевой RTO.
@@ -684,9 +874,17 @@ Deploy job:
 
 ## 10. Cutover Railway → i167
 
+### T-14…T-7 дней: стабильный публичный домен
+
+- Собственный production domain проекта сначала подключён к Railway.
+- `AIWA_WEBAPP_URL`, явный `AIWA_ALLOWED_ORIGINS`, BotFather/menu и Telegram
+  iOS/Android проверены на новом имени.
+- i167 Caddy/TLS проверен без перевода production DNS.
+- Rollback DNS target и ответственный оператор зафиксированы.
+
 ### T-7…T-2 дня
 
-- Relay B создан и проверен.
+- mTLS relay A и B созданы из одного versioned package и проверены.
 - Автоматический failover испытан отключением A, затем B.
 - Production unit и Caddy подготовлены без bot token/polling.
 - Exact `main` развернут с копией **обезличенной** или временной базы.
@@ -818,9 +1016,17 @@ SQLite не откатывается вместе с кодом, если нет
 ### До cutover
 
 - [ ] Relay A и B в разных provider/ASN.
+- [ ] Оба relay — служебные VPS проекта; личный `hetz2` не входит в
+      автоматический или steady-state путь.
+- [ ] i167 аутентифицируется к service ports обоих relay по mTLS и не имеет
+      SSH-ключа/доступа к relay-хостам.
 - [ ] Автоfailover A→B и B→A проверен без ручного релиза.
 - [ ] TLS проверяется как `api.telegram.org`.
 - [ ] Bot token отсутствует на relay.
+- [ ] Стабильный production domain принадлежит проекту, сначала работает на
+      Railway и имеет проверенный DNS rollback target.
+- [ ] `AIWA_WEBAPP_URL`, явный allowed origin, BotFather/menu и Caddy используют
+      один стабильный production domain.
 - [ ] Exact SHA отображается в health.
 - [ ] Full test suite green.
 - [ ] Staging smoke green.
@@ -852,7 +1058,8 @@ SQLite не откатывается вместе с кодом, если нет
 
 | Этап | Работа |
 |---|---:|
-| Relay B + hardening + local failover | 2–3 инженерных дня |
+| Воспроизводимый mTLS relay package + два провайдера + local failover | 3–5 инженерных дней |
+| Stable domain на Railway, Caddy/TLS и DNS rehearsal | 1–2 дня |
 | Production layout/systemd/Caddy/secrets | 2–3 дня |
 | GitHub deploy workflow + scoped access | 2–4 дня |
 | Backup/restore/rollback automation | 1–2 дня |
@@ -860,7 +1067,7 @@ SQLite не откатывается вместе с кодом, если нет
 | Production cutover и 24h наблюдение | 1–2 дня |
 | Документация/передача Соне и команде | 1 день |
 
-Итого для рекомендованного варианта A: **9–15 инженерных дней**, без
+Итого для рекомендованного варианта A: **12–21 инженерный день**, без
 PostgreSQL/Redis, без разделения bot-edge и без нового нагрузочного теста, если
 приложение не меняет архитектуру. Проверка network failover обязательна, но это
 не массовый тест AI/LLM.
@@ -870,6 +1077,9 @@ PostgreSQL/Redis, без разделения bot-edge и без нового н
 - не хардкодить IP Telegram;
 - не отключать TLS verification;
 - не передавать bot token relay;
+- не включать личный `hetz2` в steady-state/автоматический failover;
+- не хранить на i167 SSH credentials для relay;
+- не поднимать generic HTTP CONNECT/SOCKS/open proxy;
 - не использовать один relay как «временное постоянное» решение;
 - не делать `git pull` в active production directory;
 - не выдавать разработчикам shared root;
