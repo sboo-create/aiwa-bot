@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Серверная часть деплоя AIWA на i167. Запускается ТОЛЬКО как forced command
+# в authorized_keys пользователя aiwa-deployer, поэтому SSH-ключ CI не даёт
+# ни shell, ни произвольных команд.
+#
+#   ssh aiwa-deployer@i167 "deploy <40-hex-sha>" < release.tar.gz
+#   ssh aiwa-deployer@i167 "rollback"
+#   ssh aiwa-deployer@i167 "status"
+#
+# Свойства: immutable releases, atomic symlink, pre-deploy SQLite snapshot,
+# проверка release_sha в /health и автоматический откат при неудаче.
+set -euo pipefail
+
+ROOT=/srv/aiwa
+HEALTH=http://127.0.0.1:9920/health
+UNIT=aiwa
+KEEP=5
+
+log() { echo "[deploy] $*" >&2; }
+fail() { log "FAILED: $*"; exit 1; }
+
+current_sha() { basename "$(readlink -f "$ROOT/current")"; }
+
+wait_health() {
+    local want="$1" i body
+    for i in $(seq 1 30); do
+        body=$(curl -fsS --max-time 5 "$HEALTH" 2>/dev/null || true)
+        if [ -n "$body" ] && printf '%s' "$body" | grep -q "\"release_sha\": \"$want\"" \
+           && printf '%s' "$body" | grep -q '"status": "ok"'; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+activate() {
+    local sha="$1"
+    ln -sfn "$ROOT/releases/$sha" "$ROOT/current.tmp"
+    mv -Tf "$ROOT/current.tmp" "$ROOT/current"
+    sudo -n /bin/systemctl restart "$UNIT"
+}
+
+cmd_deploy() {
+    local sha="$1"
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "sha must be 40 hex chars"
+
+    local prev; prev=$(current_sha)
+    log "current=$prev target=$sha"
+    if [ "$prev" = "$sha" ]; then
+        log "already active; verifying health only"
+        wait_health "$sha" || fail "active release unhealthy"
+        log "OK (no change)"
+        return 0
+    fi
+
+    local dest="$ROOT/releases/$sha" tmp="$ROOT/releases/.tmp.$$"
+    if [ -d "$dest" ]; then
+        log "release dir exists, reusing"
+    else
+        rm -rf "$tmp"; mkdir -p "$tmp"
+        tar -xzf - -C "$tmp" || fail "bad tarball"
+        [ -f "$tmp/aiwa_bot.py" ] || fail "tarball missing aiwa_bot.py"
+        mv -T "$tmp" "$dest"
+    fi
+
+    # venv переустанавливается только при изменении зависимостей
+    local req_hash; req_hash=$(sha256sum "$dest/requirements.txt" | cut -d' ' -f1)
+    if [ ! -f "$ROOT/venv/.req-sha256" ] || [ "$(cat "$ROOT/venv/.req-sha256")" != "$req_hash" ]; then
+        log "requirements changed -> pip install"
+        sudo -n "$ROOT/venv/bin/pip" install -q -r "$dest/requirements.txt" || fail "pip install"
+        echo "$req_hash" | sudo -n /usr/bin/tee "$ROOT/venv/.req-sha256" >/dev/null
+    fi
+
+    # pre-deploy snapshot через SQLite Backup API (не cp живого файла)
+    local snap="$ROOT/backups/pre-$sha-$(date -u +%Y%m%dT%H%M%SZ).db"
+    sudo -n "$ROOT/venv/bin/python" -c "
+import sqlite3, sys
+s = sqlite3.connect('file:$ROOT/data/aiwa.db?mode=ro', uri=True)
+d = sqlite3.connect(sys.argv[1]); s.backup(d); d.close(); s.close()
+" "$snap" || fail "pre-deploy snapshot"
+    log "snapshot: $(basename "$snap")"
+
+    activate "$sha"
+    if wait_health "$sha"; then
+        log "OK $prev -> $sha"
+        ls -1dt "$ROOT"/releases/*/ 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -rf
+        return 0
+    fi
+
+    log "health check failed, rolling back to $prev"
+    activate "$prev"
+    wait_health "$prev" && log "rollback OK" || log "ROLLBACK ALSO UNHEALTHY - manual action required"
+    fail "release $sha did not become healthy"
+}
+
+cmd_rollback() {
+    local prev
+    prev=$(ls -1dt "$ROOT"/releases/*/ | sed -n 2p | xargs -r basename)
+    [ -n "$prev" ] || fail "no previous release"
+    log "rolling back to $prev"
+    activate "$prev"
+    wait_health "$prev" || fail "rollback unhealthy"
+    log "rollback OK -> $prev"
+}
+
+cmd_status() {
+    echo "current: $(current_sha)"
+    systemctl is-active "$UNIT"
+    curl -fsS --max-time 5 "$HEALTH" | head -c 300; echo
+}
+
+read -r -a ARGV <<< "${SSH_ORIGINAL_COMMAND:-${*:-}}"
+case "${ARGV[0]:-}" in
+    deploy)   cmd_deploy "${ARGV[1]:-}" ;;
+    rollback) cmd_rollback ;;
+    status)   cmd_status ;;
+    *) fail "unknown command: ${ARGV[0]:-<empty>} (deploy <sha> | rollback | status)" ;;
+esac
