@@ -5784,7 +5784,7 @@ def _proactive_signals(cid, slot="eve"):
         lowe = [l for l in logs if l.get("energy") == 1]
         if len(lowe) >= 2:
             out.append({"key": "low_energy", "score": 70, "cooldown": 3,
-                        "topic": "несколько дней подряд низкая энергия — поддержи и мягко предложи разгрузку или дыхательную практику",
+                        "topic": "несколько дней подряд низкая энергия — поддержи и мягко предложи разгрузку: снизить нагрузку, прогуляться или лечь спать пораньше",
                         "data": "низкая энергия в %s из последних дней" % len(lowe)})
         rw = workouts_recent(cid, days=12, limit=3) or []
         if rw:
