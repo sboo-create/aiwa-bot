@@ -211,3 +211,15 @@ commit. Не делать force-push в `main`.
 
 Фактическая точка каждого большого релиза записывается отдельным файлом в
 `docs/releases/`.
+
+## План переноса production на i167
+
+Полный план, включая отказоустойчивый Telegram egress, immutable releases,
+доступ разработчиков, cutover и возврат на Railway:
+[`docs/operations/i167-production-migration-plan.md`](docs/operations/i167-production-migration-plan.md).
+
+План не является разрешением на миграцию. До отдельного окна переключения
+production остаётся на Railway. В частности, production нельзя копировать с
+текущего staging-туннеля как есть: у него один внешний relay. Для production
+обязательны два независимых relay и автоматический failover с end-to-end TLS
+проверкой имени `api.telegram.org`.

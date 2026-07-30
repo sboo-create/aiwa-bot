@@ -107,6 +107,10 @@ def hist_push(cid, q, a):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 # httpx логирует полный URL с токеном бота на уровне INFO — глушим, чтобы токен не утекал в логи
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# APScheduler emits one INFO line per restored user job during startup. At
+# production scale this hides actionable logs and can trigger provider log
+# rate-limits; warnings and errors remain visible.
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 log = logging.getLogger("aiwa")
 TZ = ZoneInfo(os.environ.get("AIWA_TZ", "Europe/Moscow"))
 def dtoday():
@@ -122,6 +126,31 @@ AIWA_VERSION = os.environ.get(
     "AIWA_VERSION", "2026-07-29-v180-cx-day-diary"
 )
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
+
+def _detected_release_sha(environ=None, source_path=None):
+    env = environ if environ is not None else os.environ
+    real_source = os.path.realpath(source_path or __file__)
+    source_dir = os.path.dirname(real_source)
+    release_parent = os.path.dirname(source_dir)
+    path_release = None
+    if (
+        os.path.basename(real_source) == "aiwa_bot.py"
+        and os.path.basename(release_parent) == "releases"
+    ):
+        path_release = os.path.basename(source_dir)
+    candidates = (
+        env.get("AIWA_RELEASE_SHA"),
+        env.get("RAILWAY_GIT_COMMIT_SHA"),
+        path_release,
+    )
+    for candidate in candidates:
+        value = str(candidate or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{40}", value):
+            return value
+    return ""
+
+AIWA_RELEASE_SHA = _detected_release_sha()
+print("AIWA_RELEASE_SHA:", AIWA_RELEASE_SHA or "unknown")
 AIWA_WEBAPP_URL = os.environ.get("AIWA_WEBAPP_URL", "")
 
 def _validated_telegram_api_origin(raw):
@@ -12439,6 +12468,9 @@ async def _health(request):
         {
             "status": "ok" if APP_READY else "starting",
             "version": AIWA_VERSION,
+            # The repository is public; this non-secret marker lets deploy
+            # automation prove which immutable revision actually took traffic.
+            "release_sha": AIWA_RELEASE_SHA or None,
             "candidate": _candidate_mode(),
             "journal_router": "v2" if journal_v2_enabled() else "v1",
             "event_queue": _EVENT_WRITE_Q.qsize(),

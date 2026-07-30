@@ -70,3 +70,29 @@ The production Telegram token must never be used by a temporary parallel
 stand.
 
 Detailed commands are in `DEPLOY.md`.
+
+## Completion update: 2026-07-30
+
+The load-safety release and its post-release fixes were completed. Production
+subsequently advanced through the reviewed media release:
+
+- media PR: `#66`;
+- merge commit: `5a9ece0476f260763b19c8f2c252baa0ef1293c2`;
+- Railway deployment:
+  `6b6775f9-3b56-455d-946f-de3abc9c160b`;
+- rollback tag: `prod-rollback-2026-07-30-media-13fe278`;
+- pre-media SQLite snapshot:
+  `/data/backups/pre-media-13fe278-20260730T0055MSK.db`;
+- snapshot integrity: `ok`;
+- snapshot SHA-256:
+  `82269c29e25e7eb6676b01e3175d15638801727c8f9d96bf0787d26c86e14829`;
+- production `/health`: ready, event writer alive, zero writer failures and
+  zero dropped events;
+- reviewed catalog: 612 food entries and 235 sport entries in total;
+- background food generation: enabled, one worker, bounded daily cap;
+- production traction outbox: empty;
+- AIWA statistics module: healthy with current successful ingest/poll.
+
+The remaining operational follow-up is documented in
+`2026-07-30-post-release-operations.md`. The future i167 production migration
+is a separate plan and does not include PostgreSQL/Redis.
