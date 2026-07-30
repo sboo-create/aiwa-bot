@@ -3132,10 +3132,13 @@ def _transcribe_groq(audio_bytes, filename, ext):
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         return None
+    # GROQ_BASE_URL позволяет направить Groq через локальный relay-порт
+    # (Groq отклоняет российские IP), как OPENROUTER_BASE_URL для OpenRouter.
+    base = (os.environ.get("GROQ_BASE_URL") or "https://api.groq.com/openai/v1").rstrip("/")
     mime = {"ogg": "audio/ogg", "oga": "audio/ogg", "webm": "audio/webm", "mp4": "audio/mp4",
             "m4a": "audio/mp4", "mp3": "audio/mpeg", "wav": "audio/wav"}.get(ext, "audio/ogg")
     try:
-        r = _HTTP.post("https://api.groq.com/openai/v1/audio/transcriptions",
+        r = _HTTP.post(base + "/audio/transcriptions",
             headers={"Authorization": f"Bearer {key}"},
             files={"file": (filename, audio_bytes, mime)},
             data={"model": "whisper-large-v3-turbo", "language": "ru"}, timeout=60)
