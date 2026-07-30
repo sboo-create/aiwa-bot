@@ -1388,6 +1388,39 @@ def meal_scale(cid, mid, new_grams):
 
 _MET = {"Силовая": 5.0, "Кардио": 8.0, "Йога": 3.0, "Ходьба": 3.5, "Плавание": 7.0,
         "Пилатес": 3.0, "Растяжка": 2.5}
+# Типы из стандартного набора приложения; всё остальное — собственные
+# активности пользовательницы (например Сквош), их ведём отдельно.
+_STANDARD_WORKOUT_TYPES = frozenset(_MET) | {"Своё", "Тренировка", "Танцы", "Бег", "Велосипед", ""}
+
+def _custom_workout_title(name):
+    """Заголовок своей тренировки из единственного вписанного занятия.
+    Длинный свободный текст обрезается, чтобы не ломать карточки."""
+    t = re.sub(r"\s+", " ", str(name or "")).strip(" .,!—-")
+    if not t:
+        return ""
+    if len(t) > 24:
+        t = t[:23].rstrip() + "…"
+    return t[:1].upper() + t[1:]
+
+def favorite_activities(cid, days=60, limit=3):
+    """Собственные активности за окно, по убыванию частоты, свежие выше.
+    Окно даёт естественное затухание: что перестали отмечать — выпадает."""
+    cut = (dtoday() - timedelta(days=days)).isoformat()
+    c = db()
+    rows = c.execute(
+        "SELECT type, COUNT(*) AS n, MAX(d) FROM workouts WHERE chat_id=? AND d>=? "
+        "GROUP BY type ORDER BY n DESC, MAX(d) DESC", (cid, cut)).fetchall()
+    c.close()
+    out = []
+    for t, n, _last in rows:
+        t = (t or "").strip()
+        if t in _STANDARD_WORKOUT_TYPES:
+            continue
+        out.append((t, n))
+        if len(out) >= limit:
+            break
+    return out
+
 def workout_calories(wtype, duration, rpe, weight_kg):
     m = re.search(r"\d+", str(duration or "")); mins = int(m.group()) if m else 40
     met = _MET.get(wtype, 5.0)
@@ -8804,7 +8837,17 @@ def _recent_workouts_text(cid):
         seg = (w.get("d", "") or "") + ": " + (w.get("type", "") or "")
         if items: seg += " (" + items[:60] + ")"
         parts.append(seg)
-    return "; ".join(parts)
+    txt = "; ".join(parts)
+    try:
+        fav = favorite_activities(cid)
+    except Exception:
+        fav = []
+    if fav:
+        txt += (". Её собственные активности за последние 2 месяца: "
+                + ", ".join("%s (%s раз)" % (t, n) for t, n in fav)
+                + " — когда уместно по нагрузке и самочувствию, предлагай их "
+                  "или похожие по духу, а не только стандартный набор.")
+    return txt
 
 def _recent_syms_text(cid):
     lg = log_get(cid, dtoday().isoformat()) or {}
@@ -11733,6 +11776,10 @@ async def _api_workout(request):
         return _cors(web.json_response({"error": "empty", "text": "Выбери тип и упражнения."}, status=400))
     prof = profile_of(u); weight_kg = (prof.get("weight") if prof else None)
     kcal = workout_calories(wtype, dur, rpe, weight_kg)
+    # «Своё» с единственным вписанным занятием получает его имя как заголовок
+    # (обрезанный): в «Прошедших тренировках» видно «Сквош», а не «Своё».
+    if wtype in ("Своё", "Тренировка") and len(items) == 1:
+        wtype = _custom_workout_title(items[0]["name"]) or wtype
     muscles = ", ".join(groups)
     wk = {"type": wtype, "items": items, "duration": dur, "rpe": rpe, "note": str(body.get("note") or "")[:200],
           "kcal": kcal, "muscles": muscles}
