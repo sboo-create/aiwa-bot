@@ -31,10 +31,10 @@ Railway Volume       -> заморожен, rollback-точка 72 часа
   timeout 300) и restart policy задаются `/railway.json` в репо — dashboard
   их не переопределяет. Переключение на прокси = коммит в `railway.json`;
 - **автодеплой из `main` включён** («Wait for CI»): каждый merge в main
-  деплоится в production автоматически. Отсюда два следствия: фиксы уезжают
-  сами (проверено 2026-07-30: production ACTIVE на merge PR #71 спустя
-  минуты), и **на T0 автодеплой обязан быть выключен до остановки
-  приложения**, иначе случайный merge поднимет второй poller;
+  деплоится в production автоматически (проверено 2026-07-30: production
+  ACTIVE на merge PR #71 спустя минуты). В proxy-first порядке автодеплой
+  не выключается — он и есть механизм T0; после merge T0-PR `railway.json`
+  собирает только прокси, и случайный merge второй poller не поднимет;
 - 81 service variable (секреты и конфиг вместе); переносить только через
   Railway CLI (`railway variables`) по ssh-pipe на i167, без печати;
 - Volume: `worker-volume` (приложение), рядом `worker-staging-volume`
@@ -63,40 +63,59 @@ Railway Volume       -> заморожен, rollback-точка 72 часа
 - прогнать доставку переменных на i167 в тестовый файл (сверка имён с
   `aiwa-production.env.example`), файл удалить.
 
-## T0 — последовательность (цель: < 30 минут)
+## T0 — последовательность (низкий простой, proxy-first)
 
-1. **Выключить автодеплой.** Settings -> Source -> Auto deploys: Disable.
-   С этого момента merge в main не трогает Railway.
-2. **Стоп Railway app.** Активный deployment -> Remove. Poll завершается
-   сам; убедиться, что процесса нет (логи затихли, домен отдаёт 404/502).
-2. **Финальный snapshot.** По процедуре
-   `railway-volume-evacuation-2026-07-30.md`: SQLite Backup API snapshot,
-   выгрузка с Volume, SHA-256 на обеих сторонах.
-3. **Доставка на i167.** Snapshot -> `/srv/aiwa/data/aiwa.db` (атомарно:
-   во временное имя, `pragma integrity_check`, затем `mv`), владельцы
-   `aiwa:aiwa`.
-4. **Production-секреты и env.** Через Railway CLI (без печати значений):
-   `railway variables --kv` направить ssh-pipe'ом сразу в файл на i167,
-   оттуда разложить: `BOT_TOKEN` -> `/srv/aiwa/secrets/bot-token`,
-   провайдерские ключи -> `providers.env`, остальное сверить с
-   `/srv/aiwa/config/app.env`. Плейсхолдеры staging удаляются.
-5. **Env production.** В `/srv/aiwa/config/app.env`: удалить
-   `AIWA_CANDIDATE`; `AIWA_WEBAPP_URL=https://worker-production-505e.up.railway.app`
-   (прежний публичный URL!); `AIWA_ALLOWED_ORIGINS` — он же; `AIWA_PROACTIVE`
-   и прочие значения — как на Railway production.
-6. **Старт.** `systemctl restart aiwa`; проверить: `active`, `/health` ->
-   `ok`, `candidate: false`, точный `release_sha`, в журнале один поллер и
-   нет `getUpdates Conflict`.
-7. **Railway -> прокси.** Merge заранее подготовленного draft PR
-   (`railway.json`: `startCommand` -> `python railway_proxy.py`), затем
-   Settings -> Auto deploys: Enable — Railway задеплоит прокси. Домен не
-   меняется. Guard: healthcheck `/health` теперь проксируется на i167,
-   поэтому деплой прокси станет healthy только если i167 реально отвечает.
+Порядок построен так, чтобы долгий шаг (билд прокси на Railway) шёл, пока
+старое приложение ещё обслуживает пользователей, а окно недоступности
+свелось к переносу базы (~5 минут на 47 MiB). Ручных действий в дашборде
+Railway нет: и «стоп», и «переключение» выполняет один merge. Автодеплой
+НЕ выключается — он и есть механизм T0; после merge #74 `railway.json`
+запускает только прокси, поэтому случайный merge второй poller поднять
+не может.
+
+1. **Предпроверки.** Кандидат на i167 здоров (`/health` через
+   `aiwa-candidate-167...sslip.io` -> 200) — от него зависит healthcheck
+   прокси; relay/HAProxy зелёные; свежая drill-копия базы уже на i167.
+2. **Merge T0-PR (#74).** Автодеплой собирает прокси; приложение работает
+   весь билд (простой = 0). Активация прокси проходит healthcheck-guard
+   (`/health` проксируется на i167) и автоматически сносит деплой
+   приложения — graceful SIGINT, poll завершается. С этого момента:
+   - бот молчит; входящие апдейты копятся у Telegram (до 24 ч) и будут
+     обработаны после старта i167 — сообщения не теряются;
+   - Mini App: статика работает через прокси, а API отдаёт 401 — кандидат
+     ещё на staging-токене, поэтому production-initData не проходит и
+     записи невозможны (потерь данных нет by design).
+3. **Убедиться в остановке.** Deployment прокси ACTIVE, приложение
+   REMOVED, логи приложения затихли. База на volume квиесцентна.
+4. **Финальный snapshot.** Volume `/data` примонтирован в прокси-контейнер:
+   через `railway ssh` снять SQLite Backup API snapshot (python в контейнере
+   есть), плюс tar `/data/food-assets`; SHA-256 на обеих сторонах;
+   выгрузка ssh-pipe'ом на i167 (`~50 MiB`, секунды).
+5. **Установка.** `pragma integrity_check`, counts не меньше drill-копии;
+   атомарно `mv` в `/srv/aiwa/data/aiwa.db`; assets -> `data/food-assets/`;
+   владельцы `aiwa:aiwa`.
+6. **Секреты и env.** `railway variable list --kv` ssh-pipe'ом (механика
+   отрепетирована, значения не печатаются): `BOT_TOKEN` ->
+   `/srv/aiwa/secrets/bot-token`, провайдерские ключи -> `providers.env`;
+   в `app.env`: удалить `AIWA_CANDIDATE`,
+   `AIWA_WEBAPP_URL=https://worker-production-505e.up.railway.app` (прежний
+   публичный URL!), `AIWA_ALLOWED_ORIGINS` — он же, `AIWA_PROACTIVE` и
+   остальное — как в переменных Railway. Плейсхолдеры staging удаляются.
+7. **Старт.** `systemctl restart aiwa`; проверить: `active`, `/health` ->
+   `ok`, `candidate: false`, точный `release_sha`, один поллер, нет
+   `getUpdates Conflict`; накопленные апдейты дообрабатываются. Mini App
+   auth снова работает — сервис полностью восстановлен.
 8. **Смоук.** Mini App по прежнему URL из Telegram iOS/Android: initData,
    три экрана, запись/чтение еды; бот: text, callback, voice, photo;
    outbox/stats; `journalctl -u aiwa` без ошибок.
 9. **Наблюдение.** 30 минут активно; далее алерты. Volume и билды Railway
    не удалять 72 часа.
+
+Про «сначала перелить снапшот»: SQLite не умеет безопасную инкрементальную
+досинхронизацию двух живых файлов, поэтому финальный перенос всегда полный.
+Но файл маленький (47 MiB, секунды по ssh), а свежая копия уже лежит на
+i167 после restore-drill — предзаливка выигрыша не даёт; выигрыш даёт
+именно порядок proxy-first выше.
 
 ## Rollback (полный возврат на Railway)
 
