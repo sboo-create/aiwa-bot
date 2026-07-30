@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Создаёт CA для внешнего mTLS relay-контура. Запускается на машине
+# оператора; ключ CA не покидает её и не копируется на relay или
+# application host.
+set -euo pipefail
+DIR=${1:?usage: gen-ca <ca-dir>}
+[ -e "$DIR/ca-key.pem" ] && { echo "refusing to overwrite existing CA in $DIR" >&2; exit 1; }
+mkdir -p "$DIR"
+chmod 700 "$DIR"
+openssl ecparam -name prime256v1 -genkey -noout -out "$DIR/ca-key.pem"
+chmod 600 "$DIR/ca-key.pem"
+openssl req -new -x509 -key "$DIR/ca-key.pem" -sha256 -days 3650 \
+  -subj "/CN=AIWA egress relay CA" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -out "$DIR/ca.pem"
+echo "CA created: $DIR/ca.pem"

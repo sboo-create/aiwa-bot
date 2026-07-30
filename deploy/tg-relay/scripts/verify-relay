@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Проверяет путь через relay с application host: локальный stunnel-клиент ->
+# внешний mTLS -> relay -> upstream. Внутренний TLS проверяется системным CA
+# как обычный HTTPS к настоящему имени upstream.
+#   verify-relay 18443 api.telegram.org
+#   verify-relay 24443 openrouter.ai
+set -euo pipefail
+PORT=${1:?usage: verify-relay <local-port> <upstream-host>}
+HOST=${2:?usage: verify-relay <local-port> <upstream-host>}
+curl --fail-with-body --silent --show-error --max-time 15 \
+  --resolve "$HOST:$PORT:127.0.0.1" \
+  "https://$HOST:$PORT/" --output /dev/null --write-out \
+  "OK %{http_code} via 127.0.0.1:$PORT -> $HOST (tls %{ssl_verify_result}, %{time_total}s)\n" \
+  || { RC=$?; # у Telegram корень отдаёт 404 - это успех пути
+       if [ "$RC" = "22" ]; then
+         curl --silent --max-time 15 --resolve "$HOST:$PORT:127.0.0.1" \
+           "https://$HOST:$PORT/" --output /dev/null --write-out \
+           "OK %{http_code} via 127.0.0.1:$PORT -> $HOST (tls %{ssl_verify_result}, %{time_total}s)\n"
+       else exit "$RC"; fi; }
