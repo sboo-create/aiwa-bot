@@ -5640,6 +5640,13 @@ async def push_checkin(context, cid, campaign=None):
 
 # ================= Проактивный движок =================
 PROACTIVE_MIN = int(os.environ.get("AIWA_PROACTIVE_MIN", "40"))
+def _candidate_mode():
+    # candidate/no-poll: кандидат production-раскладки поднимает HTTP, Mini App
+    # и health, но не вызывает getUpdates, не запускает cron/broadcast/AI
+    # workers и не пишет в Telegram (menu button, команды). Позволяет проверить
+    # systemd/Caddy/release layout, пока действующий production ещё поллит.
+    return os.environ.get("AIWA_CANDIDATE", "0") in ("1", "true", "True", "yes", "on")
+
 def _proactive_enabled():
     return os.environ.get("AIWA_PROACTIVE", "0") in ("1", "true", "True", "yes", "on")
 def _proactive_preference_on(cid):
@@ -12432,6 +12439,7 @@ async def _health(request):
         {
             "status": "ok" if APP_READY else "starting",
             "version": AIWA_VERSION,
+            "candidate": _candidate_mode(),
             "journal_router": "v2" if journal_v2_enabled() else "v1",
             "event_queue": _EVENT_WRITE_Q.qsize(),
             "event_writer_alive": bool(
@@ -12596,7 +12604,11 @@ async def run_all():
     site = web.TCPSite(
         runner, bind_host, port, backlog=http_backlog
     ); await site.start()  # nosec B104
-    await app.initialize(); await on_startup(app); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    await app.initialize()
+    if _candidate_mode():
+        log.warning("AIWA_CANDIDATE=1: no polling, no jobs, no Telegram writes")
+    else:
+        await on_startup(app); await app.start(); await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     global APP_READY; APP_READY = True
     log.info("AIWA bot + web on :%s", port)
     try:
