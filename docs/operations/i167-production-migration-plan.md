@@ -97,6 +97,10 @@ production-архитектура**. Новая схема должна рабо
   atomic public assets и service-specific routing;
 - Railway staging compute остановлен; его Volume пока сохранён для
   контролируемого backup/удаления;
+- восемь offline production snapshots и approved-food archive скопированы в
+  закрытый каталог i167, проверены тройным SHA-256 и SQLite integrity check;
+  точный ручной шаг освобождения Railway volume описан в
+  `railway-volume-evacuation-2026-07-30.md`;
 - production media catalog, bounded food background generation, системный
   male-mode audit и post-release fixes выпущены до этого migration-плана.
 
