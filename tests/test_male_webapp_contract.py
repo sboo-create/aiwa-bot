@@ -282,17 +282,17 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn('deslop-main-aiwa-v177.js', wrapper)
         self.assertIn('AiwaWebUiChart-aiwa-v177.js', bundle)
         self.assertIn('deslop-main-aiwa-v177.js', chart_bundle)
-        self.assertIn('main.js?v=r27', index)
+        self.assertIn('main.js?v=r28', index)
         self.assertIn(
-            'import "./deslop-main-aiwa-v177.js?v=r27";',
+            'import "./deslop-main-aiwa-v177.js?v=r28";',
             wrapper,
         )
         self.assertIn(
-            'import("./AiwaWebUiChart-aiwa-v177.js?v=r27")',
+            'import("./AiwaWebUiChart-aiwa-v177.js?v=r28")',
             bundle,
         )
         self.assertIn(
-            'from "./deslop-main-aiwa-v177.js?v=r27";',
+            'from "./deslop-main-aiwa-v177.js?v=r28";',
             chart_bundle,
         )
         self.assertIn("aiwaCacheTs", bundle)
