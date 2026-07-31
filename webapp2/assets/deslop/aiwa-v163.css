@@ -65,6 +65,28 @@ body.material .aiwa-nav-mascot {
   border-radius: 0;
 }
 
+/* Ячейки сводим к текущему эталону deslop.
+
+   Шеврон: бандл рисует его в боксе 7x12, тогда как маска — SVG 24x24 с
+   no-repeat center, то есть от иконки видно только центральный обрезок.
+   Эталон даёт иконке весь бокс 24x24. Цвет уже совпадает (--border-color
+   резолвится в rgba(17,17,17,.3)). */
+[class*="_chevron_"] {
+  width: 24px;
+  height: 24px;
+}
+
+/* Разделители: в бандле их гасит правило
+   [data-aiwa-cell="true"] > [class*="_body_"] { border-bottom: 0 !important }
+   — строки в CellStack шли сплошным блоком. Возвращаем штатный механизм
+   deslop: толщину держит --cell-separator-height (0.33px, как в эталоне),
+   а последней ячейке стека она и так обнуляется отдельным правилом. */
+[data-aiwa-cell="true"] > [class*="_body_"],
+[data-aiwa-cell="true"] > [class*="_end_"] {
+  border-bottom: var(--cell-separator-height)
+    solid var(--tg-theme-section-separator-color) !important;
+}
+
 .aiwa-insight-content .aiwa-paper-ai-heading .aiwa-sequence img,
 .aiwa-nav-mascot .aiwa-sequence img {
   display: block !important;
