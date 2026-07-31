@@ -25,7 +25,7 @@ class PackageEntrypointTest(unittest.TestCase):
         import aiwa_bot
         self.assertIs(sys.modules["aiwa_bot"], aiwa_bot)
         import aiwa.fitness as fitness
-        self.assertIs(fitness.bot, aiwa_bot)
+        self.assertIs(fitness._bot, aiwa_bot)
 
     def test_module_loads_under_foreign_name(self):
         # Эмуляция production-запуска: файл исполняется НЕ под именем

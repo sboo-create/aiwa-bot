@@ -9,7 +9,7 @@ import os
 from datetime import timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
-import aiwa_bot as bot
+import aiwa_bot as _bot
 
 ICONS = {  # набор Goodluck_sasha (@goodluck_alex): подобраны разные по цвету
     "food": "5418123573438980585",          # 🟢 зелёный
@@ -101,7 +101,7 @@ ACT_KB = InlineKeyboardMarkup([
 ])
 def diet_kb(selected):
     rows = [[InlineKeyboardButton("Ограничений нет", callback_data="diet:none")]]
-    rows += [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"diet:s:{code}")] for code, ru in bot.DIET]
+    rows += [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"diet:s:{code}")] for code, ru in _bot.DIET]
     rows.append([InlineKeyboardButton("Готово", callback_data="diet:done")]); return InlineKeyboardMarkup(rows)
 
 def time_kb():
@@ -130,7 +130,7 @@ def summary_prepare_hhmm(cid, hhmm):
 def schedule_text(cid, hhmm):
     """Пользователю показываем выбранное время — то же, что в профиле приложения.
     Внутренний сдвиг очереди рассылки (scheduled_hhmm) — деталь доставки, не UI."""
-    shown = (bot.row(cid) or {}).get("send_time") or hhmm or "08:00"
+    shown = (_bot.row(cid) or {}).get("send_time") or hhmm or "08:00"
     return (
         f"Время сводки: {shown} по Москве — подготовлю заранее и начну отправку в это время. "
         "При высокой нагрузке доставка может занять несколько минут."
@@ -139,21 +139,21 @@ def schedule_text(cid, hhmm):
 def today_start_iso():
     """UTC boundary for canonical events_v2 timestamps."""
     return datetime.combine(
-        datetime.now(bot.TZ).date(), dtime.min, tzinfo=bot.TZ
-    ).astimezone(bot.timezone.utc).isoformat()
+        datetime.now(_bot.TZ).date(), dtime.min, tzinfo=_bot.TZ
+    ).astimezone(_bot.timezone.utc).isoformat()
 
 def legacy_today_start_iso():
     """Moscow-local boundary for historical naive `events.ts` rows."""
-    return datetime.combine(datetime.now(bot.TZ).date(), dtime.min).isoformat()
+    return datetime.combine(datetime.now(_bot.TZ).date(), dtime.min).isoformat()
 
 def summary_sent_today(cid):
-    c = bot.db()
+    c = _bot.db()
     r = c.execute(
         """SELECT 1 FROM events_v2
            WHERE user_key=? AND occurred_at>=?
              AND event_name IN ('summary_delivered','push_sent')
            LIMIT 1""",
-        (bot.A2.user_key(cid), today_start_iso()),
+        (_bot.A2.user_key(cid), today_start_iso()),
     ).fetchone()
     if not r:
         # Historical rows created before events_v2 remain readable.
@@ -170,15 +170,15 @@ _RETRYABLE_PUSH_FAILURES = frozenset({"rate_limit", "timeout", "network"})
 
 def _push_failure_class(exc):
     """Map Telegram exceptions to stable, privacy-safe delivery diagnostics."""
-    if isinstance(exc, bot.Forbidden):
+    if isinstance(exc, _bot.Forbidden):
         return "blocked"
-    if isinstance(exc, bot.RetryAfter):
+    if isinstance(exc, _bot.RetryAfter):
         return "rate_limit"
-    if isinstance(exc, bot.TimedOut):
+    if isinstance(exc, _bot.TimedOut):
         return "timeout"
-    if isinstance(exc, bot.NetworkError):
+    if isinstance(exc, _bot.NetworkError):
         return "network"
-    if isinstance(exc, bot.BadRequest):
+    if isinstance(exc, _bot.BadRequest):
         text = str(exc or "").lower()
         if "chat not found" in text:
             return "chat_not_found"
@@ -190,13 +190,13 @@ def _push_failure_class(exc):
 def _suppress_push_delivery(cid, reason):
     if reason not in _PERMANENT_PUSH_FAILURES:
         return False
-    c = bot.db()
+    c = _bot.db()
     try:
         changed = c.execute(
             """UPDATE users
                SET push_suppressed_at=?, push_suppression_reason=?
                WHERE chat_id=? AND push_suppressed_at IS NULL""",
-            (datetime.now(bot.TZ).isoformat(), reason, cid),
+            (datetime.now(_bot.TZ).isoformat(), reason, cid),
         ).rowcount == 1
         c.commit()
         return changed
@@ -205,9 +205,9 @@ def _suppress_push_delivery(cid, reason):
 
 def _clear_push_suppression(cid):
     """An inbound private Telegram update proves that this recipient is reachable again."""
-    c = bot.db()
+    c = _bot.db()
     try:
-        occurred_at = datetime.now(bot.timezone.utc).isoformat()
+        occurred_at = datetime.now(_bot.timezone.utc).isoformat()
         changed = c.execute(
             """UPDATE users
                SET push_suppressed_at=NULL, push_suppression_reason=NULL
@@ -219,20 +219,20 @@ def _clear_push_suppression(cid):
             # restart. Persist the proof in the same transaction as the state
             # change so a queued best-effort event cannot re-suppress a user
             # who has already contacted the bot again.
-            bot.A2.insert_event_v2(
+            _bot.A2.insert_event_v2(
                 c, cid, "user_message", meta="push_reachable",
-                app_version=bot.AIWA_VERSION, occurred_at=occurred_at,
+                app_version=_bot.AIWA_VERSION, occurred_at=occurred_at,
             )
         c.commit()
         if changed:
-            bot.log.info("push delivery restored after inbound update: %s", cid)
+            _bot.log.info("push delivery restored after inbound update: %s", cid)
         return changed
     finally:
         c.close()
 
 def _backfill_push_suppressions():
     """Persist previously blocked recipients from immutable legacy and v2 history."""
-    c = bot.db()
+    c = _bot.db()
     try:
         changed_legacy = c.execute(
             """UPDATE users
@@ -263,7 +263,7 @@ def _backfill_push_suppressions():
         ).rowcount
         changed_v2 = 0
         users_by_key = {
-            bot.A2.user_key(cid): cid
+            _bot.A2.user_key(cid): cid
             for (cid,) in c.execute(
                 "SELECT chat_id FROM users WHERE push_suppressed_at IS NULL"
             ).fetchall()
@@ -298,7 +298,7 @@ def _backfill_push_suppressions():
         c.commit()
         changed = changed_legacy + changed_v2
         if changed:
-            bot.log.info("push suppression backfilled for %d blocked recipients", changed)
+            _bot.log.info("push suppression backfilled for %d blocked recipients", changed)
         return changed
     finally:
         c.close()
@@ -310,7 +310,7 @@ def _record_push_failure(cid, campaign, exc):
     if permanent:
         _suppress_push_delivery(cid, failure_class)
     status = "blocked" if permanent else "error"
-    bot.ev(
+    _bot.ev(
         cid,
         "broadcast",
         meta="|".join((status, campaign or "unknown", failure_class,
@@ -326,10 +326,10 @@ def _claim_push_delivery(cid, campaign):
         lease_seconds = max(60, int(os.environ.get("AIWA_PUSH_CLAIM_TTL_SEC", "900")))
     except (TypeError, ValueError):
         lease_seconds = 900
-    now = datetime.now(bot.TZ)
+    now = datetime.now(_bot.TZ)
     now_iso = now.isoformat()
     stale_before = (now - timedelta(seconds=lease_seconds)).isoformat()
-    c = bot.db()
+    c = _bot.db()
     try:
         c.execute("BEGIN IMMEDIATE")
         already_sent = c.execute(
@@ -344,7 +344,7 @@ def _claim_push_delivery(cid, campaign):
                    WHERE user_key=? AND event_name='push_sent'
                      AND json_extract(properties_json,'$.campaign_id')=?
                    LIMIT 1""",
-                (bot.A2.user_key(cid), campaign),
+                (_bot.A2.user_key(cid), campaign),
             ).fetchone()
         if already_sent:
             c.execute(
@@ -379,13 +379,13 @@ def _claim_push_delivery(cid, campaign):
 def _complete_push_delivery(cid, campaign):
     if not campaign:
         return
-    c = bot.db()
+    c = _bot.db()
     try:
         c.execute(
             """UPDATE push_deliveries
                SET status='sent', sent_at=?
                WHERE chat_id=? AND campaign_id=?""",
-            (datetime.now(bot.TZ).isoformat(), cid, campaign),
+            (datetime.now(_bot.TZ).isoformat(), cid, campaign),
         )
         c.commit()
     finally:
@@ -395,7 +395,7 @@ def _release_push_delivery(cid, campaign):
     """Allow retry only when Telegram definitely rejected the send."""
     if not campaign:
         return
-    c = bot.db()
+    c = _bot.db()
     try:
         c.execute(
             """DELETE FROM push_deliveries
@@ -409,8 +409,8 @@ def _release_push_delivery(cid, campaign):
 def should_catchup_broadcast(cid, hhmm):
     actual, _, _ = scheduled_hhmm(cid, hhmm)
     h, m = map(int, actual.split(":"))
-    now = datetime.now(bot.TZ)
-    due = datetime.combine(now.date(), dtime(h, m), tzinfo=bot.TZ)
+    now = datetime.now(_bot.TZ)
+    due = datetime.combine(now.date(), dtime(h, m), tzinfo=_bot.TZ)
     try:
         hours = max(1, int(os.environ.get("AIWA_BROADCAST_CATCHUP_HOURS", "16")))
     except (TypeError, ValueError):
@@ -418,50 +418,50 @@ def should_catchup_broadcast(cid, hhmm):
     return due <= now <= due + timedelta(hours=hours) and not summary_sent_today(cid)
 
 async def enqueue_broadcast(cid, meta="queued"):
-    if (bot.row(cid) or {}).get("push_suppressed_at"):
+    if (_bot.row(cid) or {}).get("push_suppressed_at"):
         return False
     if summary_sent_today(cid):
         return False
-    if cid in bot.BCAST_PENDING:
+    if cid in _bot.BCAST_PENDING:
         return False
-    bot.BCAST_PENDING.add(cid)
-    bot.ev(cid, "broadcast", meta=f"queued|{bot.campaign_id('daily_summary')}")
-    if bot.BCAST_Q is not None:
-        await bot.BCAST_Q.put(cid)
+    _bot.BCAST_PENDING.add(cid)
+    _bot.ev(cid, "broadcast", meta=f"queued|{bot.campaign_id('daily_summary')}")
+    if _bot.BCAST_Q is not None:
+        await _bot.BCAST_Q.put(cid)
         return True
-    bot.BCAST_PENDING.discard(cid)
+    _bot.BCAST_PENDING.discard(cid)
     return False
 
 def en_kb(p, labels=None):
-    bot.L = labels or bot.EN
-    return InlineKeyboardMarkup([[InlineKeyboardButton(bot.L[i].capitalize(), callback_data=f"ci:{p}:{i}") for i in (1, 2, 3)]])
+    _bot.L = labels or _bot.EN
+    return InlineKeyboardMarkup([[InlineKeyboardButton(_bot.L[i].capitalize(), callback_data=f"ci:{p}:{i}") for i in (1, 2, 3)]])
 def sym_kb(selected):
-    rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in bot.SYMPTOMS]
+    rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in _bot.SYMPTOMS]
     rows.append([InlineKeyboardButton("Свой симптом", callback_data="ci:custom")])
     rows.append([InlineKeyboardButton("Готово", callback_data="ci:done")]); return InlineKeyboardMarkup(rows)
 def sugg_kb(cid, items, app_user=None, app_label=None, feedback_id=None, campaign=None):
     def _short(t): return t if len(t) <= 28 else t[:26].rstrip(" ,.-") + "…"
     # единая точка сборки кнопок: каждый саджест с заглавной буквы (в т.ч. статичные)
-    norm = getattr(bot.L, "_norm_sugg1", None)
-    items = bot.guard_aiwa_suggestions(cid, items)
+    norm = getattr(_bot.L, "_norm_sugg1", None)
+    items = _bot.guard_aiwa_suggestions(cid, items)
     items = [(norm(t) if norm else t) for t in items if t]
     rows = [[B(_short(t), f"q:{bot.add_sugg(cid,t)}")] for t in items[:2]]
-    if app_user and bot.AIWA_WEBAPP_URL:
+    if app_user and _bot.AIWA_WEBAPP_URL:
         app_tab = {
             "Открыть дневник": "food",
             "Открыть питание": "food",
             "Открыть нагрузку": "train",
         }.get(app_label)
-        rows.append([InlineKeyboardButton(app_label or bot.APP_BUTTON_TEXT,
-                     web_app=WebAppInfo(url=bot.campaign_webapp_url(app_user, campaign, app_tab)))])
+        rows.append([InlineKeyboardButton(app_label or _bot.APP_BUTTON_TEXT,
+                     web_app=WebAppInfo(url=_bot.campaign_webapp_url(app_user, campaign, app_tab)))])
     if feedback_id:
         rows.append([B("👍 Полезно", f"fb:helpful:{feedback_id}"),
                      B("👎 Не помогло", f"fb:unhelpful:{feedback_id}")])
     return InlineKeyboardMarkup(rows)
 def summary_kb(u=None, campaign=None):
     rows = []
-    if bot.AIWA_WEBAPP_URL:
-        rows.append([InlineKeyboardButton(bot.APP_BUTTON_TEXT, web_app=WebAppInfo(url=bot.campaign_webapp_url(u, campaign)))])
+    if _bot.AIWA_WEBAPP_URL:
+        rows.append([InlineKeyboardButton(_bot.APP_BUTTON_TEXT, web_app=WebAppInfo(url=_bot.campaign_webapp_url(u, campaign)))])
     return InlineKeyboardMarkup(rows)
 def summary_suggestions(st):
     if not st:
@@ -493,7 +493,7 @@ def general_summary_suggestions(u):
     return ["Что важно сегодня?", "Что отметить?"]
 def summary_sugg_kb(cid, u=None, st=None, app_label=None, campaign=None):
     items = summary_suggestions(st) if st is not None else general_summary_suggestions(u)
-    return sugg_kb(cid, items, app_user=u, app_label=app_label or bot.APP_BUTTON_TEXT, campaign=campaign)
+    return sugg_kb(cid, items, app_user=u, app_label=app_label or _bot.APP_BUTTON_TEXT, campaign=campaign)
 def merge_summary_suggestions(u=None, st=None, extra=None):
     items = [x for x in (extra or []) if x]
     fallback = summary_suggestions(st) if st is not None else general_summary_suggestions(u)
