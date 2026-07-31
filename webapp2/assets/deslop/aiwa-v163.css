@@ -108,6 +108,31 @@ body.material .aiwa-nav-mascot {
   font-size: 26px;
 }
 
+/* Снекбар показывался пустым местом: SnackbarItem анимируется ленивыми
+   компонентами motion/react-m, которым нужен MotionProvider (LazyMotion с
+   domMax). В бандле LazyMotion нет — провайдер в приложение не добавляли, —
+   поэтому элемент навсегда оставался в стартовом кадре анимации:
+   opacity: 0 и transform: scale(.96) translateY(32px), да ещё и уезжал
+   за нижний край. Костыль до пересборки с MotionProvider: показываем
+   мгновенно, без появления и без ухода. Смахивание всё равно не работает —
+   drag тоже держится на motion. */
+[class*="_item_cnxqv"] {
+  opacity: 1 !important;
+  transform: none !important;
+}
+
+/* Нижние тосты ложились ровно на таб-бар: библиотека рассчитывает, что оба
+   отступа задаёт --bottom-clearance, но в приложении его никто не выставляет,
+   поэтому бар берёт свой дефолт 21px, а хост тостов — свои 12px. Поднимаем
+   тосты над баром: его клиренс плюс высота 65px плюс зазор. */
+[class*="_host_bottom_cnxqv"] {
+  bottom: calc(var(--bottom-clearance, 21px) + 65px + var(--ui-space-12, 12px));
+}
+
+body.material [class*="_host_bottom_cnxqv"] {
+  bottom: calc(var(--bottom-clearance, 16px) + 65px + var(--ui-space-12, 12px));
+}
+
 /* Значение справа в ячейке «Режим»: подпись и шеврон в одну строку. */
 .aiwa-mode-value {
   display: flex;
