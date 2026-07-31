@@ -17,15 +17,21 @@ ENV_FILE=/srv/aiwa/config/app.env
 
 mkdir -p "$STATE_DIR"
 TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null | tr -d ' \n')
-ADMIN=$(grep '^AIWA_ADMIN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d ' ')
+# Получатели алертов: AIWA_ALERT_CHATS (список через запятую) либо AIWA_ADMIN
+CHATS=$(grep '^AIWA_ALERT_CHATS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d ' ')
+[ -n "$CHATS" ] || CHATS=$(grep '^AIWA_ADMIN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d ' ')
 
 tg_send() {
     # Через локальный relay-путь (hosts бота сюда не примонтирован, поэтому resolve вручную)
-    [ -n "$TOKEN" ] && [ -n "$ADMIN" ] || return 1
-    curl -fsS --max-time 10 --resolve api.telegram.org:8443:127.0.0.1 \
-        "https://api.telegram.org:8443/bot${TOKEN}/sendMessage" \
-        --data-urlencode "chat_id=${ADMIN}" \
-        --data-urlencode "text=$1" -o /dev/null
+    [ -n "$TOKEN" ] && [ -n "$CHATS" ] || return 1
+    local rc=0 chat
+    for chat in ${CHATS//,/ }; do
+        curl -fsS --max-time 10 --resolve api.telegram.org:8443:127.0.0.1 \
+            "https://api.telegram.org:8443/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${chat}" \
+            --data-urlencode "text=$1" -o /dev/null || rc=1
+    done
+    return $rc
 }
 
 if [ "${1:-}" = "test" ]; then
