@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
 import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue, atexit, contextvars
+import gzip
 import mimetypes
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta, timezone
@@ -12535,6 +12536,86 @@ async def _serve_reviewed_catalog_file(request):
     response.content_type = "image/webp"
     return response
 
+# Уже сжатые форматы повторно жать бессмысленно: картинки, шрифты и webp
+# только потеряют время на CPU.
+_COMPRESSIBLE_TYPES = (
+    "text/",
+    "application/javascript",
+    "application/json",
+    "image/svg+xml",
+)
+# Ниже этого порога выигрыш меньше накладных расходов на заголовки gzip.
+_COMPRESS_MIN_BYTES = 1024
+
+
+_DESLOP_TEXT_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(?:js|css)$")
+# Путь → (mtime, размер, сжатые байты). Файлов единицы, пересжимаются только
+# после пересборки фронта.
+_DESLOP_GZIP_CACHE = {}
+
+
+async def _serve_deslop_text(request):
+    """Отдаёт js/css мини-аппа с gzip.
+
+    add_static кладёт файл через sendfile, поэтому middleware со сжатием до него
+    не добирается: enable_compression на FileResponse молча игнорируется. А это
+    самые тяжёлые файлы — бандл на 735 КБ и main.css на 262 КБ.
+    """
+    filename = request.match_info.get("filename", "")
+    if not _DESLOP_TEXT_RE.fullmatch(filename):
+        raise web.HTTPNotFound()
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "webapp2", "assets", "deslop", filename,
+    )
+    if not os.path.isfile(path) or os.path.islink(path):
+        raise web.HTTPNotFound()
+    content_type = "application/javascript" if filename.endswith(".js") else "text/css"
+    stat = os.stat(path)
+    # main.js — это одна строчка импорта, в gzip она только растёт.
+    if (stat.st_size < _COMPRESS_MIN_BYTES
+            or "gzip" not in (request.headers.get("Accept-Encoding") or "")):
+        return web.FileResponse(path)
+
+    cached = _DESLOP_GZIP_CACHE.get(path)
+    if not cached or cached[0] != stat.st_mtime_ns or cached[1] != stat.st_size:
+        with open(path, "rb") as fh:
+            packed = gzip.compress(fh.read(), 6)
+        cached = (stat.st_mtime_ns, stat.st_size, packed)
+        _DESLOP_GZIP_CACHE[path] = cached
+    return web.Response(
+        body=cached[2],
+        headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+        content_type=content_type,
+    )
+
+
+@web.middleware
+async def _compress_text(request, handler):
+    """Сжимает текстовые ответы, если клиент это умеет.
+
+    index.html весит 205 КБ, main.css — 262 КБ, и оба уходили как есть.
+    В gzip это примерно впятеро меньше: мини-апп открывается в мобильной сети,
+    где каждый лишний килобайт — это время до первого экрана.
+    """
+    response = await handler(request)
+    if "gzip" not in (request.headers.get("Accept-Encoding") or ""):
+        return response
+    if response.headers.get("Content-Encoding"):
+        return response
+    content_type = (response.content_type or "").lower()
+    if not content_type.startswith(_COMPRESSIBLE_TYPES):
+        return response
+    length = response.content_length
+    if length is not None and length < _COMPRESS_MIN_BYTES:
+        return response
+    try:
+        response.enable_compression()
+    except Exception as exc:  # pragma: no cover - зависит от типа ответа
+        log.debug("compression skipped for %s: %s", request.path, exc)
+    return response
+
+
 @web.middleware
 async def _security_headers(request, handler):
     response = await handler(request)
@@ -12615,7 +12696,10 @@ async def _health(request):
     )
 
 def build_web():
-    aio = web.Application(client_max_size=20 * 1024 * 1024, middlewares=[_security_headers])  # фото до ~20 МБ
+    # Сжатие снаружи заголовков: middleware идут по порядку, и _compress_text
+    # должен видеть уже готовый Content-Type от нижележащих обработчиков.
+    aio = web.Application(client_max_size=20 * 1024 * 1024,
+                          middlewares=[_compress_text, _security_headers])  # фото до ~20 МБ
     aio.router.add_get("/", _serve_index)
     aio.router.add_get("/app2", _serve_index2)
     aio.router.add_post("/api/nudge", _api_nudge)
@@ -12632,6 +12716,8 @@ def build_web():
             "/assets/{kind}/catalog-v2/{filename}",
             _serve_reviewed_catalog_file,
         )
+        # Тоже до общего mount: статика идёт через sendfile и не сжимается.
+        aio.router.add_get("/assets/deslop/{filename}", _serve_deslop_text)
         aio.router.add_static("/assets/", path=_bd2)   # deslop-бандл, кадры маскота, картинки еды
     try:
         _generated_base = FA.generated_public_base()
