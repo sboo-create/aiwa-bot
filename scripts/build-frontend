@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Сборка фронта Mini App из исходников и установка артефакта в webapp2.
+# Требует bun (или npm). Артефакт: webapp2/assets/deslop/.
+set -euo pipefail
+cd "$(dirname "$0")/../frontend"
+RUNNER=$(command -v bun || command -v npm)
+"$RUNNER" install
+"$RUNNER" run build:deslop
+rm -rf ../webapp2/assets/deslop
+cp -R assets/deslop ../webapp2/assets/deslop
+echo "OK: webapp2/assets/deslop обновлён:"
+shasum -a 256 ../webapp2/assets/deslop/deslop-main-*.js

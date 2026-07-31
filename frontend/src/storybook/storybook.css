@@ -1,0 +1,338 @@
+html,
+body,
+#storybook-root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--tma-background-secondary);
+  color: var(--tma-text-primary);
+  font-family: var(--ui-font-interface);
+}
+
+.aiwa-storybook-detail-shell {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.aiwa-storybook-detail-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+}
+
+.aiwa-storybook-search {
+  display: block;
+  padding: var(--ui-space-10) var(--ui-layout-content-inset) var(--ui-space-6);
+}
+
+.aiwa-storybook-search-field {
+  display: flex;
+  min-height: 40px;
+  padding: 0 var(--ui-space-10);
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-12);
+  background: var(--tma-background-secondary);
+  color: var(--tma-text-secondary);
+  align-items: center;
+  gap: var(--ui-space-8);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.aiwa-storybook-search-field:focus-within {
+  border-color: var(--aiwa-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--aiwa-accent) 16%, transparent);
+}
+
+.aiwa-storybook-search-field > svg,
+.aiwa-storybook-search-field button svg {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+}
+
+.aiwa-storybook-search-field input {
+  min-width: 0;
+  height: 38px;
+  flex: 1;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--tma-text-primary);
+  font: inherit;
+}
+
+.aiwa-storybook-search-field input::placeholder {
+  color: var(--tma-text-secondary);
+  opacity: 1;
+}
+
+.aiwa-storybook-search-field input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.aiwa-storybook-search-field button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--tma-text-secondary);
+  cursor: pointer;
+  place-items: center;
+}
+
+.aiwa-storybook-search-field button:hover {
+  background: var(--tma-background);
+  color: var(--tma-text-primary);
+}
+
+.aiwa-storybook-search-field button:focus-visible,
+.aiwa-storybook-search-empty button:focus-visible {
+  outline: 2px solid var(--aiwa-accent);
+  outline-offset: 2px;
+}
+
+.aiwa-storybook-search-field kbd {
+  min-width: 22px;
+  padding: 2px 6px;
+  border: 1px solid var(--tma-separator);
+  border-radius: var(--ui-radius-6);
+  color: var(--tma-text-secondary);
+  font: 12px/16px var(--ui-font-interface);
+  text-align: center;
+}
+
+.aiwa-storybook-search-empty {
+  display: grid;
+  padding: 40px var(--ui-layout-content-inset);
+  color: var(--tma-text-secondary);
+  gap: var(--ui-space-6);
+  text-align: center;
+}
+
+.aiwa-storybook-search-empty strong {
+  color: var(--tma-text-primary);
+  font-size: 16px;
+}
+
+.aiwa-storybook-search-empty span {
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.aiwa-storybook-search-empty button {
+  justify-self: center;
+  margin-top: var(--ui-space-8);
+  padding: var(--ui-space-8) var(--ui-space-12);
+  border: 0;
+  border-radius: var(--ui-radius-10);
+  background: transparent;
+  color: var(--aiwa-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.aiwa-storybook-search-empty button:hover {
+  background: color-mix(in srgb, var(--aiwa-accent) 10%, transparent);
+}
+
+.aiwa-storybook-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+  margin: -1px;
+  white-space: nowrap;
+}
+
+/* The swatch is painted from the token itself, never from a copy of its value —
+   otherwise the page keeps showing the light palette after the theme flips and
+   stops being evidence of anything. Checkerboard shows through the translucent
+   ink levels so «30% ink» does not read as a solid grey. */
+.aiwa-storybook-swatch {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  overflow: hidden;
+  border: 0.5px solid var(--tma-separator);
+  border-radius: 50%;
+  background-image:
+    linear-gradient(45deg, var(--tma-background-secondary) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--tma-background-secondary) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--tma-background-secondary) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--tma-background-secondary) 75%);
+  background-position: 0 0, 0 5px, 5px -5px, -5px 0;
+  background-size: 10px 10px;
+}
+
+.aiwa-storybook-swatch::after {
+  position: absolute;
+  inset: 0;
+  background: var(--storybook-swatch);
+  content: "";
+}
+
+/* A shadow token has no swatch colour — show the shadow itself on a card chip. */
+.aiwa-storybook-shadow {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 12px;
+  background: var(--aiwa-surface);
+  box-shadow: var(--storybook-shadow);
+}
+
+.aiwa-storybook-icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  color: var(--tma-text-primary);
+  place-items: center;
+}
+
+.aiwa-storybook-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.aiwa-storybook-skeleton-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+
+.aiwa-storybook-type-row {
+  display: grid;
+  gap: var(--ui-space-10);
+}
+
+.aiwa-storybook-padded {
+  display: grid;
+  gap: var(--ui-space-12);
+  padding: var(--ui-space-12) var(--ui-layout-content-inset);
+}
+
+.aiwa-storybook-tabbar {
+  position: relative;
+  min-height: 104px;
+  padding-top: var(--ui-space-12);
+}
+
+.aiwa-storybook-tabbar > * {
+  position: absolute !important;
+  right: 0 !important;
+  bottom: var(--ui-space-12) !important;
+  left: 0 !important;
+}
+
+.aiwa-storybook-week {
+  padding: var(--ui-space-14) var(--ui-layout-content-inset) 32px;
+  overflow-x: auto;
+}
+
+.aiwa-storybook-date-row {
+  display: flex;
+  min-height: 76px;
+  padding: 24px var(--ui-layout-content-inset);
+  gap: 24px;
+  align-items: flex-start;
+  overflow-x: auto;
+}
+
+/* Calendar marking: the FAB and the bar are positioned by the calendar page, so
+   the showcase gives them an equivalent positioned box to sit in. */
+.aiwa-storybook-fab-row {
+  display: flex;
+  padding: 16px var(--ui-layout-content-inset);
+  justify-content: flex-end;
+}
+
+.aiwa-storybook-mark-bar {
+  position: relative;
+  min-height: 116px;
+}
+
+/* The mode pill takes the control surface, which is the card colour — put the
+   row on the screen canvas so it reads the way it does on the calendar page. */
+.aiwa-storybook-appbar {
+  display: flex;
+  padding: 8px var(--ui-layout-content-inset);
+  align-items: center;
+  justify-content: space-between;
+  background: var(--aiwa-screen-bg);
+}
+
+.aiwa-storybook-calendar {
+  display: flex;
+  padding: 32px var(--ui-layout-content-inset);
+  justify-content: center;
+  overflow-x: auto;
+}
+
+.aiwa-storybook-main {
+  width: min(100%, 402px);
+  margin: 0 auto;
+}
+
+.aiwa-storybook-main .aiwa-tma-blocks {
+  margin-top: 24px;
+}
+
+.aiwa-storybook-macros {
+  display: grid;
+  padding: var(--ui-space-12) var(--ui-layout-content-inset);
+  gap: var(--ui-space-10);
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/* Storybook-only escape hatch for the panel stories: a panel is dismissed with
+   Telegram's native BackButton, which does not exist here. Above .aiwa-page
+   (z-index 1000) so it stays reachable over an open panel. */
+.aiwa-storybook-panel-close {
+  position: fixed;
+  z-index: 1100;
+  right: var(--ui-space-16);
+  bottom: calc(var(--ui-space-16) + env(safe-area-inset-bottom, 0px));
+  min-height: 44px;
+  padding: var(--ui-space-10) var(--ui-space-16);
+  border: 0;
+  border-radius: 999px;
+  background: var(--aiwa-accent);
+  box-shadow: var(--aiwa-shadow-overlay);
+  color: var(--aiwa-on-accent);
+  font: 600 15px/20px var(--ui-font-interface);
+  cursor: pointer;
+}
+
+.aiwa-storybook-panel-close:focus-visible {
+  outline: 2px solid var(--aiwa-accent);
+  outline-offset: 3px;
+}
+
+/* Mascot sequences shown side by side at the three sizes the product uses. */
+.aiwa-storybook-sequence-row {
+  display: flex;
+  padding: var(--ui-space-12) var(--ui-layout-content-inset) var(--ui-space-16);
+  gap: var(--ui-space-16);
+  align-items: center;
+}
