@@ -309,14 +309,21 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn("src: e[0]", component)
         self.assertIn('decoding: "sync"', component)
 
-    def test_aiwa_art_stays_inside_telegram_safe_area(self):
+    def test_aiwa_art_stays_aligned_with_the_tab_bar(self):
         css = V163_CSS.read_text(encoding="utf-8")
         index = INDEX.read_text(encoding="utf-8")
 
         self.assertIn("aiwa-v163.css", index)
         self.assertIn(".aiwa-insight-content .aiwa-paper-ai-heading .aiwa-sequence", css)
         self.assertIn("overflow: visible", css)
-        self.assertIn("env(safe-area-inset-bottom, 0px)", css)
+        # Маскот обязан считать низ от той же --bottom-clearance, что и таб-бар.
+        # Собственный env(safe-area-inset-bottom) поднимал его над баром на
+        # устройствах с home indicator: apple/material-правила бара перебивают
+        # базовый padding-bottom: env(...) шорткатом padding, то есть сам бар
+        # safe-area не учитывает.
+        self.assertIn("bottom: calc(var(--bottom-clearance, 21px) - 3.5px)", css)
+        self.assertIn("bottom: calc(var(--bottom-clearance, 16px) - 3.5px)", css)
+        self.assertNotIn("+ env(safe-area-inset-bottom", css)
 
     def test_food_and_training_use_telegram_photo_avatar(self):
         bundle = BUNDLE.read_text(encoding="utf-8")

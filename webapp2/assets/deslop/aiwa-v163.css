@@ -32,8 +32,13 @@
   min-width: 0;
 }
 
+/* Маскот центрируем по таб-бару. Сам бар стоит на bottom: var(--bottom-clearance)
+   и safe-area не учитывает: apple- и material-правила перебивают базовый
+   padding-bottom: env(safe-area-inset-bottom) шорткатом padding. Лишний терм
+   env() у маскота поднимал его над баром на устройствах с home indicator —
+   отсюда «иногда вылезает наверх». Смещение = (высота бара 65 − 72) / 2. */
 .aiwa-nav-mascot {
-  bottom: calc(var(--bottom-clearance, 18px) + env(safe-area-inset-bottom, 0px));
+  bottom: calc(var(--bottom-clearance, 21px) - 3.5px);
   width: 72px;
   height: 72px;
   overflow: visible !important;
@@ -42,6 +47,11 @@
   -webkit-mask: none !important;
   border-radius: 0;
   transform-origin: center;
+}
+
+/* У material-варианта бара свой отступ снизу. */
+body.material .aiwa-nav-mascot {
+  bottom: calc(var(--bottom-clearance, 16px) - 3.5px);
 }
 
 .aiwa-nav-mascot .aiwa-sequence {
