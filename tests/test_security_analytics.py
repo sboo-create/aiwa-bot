@@ -497,11 +497,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
         connection.close.assert_called_once_with()
 
     def test_food_vision_uses_only_its_dedicated_concurrency_gate(self):
-        # Модульный монолит: хендлеры разъезжаются по пакету aiwa/ —
-        # анализируем объединённый исходник.
         source = Path(bot.__file__).read_text(encoding="utf-8")
-        for extra in sorted(Path(bot.__file__).parent.glob("aiwa/*.py")):
-            source += "\n" + extra.read_text(encoding="utf-8")
         telegram_path = source.split(
             "async def _on_photo_bounded", 1
         )[1].split("async def handle_text", 1)[0]
