@@ -7285,6 +7285,11 @@ async def announce_cmd(update, context):
 
 # ---------- text ----------
 async def on_text(update, context):
+    # PTB отдаёт в этот же хендлер правку уже отправленного сообщения: там
+    # update.message = None, а update.edited_message заполнен. Правку не
+    # переобрабатываем — иначе один текст дважды попал бы в дневник.
+    if update.message is None:
+        return
     cid = update.effective_chat.id
     if cid in ANNOUNCE_WAIT:
         return await _announce_capture(update, context, cid)
@@ -7297,6 +7302,8 @@ async def on_text(update, context):
             "Я вижу сообщение, но сейчас не смогла собрать ответ. Попробуй ещё раз через минуту.")
 
 async def on_voice(update, context):
+    if update.message is None:   # правка сообщения: см. комментарий в on_text
+        return
     cid = update.effective_chat.id; txt = None; _sti = {}
     generation = _user_generation(cid)
     await context.bot.send_chat_action(cid, "typing")
@@ -7350,6 +7357,8 @@ def food_card(rec, added=True):
     return "\n".join(lines)
 
 async def on_photo(update, context):
+    if update.message is None:   # правка сообщения: см. комментарий в on_text
+        return
     cid = update.effective_chat.id
     if cid in ANNOUNCE_WAIT:
         return await _announce_capture(update, context, cid)
