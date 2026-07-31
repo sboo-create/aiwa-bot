@@ -11,3 +11,10 @@ AIWA_посты_и_трекинг.md
 analytics_spec.md
 training_screen_proposal.md
 Обновить GitHub.command
+
+# Фронт мини-аппа: сборка идёт в assets/deslop, готовые артефакты копируются
+# в webapp2/assets/deslop вручную.
+node_modules/
+assets/deslop/
+vendor/*/node_modules/
+vendor/deslop-web-ui/dist/
