@@ -80,7 +80,10 @@ if 'qt("/api/mode"' not in js:
         'j = async (A) => {\n'
         '    const R = await qt("/api/mode", { mode: A }).catch(() => null);\n'
         '    if (!R?.ok) return Ot(R?.text || "Не получилось сменить режим", { type: "error" });\n'
-        '    Ot(`Режим: ${(mj.find((U) => U.value === A) || mj[0]).label}`, { type: "success" }), vn("reloadAfterEdit"), e();\n'
+        '    Ot(`Режим: ${(mj.find((U) => U.value === A) || mj[0]).label}`, {\n'
+        '      type: "success",\n'
+        '      description: R.seeded_period ? "Дату месячных поставили на сегодня — поправь в календаре" : void 0\n'
+        '    }), vn("reloadAfterEdit"), e();\n'
         '  }'
     ), 1)
     done.append("смена режима")

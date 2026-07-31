@@ -79,6 +79,34 @@ class MaleWebappContractTests(unittest.TestCase):
         self.assertTrue(json.loads(response.text)["ok"])
         self.assertIsNone(bot.row(self.cid)["cycle_len"])
 
+    def test_leaving_male_mode_seeds_cycle_data_so_the_switch_is_not_a_dead_end(self):
+        # Мужской режим обнуляет last_period и cycle_len, а «Цикл» и
+        # «Беременность» их требуют — без подстановки выйти было нельзя.
+        for target in ("cycle", "preg"):
+            with self.subTest(target=target):
+                bot.upsert(self.cid, mode="male", last_period=None, cycle_len=None)
+                request = FakeJsonRequest({"mode": target})
+                with mock.patch.object(bot, "_verify_init", return_value=self.cid):
+                    response = asyncio.run(bot._api_mode(request))
+
+                payload = json.loads(response.text)
+                user = bot.row(self.cid)
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["seeded_period"], bot.dtoday().isoformat())
+                self.assertEqual(user["last_period"], bot.dtoday().isoformat())
+                self.assertEqual(user["cycle_len"], 28)
+                self.assertTrue(bot.is_onboarded(user))
+
+    def test_missing_period_still_blocks_the_switch_outside_male_mode(self):
+        bot.upsert(self.cid, mode="none", last_period=None, cycle_len=None)
+        request = FakeJsonRequest({"mode": "cycle"})
+        with mock.patch.object(bot, "_verify_init", return_value=self.cid):
+            response = asyncio.run(bot._api_mode(request))
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(json.loads(response.text)["error"], "need_period")
+        self.assertIsNone(bot.row(self.cid)["last_period"])
+
     def test_male_report_copy_never_mentions_cycle_or_gynecologist(self):
         user = bot.row(self.cid)
 
@@ -282,17 +310,17 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn('deslop-main-aiwa-v177.js', wrapper)
         self.assertIn('AiwaWebUiChart-aiwa-v177.js', bundle)
         self.assertIn('deslop-main-aiwa-v177.js', chart_bundle)
-        self.assertIn('main.js?v=r29', index)
+        self.assertIn('main.js?v=r30', index)
         self.assertIn(
-            'import "./deslop-main-aiwa-v177.js?v=r29";',
+            'import "./deslop-main-aiwa-v177.js?v=r30";',
             wrapper,
         )
         self.assertIn(
-            'import("./AiwaWebUiChart-aiwa-v177.js?v=r29")',
+            'import("./AiwaWebUiChart-aiwa-v177.js?v=r30")',
             bundle,
         )
         self.assertIn(
-            'from "./deslop-main-aiwa-v177.js?v=r29";',
+            'from "./deslop-main-aiwa-v177.js?v=r30";',
             chart_bundle,
         )
         self.assertIn("aiwaCacheTs", bundle)

@@ -11976,15 +11976,25 @@ async def _api_mode(request):
     m = body.get("mode")
     if m not in ("male", "cycle", "irregular", "meno", "none", "preg"):
         return _cors(web.json_response({"error": "bad_mode"}, status=400))
+    # Мужской режим обнуляет last_period и cycle_len, поэтому вернуться из него
+    # в «Цикл» или «Беременность» иначе нельзя. Костыль: подставляем сегодняшний
+    # день и стандартную длину цикла, клиент сообщает об этом пользователю,
+    # чтобы дату можно было поправить в календаре.
+    seeded_period = None
     if m in ("cycle", "preg") and not u.get("last_period"):
-        return _cors(web.json_response({"error": "need_period",
-            "text": "Сначала отметь дату последних месячных — без неё этот режим не включить."}, status=400))
+        if (u.get("mode") or "") == "male":
+            seeded_period = dtoday().isoformat()
+        else:
+            return _cors(web.json_response({"error": "need_period",
+                "text": "Сначала отметь дату последних месячных — без неё этот режим не включить."}, status=400))
+    kept_period = seeded_period or u.get("last_period")
+    kept_cycle_len = u.get("cycle_len") or (28 if seeded_period else None)
     upsert(
         cid,
         mode=m,
         state=None,
-        last_period=(None if m == "male" else u.get("last_period")),
-        cycle_len=(None if m == "male" else u.get("cycle_len")),
+        last_period=(None if m == "male" else kept_period),
+        cycle_len=(None if m == "male" else kept_cycle_len),
         period_end=(None if m == "male" else u.get("period_end")),
         period_len=(None if m == "male" else u.get("period_len")),
     )
@@ -11993,7 +12003,7 @@ async def _api_mode(request):
         try: schedule_daily(BOT_APP, cid, row(cid).get("send_time") or "08:00")
         except Exception as e: log.warning("reschedule: %s", e)
     ev(cid, "manual", meta="web_mode_" + m)
-    return _cors(web.json_response({"ok": True, "mode": m}))
+    return _cors(web.json_response({"ok": True, "mode": m, "seeded_period": seeded_period}))
 
 def _api_prefs_sync(cid, body):
     _evict_today_cache(cid)

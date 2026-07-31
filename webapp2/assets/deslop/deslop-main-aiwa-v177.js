@@ -19681,7 +19681,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r29").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r30").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -20541,7 +20541,10 @@ function Yh({ isOpen: a, onClose: e }) {
   }, j = async (A) => {
     const R = await qt("/api/mode", { mode: A }).catch(() => null);
     if (!R?.ok) return Ot(R?.text || "Не получилось сменить режим", { type: "error" });
-    Ot(`Режим: ${(mj.find((U) => U.value === A) || mj[0]).label}`, { type: "success" }), vn("reloadAfterEdit"), e();
+    Ot(`Режим: ${(mj.find((U) => U.value === A) || mj[0]).label}`, {
+      type: "success",
+      description: R.seeded_period ? "Дату месячных поставили на сегодня — поправь в календаре" : void 0
+    }), vn("reloadAfterEdit"), e();
   }, M = async () => {
     if (f?.link)
       try {
