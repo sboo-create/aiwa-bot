@@ -5914,7 +5914,8 @@ def _proactive_signals(cid, slot="eve"):
         if slot == "eve":
             try:
                 dp = diary_payload(cid); tot = dp.get("totals") or {}; tgt = dp.get("target") or {}
-                if tgt.get("protein") and (tot.get("protein") is not None) and tot["protein"] < 0.5 * tgt["protein"]:
+                # пустой дневник — не повод для пуша «нет белка»: нечего дополнять
+                if dp.get("meals") and tgt.get("protein") and (tot.get("protein") is not None) and tot["protein"] < 0.5 * tgt["protein"]:
                     out.append({"key": "low_protein", "score": 40, "cooldown": 3,
                                 "topic": "сегодня мало белка к вечеру — подскажи добавить белок к ужину",
                                 "data": "белок %s из %s г" % (round(tot.get("protein", 0)), round(tgt.get("protein", 0)))})
@@ -7984,25 +7985,31 @@ async def on_error(update, context):
             await context.bot.send_message(update.effective_chat.id,
                 "Упс, что-то пошло не так. Попробуй ещё раз.")
         await admin_alert(context.application, "handler_error",
-            f"⚠️ Ошибка обработчика: {type(err).__name__}\nПроверь Railway logs.")
+            f"⚠️ Ошибка обработчика: {type(err).__name__}\nЖурнал: journalctl -u aiwa на i167.")
     except Exception: pass
 
 async def admin_alert(app, key, text, cooldown=900):
-    if not AIWA_ADMIN:
+    # AIWA_ALERT_CHATS (список через запятую, поддерживает канал -100...)
+    # имеет приоритет над AIWA_ADMIN — операционные алерты идут в мониторинг.
+    raw = (os.environ.get("AIWA_ALERT_CHATS") or "").strip() or str(AIWA_ADMIN or "").strip()
+    if not raw:
         return
     now = time.time()
     if now - ALERT_LAST.get(key, 0) < cooldown:
         return
     ALERT_LAST[key] = now
-    chat_id = str(AIWA_ADMIN).strip()
-    try:
-        chat_id = int(chat_id)
-    except Exception:
-        pass
-    try:
-        await app.bot.send_message(chat_id, "🚨 AIWA alert\n\n" + text)
-    except Exception as e:
-        log.warning("admin_alert: %s", e)
+    for chat in raw.split(","):
+        chat = chat.strip()
+        if not chat:
+            continue
+        try:
+            chat_id = int(chat)
+        except Exception:
+            chat_id = chat
+        try:
+            await app.bot.send_message(chat_id, "🚨 AIWA alert\n\n" + text)
+        except Exception as e:
+            log.warning("admin_alert %s: %s", chat, e)
 
 async def load_logger(app):
     """Раз в минуту пишет в лог сводку нагрузки: вызовы модели, средняя латентность, очередь рассылки, число юзеров."""
@@ -8576,6 +8583,16 @@ def _api_data_sync(cid, body):
             "regularity": reg,
             "history": history,
         }
+        # Текущий период без введённого конца: отдаём оценочный конец, чтобы
+        # идущие дни (2-й, 3-й...) отмечались без ежедневного ввода — иначе
+        # главный экран показывает «до месячных ~N дней» во время месячных.
+        for p in out["periods"]:
+            if p["start"] == u.get("last_period") and not p.get("end"):
+                plen = int(u.get("period_len") or out["stats"].get("avg_period") or 5)
+                virt = min(dtoday(), date.fromisoformat(p["start"]) + timedelta(days=max(1, plen) - 1))
+                if virt >= date.fromisoformat(p["start"]):
+                    p["end"] = virt.isoformat()
+                    p["end_estimated"] = True
     elif out["mode"] == "preg" and u.get("last_period"):
         out["preg"] = C.preg_status(u["last_period"])
     return _cors(web.json_response(out))
