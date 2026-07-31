@@ -1,0 +1,7 @@
+[Unit]
+Description=AIWA production probe with Telegram alerting
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aiwa-alert
