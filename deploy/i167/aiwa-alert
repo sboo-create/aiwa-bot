@@ -12,6 +12,9 @@ HEALTH=http://127.0.0.1:9920/health
 UNIT=aiwa
 STATE_DIR=/var/lib/aiwa-alert
 STATE="$STATE_DIR/state"
+MAINT="$STATE_DIR/maintenance"
+# Сервер в UTC, продукт живёт по Москве — в сообщениях всегда МСК.
+now_msk() { TZ=Europe/Moscow date "+%H:%M %d.%m"; }
 TOKEN_FILE=/srv/aiwa/secrets/bot-token
 ENV_FILE=/srv/aiwa/config/app.env
 
@@ -40,6 +43,14 @@ if [ "${1:-}" = "test" ]; then
     exit 0
 fi
 
+# Плановый деплой ставит флаг: рестарт на несколько секунд — не авария.
+if [ -f "$MAINT" ]; then
+    if [ "$(( $(date +%s) - $(stat -c %Y "$MAINT") ))" -lt 300 ]; then
+        exit 0
+    fi
+    rm -f "$MAINT"
+fi
+
 FAILS=()
 
 systemctl is-active --quiet "$UNIT" || FAILS+=("юнит $UNIT не active")
@@ -65,18 +76,23 @@ if [ -n "$PREV_RESTARTS" ] && [ "$RESTARTS" -gt "${PREV_RESTARTS:-0}" ] 2>/dev/n
 fi
 
 PREV_STATUS=$(grep '^status=' "$STATE" 2>/dev/null | cut -d= -f2)
+PREV_FAILS=$(grep '^fails=' "$STATE" 2>/dev/null | cut -d= -f2)
+[ -n "$PREV_FAILS" ] || PREV_FAILS=0
 
 if [ ${#FAILS[@]} -gt 0 ]; then
-    NOW_STATUS=down
-    if [ "$PREV_STATUS" != "down" ]; then
-        MSG="🚨 AIWA DOWN: $(IFS='; '; echo "${FAILS[*]}") — $(date '+%H:%M %d.%m')"
+    # Одна неудачная проба может совпасть с рестартом; алертим со второй подряд.
+    FAIL_STREAK=$((PREV_FAILS + 1))
+    NOW_STATUS=$([ "$FAIL_STREAK" -ge 2 ] && echo down || echo flaky)
+    if [ "$NOW_STATUS" = "down" ] && [ "$PREV_STATUS" != "down" ]; then
+        MSG="🚨 AIWA DOWN: $(IFS='; '; echo "${FAILS[*]}") — $(now_msk)"
         tg_send "$MSG" || logger -t aiwa-alert "alert send failed: $MSG"
         logger -t aiwa-alert "$MSG"
     fi
 else
     NOW_STATUS=up
+    FAIL_STREAK=0
     if [ "$PREV_STATUS" = "down" ]; then
-        tg_send "✅ AIWA снова работает — $(date '+%H:%M %d.%m')" || true
+        tg_send "✅ AIWA снова работает — $(now_msk)" || true
         logger -t aiwa-alert "recovered"
     fi
     if [ -n "$RESTART_NOTE" ]; then
@@ -85,5 +101,5 @@ else
     fi
 fi
 
-printf 'status=%s\nrestarts=%s\n' "$NOW_STATUS" "$RESTARTS" > "$STATE"
+printf 'status=%s\nrestarts=%s\nfails=%s\n' "$NOW_STATUS" "$RESTARTS" "${FAIL_STREAK:-0}" > "$STATE"
 exit 0
