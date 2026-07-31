@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { TMAProvider, Page, Text, RegularButton, SectionList } from "../lib/tma";
 import { ScreenLoading } from "../components/ScreenLoading";
+import { ProfileAvatar } from "../components/ProfileAvatar";
 import { MacroCard } from "../components/MacroCard";
 import { CalorieGauge } from "../components/CalorieGauge";
 import { AiwaInsightCard } from "../components/AiwaInsightCard";
@@ -22,49 +23,40 @@ import { Week } from "../components/Week";
 const KEYS = ["foodSection", "diary"];
 
 // Placeholder thumbnail for recommendations until per-dish images ship.
-const RECOMMENDATION_IMAGE = "/assets/paper-food-placeholder.png";
+const RECOMMENDATION_IMAGE = "/assets/food/meal-placeholder.svg";
 
 // Сгенерированные 3d-иконки блюд. Манифест "название -> файл" пишет
 // scripts/gen_food_icons.py. Названия из дневника и меню свободные, поэтому
 // точное совпадение дополняем подбором по началам слов («куриная грудка» →
 // «Курица с рисом» не нужен, но «Омлет с зеленью» → «Омлет с овощами» да).
-const normDish = (value) => String(value || "").toLowerCase().replace(/ё/g, "е");
+const normDish = (value) => String(value || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
 const ICON_VERSION = "?v=2";
-const dishWords = (value) => normDish(value).split(/[^а-яa-z0-9]+/).filter((w) => w.length >= 3);
-const sameRoot = (a, b) => {
-  const len = Math.min(4, a.length, b.length);
-  return a.slice(0, len) === b.slice(0, len);
-};
-
 /**
- * Иконка по названию блюда. Скоринг двусторонний: считаем, какая ДОЛЯ слов
- * ключа совпала со словами запроса — «Суп куриный с лапшой» выбирает
- * «Куриный суп» (совпали оба слова ключа), а не «Курица с рисом» (одно из двух).
+ * Иконка блюда: только точное совпадение с манифестом (прямое или по
+ * нормализованному ключу). Нечёткий подбор по корням слов убран в v177 —
+ * он подставлял чужие картинки; вместо него серверные image_url и
+ * осмысленная заглушка (напиток/блюдо).
  */
 const dishImageFrom = (icons, name) => {
-  const n = normDish(name).trim();
+  const n = normDish(name);
   if (!icons || !n) return null;
   const exact = icons[String(name || "").trim()];
   if (exact) return exact + ICON_VERSION;
-  const queryWords = dishWords(name);
-  if (!queryWords.length) return null;
-  let best = null;
-  let bestMatched = 0;
-  let bestShare = 0;
   for (const [key, file] of Object.entries(icons)) {
-    const k = normDish(key);
-    if (k === n) return file + ICON_VERSION;
-    const keyWords = dishWords(key);
-    if (!keyWords.length) continue;
-    const matched = keyWords.filter((kw) => queryWords.some((qw) => sameRoot(kw, qw))).length;
-    const share = matched / keyWords.length;
-    if (matched > 0 && (share > bestShare || (share === bestShare && matched > bestMatched))) {
-      bestShare = share;
-      bestMatched = matched;
-      best = file;
-    }
+    if (normDish(key) === n) return file + ICON_VERSION;
   }
-  return bestShare >= 0.5 ? best + ICON_VERSION : null;
+  return null;
+};
+
+/** Заглушка по типу приёма: напиткам — стакан, остальному — общее блюдо. */
+const foodFallbackImage = (row) => {
+  const text = normDish([
+    row?.title,
+    ...(Array.isArray(row?.items) ? row.items.map((item) => item?.name) : []),
+  ].filter(Boolean).join(" "));
+  const drink = normDish(row?.fclass) === "напиток"
+    || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(text);
+  return drink ? "/assets/food/drink-cup.svg?v=1" : RECOMMENDATION_IMAGE;
 };
 
 const DAY_LABEL = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
@@ -98,21 +90,66 @@ export function FoodScreen({ mode, revision = 0 }) {
 
   // Меню генерится моделью и может приехать позже открытия экрана — пока его
   // нет, перечитываем секцию с бэкофом, чтобы блюда появились сами.
-  const menuMissing = Boolean(data.foodSection) && !(data.foodSection.menu?.meals || []).length;
+  // Ретраим только когда сервер сам сказал «секция обновляется» и вкладка на
+  // экране: пустое меню без флага перезапрашивать бессмысленно (прод v177).
+  const menuRefreshing = Boolean(data.foodSection?.refreshing);
   const menuRetry = useRef(0);
   useEffect(() => {
-    if (!menuMissing) { menuRetry.current = 0; return undefined; }
-    if (menuRetry.current >= 5) return undefined;
-    const delay = [1500, 3000, 5000, 9000, 15000][menuRetry.current];
+    if (!menuRefreshing) { menuRetry.current = 0; return undefined; }
+    if (menuRetry.current >= 3) return undefined;
+    const delay = Math.max(5000, Number(data.foodSection?.retry_after_ms || 8000))
+      + Math.floor(Math.random() * 2500);
     const timer = setTimeout(() => {
+      if (document.visibilityState !== "visible") return;
       menuRetry.current += 1;
       refresh("foodSection");
     }, delay);
     return () => clearTimeout(timer);
-  }, [menuMissing, data.foodSection]);
+  }, [menuRefreshing, data.foodSection]);
+
+  // Часть картинок блюд генерится фоном. Пока в выдаче есть «временные»
+  // (asset_state=missing или подстановка из каталога), раз в минуту спрашиваем
+  // лёгкую ручку с ревизией и перечитываем экран только когда она сменилась
+  // (порт прод-патча v177: раньше был тяжёлый поллинг всей секции).
+  const assetPoll = useRef({ revision: null, attempts: 0 });
+  const assetRows = [
+    ...(data.foodSection?.menu?.meals || []),
+    ...(data.diary?.meals || []),
+    ...Object.values(data.diary?.recent || {}).flatMap((day) => day?.meals || []),
+  ];
+  const assetRefreshNeeded = assetRows.some((row) => row?.asset_state === "missing"
+    || row?.image_source === "catalog_family" || row?.image_source === "catalog_canonical");
+  const payloadAssetRevision = Math.max(
+    Number(data.foodSection?.asset_revision || 0),
+    Number(data.diary?.asset_revision || 0),
+  );
+  useEffect(() => {
+    if (!assetRefreshNeeded) { assetPoll.current = { revision: null, attempts: 0 }; return undefined; }
+    if (assetPoll.current.revision === null) assetPoll.current.revision = payloadAssetRevision;
+    let alive = true;
+    let timer = null;
+    const tick = async () => {
+      if (!alive || assetPoll.current.attempts >= 30) return;
+      if (document.visibilityState === "visible") {
+        const result = await apiCall("/api/food-assets/revision", {}).catch(() => null);
+        const revision = Number(result?.revision);
+        if (Number.isFinite(revision)) {
+          const previous = assetPoll.current.revision;
+          assetPoll.current.revision = revision;
+          if (previous !== null && revision !== previous) await refresh("foodSection", "diary");
+        }
+        assetPoll.current.attempts += 1;
+      }
+      if (alive && assetPoll.current.attempts < 30) {
+        timer = setTimeout(tick, 60000 + Math.floor(Math.random() * 20000));
+      }
+    };
+    timer = setTimeout(tick, 15000 + Math.floor(Math.random() * 20000));
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [assetRefreshNeeded, payloadAssetRevision]);
 
   useEffect(() => {
-    fetch("/assets/food/manifest.json?v=2")
+    fetch("/assets/food/manifest.json?v=3")
       .then((r) => (r.ok ? r.json() : {}))
       .then((icons) => setFoodIcons(icons || {}))
       .catch(() => {});
@@ -253,7 +290,7 @@ export function FoodScreen({ mode, revision = 0 }) {
                 aria-label="Открыть профиль"
                 onClick={() => setProfileOpen(true)}
               >
-                {(aiwaHost?.name || "•").trim()[0]?.toUpperCase() || "•"}
+                <ProfileAvatar />
               </button>
             ) : null}
           </div>
@@ -299,7 +336,7 @@ export function FoodScreen({ mode, revision = 0 }) {
                 {recommended.map((item) => (
                   <PaperRow
                     key={item.value}
-                    image={item.meal.image || dishImageFrom(foodIcons, item.meal.dish) || RECOMMENDATION_IMAGE}
+                    image={item.meal.image_url || item.meal.image || dishImageFrom(foodIcons, item.meal.dish) || RECOMMENDATION_IMAGE}
                     title={item.meal.dish || "Рекомендация Айвы"}
                     description={[item.label, item.meal.kcal, item.meal.note].filter(Boolean).join(" · ")}
                     onClick={() => setRecipeItem(item)}
@@ -321,10 +358,10 @@ export function FoodScreen({ mode, revision = 0 }) {
               {shownMeals.length ? shownMeals.map((meal) => (
                 <PaperRow
                   key={meal.id}
-                  image={dishImageFrom(foodIcons, meal.title) || MEAL_IMAGE}
+                  image={meal.image_url || dishImageFrom(foodIcons, meal.title) || foodFallbackImage(meal) || MEAL_IMAGE}
                   title={meal.title}
                   description={`${fmtKcal(meal.kcal)} · Б${Math.round(meal.protein || 0)} · Ж${Math.round(meal.fat || 0)} · У${Math.round(meal.carbs || 0)}`}
-                  onClick={viewingPast ? undefined : () => setPanel("diary")}
+                  onClick={() => setPanel("diary")}
                 />
               )) : (uploading || (viewingPast && !historyDiary)) ? null : (
                 <PaperRow
@@ -384,7 +421,8 @@ export function FoodScreen({ mode, revision = 0 }) {
           <FoodDiaryPanel
             isOpen={panel === "diary"}
             onClose={() => setPanel("")}
-            diary={diary}
+            diary={viewingPast ? (historyDiary || { meals: [], totals: {}, target }) : diary}
+            canAdd={!viewingPast}
             onAdd={openAdd}
             onEdit={(meal) => {
               setEditingMeal(meal);

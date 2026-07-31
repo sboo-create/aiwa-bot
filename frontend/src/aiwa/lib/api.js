@@ -118,3 +118,22 @@ export const actionProps = (label, onClick) => ({
   role: "button",
   tabIndex: 0,
 });
+
+
+/* Подтверждение доставки выписки (порт прод-патча v177): тост + системный
+   попап Telegram с возвратом в чат, где уже лежит PDF. */
+export function aiwaConfirmReportDelivered() {
+  const webApp = window.Telegram?.WebApp;
+  showToast("Выписка готова и отправлена в чат бота.", { type: "success" });
+  if (typeof webApp?.showPopup === "function") {
+    try {
+      webApp.showPopup({
+        title: "Выписка готова",
+        message: "PDF уже отправлен в чат. Нажми «ОК», чтобы вернуться к нему.",
+        buttons: [{ id: "ok", type: "ok" }],
+      }, () => webApp.close?.());
+      return;
+    } catch {}
+  }
+  setTimeout(() => { try { webApp?.close?.(); } catch {} }, 2200);
+}

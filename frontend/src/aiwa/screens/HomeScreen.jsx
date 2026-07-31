@@ -12,6 +12,7 @@ import { HistorySection } from "../sections/HistorySection";
 import { SymptomHistorySection } from "../sections/SymptomHistorySection";
 import { PregnancyProgress } from "../sections/PregnancyProgress";
 import { HomePanels } from "../panels/HomePanels";
+import { ProfileAvatar } from "../components/ProfileAvatar";
 import { ProfilePanel } from "../panels/ProfilePanel";
 
 /**
@@ -24,27 +25,6 @@ import { ProfilePanel } from "../panels/ProfilePanel";
  * с первой буквой имени — дизайнерская фотография-заглушка на проде выглядела
  * как чужой профиль.
  */
-function ProfileAvatar() {
-  const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
-  const photo = tgUser?.photo_url;
-  const data = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
-  const name = (data?.name || tgUser?.first_name || "").trim();
-  // Оранжевый круг с инициалом рисуется всегда; фото ложится поверх и просто
-  // исчезает, если клиент его не отдал или загрузка упала.
-  return (
-    <span className="aiwa-avatar-initial" aria-hidden="true">
-      {(name[0] || "•").toUpperCase()}
-      {photo ? (
-        <img
-          className="aiwa-avatar-photo"
-          src={photo}
-          alt=""
-          onError={(event) => { event.currentTarget.style.display = "none"; }}
-        />
-      ) : null}
-    </span>
-  );
-}
 
 export function HomeScreen(props) {
   return (

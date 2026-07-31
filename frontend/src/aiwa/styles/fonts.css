@@ -1,0 +1,50 @@
+/* Шрифты SB Sans.
+
+   Vendor-пакет @deslop/tma вшивает начертания как base64 OTF прямо в CSS —
+   это +540 КБ в каждом ответе и OTF вместо woff2. В проде это правили руками
+   в собранном main.css (v163→v177); здесь то же самое сделано в исходниках:
+   base64-блоки из vendor удалены, а начертания подключаются файлами из
+   /assets/deslop/fonts (woff2, font-display: swap). */
+
+@font-face {
+  font-family: "SB Sans Interface";
+  src: url(fonts/sb-sans-interface-400.woff2) format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "SB Sans Interface";
+  src: url(fonts/sb-sans-interface-600.woff2) format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "SB Sans Interface";
+  src: url(fonts/sb-sans-interface-700.woff2) format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "SB Sans Interface Caps";
+  src: url(fonts/sb-sans-interface-caps-400.woff2) format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "SB Sans Text Mono";
+  src: url(fonts/sb-sans-text-mono-400.woff2) format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "SB Sans Text Mono";
+  src: url(fonts/sb-sans-text-mono-700.woff2) format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}

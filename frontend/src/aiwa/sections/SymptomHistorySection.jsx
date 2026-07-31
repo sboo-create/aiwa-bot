@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { RegularButton, SectionList } from "../lib/tma";
 import { AiwaCell } from "../components/AiwaCell";
 import { JOURNAL_SYMPTOM_GROUPS } from "../lib/constants";
-import { apiCall, actionProps, showToast } from "../lib/api";
+import { apiCall, actionProps, showToast, aiwaConfirmReportDelivered } from "../lib/api";
 
 const SYMPTOM_LABEL = Object.fromEntries(
   JOURNAL_SYMPTOM_GROUPS.flatMap(([, options]) => options),
@@ -53,7 +53,7 @@ export function SymptomHistorySection() {
     setBusy(true);
     try {
       const result = await apiCall("/api/report", { period: "all" }).catch(() => null);
-      if (result?.ok) showToast("Выписка отправлена в чат бота", { type: "success" });
+      if (result?.ok && result?.delivered) aiwaConfirmReportDelivered();
       else showToast(result?.text || "Выписка временно недоступна", { type: "error" });
     } finally {
       setBusy(false);

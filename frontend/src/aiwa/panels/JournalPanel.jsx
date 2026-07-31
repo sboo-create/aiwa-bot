@@ -8,6 +8,7 @@ import { JournalSymptomGroup } from "../components/JournalSymptomGroup";
 import { JournalCustomSymptom } from "../components/JournalCustomSymptom";
 import { JOURNAL_ENERGY_OPTIONS, JOURNAL_MOOD_OPTIONS, JOURNAL_SYMPTOM_GROUPS } from "../lib/constants";
 import { actionProps, read, showToast } from "../lib/api";
+import { aiwaTodayIso } from "../lib/dates";
 
 /**
  * Today's journal. Every control edits a local draft; nothing reaches the host
@@ -17,7 +18,7 @@ import { actionProps, read, showToast } from "../lib/api";
 export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode, dayIso }) {
   // Прошлый день, выбранный в полосе на главной: пишем через Day-функции
   // склейки с явной датой (инцидент 31.07: всё падало в «сегодня»).
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = aiwaTodayIso();
   const isPastDay = Boolean(dayIso && dayIso !== todayIso);
   const [symptoms, setSymptoms] = useState(checkin.symptoms || []);
   const [energy, setEnergy] = useState(checkin.energy || 0);

@@ -7,7 +7,9 @@ import { CrossIcon } from "../lib/icons";
 import { actionProps } from "../lib/api";
 
 /** List body pure TMA; navigation via native Telegram header. */
-export function FoodDiaryPanel({ isOpen, onClose, diary, onAdd, onEdit, onDelete, onReco }) {
+// canAdd=false для прошедшего дня: записи показываем, но добавлять в чужой
+// день нельзя (порт прод-патча v177).
+export function FoodDiaryPanel({ isOpen, onClose, diary, onAdd, onEdit, onDelete, onReco, canAdd = true }) {
   const meals = diary?.meals || [];
   const totals = diary?.totals || {};
   const target = diary?.target || {};
@@ -29,11 +31,15 @@ export function FoodDiaryPanel({ isOpen, onClose, diary, onAdd, onEdit, onDelete
           const rows = meals.filter((meal) => (meal.slot || "snack") === slot.value);
           return (
             <SectionList.Item header={slot.label} key={slot.value}>
-              {!rows.length ? (
+              {!rows.length ? (canAdd ? (
                 <AiwaCell as="button" type="button" onClick={onAdd} end={<AiwaCell.Part type="Chevron" />}>
                   <AiwaCell.Text type="Accent" title="Добавить" />
                 </AiwaCell>
-              ) : rows.map((meal) => (
+              ) : (
+                <AiwaCell tappable={false}>
+                  <AiwaCell.Text title="Нет записей" />
+                </AiwaCell>
+              )) : rows.map((meal) => (
                 <PaperRow
                   key={meal.id}
                   title={meal.title}
@@ -62,7 +68,7 @@ export function FoodDiaryPanel({ isOpen, onClose, diary, onAdd, onEdit, onDelete
         <SectionList.Item>
           <AiwaCell tappable={false}>
             <div className="aiwa-cell-actions">
-              <RegularButton variant="filled" label="Добавить приём" isFill {...actionProps("Добавить приём", onAdd)} />
+              {canAdd ? <RegularButton variant="filled" label="Добавить приём" isFill {...actionProps("Добавить приём", onAdd)} /> : null}
               <RegularButton variant="filled" label="Совет по дневнику" isFill {...actionProps("Совет по дневнику", onReco)} />
             </div>
           </AiwaCell>

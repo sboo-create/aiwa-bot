@@ -16,6 +16,7 @@ export function ChatScreen({ initialMessages = [] }) {
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   const recorderRef = React.useRef(null);
+  const maleMode = (typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData)?.mode === "male";
   const endRef = React.useRef(null);
 
   useEffect(() => {
@@ -23,7 +24,9 @@ export function ChatScreen({ initialMessages = [] }) {
       setMessages([{
         id: "hello",
         role: "assistant",
-        text: "Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.",
+        text: maleMode
+        ? "Привет! Спроси меня о питании, тренировках или самочувствии. Я отвечу с учётом твоих данных."
+        : "Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.",
         suggestions: ["Можно ли тренироваться?", "Что съесть сегодня?", "Как моё самочувствие?"],
       }]);
     }
