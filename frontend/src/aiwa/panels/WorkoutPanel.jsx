@@ -5,6 +5,7 @@ import { Field } from "../components/Field";
 import { ChoicePills } from "../components/ChoicePills";
 import { WORKOUT_TYPES, WORKOUT_EXERCISES, WORKOUT_GROUPS } from "../lib/constants";
 import { apiCall, showToast, trackFlow, actionProps } from "../lib/api";
+import { aiwaTodayIso } from "../lib/dates";
 
 export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteTypes }) {
   // Собственные активности пользовательницы (Сквош и т.п.) — отдельные
@@ -14,7 +15,7 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteType
     ...(favoriteTypes || []).filter((t) => !WORKOUT_TYPES.includes(t)),
     "Своё",
   ];
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = aiwaTodayIso();
   const [date, setDate] = useState(todayIso);
   const [type, setType] = useState("Силовая");
   const [duration, setDuration] = useState("45 мин");
@@ -36,7 +37,7 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteType
     trackFlow("workout");
     const hinted = suggested?.name || "";
     const fromPlan = (suggested?.exercises || []).filter((e) => e?.name);
-    const nextType = /ход|прогул/i.test(hinted) ? "Ходьба" : (/йог|мобил|релиз|растяж/i.test(hinted) ? "Йога" : (/кардио|бег|вело/i.test(hinted) ? "Кардио" : (/плав/i.test(hinted) ? "Плавание" : "Силовая")));
+    const nextType = /ход|прогул/i.test(hinted) ? "Ходьба" : (/пилатес/i.test(hinted) ? "Пилатес" : (/йог|мобил|релиз|растяж/i.test(hinted) ? "Йога" : (/кардио|бег|вело/i.test(hinted) ? "Кардио" : (/плав/i.test(hinted) ? "Плавание" : "Силовая"))));
     setType(nextType);
     if (fromPlan.length) {
       // Вариант от Айвы с конкретными упражнениями: отмечаем их и переносим

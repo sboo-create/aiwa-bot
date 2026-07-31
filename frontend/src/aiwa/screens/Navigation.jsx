@@ -14,10 +14,9 @@ const TABS = [
 ];
 
 export function Navigation({ active }) {
-  // Мужской режим: пока только питание и нагрузка — без главной с циклом и чек-инами.
-  const data = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
-  const male = data?.mode === "male";
-  const tabs = male ? TABS.filter((tab) => tab.id !== "today") : TABS;
+  // Главная доступна во всех режимах, включая мужской: там свой контент без
+  // цикла (порт прод-патча v177 — раньше таб скрывался и мужчины теряли чек-ин).
+  const tabs = TABS;
   const selected = active === "stats" ? "today" : active;
   const defaultIndex = Math.max(0, tabs.findIndex((tab) => tab.id === selected));
 

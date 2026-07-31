@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { TMAProvider, Page, Text, RegularButton, SectionList } from "../lib/tma";
 import { ScreenLoading } from "../components/ScreenLoading";
+import { ProfileAvatar } from "../components/ProfileAvatar";
 import { AiwaInsightCard } from "../components/AiwaInsightCard";
 import { AiwaCell } from "../components/AiwaCell";
 import { PaperRow } from "../components/PaperRow";
@@ -10,6 +11,7 @@ import { WorkoutVariantsPanel } from "../panels/WorkoutVariantsPanel";
 import { WorkoutHistoryPanel } from "../panels/WorkoutHistoryPanel";
 import { TrainingProfilePanel } from "../panels/TrainingProfilePanel";
 import { actionProps, apiCall, call, openBotChat } from "../lib/api";
+import { aiwaTodayIso } from "../lib/dates";
 import { useScreenData } from "../lib/screenData";
 import { ProfilePanel } from "../panels/ProfilePanel";
 import { historyStrip } from "../lib/historyStrip";
@@ -44,7 +46,7 @@ const TRAIN_SYNONYMS = [
   ["силов", "Силовая"], ["ходь", "Ходьба"], ["прогул", "Прогулка"], ["шаг", "Ходьба"],
   ["бег", "Бег"], ["кардио", "Кардио"], ["велос", "Велотренажёр"], ["велотрен", "Велотренажёр"],
   ["эллипс", "Эллипс"], ["греб", "Гребля"], ["скакал", "Скакалка"],
-  ["йог", "Йога"], ["растяж", "Растяжка"], ["стретч", "Растяжка"], ["мобил", "Растяжка"], ["пилатес", "Йога"],
+  ["йог", "Йога"], ["растяж", "Растяжка"], ["стретч", "Растяжка"], ["мобил", "Растяжка"], ["пилатес", "Пилатес"],
   ["плава", "Плавание"], ["бассейн", "Плавание"], ["отдых", "Отдых"], ["восстанов", "Отдых"],
 ];
 const trainIcon = (icons, ...keys) => {
@@ -81,7 +83,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
   const [dayIso, setDayIso] = useState("");
   const [dayWorkouts, setDayWorkouts] = useState(null);
   useEffect(() => {
-    fetch("/assets/train/manifest.json?v=1")
+    fetch("/assets/train/manifest.json?v=2")
       .then((r) => (r.ok ? r.json() : {}))
       .then((icons) => setTrainIcons(icons || {}))
       .catch(() => {});
@@ -104,7 +106,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
     setSuggested(option);
     setPanel("workout");
   };
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = aiwaTodayIso();
   const viewingPast = Boolean(dayIso && dayIso !== todayIso);
   const pickDay = async (day) => {
     const iso = typeof day === "string" ? day : day?.iso || "";
@@ -136,7 +138,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
                 aria-label="Открыть профиль"
                 onClick={() => setProfileOpen(true)}
               >
-                {(aiwaHost?.name || "•").trim()[0]?.toUpperCase() || "•"}
+                <ProfileAvatar />
               </button>
             ) : null}
           </div>

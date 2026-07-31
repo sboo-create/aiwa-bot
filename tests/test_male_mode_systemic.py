@@ -14,6 +14,20 @@ os.environ.setdefault("AIWA_ANALYTICS_SALT", "test-analytics-salt")
 
 import aiwa_bot as bot
 
+def _deslop_bundle(directory):
+    """Имя чанка версионируется при сборке — резолвим по маске, не по строке."""
+    matches = sorted(directory.glob("deslop-main-*.js"))
+    assert len(matches) == 1, f"ожидался один deslop-main-*.js: {matches}"
+    return matches[0]
+
+
+def _deslop_chart(directory):
+    matches = sorted(directory.glob("AiwaWebUiChart-*.js"))
+    assert len(matches) == 1, f"ожидался один AiwaWebUiChart-*.js: {matches}"
+    return matches[0]
+
+
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN = ("цикл", "фоллик", "лютеин", "овуляц", "месячн", "менструац", "пмс", "гинеколог")
@@ -354,7 +368,7 @@ class MaleModeSystemicTests(unittest.TestCase):
             self.assertIn('"male"', source[source.find("var modeOpts"):source.find("var modeOpts") + 180])
 
         bundle = (
-            ROOT / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
+            _deslop_bundle(ROOT / "webapp2/assets/deslop")
         ).read_text(encoding="utf-8")
         self.assertNotIn('label: "Что съела?"', bundle)
         self.assertIn('label: "Что было в приёме пищи?"', bundle)

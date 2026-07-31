@@ -6,7 +6,7 @@ import { AiwaCell } from "../components/AiwaCell";
 import { Field } from "../components/Field";
 import { ChoicePills } from "../components/ChoicePills";
 import { MODE_OPTIONS } from "../lib/constants";
-import { call, read, apiCall, showToast, actionProps } from "../lib/api";
+import { call, read, apiCall, showToast, actionProps, aiwaConfirmReportDelivered } from "../lib/api";
 
 export function ProfilePanel({ isOpen, onClose }) {
   const [view, setView] = useState("main");
@@ -14,6 +14,7 @@ export function ProfilePanel({ isOpen, onClose }) {
   const [partner, setPartner] = useState(null);
   const [reportPeriod, setReportPeriod] = useState("3");
   const [form, setForm] = useState({});
+  const [reportBusy, setReportBusy] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -29,6 +30,7 @@ export function ProfilePanel({ isOpen, onClose }) {
       diet_note: next.profile?.diet_note || next.diet_note || "",
       kcal_goal: String(next.profile?.kcal_goal || next.kcal_goal || ""),
       send_time: next.send_time || "08:00",
+      daily_summary_enabled: next.daily_summary_enabled !== false,
       proactive_enabled: next.proactive_enabled !== false,
     });
   }, [isOpen]);
@@ -43,7 +45,7 @@ export function ProfilePanel({ isOpen, onClose }) {
       height: form.height,
       weight: form.weight,
       age: form.age,
-      cycle_len: form.cycle_len,
+      ...(data.mode === "cycle" ? { cycle_len: form.cycle_len } : {}),
     }).catch(() => null);
     const prefResult = await apiCall("/api/prefs", {
       diet_note: form.diet_note,
@@ -57,11 +59,15 @@ export function ProfilePanel({ isOpen, onClose }) {
     } else showToast(profileResult?.text || "Проверь рост, вес, возраст и время", { type: "error" });
   };
   const requestReport = async () => {
-    const result = await apiCall("/api/report", { period: reportPeriod }).catch(() => null);
-    if (result?.ok) {
-      showToast("Выписка отправлена в чат бота", { type: "success" });
-      setView("main");
-    } else showToast(result?.text || "Выписка временно недоступна", { type: "error" });
+    if (reportBusy) return;
+    setReportBusy(true);
+    try {
+      const result = await apiCall("/api/report", { period: reportPeriod }).catch(() => null);
+      if (result?.ok && result?.delivered) aiwaConfirmReportDelivered();
+      else showToast(result?.text || "Выписка временно недоступна", { type: "error" });
+    } finally {
+      setReportBusy(false);
+    }
   };
   const setProactive = async (enabled) => {
     const previous = form.proactive_enabled !== false;
@@ -69,6 +75,15 @@ export function ProfilePanel({ isOpen, onClose }) {
     const result = await apiCall("/api/proactive", { enabled }).catch(() => null);
     if (!result?.ok) {
       setForm((current) => ({ ...current, proactive_enabled: previous }));
+      showToast("Не получилось изменить настройку", { type: "error" });
+    }
+  };
+  const setDailySummary = async (enabled) => {
+    const previous = form.daily_summary_enabled !== false;
+    setForm((current) => ({ ...current, daily_summary_enabled: enabled }));
+    const result = await apiCall("/api/daily-summary", { enabled }).catch(() => null);
+    if (!result?.ok) {
+      setForm((current) => ({ ...current, daily_summary_enabled: previous }));
       showToast("Не получилось изменить настройку", { type: "error" });
     }
   };
@@ -125,10 +140,10 @@ export function ProfilePanel({ isOpen, onClose }) {
               )}
               <SectionList className="aiwa-tma-blocks">
                 <SectionList.Item>
-                  {data.mode === "male" ? null : <PaperRow title="Выписка для врача" description="PDF в чат бота" onClick={() => setView("report")} />}
+                  <PaperRow title={data.mode === "male" ? "Выписка по самочувствию" : "Выписка для врача"} description="PDF в чат бота" onClick={() => setView("report")} />
                   <PaperRow title="Предпочтения по питанию" description="ограничения и цель калорий" onClick={() => setView("data")} />
-                  <PaperRow title="Мои данные" description="рост · вес · возраст · цикл" onClick={() => setView("data")} />
-                  <PaperRow title="Утренняя сводка" description={`${form.send_time || "08:00"} · МСК`} onClick={() => setView("summary")} />
+                  <PaperRow title="Мои данные" description={data.mode === "male" ? "рост · вес · возраст" : "рост · вес · возраст · цикл"} onClick={() => setView("data")} />
+                  <PaperRow title="Утренняя сводка" description={form.daily_summary_enabled === false ? "выключена" : `${form.send_time || "08:00"} · МСК`} onClick={() => setView("summary")} />
                   <AiwaCell.Switch
                     value={form.proactive_enabled !== false}
                     onChange={setProactive}
@@ -151,7 +166,7 @@ export function ProfilePanel({ isOpen, onClose }) {
                 <Field label="Рост, см" value={form.height || ""} onChange={(value) => setForm((current) => ({ ...current, height: value }))} inputMode="decimal" />
                 <Field label="Вес, кг" value={form.weight || ""} onChange={(value) => setForm((current) => ({ ...current, weight: value }))} inputMode="decimal" />
                 <Field label="Возраст" value={form.age || ""} onChange={(value) => setForm((current) => ({ ...current, age: value }))} inputMode="numeric" />
-                <Field label="Длина цикла" value={form.cycle_len || ""} onChange={(value) => setForm((current) => ({ ...current, cycle_len: value }))} inputMode="numeric" />
+                {data.mode === "cycle" ? <Field label="Длина цикла" value={form.cycle_len || ""} onChange={(value) => setForm((current) => ({ ...current, cycle_len: value }))} inputMode="numeric" /> : null}
               </div>
               <Text variant="title3" weight="semibold">Питание</Text>
               <Field
@@ -170,6 +185,9 @@ export function ProfilePanel({ isOpen, onClose }) {
             <div className="aiwa-form-stack">
               <Text variant="title3" weight="semibold">Утренняя сводка</Text>
               <Text variant="body" weight="regular">Каждое утро Айва присылает сводку дня в чат — выбери удобное время (МСК).</Text>
+              <AiwaCell.Switch value={form.daily_summary_enabled !== false} onChange={setDailySummary}>
+                <AiwaCell.Text title="Присылать утром" description={form.daily_summary_enabled === false ? "выключено" : "включено"} />
+              </AiwaCell.Switch>
               <Field label="Время утренней сводки" type="time" value={form.send_time || "08:00"} onChange={(value) => setForm((current) => ({ ...current, send_time: value }))} />
               <RegularButton variant="filled" label="Сохранить" isFill {...actionProps("Сохранить время сводки", saveData)} />
             </div>
@@ -177,7 +195,7 @@ export function ProfilePanel({ isOpen, onClose }) {
 
           {view === "report" ? (
             <div className="aiwa-form-stack">
-              <Text variant="body" weight="regular">Циклы, динамика и дневник симптомов придут PDF-файлом в чат бота.</Text>
+              <Text variant="body" weight="regular">{data.mode === "male" ? "Динамика энергии и дневник самочувствия придут PDF-файлом в чат бота." : "Циклы, динамика и дневник симптомов придут PDF-файлом в чат бота."}</Text>
               <ChoicePills
                 options={[
                   { value: "3", label: "3 месяца" },
@@ -187,7 +205,7 @@ export function ProfilePanel({ isOpen, onClose }) {
                 value={reportPeriod}
                 onChange={setReportPeriod}
               />
-              <RegularButton variant="filled" label="Собрать выписку" isFill {...actionProps("Собрать выписку", requestReport)} />
+              <RegularButton variant="filled" label={reportBusy ? "Собираю…" : "Собрать выписку"} isFill disabled={reportBusy} {...actionProps("Собрать выписку", requestReport)} />
             </div>
           ) : null}
 

@@ -19,6 +19,7 @@ const REQUESTS = {
 
 const cache = new Map();
 const inflight = new Map();
+const cacheTs = new Map();
 
 const snapshot = (keys) => Object.fromEntries(keys.map((key) => [key, cache.get(key) ?? null]));
 
@@ -26,16 +27,20 @@ const snapshot = (keys) => Object.fromEntries(keys.map((key) => [key, cache.get(
  * Cache-first: `/api/section` за кадром ходит в модель, поэтому лишний раз его
  * не дёргаем. `force` — для перезагрузки после правок профиля или дневника.
  */
-export const fetchScreenData = (key, { force = false } = {}) => {
+export const fetchScreenData = (key, { force = false, maxAgeMs = 1500 } = {}) => {
   if (!force) {
-    if (cache.has(key)) return Promise.resolve(cache.get(key));
     const pending = inflight.get(key);
     if (pending) return pending;
+    // Кэш-хит только для свежего ответа: заход на таб перечитывает данные,
+    // но inflight выше защищает от дублей (порт прод-патча v177).
+    if (cache.has(key) && Date.now() - (cacheTs.get(key) || 0) <= maxAgeMs) {
+      return Promise.resolve(cache.get(key));
+    }
   }
   const request = REQUESTS[key]()
     .catch(() => null)
     .then((data) => {
-      if (data) cache.set(key, data);
+      if (data) { cache.set(key, data); cacheTs.set(key, Date.now()); }
       // Параллельный force мог уже занять слот — чужой запрос не трогаем.
       if (inflight.get(key) === request) inflight.delete(key);
       return cache.get(key) ?? null;
@@ -67,6 +72,7 @@ export function useScreenData(keys, deps) {
   // Ответ мутирующей ручки уже содержит новое состояние — кладём его без запроса.
   const patch = useCallback((key, value) => {
     cache.set(key, value);
+    cacheTs.set(key, Date.now());
     setValues(snapshot(keys));
   }, [keys]);
 

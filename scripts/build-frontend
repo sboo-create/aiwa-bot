@@ -1,12 +1,36 @@
 #!/usr/bin/env bash
 # Сборка фронта Mini App из исходников и установка артефакта в webapp2.
-# Требует bun (или npm). Артефакт: webapp2/assets/deslop/.
+#
+#   AIWA_UI_VERSION  версия в именах чанков (deslop-main-aiwa-vNNN.js)
+#   AIWA_UI_REV      cache-ревизия в ?v= (должна совпадать с index.html)
+#
+# Легаси-файлы webapp2/assets/deslop (fonts/, aiwa-v163.css) не собираются,
+# но раздаются и нужны index.html — их сохраняем.
 set -euo pipefail
 cd "$(dirname "$0")/../frontend"
+REV="${AIWA_UI_REV:-r26}"
 RUNNER=$(command -v bun || command -v npm)
 "$RUNNER" install
 "$RUNNER" run build:deslop
-rm -rf ../webapp2/assets/deslop
-cp -R assets/deslop ../webapp2/assets/deslop
-echo "OK: webapp2/assets/deslop обновлён:"
-shasum -a 256 ../webapp2/assets/deslop/deslop-main-*.js
+
+# Иммутабельные чанки требуют явной cache-ревизии в импортах: браузер
+# Telegram агрессивно кэширует модули по URL.
+python3 - "$REV" <<'PY'
+import pathlib, re, sys
+rev = sys.argv[1]
+out = pathlib.Path("assets/deslop")
+for path in out.glob("*.js"):
+    text = path.read_text(encoding="utf-8")
+    fixed = re.sub(r'(from\s*|import\s*\(?\s*)"(\./[A-Za-z0-9._-]+\.js)"',
+                   lambda m: f'{m.group(1)}"{m.group(2)}?v={rev}"', text)
+    if fixed != text:
+        path.write_text(fixed, encoding="utf-8")
+PY
+
+DEST=../webapp2/assets/deslop
+rm -f "$DEST"/deslop-main-*.js "$DEST"/AiwaWebUiChart-*.js
+cp -R assets/deslop/. "$DEST"/
+
+echo "OK: $DEST обновлён (cache rev $REV)"
+ls -1 "$DEST" | sed 's/^/  /'
+echo "Проверь, что ?v=$REV стоит у main.js/main.css в webapp2/index.html"

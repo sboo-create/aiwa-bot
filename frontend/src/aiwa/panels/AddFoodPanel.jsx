@@ -80,7 +80,7 @@ export function AddFoodPanel({ isOpen, onClose, onSaved, editingMeal = null }) {
               {method === "text" ? (
                 <div className="aiwa-form-stack">
                   <Field
-                    label="Что съела?"
+                    label="Что было в приёме пищи?"
                     value={textValue}
                     onChange={setTextValue}
                     placeholder="Например: 200 г творога и банан"

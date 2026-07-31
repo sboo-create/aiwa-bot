@@ -3,6 +3,9 @@ import react from "@vitejs/plugin-react";
 import svgr from "vite-plugin-svgr";
 import path from "node:path";
 
+// Версия UI в именах чанков; поднимается при выкате нового фронта.
+const UI_VERSION = process.env.AIWA_UI_VERSION || "aiwa-v178";
+
 export default defineConfig({
   plugins: [react(), svgr()],
   resolve: {
@@ -21,6 +24,14 @@ export default defineConfig({
       formats: ["es"],
       fileName: "main",
       cssFileName: "main",
+    },
+    rollupOptions: {
+      output: {
+        // Стабильные имена вида deslop-main-aiwa-vNNN.js: так делали руками в
+        // проде (v163→v177), сохраняем — по имени видно версию UI, а кэш
+        // Telegram обновляется сменой версии, а не случайного хеша.
+        chunkFileNames: `[name]-${UI_VERSION}.js`,
+      },
     },
   },
 });
