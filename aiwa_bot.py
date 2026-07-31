@@ -11795,7 +11795,8 @@ async def _api_train(request):
     wo = max(-52, min(0, wo))
     tod = workouts_of(cid)
     return _cors(web.json_response({"ok": True, "profile": train_profile_get(cid), "week": train_week(cid, wo),
-        "today": tod, "last_review": (tod[-1]["review"] if tod else "")}))
+        "today": tod, "last_review": (tod[-1]["review"] if tod else ""),
+        "favorite_types": [t for t, _ in favorite_activities(cid)]}))
 
 async def _api_workout(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))

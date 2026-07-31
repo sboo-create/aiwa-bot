@@ -6,7 +6,14 @@ import { ChoicePills } from "../components/ChoicePills";
 import { WORKOUT_TYPES, WORKOUT_EXERCISES, WORKOUT_GROUPS } from "../lib/constants";
 import { apiCall, showToast, trackFlow, actionProps } from "../lib/api";
 
-export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
+export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteTypes }) {
+  // Собственные активности пользовательницы (Сквош и т.п.) — отдельные
+  // пилюли перед «Своё»; список отдаёт сервер по последним 60 дням.
+  const typeOptions = [
+    ...WORKOUT_TYPES.filter((t) => t !== "Своё"),
+    ...(favoriteTypes || []).filter((t) => !WORKOUT_TYPES.includes(t)),
+    "Своё",
+  ];
   const todayIso = new Date().toISOString().slice(0, 10);
   const [date, setDate] = useState(todayIso);
   const [type, setType] = useState("Силовая");
@@ -17,6 +24,7 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
   // показываются для силовой, отправляются только заполненные значения.
   const [details, setDetails] = useState({});
   const [custom, setCustom] = useState("");
+  const [customType, setCustomType] = useState("");
   const [busy, setBusy] = useState(false);
   // Раскрытая группа мышц в силовой; своя группа у каждого выбранного упражнения
   // уезжает на бек в item.group — так разбор от Айвы знает, что качалось.
@@ -40,6 +48,7 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
       setDetails({});
     }
     setCustom("");
+    setCustomType("");
     const first = (suggested?.exercises || []).find((e) => e?.name)?.name;
     setOpenGroup(first ? (Object.keys(WORKOUT_GROUPS).find((group) => WORKOUT_GROUPS[group].includes(first)) || "") : "");
     setReview(null);
@@ -61,7 +70,7 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
     try {
       const result = await apiCall("/api/workout", {
         date,
-        type,
+        type: type === "Своё" ? (customType.trim() || "Своё") : type,
         duration,
         rpe,
         items: names.map((name) => ({
@@ -144,7 +153,10 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
       <div>
         <div className="aiwa-sheet-scroll aiwa-form-stack">
           <Field label="Когда" type="date" value={date} onChange={setDate} />
-          <ChoicePills label="Что делала" options={WORKOUT_TYPES} value={type} onChange={(value) => { setType(value); setSelected([]); }} />
+          <ChoicePills label="Что делала" options={typeOptions} value={type} onChange={(value) => { setType(value); setSelected([]); }} />
+          {type === "Своё" ? (
+            <Field label="Название тренировки" value={customType} onChange={setCustomType} placeholder="Напр. Сквош" />
+          ) : null}
           <div className="aiwa-form-group">
             <Text className="aiwa-form-label" variant="body" weight="semibold">Упражнения</Text>
             <div className="aiwa-sheet-card">
