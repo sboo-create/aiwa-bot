@@ -2564,6 +2564,12 @@ _JOURNAL_CORRECTION_RE = re.compile(
     r"подход\w*|повтор\w*))\b",
     re.I,
 )
+_JOURNAL_PAST_DAY_RE = re.compile(
+    r"\b(?:вчера|позавчера|накануне)\b|"
+    r"\b\d{1,2}[./]\d{1,2}\b|\b\d{1,2}(?:-го|\s+числа)\b|"
+    r"\b(?:дня|дней|день)\s+назад\b",
+    re.I,
+)
 _JOURNAL_BREAKFAST_TYPO_RE = re.compile(
     r"\bна\s+завтра(?=\s+(?:(?:я|мы)\s+)?"
     r"(?:съел\w*|поел\w*|ел[аи]?\b|кушал\w*|выпил\w*))",
@@ -3051,6 +3057,21 @@ def _semantic_owned_recent_target(context, domain, target):
         and str(last.get("record_id") or "") == wanted
     )
 
+def _journal_target_day_allowed(context, domain, target, raw):
+    """Правка записи прошлого дня требует явного маркера прошлого в сообщении.
+
+    Иначе утреннее «съел X» до первой сегодняшней записи дополняет вчерашний
+    приём: кандидаты берутся последними по ts без ограничения дня
+    (инцидент «карамель в вчерашнем чае», 2026-07-31)."""
+    rows = list((context or {}).get(domain) or [])
+    row = next((x for x in rows if str(x.get("id")) == str(target or "")), None)
+    if not row:
+        return True   # принадлежность и свежесть проверяются отдельно
+    d = str(row.get("date") or "")
+    if not d or d >= dtoday().isoformat():
+        return True
+    return bool(_JOURNAL_PAST_DAY_RE.search(str(raw or "")))
+
 def _semantic_source_subject_safe(text):
     # Evidence is already evaluated per span in v2. If a span (or the whole
     # legacy message) also attributes a completed event to someone else, reject
@@ -3096,7 +3117,8 @@ def _semantic_action_matches_source(
         if action == "food_update":
             target = str((payload or {}).get("target_id") or "")
             owned = {str(x.get("id")) for x in ((context or {}).get("meals") or [])}
-            return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
+            return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw)
+                        and _journal_target_day_allowed(context, "meals", target, raw))
         if action == "workout":
             return bool(
                 _JOURNAL_WORKOUT_COMPLETED_RE.search(raw)
@@ -3107,7 +3129,8 @@ def _semantic_action_matches_source(
             owned = {
                 str(x.get("id")) for x in ((context or {}).get("workouts") or [])
             }
-            return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw))
+            return bool(target in owned and _JOURNAL_CORRECTION_RE.search(raw)
+                        and _journal_target_day_allowed(context, "workouts", target, raw))
         if action == "period_start":
             return bool(
                 _JOURNAL_PERIOD_SOURCE_RE.search(raw)
@@ -3144,6 +3167,7 @@ def _semantic_action_matches_source(
         evidence = _semantic_evidence_span(raw, payload)
         return bool(
             _semantic_owned_recent_target(context, "meals", target)
+            and _journal_target_day_allowed(context, "meals", target, raw)
             and evidence
             and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
         )
@@ -3153,6 +3177,7 @@ def _semantic_action_matches_source(
         evidence = _semantic_evidence_span(raw, payload)
         return bool(
             _semantic_owned_recent_target(context, "meals", target)
+            and _journal_target_day_allowed(context, "meals", target, raw)
             and slot in {"breakfast", "lunch", "snack", "dinner"}
             and evidence
             and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
@@ -3163,6 +3188,7 @@ def _semantic_action_matches_source(
         evidence = _semantic_evidence_span(raw, payload)
         return bool(
             _semantic_owned_recent_target(context, "meals", target)
+            and _journal_target_day_allowed(context, "meals", target, raw)
             and food_text
             and evidence
             and _JOURNAL_FOOD_COMPLETED_RE.search(evidence)
@@ -3181,6 +3207,7 @@ def _semantic_action_matches_source(
         evidence = _semantic_evidence_span(raw, payload)
         return bool(
             _semantic_owned_recent_target(context, "workouts", target)
+            and _journal_target_day_allowed(context, "workouts", target, raw)
             and evidence
             and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
         )
