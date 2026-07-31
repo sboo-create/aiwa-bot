@@ -112,7 +112,8 @@ export function HomeScreen(props) {
           <HomePanels
             panel={props.panel}
             onClose={props.onPanelClose}
-            checkin={props.checkin}
+            checkin={props.dayCheckin ?? props.checkin}
+            dayIso={props.selectedIso}
             symptomGroups={props.symptomGroups}
             mode={props.mode}
             revision={props.panelRevision}

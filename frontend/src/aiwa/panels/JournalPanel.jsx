@@ -14,7 +14,11 @@ import { actionProps, read, showToast } from "../lib/api";
  * until «Сохранить», which replays the diff through the existing bridge calls
  * (they are toggles/setters, so only changed fields are sent).
  */
-export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode }) {
+export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode, dayIso }) {
+  // Прошлый день, выбранный в полосе на главной: пишем через Day-функции
+  // склейки с явной датой (инцидент 31.07: всё падало в «сегодня»).
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const isPastDay = Boolean(dayIso && dayIso !== todayIso);
   const [symptoms, setSymptoms] = useState(checkin.symptoms || []);
   const [energy, setEnergy] = useState(checkin.energy || 0);
   const [mood, setMood] = useState(checkin.mood || 0);
@@ -48,27 +52,35 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode }) 
     try {
       // setCheckin / addCustomSym toast on their own; only speak up if neither ran.
       let hostToasted = false;
-      if (period !== Boolean(checkin.period)) {
+      if (!isPastDay && period !== Boolean(checkin.period)) {
         await read("toggleTodayPeriod");
         hostToasted = true;
       }
       if (energy !== (checkin.energy || 0)) {
-        await read("setCheckin", "energy", energy);
+        if (isPastDay) await read("setDayCheckin", dayIso, "energy", energy);
+        else await read("setCheckin", "energy", energy);
         hostToasted = true;
       }
       if (mood !== (checkin.mood || 0)) {
-        await read("setCheckin", "mood", mood);
+        if (isPastDay) await read("setDayCheckin", dayIso, "mood", mood);
+        else await read("setCheckin", "mood", mood);
         hostToasted = true;
       }
       for (const code of symptoms.filter((item) => !savedSymptoms.includes(item))) {
-        await read("toggleSym", code);
+        if (isPastDay) await read("toggleDaySym", dayIso, code);
+        else await read("toggleSym", code);
       }
       for (const code of savedSymptoms.filter((item) => !symptoms.includes(item))) {
-        await read("toggleSym", code);
+        if (isPastDay) await read("toggleDaySym", dayIso, code);
+        else await read("toggleSym", code);
       }
-      if (intimacy !== Boolean(checkin.intimacy)) await read("toggleTodayIntimacy");
+      if (intimacy !== Boolean(checkin.intimacy)) {
+        if (isPastDay) await read("markPA", dayIso);
+        else await read("toggleTodayIntimacy");
+      }
       if (extra) {
-        await read("addCustomSym", extra);
+        if (isPastDay) await read("addDayCustomSym", dayIso, extra);
+        else await read("addCustomSym", extra);
         hostToasted = true;
       }
       if (!hostToasted) showToast("Сохранено", { type: "success" });
@@ -87,11 +99,11 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode }) 
       data-aiwa-log-modal="true"
     >
       {/* Title only — back is Telegram's native BackButton (see AiwaModalView). */}
-      <AiwaPanelHeader size="large" title="Занести в журнал" />
+      <AiwaPanelHeader size="large" title={isPastDay ? `Журнал за ${new Date(dayIso + "T00:00:00").toLocaleDateString("ru-RU", { day: "numeric", month: "long" })}` : "Занести в журнал"} />
 
       <div className="aiwa-log-scroll">
         <SectionList className="aiwa-log-sections">
-          {mode !== "preg" && mode !== "meno" ? (
+          {mode !== "preg" && mode !== "meno" && !isPastDay ? (
             <SectionList.Item>
               {mode === "male" ? null : <JournalToggle label="Месячные" variant="period" active={period} onChange={setPeriod} />}
             </SectionList.Item>

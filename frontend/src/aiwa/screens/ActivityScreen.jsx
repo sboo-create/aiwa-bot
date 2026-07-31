@@ -225,7 +225,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
           </SectionList>
 
           {maleProfile ? <ProfilePanel isOpen={profileOpen} onClose={() => setProfileOpen(false)} /> : null}
-          <WorkoutPanel isOpen={panel === "workout"} onClose={() => setPanel("")} onSaved={reloadTrain} suggested={suggested} />
+          <WorkoutPanel isOpen={panel === "workout"} onClose={() => setPanel("")} onSaved={reloadTrain} suggested={suggested} favoriteTypes={trainState.favorite_types || []} />
           <WorkoutVariantsPanel
             isOpen={panel === "variants"}
             onClose={() => setPanel("")}
