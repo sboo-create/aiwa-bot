@@ -38,6 +38,9 @@ activate() {
     local sha="$1"
     ln -sfn "$ROOT/releases/$sha" "$ROOT/current.tmp"
     mv -Tf "$ROOT/current.tmp" "$ROOT/current"
+    # Плановый рестарт на несколько секунд — не авария: помечаем окно, чтобы
+    # минутная проба aiwa-alert не слала ложный DOWN (инцидент 31.07 20:36).
+    sudo -n /usr/bin/touch /var/lib/aiwa-alert/maintenance 2>/dev/null || true
     sudo -n /bin/systemctl restart "$UNIT"
 }
 
