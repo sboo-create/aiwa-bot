@@ -87,6 +87,27 @@ body.material .aiwa-nav-mascot {
     solid var(--tg-theme-section-separator-color) !important;
 }
 
+/* У шторки профиля свои боковые 20px, а вложенный .aiwa-tma-blocks добавляет
+   ещё 16px — карточки уезжали на 36px вместо общих по приложению 16px.
+   Вытягиваем список на всю ширину шторки, инсет остаётся за ним самим: тем же
+   приёмом в main.css решён этот случай для .aiwa-paper-screen. */
+.aiwa-sheet-scroll > .aiwa-tma-blocks {
+  width: calc(100% + 40px) !important;
+  margin-left: -20px !important;
+}
+
+/* Аватар над списком настроек. */
+.aiwa-profile-avatar {
+  display: flex;
+  justify-content: center;
+}
+
+.aiwa-profile-avatar .aiwa-avatar-initial {
+  width: 60px;
+  height: 60px;
+  font-size: 26px;
+}
+
 /* Значение справа в ячейке «Режим»: подпись и шеврон в одну строку. */
 .aiwa-mode-value {
   display: flex;

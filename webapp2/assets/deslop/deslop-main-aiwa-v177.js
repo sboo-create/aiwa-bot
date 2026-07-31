@@ -19681,7 +19681,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r26").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r27").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -20558,7 +20558,7 @@ function Yh({ isOpen: a, onClose: e }) {
       onBack: l === "main" ? e : () => s("main"),
       children: /* @__PURE__ */ m.jsx(m.Fragment, { children: /* @__PURE__ */ m.jsxs("div", { className: "aiwa-sheet-scroll", children: [
         l === "main" ? /* @__PURE__ */ m.jsxs(m.Fragment, { children: [
-          null,
+          /* @__PURE__ */ m.jsx("div", { className: "aiwa-profile-avatar", children: /* @__PURE__ */ m.jsx(Fj, {}) }),
           /* @__PURE__ */ m.jsx(yt, { className: "aiwa-tma-blocks", children: /* @__PURE__ */ m.jsxs(yt.Item, { children: [
             /* @__PURE__ */ m.jsx(Yt, {
               title: "Режим",

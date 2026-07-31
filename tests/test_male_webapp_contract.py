@@ -282,17 +282,17 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn('deslop-main-aiwa-v177.js', wrapper)
         self.assertIn('AiwaWebUiChart-aiwa-v177.js', bundle)
         self.assertIn('deslop-main-aiwa-v177.js', chart_bundle)
-        self.assertIn('main.js?v=r26', index)
+        self.assertIn('main.js?v=r27', index)
         self.assertIn(
-            'import "./deslop-main-aiwa-v177.js?v=r26";',
+            'import "./deslop-main-aiwa-v177.js?v=r27";',
             wrapper,
         )
         self.assertIn(
-            'import("./AiwaWebUiChart-aiwa-v177.js?v=r26")',
+            'import("./AiwaWebUiChart-aiwa-v177.js?v=r27")',
             bundle,
         )
         self.assertIn(
-            'from "./deslop-main-aiwa-v177.js?v=r26";',
+            'from "./deslop-main-aiwa-v177.js?v=r27";',
             chart_bundle,
         )
         self.assertIn("aiwaCacheTs", bundle)
@@ -328,9 +328,11 @@ class MaleWebappStaticContractTests(unittest.TestCase):
     def test_food_and_training_use_telegram_photo_avatar(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
 
+        # Питание, нагрузка и шапка профиля: везде общий компонент аватара,
+        # а не самодельный инициал.
         self.assertEqual(
             bundle.count("children: /* @__PURE__ */ m.jsx(Fj, {})"),
-            2,
+            3,
         )
         self.assertNotIn(
             'children: (c?.name || "•").trim()[0]?.toUpperCase() || "•"',
