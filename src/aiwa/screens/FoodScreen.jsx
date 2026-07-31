@@ -6,6 +6,7 @@ import { CalorieGauge } from "../components/CalorieGauge";
 import { AiwaInsightCard } from "../components/AiwaInsightCard";
 import { PaperRow } from "../components/PaperRow";
 import { ActionMenu } from "../components/ActionMenu";
+import { ProfileAvatar } from "../components/ProfileAvatar";
 import { AddFoodPanel } from "../panels/AddFoodPanel";
 import { FoodDiaryPanel } from "../panels/FoodDiaryPanel";
 import { RecipePanel } from "../panels/RecipePanel";
@@ -247,14 +248,10 @@ export function FoodScreen({ mode, revision = 0 }) {
           <div className="aiwa-screen-titlebar">
             <Text className="aiwa-screen-title" variant="title1" weight="semibold">Питание</Text>
             {maleProfile ? (
-              <button
-                type="button"
-                className="aiwa-avatar-initial aiwa-screen-profile"
-                aria-label="Открыть профиль"
+              <ProfileAvatar
+                className="aiwa-screen-profile"
                 onClick={() => setProfileOpen(true)}
-              >
-                {(aiwaHost?.name || "•").trim()[0]?.toUpperCase() || "•"}
-              </button>
+              />
             ) : null}
           </div>
           <CalorieGauge kcal={kcal} kcalTarget={kcalTarget} />

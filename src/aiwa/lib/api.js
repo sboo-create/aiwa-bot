@@ -19,6 +19,26 @@ export const apiCall = (path, body = {}) => {
 
 export const showToast = (message, options = {}) => toast(message, options);
 
+/**
+ * Гасит тосты хоста на время пачки вызовов через мост.
+ *
+ * Часть функций index.html (setCheckin, addCustomSym, toggleTodayPeriod)
+ * рапортует о себе сама. Когда панель сохраняет несколько полей разом, на одно
+ * действие пользователя прилетало по тосту с каждого поля. Подтверждение
+ * должно быть одно и принадлежать панели — она знает, что именно сохранила.
+ *
+ * Тосты самого мини-аппа идут мимо флага: они зовут toast() отсюда напрямую,
+ * а не через window.aiwaToast, который проверяет флаг на стороне index.html.
+ */
+export const withHostToastsMuted = async (run) => {
+  window.__aiwaQuietToast = true;
+  try {
+    return await run();
+  } finally {
+    window.__aiwaQuietToast = false;
+  }
+};
+
 // «1 110 ккал»: ru-RU разделяет тысячи неразрывным пробелом.
 export const fmtKcal = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} ккал`;
 export const trackFlow = (flow) => call("track", flow);

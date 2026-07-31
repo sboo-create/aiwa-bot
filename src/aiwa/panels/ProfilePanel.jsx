@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { Text, Tappable, RegularButton, SectionList } from "../lib/tma";
+import { Text, RegularButton, SectionList } from "../lib/tma";
 import { AiwaModalView } from "../components/AiwaModalView";
 import { PaperRow } from "../components/PaperRow";
 import { AiwaCell } from "../components/AiwaCell";
+import { ProfileAvatar } from "../components/ProfileAvatar";
 import { Field } from "../components/Field";
 import { ChoicePills } from "../components/ChoicePills";
-import { MODE_OPTIONS } from "../lib/constants";
+import { MODE_OPTIONS, modeLabel } from "../lib/constants";
 import { call, read, apiCall, showToast, actionProps } from "../lib/api";
 
 export function ProfilePanel({ isOpen, onClose }) {
@@ -72,9 +73,26 @@ export function ProfilePanel({ isOpen, onClose }) {
       showToast("Не получилось изменить настройку", { type: "error" });
     }
   };
-  const chooseMode = (mode) => {
+  const chooseMode = async (mode) => {
+    // Ждём сервер и закрываемся только на успехе. Раньше панель закрывалась
+    // сразу, поэтому отказ прилетал уже на главный экран и выглядел как
+    // «нажал — выкинуло, режим тот же». Отказ здесь штатный: «Цикл» и
+    // «Беременность» требуют отмеченную дату месячных.
+    const result = await apiCall("/api/mode", { mode }).catch(() => null);
+    if (!result?.ok) {
+      showToast(result?.text || "Не получилось сменить режим", { type: "error" });
+      return;
+    }
+    showToast(`Режим: ${modeLabel(mode)}`, {
+      type: "success",
+      // Дату мог подставить сервер при выходе из мужского режима — она уходит
+      // в медицинские данные, поэтому молчать об этом нельзя.
+      description: result.seeded_period
+        ? "Дату месячных поставили на сегодня — поправь в календаре"
+        : undefined,
+    });
+    call("reloadAfterEdit");
     onClose();
-    call("chooseMode", mode);
   };
   const copyPartner = async () => {
     if (!partner?.link) return;
@@ -103,28 +121,21 @@ export function ProfilePanel({ isOpen, onClose }) {
         <div className="aiwa-sheet-scroll">
           {view === "main" ? (
             <>
-              {data.mode === "male" ? null : (
-              <div className="aiwa-profile-modes">
-                <Text variant="body" weight="semibold">Режим</Text>
-                <div className="aiwa-choice-pills">
-                  {MODE_OPTIONS.map((option) => (
-                    <Tappable
-                      as="button"
-                      type="button"
-                      mode="opacity"
-                      className={data.mode === option.value ? "aiwa-choice-pill is-active" : "aiwa-choice-pill"}
-                      aria-pressed={data.mode === option.value}
-                      onClick={() => chooseMode(option.value)}
-                      key={option.value}
-                    >
-                      <Text variant="body" weight="regular">{option.label}</Text>
-                    </Tappable>
-                  ))}
-                </div>
-              </div>
-              )}
+              <div className="aiwa-profile-avatar"><ProfileAvatar /></div>
               <SectionList className="aiwa-tma-blocks">
                 <SectionList.Item>
+                  {/* Режим — обычная строка списка со значением справа. Показываем
+                      и в мужском режиме: иначе из него нельзя выйти. */}
+                  <PaperRow
+                    title="Режим"
+                    trailing={(
+                      <span className="aiwa-mode-value">
+                        <Text variant="body" weight="regular">{modeLabel(data.mode)}</Text>
+                        <AiwaCell.Part type="Chevron" />
+                      </span>
+                    )}
+                    onClick={() => setView("mode")}
+                  />
                   {data.mode === "male" ? null : <PaperRow title="Выписка для врача" description="PDF в чат бота" onClick={() => setView("report")} />}
                   <PaperRow title="Предпочтения по питанию" description="ограничения и цель калорий" onClick={() => setView("data")} />
                   <PaperRow title="Мои данные" description="рост · вес · возраст · цикл" onClick={() => setView("data")} />
@@ -142,6 +153,28 @@ export function ProfilePanel({ isOpen, onClose }) {
                 </SectionList.Item>
               </SectionList>
             </>
+          ) : null}
+
+          {view === "mode" ? (
+            <SectionList className="aiwa-tma-blocks">
+              <SectionList.Item header="Режим">
+                {MODE_OPTIONS.map((option) => (
+                  <AiwaCell
+                    as="button"
+                    type="button"
+                    onClick={() => chooseMode(option.value)}
+                    key={option.value}
+                  >
+                    {/* Выбранный помечаем акцентным заголовком: у CellPart есть
+                        только Chevron / Picker / Dropdown / ColorPicker. */}
+                    <AiwaCell.Text
+                      type={data.mode === option.value ? "Accent" : undefined}
+                      title={option.label}
+                    />
+                  </AiwaCell>
+                ))}
+              </SectionList.Item>
+            </SectionList>
           ) : null}
 
           {view === "data" ? (

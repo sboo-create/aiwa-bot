@@ -103,3 +103,7 @@ export const MODE_OPTIONS = [
   { value: "none", label: "Нет месячных" },
   { value: "male", label: "Мужской режим" },
 ];
+
+/** Подпись режима по значению. Неизвестное значение показываем как «Цикл». */
+export const modeLabel = (value) =>
+  (MODE_OPTIONS.find((option) => option.value === value) || MODE_OPTIONS[0]).label;

@@ -7,7 +7,7 @@ import { JournalChoiceGroup } from "../components/JournalChoiceGroup";
 import { JournalSymptomGroup } from "../components/JournalSymptomGroup";
 import { JournalCustomSymptom } from "../components/JournalCustomSymptom";
 import { JOURNAL_ENERGY_OPTIONS, JOURNAL_MOOD_OPTIONS, JOURNAL_SYMPTOM_GROUPS } from "../lib/constants";
-import { actionProps, read, showToast } from "../lib/api";
+import { actionProps, read, showToast, withHostToastsMuted } from "../lib/api";
 
 /**
  * Today's journal. Every control edits a local draft; nothing reaches the host
@@ -46,32 +46,22 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode }) 
     const extra = custom.trim();
     setBusy(true);
     try {
-      // setCheckin / addCustomSym toast on their own; only speak up if neither ran.
-      let hostToasted = false;
-      if (period !== Boolean(checkin.period)) {
-        await read("toggleTodayPeriod");
-        hostToasted = true;
-      }
-      if (energy !== (checkin.energy || 0)) {
-        await read("setCheckin", "energy", energy);
-        hostToasted = true;
-      }
-      if (mood !== (checkin.mood || 0)) {
-        await read("setCheckin", "mood", mood);
-        hostToasted = true;
-      }
-      for (const code of symptoms.filter((item) => !savedSymptoms.includes(item))) {
-        await read("toggleSym", code);
-      }
-      for (const code of savedSymptoms.filter((item) => !symptoms.includes(item))) {
-        await read("toggleSym", code);
-      }
-      if (intimacy !== Boolean(checkin.intimacy)) await read("toggleTodayIntimacy");
-      if (extra) {
-        await read("addCustomSym", extra);
-        hostToasted = true;
-      }
-      if (!hostToasted) showToast("Сохранено", { type: "success" });
+      // Одно нажатие «Сохранить» — одно подтверждение. Часть мостовых функций
+      // рапортует о себе сама, поэтому на время пачки глушим тосты хоста.
+      await withHostToastsMuted(async () => {
+        if (period !== Boolean(checkin.period)) await read("toggleTodayPeriod");
+        if (energy !== (checkin.energy || 0)) await read("setCheckin", "energy", energy);
+        if (mood !== (checkin.mood || 0)) await read("setCheckin", "mood", mood);
+        for (const code of symptoms.filter((item) => !savedSymptoms.includes(item))) {
+          await read("toggleSym", code);
+        }
+        for (const code of savedSymptoms.filter((item) => !symptoms.includes(item))) {
+          await read("toggleSym", code);
+        }
+        if (intimacy !== Boolean(checkin.intimacy)) await read("toggleTodayIntimacy");
+        if (extra) await read("addCustomSym", extra);
+      });
+      showToast("Сохранили в журнал", { type: "success" });
       onClose();
     } catch (error) {
       showToast(error?.message || "Не удалось сохранить", { type: "error" });

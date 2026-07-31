@@ -828,7 +828,12 @@ body.material .aiwa-nav-tabbar-layer > * {
 .aiwa-nav-mascot {
   position: absolute;
   right: 12px;
-  bottom: calc(var(--bottom-clearance, 21px) + env(safe-area-inset-bottom, 0px));
+  /* Тот же клиренс, что у таб-бара, и без собственного env(): бар safe-area не
+     учитывает, потому что apple/material-правила перебивают базовый
+     padding-bottom шорткатом padding. Лишний терм поднимал маскота над баром
+     на устройствах с home indicator. Полпикселя — центровка по высоте бара
+     (65px против 64px у маскота). */
+  bottom: calc(var(--bottom-clearance, 21px) + 0.5px);
   z-index: 41;
   display: flex;
   width: 64px;
@@ -1024,7 +1029,7 @@ body.redesign-active .bar {
   width: 341px;
   margin: 23px auto 0;
   grid-template-columns: repeat(3, 101px);
-  gap: 19px;
+  gap: 20px;
 }
 
 /* Food-screen CTA spacing synced to Paper: 28px above the button, 63px below it. */
@@ -1043,7 +1048,7 @@ body.redesign-active .bar {
   padding: 16px 12px;
   flex-direction: column;
   gap: 2px;
-  border-radius: 24px;
+  border-radius: 25px;
   background: var(--aiwa-surface);
   box-sizing: border-box;
 }
@@ -2268,7 +2273,8 @@ body.material .aiwa-tma-blocks [class*="_card_"] {
 
 .aiwa-tma-blocks > section > div > div:last-child,
 body.material .aiwa-tma-blocks > section > div > div:last-child {
-  padding-block: 8px;
+  /* Без внутреннего отступа: у CellStack в deslop высоту держит сама ячейка. */
+  padding-block: 0;
   overflow: hidden !important;
   border-radius: 26px !important;
   --aiwa-control-bg: var(--aiwa-screen-bg);
@@ -2315,10 +2321,9 @@ body.material .aiwa-tma-blocks > section > div > div:last-child {
   max-height: none;
 }
 
-[data-aiwa-cell="true"] > [class*="_body_"],
-[data-aiwa-cell="true"] > [class*="_end_"] {
-  border-bottom: 0 !important;
-}
+/* Разделители между ячейками — штатные, как в эталоне deslop. Раньше здесь
+   стояло border-bottom: 0 !important, и списки шли сплошным блоком. Толщину
+   держит --cell-separator-height, последней ячейке стека она обнуляется сама. */
 
 .aiwa-tma-blocks .aiwa-status {
   width: 32px;
@@ -2580,4 +2585,62 @@ body.material .aiwa-nav-tabbar-layer > * {
   display: block;
   width: 24px;
   height: 24px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Правки, приведённые к текущему эталону deslop.
+   Вендоренный @deslop/tma — версия от 27 июля, в ней это ещё не поправлено.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* Шеврон рисовался в боксе 7x12, хотя маска — SVG 24x24 с no-repeat center:
+   от иконки был виден только центральный обрезок. В актуальном mini-app бокс
+   24x24. Цвет уже совпадает: --border-color резолвится в rgba(17,17,17,.3). */
+[class*="_chevron_"] {
+  width: 24px;
+  height: 24px;
+}
+
+/* Нижние тосты ложились ровно на таб-бар. Библиотека рассчитывает, что оба
+   отступа задаёт --bottom-clearance, но одно значение развело бы их только
+   если бар не плавающий. Поднимаем тосты над баром: его клиренс, высота 65px
+   и зазор. */
+[class*="_host_bottom_"] {
+  bottom: calc(var(--bottom-clearance, 21px) + 65px + var(--ui-space-12, 12px));
+}
+
+body.material [class*="_host_bottom_"] {
+  bottom: calc(var(--bottom-clearance, 16px) + 65px + var(--ui-space-12, 12px));
+}
+
+/* ── Профиль ── */
+
+/* У шторки свои боковые 20px, а вложенный список добавляет ещё 16px — карточки
+   вставали на 36px от края вместо общих по приложению 16px. Вытягиваем список
+   на всю ширину шторки, инсет остаётся за ним самим. */
+.aiwa-sheet-scroll > .aiwa-tma-blocks {
+  width: calc(100% + 40px) !important;
+  margin-left: -20px !important;
+}
+
+.aiwa-profile-avatar {
+  display: flex;
+  justify-content: center;
+}
+
+.aiwa-profile-avatar .aiwa-avatar-initial {
+  width: 60px;
+  height: 60px;
+  font-size: 26px;
+}
+
+/* Значение справа в строке «Режим»: подпись и шеврон в одну линию. */
+.aiwa-mode-value {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-4, 4px);
+}
+
+.aiwa-mode-value > [class*="_text_"] {
+  color: var(--aiwa-ink-subtle, rgba(17, 17, 17, 0.4));
+  white-space: nowrap;
 }

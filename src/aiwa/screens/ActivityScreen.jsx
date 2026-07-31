@@ -4,6 +4,7 @@ import { ScreenLoading } from "../components/ScreenLoading";
 import { AiwaInsightCard } from "../components/AiwaInsightCard";
 import { AiwaCell } from "../components/AiwaCell";
 import { PaperRow } from "../components/PaperRow";
+import { ProfileAvatar } from "../components/ProfileAvatar";
 import { Week } from "../components/Week";
 import { WorkoutPanel } from "../panels/WorkoutPanel";
 import { WorkoutVariantsPanel } from "../panels/WorkoutVariantsPanel";
@@ -130,14 +131,10 @@ export function ActivityScreen({ mode, revision = 0 }) {
           <div className="aiwa-screen-titlebar">
             <Text className="aiwa-screen-title" variant="title1" weight="semibold">Нагрузка</Text>
             {maleProfile ? (
-              <button
-                type="button"
-                className="aiwa-avatar-initial aiwa-screen-profile"
-                aria-label="Открыть профиль"
+              <ProfileAvatar
+                className="aiwa-screen-profile"
                 onClick={() => setProfileOpen(true)}
-              >
-                {(aiwaHost?.name || "•").trim()[0]?.toUpperCase() || "•"}
-              </button>
+              />
             ) : null}
           </div>
           <div className="aiwa-overview">

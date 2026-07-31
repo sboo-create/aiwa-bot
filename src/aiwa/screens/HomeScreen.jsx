@@ -1,6 +1,7 @@
 import { TMAProvider, Page, ImageAvatar, RegularButton, SectionList, Text } from "../lib/tma";
 import { CalendarIcon, PlusIcon } from "../lib/icons";
 import { call, actionProps } from "../lib/api";
+import { ProfileAvatar } from "../components/ProfileAvatar";
 import { AiwaPanelHeader } from "../components/AiwaPanelHeader";
 import { Week } from "../components/Week";
 import { TodaySection } from "../sections/TodaySection";
@@ -19,32 +20,6 @@ import { ProfilePanel } from "../panels/ProfilePanel";
  * - HEADER (paper): PanelHeader + week + countdown + journal CTA
  * - BLOCKS (TMA white cards): AI, delay, stats, chart, history
  */
-/**
- * Аватар пользователя: фото из Telegram, если клиент его отдал, иначе круг
- * с первой буквой имени — дизайнерская фотография-заглушка на проде выглядела
- * как чужой профиль.
- */
-function ProfileAvatar() {
-  const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
-  const photo = tgUser?.photo_url;
-  const data = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
-  const name = (data?.name || tgUser?.first_name || "").trim();
-  // Оранжевый круг с инициалом рисуется всегда; фото ложится поверх и просто
-  // исчезает, если клиент его не отдал или загрузка упала.
-  return (
-    <span className="aiwa-avatar-initial" aria-hidden="true">
-      {(name[0] || "•").toUpperCase()}
-      {photo ? (
-        <img
-          className="aiwa-avatar-photo"
-          src={photo}
-          alt=""
-          onError={(event) => { event.currentTarget.style.display = "none"; }}
-        />
-      ) : null}
-    </span>
-  );
-}
 
 export function HomeScreen(props) {
   return (
