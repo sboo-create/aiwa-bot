@@ -19681,7 +19681,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r30").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r31").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -20030,7 +20030,7 @@ function Gj({ isOpen: a, onClose: e, checkin: l, symptomGroups: s, mode: r }) {
   }, R = s?.length ? s : Yr, B = async () => {
     if (M) return;
     const U = l.symptoms || [], _ = w.trim();
-    D(!0);
+    D(!0), window.__aiwaQuietToast = !0;
     try {
       let H = !1;
       v !== !!l.period && (await le("toggleTodayPeriod"), H = !0), h !== (l.energy || 0) && await le("setCheckin", "energy", h), p !== (l.mood || 0) && await le("setCheckin", "mood", p);
@@ -20038,11 +20038,11 @@ function Gj({ isOpen: a, onClose: e, checkin: l, symptomGroups: s, mode: r }) {
         await le("toggleSym", P);
       for (const P of U.filter((K) => !c.includes(K)))
         await le("toggleSym", P);
-      T !== !!l.intimacy && await le("toggleTodayIntimacy"), _ && (await le("addCustomSym", _), H = !0), H || Ot("Записано в журнал", { type: "success" }), e();
+      T !== !!l.intimacy && await le("toggleTodayIntimacy"), _ && (await le("addCustomSym", _), H = !0), Ot("Сохранили в журнал", { type: "success" }), e();
     } catch (H) {
       Ot(H?.message || "Не удалось сохранить", { type: "error" });
     } finally {
-      D(!1);
+      D(!1), window.__aiwaQuietToast = !1;
     }
   };
   return /* @__PURE__ */ m.jsxs(
