@@ -419,17 +419,17 @@ class PostReleaseSystemicTests(unittest.TestCase):
         bundle = (
             root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
-        self.assertIn("main.js?v=r25", index)
-        self.assertIn('import "./deslop-main-aiwa-v177.js?v=r25";', entry)
+        self.assertIn("main.js?v=r26", index)
+        self.assertIn('import "./deslop-main-aiwa-v177.js?v=r26";', entry)
         self.assertIn(
-            'import("./AiwaWebUiChart-aiwa-v177.js?v=r25")',
+            'import("./AiwaWebUiChart-aiwa-v177.js?v=r26")',
             bundle,
         )
         chart_bundle = (
             root / "webapp2/assets/deslop/AiwaWebUiChart-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'from "./deslop-main-aiwa-v177.js?v=r25";',
+            'from "./deslop-main-aiwa-v177.js?v=r26";',
             chart_bundle,
         )
 

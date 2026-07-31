@@ -19681,7 +19681,7 @@ function Ej({ label: a, value: e, ok: l }) {
 function jj({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(Ej, { ...l }, l.label)) }) : null;
 }
-const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r25").then((a) => ({
+const Aj = E.lazy(() => import("./AiwaWebUiChart-aiwa-v177.js?v=r26").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function Mj() {
@@ -20558,23 +20558,16 @@ function Yh({ isOpen: a, onClose: e }) {
       onBack: l === "main" ? e : () => s("main"),
       children: /* @__PURE__ */ m.jsx(m.Fragment, { children: /* @__PURE__ */ m.jsxs("div", { className: "aiwa-sheet-scroll", children: [
         l === "main" ? /* @__PURE__ */ m.jsxs(m.Fragment, { children: [
-          r.mode === "male" ? null : /* @__PURE__ */ m.jsxs("div", { className: "aiwa-profile-modes", children: [
-            /* @__PURE__ */ m.jsx(lt, { variant: "body", weight: "semibold", children: "Режим" }),
-            /* @__PURE__ */ m.jsx("div", { className: "aiwa-choice-pills", children: mj.map((A) => /* @__PURE__ */ m.jsx(
-              Ce,
-              {
-                as: "button",
-                type: "button",
-                mode: "opacity",
-                className: r.mode === A.value ? "aiwa-choice-pill is-active" : "aiwa-choice-pill",
-                "aria-pressed": r.mode === A.value,
-                onClick: () => j(A.value),
-                children: /* @__PURE__ */ m.jsx(lt, { variant: "body", weight: "regular", children: A.label })
-              },
-              A.value
-            )) })
-          ] }),
+          null,
           /* @__PURE__ */ m.jsx(yt, { className: "aiwa-tma-blocks", children: /* @__PURE__ */ m.jsxs(yt.Item, { children: [
+            /* @__PURE__ */ m.jsx(Yt, {
+              title: "Режим",
+              trailing: /* @__PURE__ */ m.jsxs("span", { className: "aiwa-mode-value", children: [
+                /* @__PURE__ */ m.jsx(lt, { variant: "body", weight: "regular", children: (mj.find((A) => A.value === r.mode) || mj[0]).label }),
+                /* @__PURE__ */ m.jsx(pt.Part, { type: "Chevron" })
+              ] }),
+              onClick: () => s("mode")
+            }),
             /* @__PURE__ */ m.jsx(Yt, { title: r.mode === "male" ? "Выписка по самочувствию" : "Выписка для врача", description: "PDF в чат бота", onClick: () => s("report") }),
             /* @__PURE__ */ m.jsx(Yt, { title: "Предпочтения по питанию", description: "ограничения и цель калорий", onClick: () => s("data") }),
             /* @__PURE__ */ m.jsx(Yt, { title: "Мои данные", description: r.mode === "male" ? "рост · вес · возраст" : "рост · вес · возраст · цикл", onClick: () => s("data") }),
@@ -20596,6 +20589,16 @@ function Yh({ isOpen: a, onClose: e }) {
             r.mode === "male" ? null : /* @__PURE__ */ m.jsx(Yt, { title: "Партнёр и близкие", description: "короткая бережная сводка", onClick: b })
           ] }) })
         ] }) : null,
+        l === "mode" ? /* @__PURE__ */ m.jsx(yt, { className: "aiwa-tma-blocks", children: /* @__PURE__ */ m.jsx(yt.Item, { header: "Режим", children: mj.map((A) => /* @__PURE__ */ m.jsx(
+          pt,
+          {
+            as: "button",
+            type: "button",
+            onClick: () => j(A.value),
+            children: /* @__PURE__ */ m.jsx(pt.Text, { type: r.mode === A.value ? "Accent" : void 0, title: A.label })
+          },
+          A.value
+        )) }) }) : null,
         l === "data" ? /* @__PURE__ */ m.jsxs("div", { className: "aiwa-form-stack", children: [
           /* @__PURE__ */ m.jsx(lt, { variant: "title3", weight: "semibold", children: "Параметры тела" }),
           /* @__PURE__ */ m.jsxs("div", { className: "aiwa-form-grid", children: [

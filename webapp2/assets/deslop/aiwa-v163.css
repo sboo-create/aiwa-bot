@@ -87,6 +87,18 @@ body.material .aiwa-nav-mascot {
     solid var(--tg-theme-section-separator-color) !important;
 }
 
+/* Значение справа в ячейке «Режим»: подпись и шеврон в одну строку. */
+.aiwa-mode-value {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-4, 4px);
+}
+
+.aiwa-mode-value > [class*="_text_"] {
+  color: var(--aiwa-ink-subtle, rgba(17, 17, 17, 0.4));
+  white-space: nowrap;
+}
+
 /* Белые блоки ячеек: бандл добавляет им padding-block: 8px, из-за чего первая
    и последняя строки стоят ниже и выше, чем в эталоне. У CellStack в deslop
    контейнер без внутренних отступов — высоту задаёт сама ячейка. */
