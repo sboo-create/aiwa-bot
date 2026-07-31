@@ -6,7 +6,7 @@
 """
 import re
 
-import aiwa_bot as bot
+import aiwa_bot as _bot
 
 _MET = {"Силовая": 5.0, "Кардио": 8.0, "Йога": 3.0, "Ходьба": 3.5, "Плавание": 7.0,
         "Пилатес": 3.0, "Растяжка": 2.5}
@@ -30,8 +30,8 @@ def favorite_activities(cid, days=60, limit=3):
     """Собственные активности за окно, по убыванию частоты, свежие выше.
     Окно даёт естественное затухание: что перестали отмечать — выпадает."""
     from datetime import timedelta
-    cut = (bot.dtoday() - timedelta(days=days)).isoformat()
-    c = bot.db()
+    cut = (_bot.dtoday() - timedelta(days=days)).isoformat()
+    c = _bot.db()
     rows = c.execute(
         "SELECT type, COUNT(*) AS n, MAX(d) FROM workouts WHERE chat_id=? AND d>=? "
         "GROUP BY type ORDER BY n DESC, MAX(d) DESC", (cid, cut)).fetchall()
