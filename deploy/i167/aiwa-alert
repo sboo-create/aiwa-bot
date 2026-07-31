@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Минутная проба production AIWA + алерт админу в Telegram.
+# Проверяет: systemd-юнит, /health, путь до Telegram (getMe через relay) и
+# рост NRestarts. Алертит один раз при падении и один раз при
+# восстановлении; состояние — в /var/lib/aiwa-alert/state.
+#
+#   aiwa-alert            # обычная проба (для systemd timer)
+#   aiwa-alert test       # прислать тестовое сообщение админу
+set -uo pipefail
+
+HEALTH=http://127.0.0.1:9920/health
+UNIT=aiwa
+STATE_DIR=/var/lib/aiwa-alert
+STATE="$STATE_DIR/state"
+TOKEN_FILE=/srv/aiwa/secrets/bot-token
+ENV_FILE=/srv/aiwa/config/app.env
+
+mkdir -p "$STATE_DIR"
+TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null | tr -d ' \n')
+# Получатели алертов: AIWA_ALERT_CHATS (список через запятую) либо AIWA_ADMIN
+CHATS=$(grep '^AIWA_ALERT_CHATS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d ' ')
+[ -n "$CHATS" ] || CHATS=$(grep '^AIWA_ADMIN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d ' ')
+
+tg_send() {
+    # Через локальный relay-путь (hosts бота сюда не примонтирован, поэтому resolve вручную)
+    [ -n "$TOKEN" ] && [ -n "$CHATS" ] || return 1
+    local rc=0 chat
+    for chat in ${CHATS//,/ }; do
+        curl -fsS --max-time 10 --resolve api.telegram.org:8443:127.0.0.1 \
+            "https://api.telegram.org:8443/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${chat}" \
+            --data-urlencode "text=$1" -o /dev/null || rc=1
+    done
+    return $rc
+}
+
+if [ "${1:-}" = "test" ]; then
+    tg_send "🔔 aiwa-alert: тестовое сообщение, мониторинг работает" \
+        && echo "sent" || echo "SEND FAILED" >&2
+    exit 0
+fi
+
+FAILS=()
+
+systemctl is-active --quiet "$UNIT" || FAILS+=("юнит $UNIT не active")
+
+BODY=$(curl -fsS --max-time 8 "$HEALTH" 2>/dev/null)
+if [ -z "$BODY" ]; then
+    FAILS+=("/health не отвечает")
+elif ! printf '%s' "$BODY" | grep -q '"status": "ok"'; then
+    FAILS+=("/health не ok")
+fi
+
+if [ -n "$TOKEN" ]; then
+    curl -fsS --max-time 10 --resolve api.telegram.org:8443:127.0.0.1 \
+        "https://api.telegram.org:8443/bot${TOKEN}/getMe" -o /dev/null 2>/dev/null \
+        || FAILS+=("getMe через relay не проходит")
+fi
+
+RESTARTS=$(systemctl show -p NRestarts --value "$UNIT" 2>/dev/null || echo 0)
+PREV_RESTARTS=$(grep '^restarts=' "$STATE" 2>/dev/null | cut -d= -f2 || echo "$RESTARTS")
+RESTART_NOTE=""
+if [ -n "$PREV_RESTARTS" ] && [ "$RESTARTS" -gt "${PREV_RESTARTS:-0}" ] 2>/dev/null; then
+    RESTART_NOTE="⚠️ aiwa перезапускался (NRestarts ${PREV_RESTARTS}→${RESTARTS})"
+fi
+
+PREV_STATUS=$(grep '^status=' "$STATE" 2>/dev/null | cut -d= -f2)
+
+if [ ${#FAILS[@]} -gt 0 ]; then
+    NOW_STATUS=down
+    if [ "$PREV_STATUS" != "down" ]; then
+        MSG="🚨 AIWA DOWN: $(IFS='; '; echo "${FAILS[*]}") — $(date '+%H:%M %d.%m')"
+        tg_send "$MSG" || logger -t aiwa-alert "alert send failed: $MSG"
+        logger -t aiwa-alert "$MSG"
+    fi
+else
+    NOW_STATUS=up
+    if [ "$PREV_STATUS" = "down" ]; then
+        tg_send "✅ AIWA снова работает — $(date '+%H:%M %d.%m')" || true
+        logger -t aiwa-alert "recovered"
+    fi
+    if [ -n "$RESTART_NOTE" ]; then
+        tg_send "$RESTART_NOTE" || true
+        logger -t aiwa-alert "$RESTART_NOTE"
+    fi
+fi
+
+printf 'status=%s\nrestarts=%s\n' "$NOW_STATUS" "$RESTARTS" > "$STATE"
+exit 0

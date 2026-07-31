@@ -1251,8 +1251,8 @@ def _ctx_note(st, profile):
         if profile.get("age"): bits.append(f"возраст {profile['age']}")
         a = _ACT.get(profile.get("activity"))
         if a: bits.append(f"активность {a}")
-        d = profile.get("diet") or profile.get("diet_note")
-        if d: bits.append("есть пищевые ограничения")
+        d = diet_restrictions(profile)
+        if d: bits.append("СТРОГИЕ пищевые ограничения: " + d + " — не предлагай запрещённые продукты ни в каких советах по еде")
         if bits:
             note += " Данные пользовательницы: " + ", ".join(bits) + ". Используй их для персональных расчётов (например калорий по формуле Миффлина-Сан Жеора для женщин)."
     return (note.rstrip() + "\n" + _identity_note(profile)).strip()
@@ -1612,7 +1612,8 @@ def training_today(st, profile=None, recent=None, mode=None, usage=None, pregnan
         '"tip":"одна конкретная рекомендация по технике или восстановлению"}],'
         '"suggestions":["три РАЗНЫХ саджеста про нагрузку, восстановление или технику"]}\n' + SUGG_RULES + '\n'
         "В options 2-3 варианта. Название каждого варианта — обычный вид тренировки, как в дневнике: "
-        "Силовая, Кардио, Йога, Ходьба, Плавание, Растяжка (можно с уточнением: «Силовая: низ тела», «Ходьба в бодром темпе»). "
+        "Силовая, Кардио, Йога, Ходьба, Плавание, Растяжка (можно с уточнением: «Силовая: низ тела», «Ходьба в бодром темпе»), "
+        "либо её собственная активность из контекста недавних тренировок — если она сама её отмечает и это подходит сегодняшней нагрузке. "
         "Никаких выдуманных упражнений и странных техник. У КАЖДОГО варианта обязательно заполни duration и tip. Если вариант силовой — exercises обязательны. Для силовых вариантов подбирай упражнения СТРОГО из списка: "
         "Присед, Жим ногами, Выпады, Болгарские, Румынская тяга, Разгибания, Сгибания, Икры, "
         "Вертикальная тяга, Горизонтальная тяга, Тяга в наклоне, Становая, Подтягивания, Гиперэкстензия, "
@@ -1957,6 +1958,18 @@ def partner_preg_answer(preg, question, hint=None, usage=None):
     return guard_user_address(_clean(out, "Спроси, что ей сейчас облегчить: еду, воду, сон, прогулку, аптеку или тишину. Если есть тревожные симптомы, лучше связаться с врачом."))
 
 DIET_RU = {"veg": "вегетарианство", "vegan": "веган", "nolac": "без лактозы", "noglu": "без глютена", "nonuts": "без орехов", "pesc": "пескетарианство, из мяса только рыба"}
+
+def diet_restrictions(profile):
+    """Человекочитаемые пищевые ограничения профиля: коды + свободная заметка.
+    Возвращает '' если ограничений нет."""
+    if not profile:
+        return ""
+    parts = [DIET_RU.get(x, x) for x in (profile.get("diet") or "").split(",") if x.strip()]
+    note = (profile.get("diet_note") or "").strip()
+    if note:
+        parts.append(note)
+    return ", ".join(p for p in parts if p)
+
 MODE_RU = {"irregular": "нерегулярный цикл", "none": "сейчас нет месячных (аменорея)",
            "male": "пользователь — МУЖЧИНА: никаких тем женского цикла и женской физиологии, обращайся в мужском роде; питание и тренировки по общим медицинским рекомендациям для мужчин (достаточный белок, силовая и кардио, сон и восстановление)", "meno": "менопауза или постменопауза", "preg": "беременность (давай рекомендации с учётом беременности, безопасные при гестации, без потенциально вредных продуктов и нагрузок)", "long": "длинный цикл (более 40 дней)"}
 def _age_band(age):
@@ -1971,9 +1984,8 @@ def _gen_ctx(profile, mode):
     band = _age_band(profile.get("age") if profile else None)
     age = (profile.get("age") if profile else None) or "не указан"
     diet = ""
-    parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
-    if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
-    if parts: diet = f" Пищевые ограничения: {', '.join(parts)}."
+    _d = diet_restrictions(profile)
+    if _d: diet = f" Пищевые ограничения: {_d}."
     if mode == "male":
         return (
             "Профиль мужчины. Обращайся к пользователю только в мужском роде. "
@@ -2262,9 +2274,8 @@ def menu_today(st, profile=None, target=None, usage=None):
     if target:
         extra += (f" Ориентир по дню: примерно {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, "
                   f"углеводы {target[3]} г, распредели по приёмам.")
-    parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
-    if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
-    if parts: extra += f" Строго учитывай пищевые ограничения: {', '.join(parts)}. Не предлагай запрещённые продукты."
+    _d = diet_restrictions(profile)
+    if _d: extra += f" Строго учитывай пищевые ограничения: {_d}. Не предлагай запрещённые продукты."
     prompt = (f"Составь меню на день под {st['subphase']} {st['phase_ru'].lower()} фазу (день {st['day']} цикла). "
               "Четыре приёма: завтрак ~08:00, обед ~13:00, перекус ~16:00, ужин ~20:00. "
               "Завтрак обязательно белковый (яйца, омлет, сыр, греческий йогурт, рыба), а не сладкая каша как основа. "
@@ -2310,9 +2321,8 @@ def replace_meal(
     k = slots[idx]
     if True:   # замену блюда тоже всегда делает модель; пул — фолбэк ниже
         extra = ""
-        parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
-        if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
-        if parts: extra += f" Ограничения: {', '.join(parts)}."
+        _d = diet_restrictions(profile)
+        if _d: extra += f" Ограничения: {_d}. Не предлагай запрещённые продукты."
         if target:
             extra += f" Ориентир дня: {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, углеводы {target[3]} г."
         physiology = (
@@ -2448,9 +2458,8 @@ def general_menu(profile, mode, target=None, usage=None):
     if target:
         extra += (f" Ориентир по дню: примерно {target[0]} ккал, белок {target[1]} г, жиры {target[2]} г, "
                   f"углеводы {target[3]} г, распредели по приёмам.")
-    parts = [DIET_RU.get(x, x) for x in (profile.get("diet").split(",") if profile and profile.get("diet") else []) if x]
-    if profile and profile.get("diet_note"): parts.append(profile["diet_note"])
-    if parts: extra += f" Строго учитывай пищевые ограничения: {', '.join(parts)}. Не предлагай запрещённые продукты."
+    _d = diet_restrictions(profile)
+    if _d: extra += f" Строго учитывай пищевые ограничения: {_d}. Не предлагай запрещённые продукты."
     prompt = (f"Составь меню на день. Контекст питания: {ctx}. "
               "Четыре приёма: завтрак ~08:00, обед ~13:00, перекус ~16:00, ужин ~20:00. "
               "Завтрак обязательно белковый (яйца, омлет, сыр, греческий йогурт, рыба). "

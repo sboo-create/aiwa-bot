@@ -2,6 +2,11 @@
 """AIWA, Telegram-бот женского здоровья по циклу: сводка, инфографика, меню, чек-ин, история, статистика."""
 import os, io, re, time, json, html, asyncio, sqlite3, secrets, logging, math, threading, queue, atexit, contextvars
 import mimetypes
+import sys
+# Production запускает файл как `python aiwa_bot.py` (__main__). Модули пакета
+# aiwa/ делают `import aiwa_bot` — без алиаса это загрузило бы файл второй раз
+# и дало циклический импорт. Алиас обязан стоять ДО первого `from aiwa...`.
+sys.modules.setdefault("aiwa_bot", sys.modules[__name__])
 from collections import deque
 from datetime import datetime, date, time as dtime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -1386,16 +1391,10 @@ def meal_scale(cid, mid, new_grams):
               (int(round(r[0] * k)), round(r[1] * k, 1), round(r[2] * k, 1), round(r[3] * k, 1), int(new_grams), cid, int(mid)))
     c.commit(); c.close(); return True
 
-_MET = {"Силовая": 5.0, "Кардио": 8.0, "Йога": 3.0, "Ходьба": 3.5, "Плавание": 7.0,
-        "Пилатес": 3.0, "Растяжка": 2.5}
-def workout_calories(wtype, duration, rpe, weight_kg):
-    m = re.search(r"\d+", str(duration or "")); mins = int(m.group()) if m else 40
-    met = _MET.get(wtype, 5.0)
-    r = str(rpe or "").lower()
-    if "лег" in r: met *= 0.85
-    elif "тяж" in r: met *= 1.15
-    w = weight_kg if (weight_kg and weight_kg > 30) else 65
-    return int(round(met * w * (mins / 60.0)))
+# Тренировки: калории/заголовки/любимые активности переехали в aiwa.fitness
+# (модульный монолит, см. docs/architecture/monolith-split-plan.md).
+from aiwa.fitness import (_MET, _STANDARD_WORKOUT_TYPES, _custom_workout_title,
+                          favorite_activities, workout_calories)
 
 def workout_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_hash=None, return_status=False):
     d = d or dtoday().isoformat()
@@ -3557,496 +3556,55 @@ def status_of(cid):
     return u, C.cycle_status(date.fromisoformat(u["last_period"]), u["cycle_len"])
 
 # ---------- keyboards ----------
-ICONS = {  # набор Goodluck_sasha (@goodluck_alex): подобраны разные по цвету
-    "food": "5418123573438980585",          # 🟢 зелёный
-    "sec:training": "5359581378193138129",  # 🔥 оранжевый
-    "calendar": "5415856681110217088",      # 🔵 синий
-    "checkin": "5337172201642664657",       # 💜 фиолетовый
-    "history": "5418143957353766660",       # ⭐️ золотой
-    "guides": "5359285137118864843",        # 📕 красный
-    "partner": "5359828776899322943",       # 💙 голубое сердце
-    "period": "5357334118159883232",        # ❤️ красный
-    "set:time": "5415597204955996883",      # 🟡 жёлтый
-    "menu": "5415634562581538032",          # 🔘 нейтральный
-    "edit": "5336819202575573316",          # ✏️ карандаш
-    "cyclelen": "5337121636992690373",      # 🔁 цикл
-    "addcycles": "5337010070922209271",     # 📌 пин
-    "profile_edit": "5359307659927364818",  # 🌸 цветок
-}
-def B(text, cb, style=None):
-    return InlineKeyboardButton(text, callback_data=cb)
-
-MENU_KB = InlineKeyboardMarkup([
-    [B("Сводка", "today")],
-    [B("Партнёр", "partner"), B("Выписка врачу", "history")],
-    [B("Настройки уведомлений", "more")],
-])
-GATE_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начать", callback_data="go_start")]])
-ONB_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Женщина", callback_data="onb_female")],
-    [InlineKeyboardButton("Мужчина", callback_data="mode:male")],
-])
-FEMALE_ONB_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
-    [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
-])
-NOCYCLE_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Нерегулярный цикл", callback_data="mode:irregular")],
-    [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
-    [InlineKeyboardButton("Менопауза", callback_data="mode:meno")],
-    [InlineKeyboardButton("Сейчас нет месячных", callback_data="mode:none")],
-])
-GENERAL_MENU_KB = InlineKeyboardMarkup([
-    [B("Сводка", "today")],
-    [B("Партнёр", "partner"), B("Выписка врачу", "history")],
-    [B("Настройки уведомлений", "more")],
-])
-MORE_KB = InlineKeyboardMarkup([
-    [B("История и выписка", "history"), B("Гид", "guides")],
-    [B("Время сводки", "set:time")],
-    [B("Утренние сводки: вкл/выкл", "toggle:summary")],
-    [B("Назад", "menu")],
-])
-MALE_MORE_KB = InlineKeyboardMarkup([
-    [B("История и выписка", "history")],
-    [B("Время сводки", "set:time")],
-    [B("Утренние сводки: вкл/выкл", "toggle:summary")],
-    [B("Назад", "menu")],
-])
-EDIT_KB = InlineKeyboardMarkup([
-    [B("Отметить месячные", "period")],
-    [B("Длина цикла", "cyclelen"), B("Рост, вес, возраст", "profile_edit")],
-    [B("История циклов", "addcycles")],
-    [B("Время рассылки", "set:time")],
-    [B("Назад", "menu")],
-])
-MALE_EDIT_KB = InlineKeyboardMarkup([
-    [B("Рост, вес, возраст", "profile_edit")],
-    [B("Время рассылки", "set:time")],
-    [B("Назад", "menu")],
-])
-PERIOD_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Начались сегодня", callback_data="period_today")]])
-SKIP_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Пропустить", callback_data="prof_skip")]])
-REPORT_PERIODS = frozenset({"3", "6", "all"})
-HIST_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("3 месяца", callback_data="rep:3"), InlineKeyboardButton("6 месяцев", callback_data="rep:6")],
-    [InlineKeyboardButton("Весь период", callback_data="rep:all")],
-])
-def report_prompt(u):
-    if u and u.get("mode") == "male":
-        return "За какой период собрать выписку по самочувствию?"
-    return "За какой период собрать выписку для врача?"
-def report_caption(u, label):
-    if u and u.get("mode") == "male":
-        return f"📄 Выписка по самочувствию, {label.lower()}. Можно показать терапевту."
-    return f"📄 Выписка по циклу, {label.lower()}. Можно показать гинекологу."
-ACT_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Минимальная", callback_data="act:1"), InlineKeyboardButton("Лёгкая", callback_data="act:2")],
-    [InlineKeyboardButton("Умеренная", callback_data="act:3"), InlineKeyboardButton("Высокая", callback_data="act:4")],
-    [InlineKeyboardButton("Очень высокая", callback_data="act:5")],
-])
-def diet_kb(selected):
-    rows = [[InlineKeyboardButton("Ограничений нет", callback_data="diet:none")]]
-    rows += [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"diet:s:{code}")] for code, ru in DIET]
-    rows.append([InlineKeyboardButton("Готово", callback_data="diet:done")]); return InlineKeyboardMarkup(rows)
-
-def time_kb():
-    times = ["07:00", "08:00", "09:00", "10:00", "21:00", "22:00"]
-    return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=f"tm:{t}") for t in times[i:i + 3]] for i in (0, 3)])
-
-def scheduled_hhmm(cid, hhmm):
-    """The selected time is the delivery time, never a load-spreading hint."""
-    h, m = map(int, hhmm.split(":"))
-    return f"{h % 24:02d}:{m % 60:02d}", 0, 0
-
-def summary_prepare_hhmm(cid, hhmm):
-    """Spread expensive generation before, rather than after, delivery time."""
-    try:
-        lead = max(1, int(os.environ.get("AIWA_SUMMARY_PREPARE_MIN", "10")))
-    except (TypeError, ValueError):
-        lead = 10
-    try:
-        spread = max(1, int(os.environ.get("AIWA_SUMMARY_PREPARE_SPREAD_MIN", "20")))
-    except (TypeError, ValueError):
-        spread = 20
-    h, m = map(int, hhmm.split(":"))
-    total = (h * 60 + m - lead - (abs(int(cid)) % spread)) % (24 * 60)
-    return f"{total // 60:02d}:{total % 60:02d}"
-
-def schedule_text(cid, hhmm):
-    """Пользователю показываем выбранное время — то же, что в профиле приложения.
-    Внутренний сдвиг очереди рассылки (scheduled_hhmm) — деталь доставки, не UI."""
-    shown = (row(cid) or {}).get("send_time") or hhmm or "08:00"
-    return (
-        f"Время сводки: {shown} по Москве — подготовлю заранее и начну отправку в это время. "
-        "При высокой нагрузке доставка может занять несколько минут."
-    )
-
-def today_start_iso():
-    """UTC boundary for canonical events_v2 timestamps."""
-    return datetime.combine(
-        datetime.now(TZ).date(), dtime.min, tzinfo=TZ
-    ).astimezone(timezone.utc).isoformat()
-
-def legacy_today_start_iso():
-    """Moscow-local boundary for historical naive `events.ts` rows."""
-    return datetime.combine(datetime.now(TZ).date(), dtime.min).isoformat()
-
-def summary_sent_today(cid):
-    c = db()
-    r = c.execute(
-        """SELECT 1 FROM events_v2
-           WHERE user_key=? AND occurred_at>=?
-             AND event_name IN ('summary_delivered','push_sent')
-           LIMIT 1""",
-        (A2.user_key(cid), today_start_iso()),
-    ).fetchone()
-    if not r:
-        # Historical rows created before events_v2 remain readable.
-        r = c.execute("""SELECT 1 FROM events
-            WHERE chat_id=? AND ts>=? AND (
-                (action='goal' AND meta='summary') OR
-                (action='broadcast' AND (meta='sent' OR meta LIKE 'sent|%'))
-            ) LIMIT 1""", (cid, legacy_today_start_iso())).fetchone()
-    c.close()
-    return bool(r)
-
-_PERMANENT_PUSH_FAILURES = frozenset({"blocked", "chat_not_found", "user_deactivated"})
-_RETRYABLE_PUSH_FAILURES = frozenset({"rate_limit", "timeout", "network"})
-
-def _push_failure_class(exc):
-    """Map Telegram exceptions to stable, privacy-safe delivery diagnostics."""
-    if isinstance(exc, Forbidden):
-        return "blocked"
-    if isinstance(exc, RetryAfter):
-        return "rate_limit"
-    if isinstance(exc, TimedOut):
-        return "timeout"
-    if isinstance(exc, NetworkError):
-        return "network"
-    if isinstance(exc, BadRequest):
-        text = str(exc or "").lower()
-        if "chat not found" in text:
-            return "chat_not_found"
-        if "user is deactivated" in text or "user deactivated" in text:
-            return "user_deactivated"
-        return "bad_request"
-    return "internal_or_unknown"
-
-def _suppress_push_delivery(cid, reason):
-    if reason not in _PERMANENT_PUSH_FAILURES:
-        return False
-    c = db()
-    try:
-        changed = c.execute(
-            """UPDATE users
-               SET push_suppressed_at=?, push_suppression_reason=?
-               WHERE chat_id=? AND push_suppressed_at IS NULL""",
-            (datetime.now(TZ).isoformat(), reason, cid),
-        ).rowcount == 1
-        c.commit()
-        return changed
-    finally:
-        c.close()
-
-def _clear_push_suppression(cid):
-    """An inbound private Telegram update proves that this recipient is reachable again."""
-    c = db()
-    try:
-        occurred_at = datetime.now(timezone.utc).isoformat()
-        changed = c.execute(
-            """UPDATE users
-               SET push_suppressed_at=NULL, push_suppression_reason=NULL
-               WHERE chat_id=? AND push_suppressed_at IS NOT NULL""",
-            (cid,),
-        ).rowcount == 1
-        if changed:
-            # Backfill uses immutable delivery/reachability history after a
-            # restart. Persist the proof in the same transaction as the state
-            # change so a queued best-effort event cannot re-suppress a user
-            # who has already contacted the bot again.
-            A2.insert_event_v2(
-                c, cid, "user_message", meta="push_reachable",
-                app_version=AIWA_VERSION, occurred_at=occurred_at,
-            )
-        c.commit()
-        if changed:
-            log.info("push delivery restored after inbound update: %s", cid)
-        return changed
-    finally:
-        c.close()
-
-def _backfill_push_suppressions():
-    """Persist previously blocked recipients from immutable legacy and v2 history."""
-    c = db()
-    try:
-        changed_legacy = c.execute(
-            """UPDATE users
-               SET push_suppressed_at=(
-                     SELECT MAX(e.ts) FROM events e
-                     WHERE e.chat_id=users.chat_id
-                       AND e.action='broadcast' AND e.meta LIKE 'blocked|%'
-                   ),
-                   push_suppression_reason='blocked'
-               WHERE push_suppressed_at IS NULL
-                 AND EXISTS (
-                     SELECT 1 FROM events e
-                     WHERE e.chat_id=users.chat_id
-                       AND e.action='broadcast' AND e.meta LIKE 'blocked|%'
-                 )
-                 AND (
-                     SELECT MAX(e.ts) FROM events e
-                     WHERE e.chat_id=users.chat_id
-                       AND e.action='broadcast' AND e.meta LIKE 'blocked|%'
-                 ) > COALESCE((
-                     SELECT MAX(e.ts) FROM events e
-                     WHERE e.chat_id=users.chat_id
-                       AND (
-                           (e.action='broadcast' AND e.meta LIKE 'sent|%')
-                           OR e.action IN ('command','user_message','voice','button','suggest')
-                       )
-                 ), '')"""
-        ).rowcount
-        changed_v2 = 0
-        users_by_key = {
-            A2.user_key(cid): cid
-            for (cid,) in c.execute(
-                "SELECT chat_id FROM users WHERE push_suppressed_at IS NULL"
-            ).fetchall()
-        }
-        # One indexed scan/group replaces an unbounded history query per user.
-        # json_extract is safe here: analytics_v2 always stores an object.
-        v2_states = c.execute(
-            """SELECT user_key,
-                      MAX(CASE
-                          WHEN event_name='push_failed'
-                           AND json_extract(properties_json,'$.delivery_status')='blocked'
-                          THEN occurred_at ELSE '' END) AS latest_failed,
-                      MAX(CASE
-                          WHEN event_name!='push_failed'
-                          THEN occurred_at ELSE '' END) AS latest_reachable
-               FROM events_v2
-               WHERE event_name IN (
-                 'push_failed','push_sent','user_message_sent',
-                 'screen_viewed','app_opened','legacy_message_interaction'
-               )
-               GROUP BY user_key"""
-        ).fetchall()
-        for key, latest_failed, latest_reachable in v2_states:
-            cid = users_by_key.get(key)
-            if cid is not None and latest_failed and latest_failed > (latest_reachable or ""):
-                changed_v2 += c.execute(
-                    """UPDATE users
-                       SET push_suppressed_at=?,push_suppression_reason='blocked'
-                       WHERE chat_id=? AND push_suppressed_at IS NULL""",
-                    (latest_failed, cid),
-                ).rowcount
-        c.commit()
-        changed = changed_legacy + changed_v2
-        if changed:
-            log.info("push suppression backfilled for %d blocked recipients", changed)
-        return changed
-    finally:
-        c.close()
-
-def _record_push_failure(cid, campaign, exc):
-    """Record one attempt without leaking Telegram error text or identifiers."""
-    failure_class = _push_failure_class(exc)
-    permanent = failure_class in _PERMANENT_PUSH_FAILURES
-    if permanent:
-        _suppress_push_delivery(cid, failure_class)
-    status = "blocked" if permanent else "error"
-    ev(
-        cid,
-        "broadcast",
-        meta="|".join((status, campaign or "unknown", failure_class,
-                       "retryable" if failure_class in _RETRYABLE_PUSH_FAILURES else "terminal")),
-    )
-    return failure_class
-
-def _claim_push_delivery(cid, campaign):
-    """Atomically reserve a push using a recoverable lease, not a permanent lock."""
-    if not campaign:
-        return True
-    try:
-        lease_seconds = max(60, int(os.environ.get("AIWA_PUSH_CLAIM_TTL_SEC", "900")))
-    except (TypeError, ValueError):
-        lease_seconds = 900
-    now = datetime.now(TZ)
-    now_iso = now.isoformat()
-    stale_before = (now - timedelta(seconds=lease_seconds)).isoformat()
-    c = db()
-    try:
-        c.execute("BEGIN IMMEDIATE")
-        already_sent = c.execute(
-            """SELECT 1 FROM events
-               WHERE chat_id=? AND action='broadcast' AND meta=?
-               LIMIT 1""",
-            (cid, "sent|" + campaign),
-        ).fetchone()
-        if not already_sent:
-            already_sent = c.execute(
-                """SELECT 1 FROM events_v2
-                   WHERE user_key=? AND event_name='push_sent'
-                     AND json_extract(properties_json,'$.campaign_id')=?
-                   LIMIT 1""",
-                (A2.user_key(cid), campaign),
-            ).fetchone()
-        if already_sent:
-            c.execute(
-                """INSERT OR IGNORE INTO push_deliveries
-                   (chat_id,campaign_id,status,claimed_at,sent_at)
-                   VALUES(?,?,'sent',?,?)""",
-                (cid, campaign, now_iso, now_iso),
-            )
-            c.commit()
-            return False
-        claimed = c.execute(
-            """INSERT OR IGNORE INTO push_deliveries
-               (chat_id,campaign_id,status,claimed_at)
-               VALUES(?,?,'claimed',?)""",
-            (cid, campaign, now_iso),
-        ).rowcount == 1
-        if not claimed:
-            # A process may die after claiming and before completing. Reclaim only
-            # an expired in-flight lease; a sent row is never reopened.
-            claimed = c.execute(
-                """UPDATE push_deliveries
-                   SET claimed_at=?, sent_at=NULL
-                   WHERE chat_id=? AND campaign_id=? AND status='claimed'
-                     AND claimed_at<=?""",
-                (now_iso, cid, campaign, stale_before),
-            ).rowcount == 1
-        c.commit()
-        return claimed
-    finally:
-        c.close()
-
-def _complete_push_delivery(cid, campaign):
-    if not campaign:
-        return
-    c = db()
-    try:
-        c.execute(
-            """UPDATE push_deliveries
-               SET status='sent', sent_at=?
-               WHERE chat_id=? AND campaign_id=?""",
-            (datetime.now(TZ).isoformat(), cid, campaign),
-        )
-        c.commit()
-    finally:
-        c.close()
-
-def _release_push_delivery(cid, campaign):
-    """Allow retry only when Telegram definitely rejected the send."""
-    if not campaign:
-        return
-    c = db()
-    try:
-        c.execute(
-            """DELETE FROM push_deliveries
-               WHERE chat_id=? AND campaign_id=? AND status='claimed'""",
-            (cid, campaign),
-        )
-        c.commit()
-    finally:
-        c.close()
-
-def should_catchup_broadcast(cid, hhmm):
-    actual, _, _ = scheduled_hhmm(cid, hhmm)
-    h, m = map(int, actual.split(":"))
-    now = datetime.now(TZ)
-    due = datetime.combine(now.date(), dtime(h, m), tzinfo=TZ)
-    try:
-        hours = max(1, int(os.environ.get("AIWA_BROADCAST_CATCHUP_HOURS", "16")))
-    except (TypeError, ValueError):
-        hours = 16
-    return due <= now <= due + timedelta(hours=hours) and not summary_sent_today(cid)
-
-async def enqueue_broadcast(cid, meta="queued"):
-    if (row(cid) or {}).get("push_suppressed_at"):
-        return False
-    if summary_sent_today(cid):
-        return False
-    if cid in BCAST_PENDING:
-        return False
-    BCAST_PENDING.add(cid)
-    ev(cid, "broadcast", meta=f"queued|{campaign_id('daily_summary')}")
-    if BCAST_Q is not None:
-        await BCAST_Q.put(cid)
-        return True
-    BCAST_PENDING.discard(cid)
-    return False
-
-def en_kb(p, labels=None):
-    L = labels or EN
-    return InlineKeyboardMarkup([[InlineKeyboardButton(L[i].capitalize(), callback_data=f"ci:{p}:{i}") for i in (1, 2, 3)]])
-def sym_kb(selected):
-    rows = [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"ci:s:{code}")] for code, ru in SYMPTOMS]
-    rows.append([InlineKeyboardButton("Свой симптом", callback_data="ci:custom")])
-    rows.append([InlineKeyboardButton("Готово", callback_data="ci:done")]); return InlineKeyboardMarkup(rows)
-def sugg_kb(cid, items, app_user=None, app_label=None, feedback_id=None, campaign=None):
-    def _short(t): return t if len(t) <= 28 else t[:26].rstrip(" ,.-") + "…"
-    # единая точка сборки кнопок: каждый саджест с заглавной буквы (в т.ч. статичные)
-    norm = getattr(L, "_norm_sugg1", None)
-    items = guard_aiwa_suggestions(cid, items)
-    items = [(norm(t) if norm else t) for t in items if t]
-    rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
-    if app_user and AIWA_WEBAPP_URL:
-        app_tab = {
-            "Открыть дневник": "food",
-            "Открыть питание": "food",
-            "Открыть нагрузку": "train",
-        }.get(app_label)
-        rows.append([InlineKeyboardButton(app_label or APP_BUTTON_TEXT,
-                     web_app=WebAppInfo(url=campaign_webapp_url(app_user, campaign, app_tab)))])
-    if feedback_id:
-        rows.append([B("👍 Полезно", f"fb:helpful:{feedback_id}"),
-                     B("👎 Не помогло", f"fb:unhelpful:{feedback_id}")])
-    return InlineKeyboardMarkup(rows)
-def summary_kb(u=None, campaign=None):
-    rows = []
-    if AIWA_WEBAPP_URL:
-        rows.append([InlineKeyboardButton(APP_BUTTON_TEXT, web_app=WebAppInfo(url=campaign_webapp_url(u, campaign)))])
-    return InlineKeyboardMarkup(rows)
-def summary_suggestions(st):
-    if not st:
-        return ["Что важно сегодня?", "Что отметить?"]
-    if st.get("status") == "due":
-        return ["Тест уже делать?", "Почему сдвигается?"]
-    if st.get("status") == "delay":
-        d = int(st.get("delay_days") or 0)
-        if d >= 10:
-            return ["Когда к врачу?", "Что проверить?"]
-        return ["Тест на ХГЧ?", "Почему задержка?"]
-    if st.get("status") == "stale":
-        return ["Как обновить календарь?", "Что проверить?"]
-    ph = st.get("phase")
-    return {
-        "menstrual": ["Как снизить боль?", "Что есть при месячных?"],
-        "follicular": ["Какая тренировка?", "Что есть сегодня?"],
-        "ovulation": ["Когда фертильное окно?", "Можно интенсивнее?"],
-        "luteal": ["Как пережить ПМС?", "Что съесть вечером?"],
-    }.get(ph, ["Что важно сегодня?", "Что отметить?"])
-def general_summary_suggestions(u):
-    mode = (u or {}).get("mode")
-    if mode == "meno":
-        return ["Почему приливы?", "Какие чекапы?"]
-    if mode == "preg":
-        return ["Что есть сейчас?", "Какая активность?"]
-    if mode == "irregular":
-        return ["Почему цикл скачет?", "Что отмечать?"]
-    return ["Что важно сегодня?", "Что отметить?"]
-def summary_sugg_kb(cid, u=None, st=None, app_label=None, campaign=None):
-    items = summary_suggestions(st) if st is not None else general_summary_suggestions(u)
-    return sugg_kb(cid, items, app_user=u, app_label=app_label or APP_BUTTON_TEXT, campaign=campaign)
-def merge_summary_suggestions(u=None, st=None, extra=None):
-    items = [x for x in (extra or []) if x]
-    fallback = summary_suggestions(st) if st is not None else general_summary_suggestions(u)
-    for x in fallback:
-        if len(items) >= 2: break
-        if x not in items: items.append(x)
-    return items[:2]
+# Секция перенесена в aiwa.keyboards (модульный монолит,
+# см. docs/architecture/monolith-split-plan.md).
+from aiwa.keyboards import (ICONS,
+    B,
+    MENU_KB,
+    GATE_KB,
+    ONB_KB,
+    FEMALE_ONB_KB,
+    NOCYCLE_KB,
+    GENERAL_MENU_KB,
+    MORE_KB,
+    MALE_MORE_KB,
+    EDIT_KB,
+    MALE_EDIT_KB,
+    PERIOD_KB,
+    SKIP_KB,
+    REPORT_PERIODS,
+    HIST_KB,
+    report_prompt,
+    report_caption,
+    ACT_KB,
+    diet_kb,
+    time_kb,
+    scheduled_hhmm,
+    summary_prepare_hhmm,
+    schedule_text,
+    today_start_iso,
+    legacy_today_start_iso,
+    summary_sent_today,
+    _PERMANENT_PUSH_FAILURES,
+    _RETRYABLE_PUSH_FAILURES,
+    _push_failure_class,
+    _suppress_push_delivery,
+    _clear_push_suppression,
+    _backfill_push_suppressions,
+    _record_push_failure,
+    _claim_push_delivery,
+    _complete_push_delivery,
+    _release_push_delivery,
+    should_catchup_broadcast,
+    enqueue_broadcast,
+    en_kb,
+    sym_kb,
+    sugg_kb,
+    summary_kb,
+    summary_suggestions,
+    general_summary_suggestions,
+    summary_sugg_kb,
+    merge_summary_suggestions)
 
 # ---------- senders ----------
 async def need_onboard(t, user_generation=None):
@@ -6973,254 +6531,18 @@ async def help_cmd(update, context):
     )
 
 # ---------- stats ----------
-def aggregate_stats():
-    """Выжимка /stats из analytics_data: 4 блока, явный период, WoW, источники."""
-    A = analytics_data(days=7)
-    a = A["audience"]; e = A["engagement"]; pr = A["product"]; qd = A["quality"]
-    g = A.get("growth", {}); ts = A.get("toolcalls_by_source", {})
-    def rr(x): return "-" if x is None else (str(x) + "%")
-    def wow(x): return "" if x is None else (" · WoW " + ("+" if x >= 0 else "") + str(x) + "%")
-    L = []
-    L.append("Аналитика AIWA · за 7 дней (" + A["since"] + " -> " + A["until"] + ")")
-    L.append("")
-    L.append("АУДИТОРИЯ")
-    L.append("Ever used " + str(a["ever_used"]))
-    L.append("Средний DAU " + str(a["avg_dau"]) + wow(g.get("avg_dau")) + " · сегодня " + str(a["dau"]) + " (день идёт)")
-    L.append("WAU " + str(a["wau"]) + " · MAU " + str(a["mau"]) + " · Stickiness " + str(a["stickiness"]) + "% (DAU/MAU)")
-    ret = a["retention"]
-    L.append("Rolling retention D1/7/30: " + rr(ret["roll_d1"]) + "/" + rr(ret["roll_d7"]) + "/" + rr(ret["roll_d30"]))
-    L.append("Всего " + str(a["users_total"]) + ", новых за период " + str(a["new_users"]) + ", партнёров " + str(a["partners"]["connected"]))
-    L.append("Сегменты (активных): " + (", ".join(str(sg["mode"]) + " " + str(sg["active"]) for sg in a["segments"]) or "нет"))
-    L.append("")
-    L.append("ВОВЛЕЧЁННОСТЬ")
-    L.append("Событий на DAU: " + str(e["events_per_dau"]) + " = " + str(e["events_total"]) + " событий / " + str(e["active_user_days"]) + " активных·дней" + wow(g.get("events")))
-    L.append("События по источнику: приложение " + str(e["by_source"]["app"]) + ", чат " + str(e["by_source"]["chat"]))
-    L.append("Tools / DAU " + str(e["tools_per_dau"]) + " (" + str(e["toolcalls_total"]) + " вызовов) · прил " + str(ts.get("app", 0)) + ", чат " + str(ts.get("chat", 0)) + ", авто " + str(ts.get("auto", 0)) + wow(g.get("toolcalls")))
-    L.append("Топ действий: " + (", ".join(str(k) + " " + str(vv) for k, vv in e["actions_top"][:6]) or "нет"))
-    ss = e["sessions"]
-    L.append("Sessions / DAU " + str(e["sessions_per_dau"]) + " (" + str(ss["count"]) + " сессий), длина " + str(ss["avg_len_min"]) + " мин, действий/сессия " + str(ss["events_per"]))
-    L.append("")
-    L.append("ПРОДУКТ")
-    po = pr["push_open"]
-    L.append("Пуш->открытие: " + str(po["rate"]) + "% (" + str(po["opened"]) + " из " + str(po["sent"]) + ")")
-    _bc = sorted(pr["broadcasts"].items(), key=lambda x: -x[1])[:6]
-    L.append("Рассылки: " + (", ".join(str(k) + " " + str(vv) for k, vv in _bc) or "нет"))
-    f = pr["funnel"]
-    L.append("Воронка: новые " + str(f["new_users"]) + " -> активны " + str(f["onboarded"]) + " -> сводка " + str(f["got_summary"]) + " -> еда " + str(f["logged_food"]) + " -> тренировка " + str(f["logged_workout"]))
-    L.append("")
-    L.append("КАЧЕСТВО")
-    L.append("Успешность " + str(qd["success_rate"]) + "% = " + str(qd["answered"]) + " / (" + str(qd["answered"]) + "+" + str(qd["fallback"]) + "+" + str(qd["errors"]) + ")")
-    L.append("Фолбэки " + str(qd["fallback_rate"]) + "%, ошибки " + str(qd["error_rate"]) + "%")
-    L.append("Латентность p50 " + str(qd["p50"]) + " / p95 " + str(qd["p95"]) + " мс")
-    L.append("Токены " + str(qd["tokens"]) + ", оценка $" + str(qd["cost_usd"]))
-    return "\n".join(L)
-
-async def ui_cmd(update, context):
-    """Диагностика редизайна: что видит флаг и какой URL получают кнопки этого пользователя."""
-    cid = update.effective_chat.id
-    u = row(cid)
-    url = webapp_url(u) or "(нет AIWA_WEBAPP_URL)"
-    lines = ["Диагностика мини-аппа:",
-             f"твой id: {cid}",
-             f"redesign включён для тебя: {'ДА' if redesign_on(cid) else 'НЕТ'}",
-             f"id в списке AIWA_REDESIGN_IDS: {len(_REDESIGN_IDS)} шт",
-             f"URL кнопок: {url}",
-             "", "Кнопка ниже ведёт на новый фронт напрямую. Если по ней открывается старый экран — пришли скрин."]
-    kb = None
-    if AIWA_WEBAPP_URL:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Новый апп (прямая ссылка)",
-              web_app=WebAppInfo(url=AIWA_WEBAPP_URL))]])
-    await update.message.reply_text("\n".join(lines), reply_markup=kb)
-
-async def voicetest_cmd(update, context):
-    """Диагностика голоса: авторизация Сбера, синтез, отправка тестового голосового."""
-    cid = update.effective_chat.id
-    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
-        return await update.message.reply_text("Команда только для админа.")
-    await update.message.reply_text("Проверяю голосовой контур…")
-    d = await asyncio.to_thread(L.salute_diag)
-    L_ = ["Голосовой контур:", ""]
-    L_.append(("✅" if d["key"] else "❌") + " ключ SBER_SALUTE_AUTH_KEY " + ("задан" if d["key"] else "НЕ задан")
-              + (" · %s символов · %s" % (d.get("key_len"), d.get("key_form")) if d.get("key_form") else ""))
-    L_.append(("✅" if d["auth"] else "❌") + " авторизация в Сбере" + ("" if d["auth"] else ": " + (d.get("auth_err") or "неизвестно")))
-    if d.get("auth_form"): L_.append("   формат ключа: " + str(d["auth_form"]))
-    if d.get("auth"):
-        ok_tts = d.get("tts_bytes", 0) > 0
-        L_.append(("✅" if ok_tts else "❌") + " синтез речи" + (" (%s байт)" % d["tts_bytes"] if ok_tts else ": " + (d.get("tts_err") or "пусто")))
-    if d.get("key_parts"): L_.append("   в ключе: " + str(d["key_parts"]) + " (норма: 36 + 36)")
-    L_ += ["", "версия: " + AIWA_VERSION, "сервис: " + str(d.get("mode")) + " · логин: " + str(d.get("client")),
-           "OAuth URL: " + str(d.get("oauth_url")),
-           "модель распознавания: " + str(d["model"]),
-           "голос: " + str(d["voice"]), "режим STT: " + str(d["stt_mode"]),
-           "ответ голосом: " + ("включён" if _voice_reply_on() else "ВЫКЛЮЧЕН (AIWA_VOICE_REPLY=0)"),
-           "Groq (запасной): " + ("есть" if d["groq"] else "нет")]
-    await update.message.reply_text("\n".join(L_))
-    if d.get("tts_bytes"):
-        try:
-            audio = await asyncio.to_thread(L.synthesize, "Привет! Это Айва. Проверка голосового ответа.")
-            if audio:
-                try:
-                    await context.bot.send_voice(cid, audio)
-                except Exception as e:
-                    if "voice_messages_forbidden" not in str(e).lower():
-                        raise
-                    await _send_audio_fallback(context, cid, audio)
-                    await update.message.reply_text(
-                        "⚠️ Голосовые тебе слать нельзя — это настройка приватности Telegram, не ошибка бота.\n"
-                        "Прислала ответ обычным аудиофайлом. Чтобы приходили именно голосовые: "
-                        "Настройки → Конфиденциальность → Голосовые сообщения → «Все».\n"
-                        "Пользовательницам без этого ограничения голосовые уходят нормально.")
-        except Exception as e:
-            await update.message.reply_text("Синтез удался, но отправить не вышло: " + str(e)[:200])
-
-async def refs_cmd(update, context):
-    cid = update.effective_chat.id
-    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
-        return await update.message.reply_text("Команда только для админа.")
-    try:
-        c = db(); rows = c.execute("SELECT source, chat_id FROM referrals").fetchall(); c.close()
-    except Exception:
-        rows = []
-    from collections import defaultdict
-    agg = defaultdict(lambda: [0, 0])
-    for src, ccid in rows:
-        agg[src][0] += 1
-        if is_onboarded(row(ccid)): agg[src][1] += 1
-    if not agg:
-        return await update.message.reply_text(
-            "Пока нет переходов по ссылкам с меткой.\nРаздавай ссылку вида:\nhttps://t.me/" + (BOT_USERNAME or "<bot>") + "?start=ИСТОЧНИК")
-    lines = ["Переходы по меткам (перешли \u2192 настроили Айву):", ""]
-    tot_all = 0; onb_all = 0
-    for src, (tot, onb) in sorted(agg.items(), key=lambda x: -x[1][0]):
-        tot_all += tot; onb_all += onb
-        cr = (str(round(onb * 100 / tot)) + "%") if tot else "0%"
-        lines.append("\u2022 " + src + ": " + str(tot) + " \u2192 " + str(onb) + " (" + cr + ")")
-    lines.append("")
-    lines.append("Итого: " + str(tot_all) + " \u2192 " + str(onb_all))
-    await update.message.reply_text("\n".join(lines))
-
-async def stats_cmd(update, context):
-    cid = update.effective_chat.id
-    if not AIWA_ADMIN:
-        return await update.message.reply_text(f"Статистика закрыта. Твой chat id: {cid}. Задай в Railway переменную AIWA_ADMIN={cid}, и команда станет доступна только тебе.")
-    if str(cid) != str(AIWA_ADMIN):
-        return await update.message.reply_text("Эта команда доступна только администратору.")
-    _txt = await asyncio.to_thread(aggregate_stats)
-    await update.message.reply_text(_txt)
-
-async def probe_cmd(update, context):
-    cid = update.effective_chat.id
-    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
-        return await update.message.reply_text("Эта команда доступна только администратору.")
-    try:
-        n = int(context.args[0]) if getattr(context, "args", None) else 10
-    except (ValueError, IndexError):
-        n = 10
-    n = max(1, min(200, n))
-    await update.message.reply_text(f"Запускаю {n} по-настоящему параллельных вызовов к модели в обход внутреннего лимита, меряю реальную параллельность тарифа...")
-    import concurrent.futures as _cf
-    t0 = time.time()
-    loop = asyncio.get_running_loop()
-    pool = _cf.ThreadPoolExecutor(max_workers=n)
-    try:
-        results = await asyncio.gather(*[loop.run_in_executor(pool, L.probe_once) for _ in range(n)])
-    finally:
-        pool.shutdown(wait=False)
-    dt = int((time.time() - t0) * 1000)
-    ok = sum(1 for r in results if r[0])
-    fail = n - ok
-    lats = sorted(r[1] for r in results)
-    p50 = lats[len(lats) // 2]
-    p95 = lats[min(len(lats) - 1, int(len(lats) * 0.95))]
-    verdict = ("Все прошли - тариф держит такую параллельность."
-               if fail == 0 else
-               f"{fail} из {n} упало при одновременном запуске - похоже, это потолок параллельности тарифа. "
-               f"Держи AIWA_LLM_CONCURRENCY ниже порога, где начинаются ошибки.")
-    await update.message.reply_text(
-        f"Готово за {dt} мс.\n\n"
-        f"Успешно: {ok}/{n}\n"
-        f"Ошибок: {fail}\n"
-        f"Задержка: p50 {p50} мс, p95 {p95} мс, max {lats[-1]} мс\n\n"
-        + verdict
-    )
-
-async def broadcast_today_cmd(update, context):
-    cid = update.effective_chat.id
-    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
-        return await update.message.reply_text("Эта команда доступна только администратору.")
-    users = all_users()
-    queued = skipped = 0
-    for uid in users:
-        hhmm = (row(uid) or {}).get("send_time") or "08:00"
-        if not should_catchup_broadcast(uid, hhmm):
-            skipped += 1
-            continue
-        if await enqueue_broadcast(uid):
-            queued += 1
-        else:
-            skipped += 1
-    qsize = BCAST_Q.qsize() if BCAST_Q is not None else 0
-    await update.message.reply_text(
-        f"Запустила рассылку на сегодня.\n\n"
-        f"В очереди: {queued}\n"
-        f"Уже была сводка или уже стоят в очереди: {skipped}\n"
-        f"Размер очереди сейчас: {qsize}\n\n"
-        f"Сводки уйдут по очереди, чтобы не положить модель и Telegram."
-    )
-
-async def meno_update_cmd(update, context):
-    cid = update.effective_chat.id
-    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
-        return await update.message.reply_text("Эта команда доступна только администратору.")
-    users = meno_users()
-    sent = failed = 0
-    campaign = campaign_id("meno_update")
-    for uid in users:
-        u = row(uid)
-        try:
-            await context.bot.send_message(uid, html.escape(MENO_UPDATE_TEXT),
-                reply_markup=summary_sugg_kb(uid, u, campaign=campaign), parse_mode="HTML")
-            ev(uid, "broadcast", meta="sent|" + campaign)
-            sent += 1
-            await asyncio.sleep(0.25)
-        except Exception as e:
-            failed += 1
-            _record_push_failure(uid, campaign, e)
-            log.warning("meno update %s: %s", uid, e)
-    await update.message.reply_text(f"Пуш про мено-экран отправлен.\n\nУшло: {sent}\nОшибок: {failed}")
-
-async def _announce_capture(update, context, cid):
-    """Копирует сообщение, которое админ прислал после /announce (текст и/или фото), всем пользователям."""
-    ANNOUNCE_WAIT.discard(cid)
-    msg = update.message
-    txt = (msg.text or "").strip()
-    if txt.lower() in ("/cancel", "отмена"):
-        return await msg.reply_text("Рассылка отменена.")
-    await msg.reply_text("Рассылаю это сообщение всем пользователям. Пришлю отчёт, когда закончу.")
-    sent = failed = 0
-    campaign = campaign_id("announcement")
-    for uid in all_users():
-        try:
-            await context.bot.copy_message(chat_id=uid, from_chat_id=cid, message_id=msg.message_id,
-                                           reply_markup=summary_kb(row(uid), campaign=campaign))
-            ev(uid, "broadcast", meta="sent|" + campaign); sent += 1
-            await asyncio.sleep(0.25)
-        except Forbidden as exc:
-            failed += 1; _record_push_failure(uid, campaign, exc)
-        except Exception as e:
-            failed += 1; _record_push_failure(uid, campaign, e); log.warning("announce %s: %s", uid, e)
-    await msg.reply_text(f"Готово. Ушло: {sent}, ошибок: {failed}.")
-
-async def announce_cmd(update, context):
-    cid = update.effective_chat.id
-    if not AIWA_ADMIN or str(cid) != str(AIWA_ADMIN):
-        return await update.message.reply_text("Эта команда доступна только администратору.")
-    ANNOUNCE_WAIT.add(cid)
-    await update.message.reply_text(
-        "Режим рассылки включён.\n\n"
-        "Пришли СЛЕДУЮЩИМ сообщением то, что разослать всем: обычный текст, или фото с подписью, или картинку. "
-        "Я скопирую это сообщение всем пользователям и добавлю кнопку «Приложение».\n\n"
-        "Чтобы отменить — напиши слово: отмена.")
+# Секция перенесена в aiwa.stats (модульный монолит,
+# см. docs/architecture/monolith-split-plan.md).
+from aiwa.stats import (aggregate_stats,
+    ui_cmd,
+    voicetest_cmd,
+    refs_cmd,
+    stats_cmd,
+    probe_cmd,
+    broadcast_today_cmd,
+    meno_update_cmd,
+    _announce_capture,
+    announce_cmd)
 
 # ---------- text ----------
 async def on_text(update, context):
@@ -8804,7 +8126,17 @@ def _recent_workouts_text(cid):
         seg = (w.get("d", "") or "") + ": " + (w.get("type", "") or "")
         if items: seg += " (" + items[:60] + ")"
         parts.append(seg)
-    return "; ".join(parts)
+    txt = "; ".join(parts)
+    try:
+        fav = favorite_activities(cid)
+    except Exception:
+        fav = []
+    if fav:
+        txt += (". Её собственные активности за последние 2 месяца: "
+                + ", ".join("%s (%s раз)" % (t, n) for t, n in fav)
+                + " — когда уместно по нагрузке и самочувствию, предлагай их "
+                  "или похожие по духу, а не только стандартный набор.")
+    return txt
 
 def _recent_syms_text(cid):
     lg = log_get(cid, dtoday().isoformat()) or {}
@@ -11733,6 +11065,10 @@ async def _api_workout(request):
         return _cors(web.json_response({"error": "empty", "text": "Выбери тип и упражнения."}, status=400))
     prof = profile_of(u); weight_kg = (prof.get("weight") if prof else None)
     kcal = workout_calories(wtype, dur, rpe, weight_kg)
+    # «Своё» с единственным вписанным занятием получает его имя как заголовок
+    # (обрезанный): в «Прошедших тренировках» видно «Сквош», а не «Своё».
+    if wtype in ("Своё", "Тренировка") and len(items) == 1:
+        wtype = _custom_workout_title(items[0]["name"]) or wtype
     muscles = ", ".join(groups)
     wk = {"type": wtype, "items": items, "duration": dur, "rpe": rpe, "note": str(body.get("note") or "")[:200],
           "kcal": kcal, "muscles": muscles}
