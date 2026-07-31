@@ -2644,3 +2644,14 @@ body.material [class*="_host_bottom_"] {
   color: var(--aiwa-ink-subtle, rgba(17, 17, 17, 0.4));
   white-space: nowrap;
 }
+
+/* Иконка статуса в тосте. Библиотека заливает currentColor все пути
+   (.icon svg path { fill: currentcolor }), рассчитывая на одноцветный глиф
+   Material Symbols. У наших примитивов иначе: круг — заливка, а галочка,
+   восклицательный знак и «i» вырезаны из него вторым путём штрихом. При
+   сплошной заливке знак пропадал, и от тоста оставался белый кружок.
+   Возвращаем вырез: второй путь не заливаем и красим цветом фона тоста. */
+[class*="_icon_"] svg path + path {
+  fill: none !important;
+  stroke: var(--toast-background, rgba(45, 45, 45, 0.92)) !important;
+}
