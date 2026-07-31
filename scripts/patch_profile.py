@@ -69,5 +69,21 @@ if "aiwa-profile-avatar" not in js:
     ), 1)
     done.append("аватар")
 
+# --- 3. Смена режима: ждать ответ сервера, а не закрываться сразу ---------
+if 'qt("/api/mode"' not in js:
+    # Было: j = (A) => { e(), vn("chooseMode", A); } — панель закрывалась до
+    # запроса, поэтому отказ сервера («нужна дата последних месячных»)
+    # прилетал уже на главный экран и выглядел как «режим просто не сменился».
+    old = 'j = (A) => {\n    e(), vn("chooseMode", A);\n  }'
+    assert js.count(old) == 1, js.count(old)
+    js = js.replace(old, (
+        'j = async (A) => {\n'
+        '    const R = await qt("/api/mode", { mode: A }).catch(() => null);\n'
+        '    if (!R?.ok) return Ot(R?.text || "Не получилось сменить режим", { type: "error" });\n'
+        '    Ot(`Режим: ${(mj.find((U) => U.value === A) || mj[0]).label}`, { type: "success" }), vn("reloadAfterEdit"), e();\n'
+        '  }'
+    ), 1)
+    done.append("смена режима")
+
 BUNDLE.write_text(js, encoding="utf-8")
 print("применено:", ", ".join(done) if done else "нечего, всё уже на месте")
