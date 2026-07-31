@@ -66,3 +66,29 @@ The staging text route uses `google/gemini-3.1-flash-lite` with
 2026-07-28 measured 2.12 s p50 and 2.24 s p95 versus 9.35 s p50 and 32.43 s p95
 for `deepseek/deepseek-v4-flash`. Keep production unchanged until the staging
 quality and load suite passes.
+
+## Офлайн-генерация медиа-каталогов на i167
+
+Скрипты `scripts/backfill_media_assets.py` и `promote_media_catalog.py`
+работают вне systemd, поэтому **не видят service-specific hosts** и не
+попадают в relay: запрос к `openrouter.ai:14443` падает с ConnectionError.
+Запускать в mount-namespace с тем же hosts-файлом:
+
+```bash
+sudo unshare --mount bash -c '
+  mount --bind /srv/aiwa/config/hosts /etc/hosts
+  set -a; . /srv/aiwa/config/app.env; . /srv/aiwa/secrets/providers.env; set +a
+  cd /srv/aiwa/current
+  python scripts/backfill_media_assets.py --generate --kind sport \
+    --input labels.json --output work/assets --workers 1 --attempts 4
+  python scripts/backfill_media_assets.py --review --kind sport \
+    --input work/assets/backfill-manifest.json \
+    --output work/assets/reviewed-manifest.json --repair-attempts 4
+'
+```
+
+Гейтов два и оба обязательны: автоматический (`review_status`) и
+человеческий (`visual_review_status`) — `promote_media_catalog.py` без них
+откажется публиковать. Выходной манифест ревью должен лежать рядом со
+входным. После промоута обновить ожидаемое число картинок в
+`tests/test_media_catalog_backfill.py`.
