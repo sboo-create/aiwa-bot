@@ -24550,8 +24550,8 @@ function $U({ gradientId: e, emptyText: t }) {
         preserveAspectRatio: "none",
         children: [
           /* @__PURE__ */ B.jsx("defs", { children: /* @__PURE__ */ B.jsxs("linearGradient", { id: e, x1: "0", y1: "0", x2: "0", y2: "1", children: [
-            /* @__PURE__ */ B.jsx("stop", { offset: "5%", stopColor: "currentColor", stopOpacity: 0.26 }),
-            /* @__PURE__ */ B.jsx("stop", { offset: "95%", stopColor: "currentColor", stopOpacity: 0.03 })
+            /* @__PURE__ */ B.jsx("stop", { offset: "5%", stopColor: "var(--aiwa-ink-muted)", stopOpacity: 0.26 }),
+            /* @__PURE__ */ B.jsx("stop", { offset: "95%", stopColor: "var(--aiwa-ink-muted)", stopOpacity: 0.03 })
           ] }) }),
           /* @__PURE__ */ B.jsx(
             "path",

@@ -26,7 +26,8 @@ const reactSource = [
   ...aiwaFiles.filter((path) => /\.jsx?$/.test(path)).map((path) => readFileSync(path, "utf8")),
 ].join("\n");
 // Bespoke data-viz primitives legitimately draw inline <svg>; the icon guard
-// targets handwritten navigation icons, not charts. Keep this allowlist tight.
+// targets handwritten navigation icons, not charts. Keep this allowlist tight:
+// AiwaWebUiChart contains only its empty-state trend, never product icons.
 const svgDataVizAllowlist = new Set([
   resolve(root, "src/aiwa/components/AiwaWebUiChart.jsx"),
   resolve(root, "src/aiwa/components/CalorieGauge.jsx"),

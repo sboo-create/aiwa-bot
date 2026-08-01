@@ -45,18 +45,17 @@
   display: block;
   width: 100%;
   height: 160px;
-  color: var(--aiwa-ink-muted);
 }
 
 .aiwa-area-chart-empty-line {
   fill: none;
-  stroke: currentcolor;
+  stroke: var(--aiwa-ink-muted);
   stroke-width: 1.25;
   vector-effect: non-scaling-stroke;
 }
 
 .aiwa-area-chart-empty-dot {
-  fill: currentcolor;
+  fill: var(--aiwa-ink-muted);
   stroke: var(--aiwa-surface);
   stroke-width: 3;
   vector-effect: non-scaling-stroke;
