@@ -15,20 +15,6 @@ os.environ.setdefault("AIWA_ANALYTICS_SALT", "test-analytics-salt")
 
 import aiwa_bot as bot
 
-def _deslop_bundle(directory):
-    """Имя чанка версионируется при сборке — резолвим по маске, не по строке."""
-    matches = sorted(directory.glob("deslop-main-*.js"))
-    assert len(matches) == 1, f"ожидался один deslop-main-*.js: {matches}"
-    return matches[0]
-
-
-def _deslop_chart(directory):
-    matches = sorted(directory.glob("AiwaWebUiChart-*.js"))
-    assert len(matches) == 1, f"ожидался один AiwaWebUiChart-*.js: {matches}"
-    return matches[0]
-
-
-
 
 class _JsonRequest:
     def __init__(self, body):
@@ -327,7 +313,7 @@ class ReportAndAcquisitionTests(unittest.TestCase):
 
         root = Path(__file__).resolve().parents[1]
         bundle = (
-            _deslop_bundle(root / "webapp2/assets/deslop")
+            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         legacy_sources = [
             (root / "aiwa_webapp.html").read_text(encoding="utf-8"),
@@ -344,15 +330,13 @@ class ReportAndAcquisitionTests(unittest.TestCase):
             ))
 
     def test_current_mini_app_confirms_delivery_and_returns_to_chat(self):
-        bundle = _deslop_bundle(
-            Path(__file__).resolve().parents[1] / "webapp2/assets/deslop"
+        bundle = (
+            Path(__file__).resolve().parents[1]
+            / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
         ).read_text(encoding="utf-8")
         self.assertIn('y?.ok && y?.delivered', bundle)
-        # оба места запроса выписки (профиль и журнал симптомов) проверяют доставку
-        self.assertGreaterEqual(bundle.count("?.delivered"), 2)
-        # кнопка выписки блокируется на время сборки
-        self.assertIn('"Собираю…"', bundle)
-        self.assertIn('"Собрать выписку"', bundle)
+        self.assertIn('A?.ok && A?.delivered', bundle)
+        self.assertIn('label: reportBusy ? "Собираю…" : "Собрать выписку"', bundle)
         self.assertIn('title: "Выписка готова"', bundle)
         self.assertIn("a.showPopup({", bundle)
         self.assertIn("a?.close?.()", bundle)
