@@ -1,15 +1,17 @@
 import { useState } from "react";
-import { RegularButton } from "../lib/tma";
+import { AiwaButton } from "./AiwaButton";
 import { Field } from "./Field";
 import { ChoicePills } from "./ChoicePills";
 import { FOOD_SLOTS, foodFormFromMeal } from "../lib/constants";
 import { apiCall, showToast, actionProps } from "../lib/api";
+import { optimisticFoodEdit } from "../lib/foodDayCache";
 
-export function FoodEntryForm({ meal, onSaved, onClose }) {
+export function FoodEntryForm({ meal, onSaved, onClose, choiceSurface = "container" }) {
   const [form, setForm] = useState(() => foodFormFromMeal(meal));
   const [busy, setBusy] = useState(false);
   const set = (key, value) => setForm((current) => ({ ...current, [key]: value }));
   const save = async () => {
+    if (busy) return;
     if (!form.title.trim() && !String(form.kcal).trim()) {
       showToast("Укажи название или калории", { type: "error" });
       return;
@@ -22,7 +24,11 @@ export function FoodEntryForm({ meal, onSaved, onClose }) {
       });
       if (result?.ok === false || result?.error) throw new Error(result.message || "Не получилось сохранить");
       showToast(meal ? "Приём обновлён" : "Приём добавлен", { type: "success" });
-      await onSaved();
+      await onSaved({
+        type: meal ? "edit" : "receipt",
+        result,
+        meal: meal ? optimisticFoodEdit(meal, form) : null,
+      });
       onClose();
     } catch (error) {
       showToast(error.message || "Не получилось сохранить", { type: "error" });
@@ -40,12 +46,17 @@ export function FoodEntryForm({ meal, onSaved, onClose }) {
         <Field label="Жиры" value={form.fat} onChange={(value) => set("fat", value)} inputMode="decimal" />
         <Field label="Углеводы" value={form.carbs} onChange={(value) => set("carbs", value)} inputMode="decimal" />
       </div>
-      <ChoicePills label="Приём пищи" options={FOOD_SLOTS} value={form.slot} onChange={(value) => set("slot", value)} />
-      <RegularButton
-        variant="filled"
-        label={busy ? "Сохраняю…" : (meal ? "Сохранить изменения" : "Сохранить приём")}
+      <ChoicePills
+        label="Приём пищи"
+        options={FOOD_SLOTS}
+        value={form.slot}
+        onChange={(value) => set("slot", value)}
+        surface={choiceSurface}
+      />
+      <AiwaButton
+        label={meal ? "Сохранить изменения" : "Сохранить приём"}
+        loading={busy}
         isFill
-        disabled={busy}
         {...actionProps("Сохранить приём", save)}
       />
     </div>

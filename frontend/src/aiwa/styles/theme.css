@@ -37,6 +37,9 @@ body {
      white card containers flip this to the canvas colour so nesting stays legible. */
   --aiwa-control-bg: var(--aiwa-surface);
 
+  /* Quiet media bed for opaque food illustrations on extended rows and recipes. */
+  --aiwa-media-bg: color-mix(in srgb, var(--aiwa-surface) 96.2%, var(--aiwa-ink));
+
   /* ── Ink scale ──────────────────────────────────────────────────────────
      Every level is a Deslop role, not a hand-picked hex, so the whole scale
      flips with the kit's own light/dark pair. --ui-elevation-* is the kit's

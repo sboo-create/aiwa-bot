@@ -1,15 +1,20 @@
 import { useEffect, useState } from "react";
-import { Text, RegularButton, SectionList, Spinner } from "../lib/tma";
-import { AiwaCell } from "../components/AiwaCell";
+import { Text, Spinner } from "../lib/tma";
 import { AiwaModalView } from "../components/AiwaModalView";
+import { AiwaButton } from "../components/AiwaButton";
 import { apiCall, actionProps } from "../lib/api";
+
+const calorieLabel = (value) => {
+  const match = String(value || "").match(/\d[\d\s\u00a0]*/);
+  return match ? `${match[0].trim()} калорий` : "";
+};
 
 /**
  * Recipe card for a recommended dish. The recipe is generated on first open
  * (the backend caches it for the day), so the panel shows a spinner while the
  * model is writing and never blocks the tap itself.
  */
-export function RecipePanel({ isOpen, meal, slotLabel = "", onClose, onAdd, busy = false }) {
+export function RecipePanel({ isOpen, meal, image, slotLabel = "", onClose, onAdd, busy = false }) {
   const [recipe, setRecipe] = useState(null);
   const [failed, setFailed] = useState(false);
   const dish = meal?.dish || "";
@@ -34,81 +39,85 @@ export function RecipePanel({ isOpen, meal, slotLabel = "", onClose, onAdd, busy
   const macros = recipe?.macros || {};
   const macroLine = [macros.protein && `Б ${macros.protein}`, macros.fat && `Ж ${macros.fat}`, macros.carbs && `У ${macros.carbs}`]
     .filter(Boolean).join(" · ");
-  const metaLine = [slotLabel, meal?.kcal, recipe?.time].filter(Boolean).join(" · ");
+  const nutritionLine = [recipe?.kcal || meal?.kcal, macroLine].filter(Boolean).join(" · ");
+  const metaLine = [slotLabel, calorieLabel(meal?.kcal || recipe?.kcal), recipe?.time].filter(Boolean).join(" · ");
 
   return (
-    <AiwaModalView isOpen={isOpen} onClose={onClose}>
-      <SectionList className="aiwa-tma-blocks">
-        <SectionList.Item>
-          <AiwaCell tappable={false}>
-            <AiwaCell.Text title={dish} description={metaLine || meal?.note || ""} bold />
-          </AiwaCell>
-        </SectionList.Item>
+    <AiwaModalView isOpen={isOpen} onClose={onClose} aria-label={dish ? `Рецепт: ${dish}` : "Рецепт"}>
+      <div className="aiwa-sheet-scroll aiwa-recipe-page">
+        <header className="aiwa-recipe-hero">
+          {image ? (
+            <span className="aiwa-recipe-image">
+              <img src={image} alt={dish} />
+            </span>
+          ) : null}
+          <div className="aiwa-recipe-heading">
+            <Text as="h1" variant="body" weight="semibold">{dish}</Text>
+            {metaLine || meal?.note ? (
+              <Text as="p" variant="subheadline2" weight="regular">
+                {metaLine || meal?.note}
+              </Text>
+            ) : null}
+          </div>
+        </header>
 
-        {!recipe && !failed ? (
-          <SectionList.Item>
-            <AiwaCell tappable={false}>
-              <div className="aiwa-cell-actions" aria-label="Готовлю рецепт">
-                <Spinner size="m" />
-                <Text variant="body" weight="regular">Айва пишет рецепт…</Text>
-              </div>
-            </AiwaCell>
-          </SectionList.Item>
-        ) : null}
-
-        {failed ? (
-          <SectionList.Item>
-            <AiwaCell tappable={false}>
-              <AiwaCell.Text title="Рецепт не собрался" description="Попробуй открыть блюдо ещё раз." />
-            </AiwaCell>
-          </SectionList.Item>
-        ) : null}
-
-        {recipe ? (
-          <SectionList.Item header="Питательность">
-            <AiwaCell tappable={false}>
-              <AiwaCell.Text
-                title={[recipe.kcal, macroLine].filter(Boolean).join(" · ") || "—"}
-                description={(recipe.micros || []).join("; ")}
-              />
-            </AiwaCell>
-          </SectionList.Item>
-        ) : null}
-
-        {recipe?.ingredients?.length ? (
-          <SectionList.Item header="Ингредиенты">
-            {recipe.ingredients.map((item) => (
-              <AiwaCell key={item} tappable={false}>
-                <AiwaCell.Text title={item} />
-              </AiwaCell>
-            ))}
-          </SectionList.Item>
-        ) : null}
-
-        {recipe?.steps?.length ? (
-          <SectionList.Item header="Приготовление">
-            {recipe.steps.map((step, index) => (
-              <AiwaCell key={step} tappable={false}>
-                <AiwaCell.Text title={`${index + 1}. ${step}`} />
-              </AiwaCell>
-            ))}
-          </SectionList.Item>
-        ) : null}
-
-        <SectionList.Item>
-          <AiwaCell tappable={false}>
-            <div className="aiwa-cell-actions">
-              <RegularButton
-                variant="filled"
-                label={busy ? "Добавляю…" : "Добавить в дневник"}
-                isFill
-                disabled={busy}
-                {...actionProps("Добавить в дневник", onAdd)}
-              />
+        <main className="aiwa-recipe-content" aria-live="polite">
+          {!recipe && !failed ? (
+            <div className="aiwa-recipe-status" role="status" aria-label="Готовлю рецепт">
+              <Spinner size="m" />
+              <Text variant="body" weight="regular">Айва пишет рецепт…</Text>
             </div>
-          </AiwaCell>
-        </SectionList.Item>
-      </SectionList>
+          ) : null}
+
+          {failed ? (
+            <section className="aiwa-recipe-section">
+              <Text as="h2" variant="body" weight="semibold">Рецепт не собрался</Text>
+              <Text as="p" variant="body" weight="regular">Попробуй открыть блюдо ещё раз.</Text>
+            </section>
+          ) : null}
+
+          {recipe ? (
+            <section className="aiwa-recipe-section">
+              <Text as="h2" variant="body" weight="semibold">Питательность</Text>
+              <Text as="p" variant="body" weight="regular">{nutritionLine || "—"}</Text>
+              {recipe.micros?.length ? (
+                <Text as="p" variant="body" weight="regular">{recipe.micros.join("; ")}</Text>
+              ) : null}
+            </section>
+          ) : null}
+
+          {recipe?.ingredients?.length ? (
+            <section className="aiwa-recipe-section">
+              <Text as="h2" variant="body" weight="semibold">Ингредиенты</Text>
+              <ul className="aiwa-recipe-list">
+                {recipe.ingredients.map((item) => (
+                  <li key={item}><Text variant="body" weight="regular">{item}</Text></li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {recipe?.steps?.length ? (
+            <section className="aiwa-recipe-section">
+              <Text as="h2" variant="body" weight="semibold">Приготовление</Text>
+              <ol className="aiwa-recipe-list">
+                {recipe.steps.map((step, index) => (
+                  <li key={step} value={index + 1}><Text variant="body" weight="regular">{step}</Text></li>
+                ))}
+              </ol>
+            </section>
+          ) : null}
+        </main>
+
+        <div className="aiwa-recipe-action">
+          <AiwaButton
+            label="Добавить в дневник"
+            loading={busy}
+            isFill
+            {...actionProps("Добавить в дневник", onAdd)}
+          />
+        </div>
+      </div>
     </AiwaModalView>
   );
 }

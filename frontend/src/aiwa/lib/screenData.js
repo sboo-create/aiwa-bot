@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiCall } from "./api";
+import { createCacheCoordinator, isSuccessfulCachePayload } from "./cacheCoordinator";
 
 /**
  * Данные экранов «Питание» и «Нагрузка» живут вне React.
@@ -20,8 +21,11 @@ const REQUESTS = {
 const cache = new Map();
 const inflight = new Map();
 const cacheTs = new Map();
+const cacheErrors = new Map();
+const coordinator = createCacheCoordinator();
 
 const snapshot = (keys) => Object.fromEntries(keys.map((key) => [key, cache.get(key) ?? null]));
+const errorSnapshot = (keys) => Object.fromEntries(keys.map((key) => [key, cacheErrors.get(key) ?? null]));
 
 /**
  * Cache-first: `/api/section` за кадром ходит в модель, поэтому лишний раз его
@@ -37,10 +41,19 @@ export const fetchScreenData = (key, { force = false, maxAgeMs = 1500 } = {}) =>
       return Promise.resolve(cache.get(key));
     }
   }
+  const generation = coordinator.begin(key);
   const request = REQUESTS[key]()
-    .catch(() => null)
+    .catch((error) => ({ error: error?.message || "network" }))
     .then((data) => {
-      if (data) { cache.set(key, data); cacheTs.set(key, Date.now()); }
+      if (coordinator.isCurrent(key, generation)) {
+        if (isSuccessfulCachePayload(data)) {
+          cache.set(key, data);
+          cacheTs.set(key, Date.now());
+          cacheErrors.delete(key);
+        } else {
+          cacheErrors.set(key, data?.error || "network");
+        }
+      }
       // Параллельный force мог уже занять слот — чужой запрос не трогаем.
       if (inflight.get(key) === request) inflight.delete(key);
       return cache.get(key) ?? null;
@@ -57,7 +70,7 @@ export const prefetchScreens = () => {
 /**
  * @param {string[]} keys стабильный (модульного уровня) список ключей
  * @param {any[]} deps перезагрузка при смене режима или ревизии экрана
- * @returns {[Record<string, any>, (...keys: string[]) => Promise<void>, (key: string, value: any) => void]}
+ * @returns {[Record<string, any>, (...keys: string[]) => Promise<void>, (key: string, value: any) => void, Record<string, string|null>]}
  */
 export function useScreenData(keys, deps) {
   const [values, setValues] = useState(() => snapshot(keys));
@@ -71,8 +84,10 @@ export function useScreenData(keys, deps) {
 
   // Ответ мутирующей ручки уже содержит новое состояние — кладём его без запроса.
   const patch = useCallback((key, value) => {
+    coordinator.begin(key);
     cache.set(key, value);
     cacheTs.set(key, Date.now());
+    cacheErrors.delete(key);
     setValues(snapshot(keys));
   }, [keys]);
 
@@ -86,5 +101,5 @@ export function useScreenData(keys, deps) {
     return () => { alive = false; };
   }, deps);
 
-  return [values, refresh, patch];
+  return [values, refresh, patch, errorSnapshot(keys)];
 }

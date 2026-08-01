@@ -62,7 +62,9 @@ import {
   PanelHeader,
   ParticleEffect,
   Picker,
+  ProfileAvatar,
   ProfilePanel,
+  RecipePanel,
   Redaction,
   RegularButton,
   ScreenDayHeader,
@@ -114,8 +116,8 @@ import {
   ImageIcon,
   TextIcon,
 } from "../aiwa/lib/icons";
-import profileImage from "../../assets/paper-profile.jpg";
-import foodImage from "../../assets/paper-food-placeholder.png";
+import profileImage from "../../../assets/paper-profile.jpg";
+import foodImage from "../../../webapp2/assets/food/meal-placeholder.svg";
 import {
   cycleChartData,
   cycleChartSeries,
@@ -405,6 +407,7 @@ export function AiwaComponentsPage() {
           <PaperRow title="История цикла" description="Последняя запись 23 июля" onClick={() => {}} />
           <MetricCell label="Средняя длина цикла" value="26 дней" ok />
           <MetricCell label="Разброс начала месячных" value="17 дней" ok={false} />
+          <MetricCell label="Средняя длина сна" value="—" />
         </SectionList.Item>
         <SectionList.Item header="AIWA Cell · Рекомендации">
           <PaperRow
@@ -426,10 +429,26 @@ export function AiwaComponentsPage() {
 }
 
 export function AvatarPage() {
+  const [hostReady, setHostReady] = useState(false);
+  useEffect(() => {
+    const previous = window.aiwaData;
+    window.aiwaData = () => ({ name: "Анна" });
+    setHostReady(true);
+    return () => {
+      if (previous === undefined) delete window.aiwaData;
+      else window.aiwaData = previous;
+    };
+  }, []);
+
   return (
     <Page>
       <SectionList>
         <SectionList.Item header="Avatar">
+          {hostReady ? (
+            <Cell start={<ProfileAvatar onClick={() => {}} />}>
+              <Cell.Text title="Анна" description="AIWA avatar · доступная кнопка профиля" />
+            </Cell>
+          ) : null}
           <Cell start={<ImageAvatar src={profileImage} size={40} />}>
             <Cell.Text title="Анна" description="Профиль Айвы" />
           </Cell>
@@ -624,6 +643,7 @@ export function SectionListPage() {
 export function FormControlsPage() {
   const [name, setName] = useState("");
   const [slot, setSlot] = useState("breakfast");
+  const [canvasChip, setCanvasChip] = useState(true);
   return (
     <Page>
       <SectionList>
@@ -657,6 +677,26 @@ export function FormControlsPage() {
           </div>
         </SectionList.Item>
       </SectionList>
+      <div className="aiwa-storybook-canvas-controls">
+        <Text variant="subheadline2" weight="semibold">Контролы прямо на холсте</Text>
+        <ChoicePills
+          surface="canvas"
+          label="Приём пищи"
+          value={slot}
+          onChange={setSlot}
+          options={[
+            { value: "breakfast", label: "Завтрак" },
+            { value: "lunch", label: "Обед" },
+            { value: "dinner", label: "Ужин" },
+          ]}
+        />
+        <AiwaChip
+          surface="canvas"
+          label="Тянет на сладкое"
+          active={canvasChip}
+          onClick={() => setCanvasChip((value) => !value)}
+        />
+      </div>
     </Page>
   );
 }
@@ -1408,9 +1448,9 @@ export function SectionsPage() {
  * they can only be judged open — a static preview would show the sheet chrome
  * but none of the layout it actually gets over the app.
  *
- * Panels that save go through `apiCall`, which rejects without the host bridge:
- * the storybook is the place to see the error path, so those buttons are live
- * and land on a toast.
+ * Most panels that save go through `apiCall`, which rejects without the host
+ * bridge: the storybook is the place to see that error path. The recipe alone
+ * gets a deterministic fixture so its complete semantic content can be reviewed.
  */
 export function PanelsPage() {
   const [open, setOpen] = useState(null);
@@ -1430,20 +1470,52 @@ export function PanelsPage() {
 
   // CalendarPanel builds its months from `getAiwaCalendarMonth` on the host, and
   // `read` returns null without one — the panel would open on an empty grid.
-  // Serve the fixture month for offset 0 and nothing beyond it, which is also
-  // what the host does at the edge of the tracked range.
+  // RecipePanel gets one complete response. Every other API remains an error,
+  // preserving the real unavailable-host state for saving panels.
   useEffect(() => {
-    const previous = window.getAiwaCalendarMonth;
+    const previousCalendar = window.getAiwaCalendarMonth;
+    const previousApi = window.aiwaApi;
+    const previousData = window.aiwaData;
     window.getAiwaCalendarMonth = (offset) => (offset === 0 ? markingMonth : null);
-    return () => { window.getAiwaCalendarMonth = previous; };
+    window.aiwaData = () => ({ name: "Анна", mode: "cycle", daily_summary_enabled: true });
+    window.aiwaApi = (path, body) => {
+      if (path === "/api/recipe") {
+        if (body?.dish === "Загрузка рецепта") return new Promise(() => {});
+        if (body?.dish === "Рецепт с ошибкой") return Promise.reject(new Error("Recipe fixture error"));
+        return Promise.resolve({
+          dish: body?.dish,
+          kcal: 420,
+          time: "25 минут",
+          macros: { protein: "28 г", fat: "16 г", carbs: "42 г" },
+          micros: ["Железо — 4 мг", "Клетчатка — 9 г"],
+          ingredients: ["Говядина — 140 г", "Красная фасоль — 120 г", "Томаты — 160 г"],
+          steps: ["Нарежь мясо и томаты.", "Потуши всё вместе 20 минут.", "Добавь фасоль и прогрей."],
+        });
+      }
+      if (typeof previousApi === "function") return previousApi(path, body);
+      return Promise.reject(new Error("API bridge is unavailable"));
+    };
+    return () => {
+      if (previousCalendar === undefined) delete window.getAiwaCalendarMonth;
+      else window.getAiwaCalendarMonth = previousCalendar;
+      if (previousApi === undefined) delete window.aiwaApi;
+      else window.aiwaApi = previousApi;
+      if (previousData === undefined) delete window.aiwaData;
+      else window.aiwaData = previousData;
+    };
   }, []);
 
   const panels = [
     ["journal", "Журнал", "Занести самочувствие за сегодня"],
+    ["journalPast", "Журнал за прошлый день", "Дата маршрутизируется в day-aware host methods"],
     ["calendar", "Календарь", "Месяц целиком, режим отметок и легенда"],
     ["calendarDay", "День в календаре", "Тот же журнал, но за выбранный день"],
     ["addFood", "Добавить приём", "Фото / текстом / вручную"],
     ["foodDiary", "Дневник питания", "Приёмы по слотам и итог за день"],
+    ["foodDiaryPast", "Прошлый дневник питания", "Записи редактируются, новые приёмы и совет скрыты"],
+    ["recipe", "Рецепт", "Фото, питательность, ингредиенты и шаги"],
+    ["recipeLoading", "Рецепт · загрузка", "Долгая генерация с живым status"],
+    ["recipeError", "Рецепт · ошибка", "Ответ недоступен, действие остаётся понятным"],
     ["workout", "Отметить тренировку", "Тип, длительность, упражнения"],
     ["workoutVariants", "Варианты тренировки", "Рекомендации на сегодня"],
     ["workoutHistory", "История тренировок", "Неделя и записи за сегодня"],
@@ -1473,6 +1545,14 @@ export function PanelsPage() {
         symptomGroups={symptomGroups}
         mode="cycle"
       />
+      <JournalPanel
+        isOpen={open === "journalPast"}
+        onClose={close}
+        checkin={{ ...todayCheckin, period: false }}
+        symptomGroups={symptomGroups}
+        mode="cycle"
+        dayIso="2026-07-23"
+      />
       <CalendarPanel
         isOpen={open === "calendar"}
         onClose={close}
@@ -1497,7 +1577,48 @@ export function PanelsPage() {
         onDelete={() => {}}
         onReco={() => {}}
       />
-      <WorkoutPanel isOpen={open === "workout"} onClose={close} onSaved={noop} suggested={workoutVariants[0]} />
+      <FoodDiaryPanel
+        isOpen={open === "foodDiaryPast"}
+        onClose={close}
+        diary={foodDiary}
+        canAdd={false}
+        onAdd={() => {}}
+        onEdit={() => {}}
+        onDelete={() => {}}
+        onReco={() => {}}
+      />
+      <RecipePanel
+        isOpen={open === "recipe"}
+        onClose={close}
+        meal={{ dish: "Тушёная говядина с фасолью", kcal: 420, note: "железо и белок" }}
+        image={foodImage}
+        slotLabel="Обед"
+        onAdd={close}
+      />
+      <RecipePanel
+        isOpen={open === "recipeLoading"}
+        onClose={close}
+        meal={{ dish: "Загрузка рецепта", kcal: 360 }}
+        image={foodImage}
+        slotLabel="Завтрак"
+        onAdd={close}
+      />
+      <RecipePanel
+        isOpen={open === "recipeError"}
+        onClose={close}
+        meal={{ dish: "Рецепт с ошибкой", kcal: 360 }}
+        image={foodImage}
+        slotLabel="Ужин"
+        onAdd={close}
+      />
+      <WorkoutPanel
+        isOpen={open === "workout"}
+        onClose={close}
+        onSaved={noop}
+        suggested={{ name: "Пилатес", exercises: [] }}
+        favoriteTypes={["Сквош"]}
+        initialDate="2026-07-23"
+      />
       <WorkoutVariantsPanel
         isOpen={open === "workoutVariants"}
         onClose={close}

@@ -188,12 +188,12 @@ step("AIWA: browser integration keeps current product logic", () => {
     "window.AiwaDeslop?.openProfile?.()",
     "call(\"openHomePanel\", \"calendar\")",
     "call(\"openHomePanel\", \"journal\")",
-    // The journal defers these to «Сохранить», so they go through read(), which
-    // returns the host promise — see "the journal saves on its primary button".
-    "read(\"setCheckin\"",
-    "read(\"toggleSym\"",
-    "read(\"toggleTodayPeriod\")",
-    "read(\"toggleTodayIntimacy\")",
+    // The journal defers these to «Сохранить» and requires an explicit host
+    // acknowledgement before React confirms or closes the draft.
+    "acknowledgedHostWrite(\"setCheckin\"",
+    "acknowledgedHostWrite(\"toggleSym\"",
+    "acknowledgedHostWrite(\"toggleTodayPeriod\")",
+    "acknowledgedHostWrite(\"toggleTodayIntimacy\")",
     "data-aiwa-log-modal=\"true\"",
     "data-aiwa-calendar-modal=\"true\"",
     "function DateCell",
@@ -231,19 +231,21 @@ step("AIWA: the journal saves on its primary button", () => {
   ]);
   requireText("journal save button", reactSource, [
     "className=\"aiwa-log-footer\"",
-    "variant=\"filled\"",
+    "<AiwaButton",
+    "loading={busy}",
     "{...actionProps(\"Сохранить\", save)}",
   ]);
   requireText("journal deferred writes", reactSource, [
-    "await read(\"toggleTodayPeriod\")",
-    "await read(\"setCheckin\", \"energy\", energy)",
-    "await read(\"toggleSym\", code)",
-    "await read(\"toggleTodayIntimacy\")",
-    "await read(\"addCustomSym\", extra)",
-    "await read(\"setDayCheckin\", iso, \"energy\", energy)",
-    "await read(\"toggleDaySym\", iso, code)",
-    "await read(\"markPA\", iso)",
-    "await read(\"addDayCustomSym\", iso, extra)",
+    "await acknowledgedHostWrite(\"toggleTodayPeriod\")",
+    "await acknowledgedHostWrite(\"setCheckin\", \"energy\", energy)",
+    "await acknowledgedHostWrite(\"toggleSym\", code)",
+    "await acknowledgedHostWrite(\"toggleTodayIntimacy\")",
+    "await acknowledgedHostWrite(\"addCustomSym\", extra)",
+    "await acknowledgedHostWrite(\"setDayCheckin\", dayIso, \"energy\", energy)",
+    "await acknowledgedHostWrite(\"toggleDaySym\", dayIso, code)",
+    "await acknowledgedHostWrite(\"markPA\", dayIso)",
+    "await acknowledgedHostWrite(\"addDayCustomSym\", dayIso, extra)",
+    "result.ok === true",
   ]);
   requireText("journal footer styling", compositionCss, [".aiwa-log-footer {"]);
 });

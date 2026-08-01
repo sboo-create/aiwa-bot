@@ -10,6 +10,8 @@ import { InfoIcon, PlusIcon } from "../lib/icons";
 import { CALENDAR_LEGEND, CALENDAR_MARK_MODES, calendarMarkOptions } from "../lib/constants";
 import { useBackButton } from "../lib/backButton";
 import { nativeMenuSupported, read } from "../lib/api";
+import { aiwaTodayIso } from "../lib/dates";
+import { isCalendarDaySelectable } from "../lib/calendarDay";
 
 /**
  * Calendar opens as a full-screen page (a plain fixed layer portaled to body),
@@ -107,16 +109,18 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
     });
   };
 
-  const todayIso = (() => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-  })();
+  // Calendar boundaries follow the same Moscow civil day as the host and the
+  // shared day strip. A device-local midnight must not unlock tomorrow early.
+  const todayIso = aiwaTodayIso();
 
   const handleSelect = (day, monthName) => {
+    // Future and host-disabled cells are read-only in every branch: day log,
+    // symptoms, period and intimacy. Phase 3 will mirror this at the bridge.
+    if (!isCalendarDaySelectable(day, todayIso)) return;
     if (!marking) {
       // Вне режима отметок тап по прошедшему дню открывает его журнал —
       // симптомы и самочувствие смотрятся прямо из календаря.
-      if (day.iso && day.iso <= todayIso) setDayLog({ iso: day.iso, label: `${day.date} ${monthName}` });
+      setDayLog({ iso: day.iso, label: `${day.date} ${monthName}` });
       return;
     }
     if (markMode === "symptoms") {
@@ -208,9 +212,9 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
                       : (
                         <DateCell
                           day={day}
-                          interactive={marking || Boolean(day.iso && day.iso <= todayIso)}
-                          marking={marking}
-                          checked={marking && isChecked(day)}
+                          interactive={isCalendarDaySelectable(day, todayIso)}
+                          marking={marking && isCalendarDaySelectable(day, todayIso)}
+                          checked={marking && isCalendarDaySelectable(day, todayIso) && isChecked(day)}
                           markVariant={markMode === "intimacy" ? "heart" : "radio"}
                           monthLabel={month.label}
                           onSelect={(selected) => handleSelect(selected, month.name || month.label)}

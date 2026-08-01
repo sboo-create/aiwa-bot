@@ -50,7 +50,7 @@ export { Wheel } from "./lib/tma.js";
 export { useAppearance, useColorScheme, useSkin, useSnackbar } from "./lib/tma.js";
 
 // Lib
-export { call, read, apiCall, showToast, trackFlow, actionProps, closeMiniApp, openBotChat } from "./lib/api.js";
+export { call, read, apiCall, acknowledgedHostWrite, showToast, withHostToastsMuted, trackFlow, actionProps, closeMiniApp, openBotChat } from "./lib/api.js";
 export {
   AIWA_SEQUENCE_FRAMES,
   AIWA_CARD_SEQUENCE_FRAMES,
@@ -94,6 +94,8 @@ export { AiwaModalView } from "./components/AiwaModalView.jsx";
 export { AiwaPanelHeader } from "./components/AiwaPanelHeader.jsx";
 export { AiwaInsightCard } from "./components/AiwaInsightCard.jsx";
 export { PaperRow } from "./components/PaperRow.jsx";
+export { ProfileAvatar } from "./components/ProfileAvatar.jsx";
+export { profileName } from "./components/ProfileAvatar.jsx";
 export { FoodEntryForm } from "./components/FoodEntryForm.jsx";
 export { MacroCard } from "./components/MacroCard.jsx";
 export { CalorieGauge } from "./components/CalorieGauge.jsx";
@@ -113,6 +115,7 @@ export { CalendarDayLogPanel } from "./panels/CalendarDayLogPanel.jsx";
 export { HomePanels } from "./panels/HomePanels.jsx";
 export { AddFoodPanel } from "./panels/AddFoodPanel.jsx";
 export { FoodDiaryPanel } from "./panels/FoodDiaryPanel.jsx";
+export { RecipePanel } from "./panels/RecipePanel.jsx";
 export { WorkoutPanel } from "./panels/WorkoutPanel.jsx";
 export { WorkoutVariantsPanel } from "./panels/WorkoutVariantsPanel.jsx";
 export { TrainingProfilePanel } from "./panels/TrainingProfilePanel.jsx";

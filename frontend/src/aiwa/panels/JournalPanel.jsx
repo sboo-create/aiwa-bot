@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { RegularButton, SectionList } from "../lib/tma";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { SectionList } from "../lib/tma";
+import { AiwaButton } from "../components/AiwaButton";
 import { AiwaModalView } from "../components/AiwaModalView";
 import { AiwaPanelHeader } from "../components/AiwaPanelHeader";
 import { JournalToggle } from "../components/JournalToggle";
@@ -7,7 +8,7 @@ import { JournalChoiceGroup } from "../components/JournalChoiceGroup";
 import { JournalSymptomGroup } from "../components/JournalSymptomGroup";
 import { JournalCustomSymptom } from "../components/JournalCustomSymptom";
 import { JOURNAL_ENERGY_OPTIONS, JOURNAL_MOOD_OPTIONS, JOURNAL_SYMPTOM_GROUPS } from "../lib/constants";
-import { actionProps, read, showToast } from "../lib/api";
+import { acknowledgedHostWrite, actionProps, showToast, withHostToastsMuted } from "../lib/api";
 import { aiwaTodayIso } from "../lib/dates";
 
 /**
@@ -27,10 +28,35 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode, da
   const [intimacy, setIntimacy] = useState(Boolean(checkin.intimacy));
   const [custom, setCustom] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saveRevision, setSaveRevision] = useState(0);
+  const saveLock = useRef(null);
+  const saveId = useRef(0);
+  const openSession = useRef({ generation: 0, open: false });
+  const draftSeed = useRef("");
+  const currentDay = useRef(dayIso || todayIso);
+  currentDay.current = dayIso || todayIso;
 
-  // Seed the draft when the sheet opens; while it is open the draft is the truth.
+  useLayoutEffect(() => {
+    openSession.current = {
+      generation: openSession.current.generation + (isOpen ? 1 : 0),
+      open: isOpen,
+    };
+  }, [isOpen]);
+
+  // An in-flight batch owns its draft across close/reopen. Re-seeding it would
+  // expose a second submit while the first host toggle sequence is still active.
   useEffect(() => {
     if (!isOpen) return;
+    if (saveLock.current) {
+      setBusy(true);
+      return;
+    }
+    const seedKey = `${openSession.current.generation}:${dayIso || todayIso}:${saveRevision}`;
+    // A host refresh can replace the checkin object while somebody is editing.
+    // It supplies the latest value for the next session, but only a new open,
+    // selected day, or completed stale save is allowed to replace this draft.
+    if (draftSeed.current === seedKey) return;
+    draftSeed.current = seedKey;
     setSymptoms(checkin.symptoms || []);
     setEnergy(checkin.energy || 0);
     setMood(checkin.mood || 0);
@@ -38,7 +64,7 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode, da
     setIntimacy(Boolean(checkin.intimacy));
     setCustom("");
     setBusy(false);
-  }, [isOpen]);
+  }, [checkin, dayIso, isOpen, saveRevision, todayIso]);
 
   const toggleSymptom = (code) => {
     setSymptoms((current) => (current.includes(code) ? current.filter((item) => item !== code) : [...current, code]));
@@ -46,50 +72,71 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode, da
   const groups = symptomGroups?.length ? symptomGroups : JOURNAL_SYMPTOM_GROUPS;
 
   const save = async () => {
-    if (busy) return;
+    if (saveLock.current) return;
+    const operation = {
+      id: ++saveId.current,
+      generation: openSession.current.generation,
+      dayIso: dayIso || todayIso,
+    };
+    saveLock.current = operation;
     const savedSymptoms = checkin.symptoms || [];
     const extra = custom.trim();
     setBusy(true);
     try {
-      // setCheckin / addCustomSym toast on their own; only speak up if neither ran.
-      let hostToasted = false;
-      if (!isPastDay && period !== Boolean(checkin.period)) {
-        await read("toggleTodayPeriod");
-        hostToasted = true;
-      }
-      if (energy !== (checkin.energy || 0)) {
-        if (isPastDay) await read("setDayCheckin", dayIso, "energy", energy);
-        else await read("setCheckin", "energy", energy);
-        hostToasted = true;
-      }
-      if (mood !== (checkin.mood || 0)) {
-        if (isPastDay) await read("setDayCheckin", dayIso, "mood", mood);
-        else await read("setCheckin", "mood", mood);
-        hostToasted = true;
-      }
-      for (const code of symptoms.filter((item) => !savedSymptoms.includes(item))) {
-        if (isPastDay) await read("toggleDaySym", dayIso, code);
-        else await read("toggleSym", code);
-      }
-      for (const code of savedSymptoms.filter((item) => !symptoms.includes(item))) {
-        if (isPastDay) await read("toggleDaySym", dayIso, code);
-        else await read("toggleSym", code);
-      }
-      if (intimacy !== Boolean(checkin.intimacy)) {
-        if (isPastDay) await read("markPA", dayIso);
-        else await read("toggleTodayIntimacy");
-      }
-      if (extra) {
-        if (isPastDay) await read("addDayCustomSym", dayIso, extra);
-        else await read("addCustomSym", extra);
-        hostToasted = true;
-      }
-      if (!hostToasted) showToast("Сохранено", { type: "success" });
+      // Один submit принадлежит одной панели: мостовые success-тосты на время
+      // пачки приглушены, а ошибки остаются видимыми через scoped bridge.
+      await withHostToastsMuted(async () => {
+        if (!isPastDay && period !== Boolean(checkin.period)) {
+          await acknowledgedHostWrite("toggleTodayPeriod");
+        }
+        if (energy !== (checkin.energy || 0)) {
+          if (isPastDay) await acknowledgedHostWrite("setDayCheckin", dayIso, "energy", energy);
+          else await acknowledgedHostWrite("setCheckin", "energy", energy);
+        }
+        if (mood !== (checkin.mood || 0)) {
+          if (isPastDay) await acknowledgedHostWrite("setDayCheckin", dayIso, "mood", mood);
+          else await acknowledgedHostWrite("setCheckin", "mood", mood);
+        }
+        for (const code of symptoms.filter((item) => !savedSymptoms.includes(item))) {
+          if (isPastDay) await acknowledgedHostWrite("toggleDaySym", dayIso, code);
+          else await acknowledgedHostWrite("toggleSym", code);
+        }
+        for (const code of savedSymptoms.filter((item) => !symptoms.includes(item))) {
+          if (isPastDay) await acknowledgedHostWrite("toggleDaySym", dayIso, code);
+          else await acknowledgedHostWrite("toggleSym", code);
+        }
+        if (intimacy !== Boolean(checkin.intimacy)) {
+          if (isPastDay) await acknowledgedHostWrite("markPA", dayIso);
+          else await acknowledgedHostWrite("toggleTodayIntimacy");
+        }
+        if (extra) {
+          if (isPastDay) await acknowledgedHostWrite("addDayCustomSym", dayIso, extra);
+          else await acknowledgedHostWrite("addCustomSym", extra);
+        }
+      });
+      if (!openSession.current.open
+          || openSession.current.generation !== operation.generation
+          || currentDay.current !== operation.dayIso) return;
+      showToast("Сохранили в журнал", { type: "success" });
       onClose();
     } catch (error) {
+      if (!openSession.current.open
+          || openSession.current.generation !== operation.generation
+          || currentDay.current !== operation.dayIso) return;
       showToast(error?.message || "Не удалось сохранить", { type: "error" });
     } finally {
-      setBusy(false);
+      if (saveLock.current?.id === operation.id) {
+        saveLock.current = null;
+        setBusy(false);
+        if (openSession.current.open && (
+          openSession.current.generation !== operation.generation
+          || currentDay.current !== operation.dayIso
+        )) {
+          // A close/reopen created a new session while this batch owned the
+          // previous draft. Seed the reopened sheet only after the lock clears.
+          setSaveRevision((value) => value + 1);
+        }
+      }
     }
   };
 
@@ -98,15 +145,16 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode, da
       isOpen={isOpen}
       onClose={onClose}
       data-aiwa-log-modal="true"
+      aria-label={isPastDay ? "Журнал за выбранный день" : "Занести в журнал"}
     >
       {/* Title only — back is Telegram's native BackButton (see AiwaModalView). */}
       <AiwaPanelHeader size="large" title={isPastDay ? `Журнал за ${new Date(dayIso + "T00:00:00").toLocaleDateString("ru-RU", { day: "numeric", month: "long" })}` : "Занести в журнал"} />
 
-      <div className="aiwa-log-scroll">
+      <div className="aiwa-log-scroll" aria-busy={busy || undefined}>
         <SectionList className="aiwa-log-sections">
-          {mode !== "preg" && mode !== "meno" && !isPastDay ? (
+          {mode !== "preg" && mode !== "meno" && mode !== "male" && !isPastDay ? (
             <SectionList.Item>
-              {mode === "male" ? null : <JournalToggle label="Месячные" variant="period" active={period} onChange={setPeriod} />}
+              <JournalToggle label="Месячные" variant="period" active={period} onChange={setPeriod} />
             </SectionList.Item>
           ) : null}
 
@@ -138,16 +186,18 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode, da
             <JournalCustomSymptom value={custom} onChange={setCustom} />
           </SectionList.Item>
 
-          <SectionList.Item>
-            {mode === "male" ? null : <JournalToggle label="Близость" active={intimacy} onChange={setIntimacy} />}
-          </SectionList.Item>
+          {mode === "male" ? null : (
+            <SectionList.Item>
+              <JournalToggle label="Близость" active={intimacy} onChange={setIntimacy} />
+            </SectionList.Item>
+          )}
         </SectionList>
       </div>
 
       <div className="aiwa-log-footer">
-        <RegularButton
-          variant="filled"
-          label={busy ? "Сохраняю…" : "Сохранить"}
+        <AiwaButton
+          label="Сохранить"
+          loading={busy}
           isFill
           {...actionProps("Сохранить", save)}
         />

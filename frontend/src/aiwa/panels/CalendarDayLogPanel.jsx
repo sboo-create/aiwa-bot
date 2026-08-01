@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { RegularButton, SectionList } from "../lib/tma";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { SectionList } from "../lib/tma";
+import { AiwaButton } from "../components/AiwaButton";
 import { AiwaModalView } from "../components/AiwaModalView";
 import { AiwaPanelHeader } from "../components/AiwaPanelHeader";
 import { JournalToggle } from "../components/JournalToggle";
@@ -7,7 +8,7 @@ import { JournalChoiceGroup } from "../components/JournalChoiceGroup";
 import { JournalSymptomGroup } from "../components/JournalSymptomGroup";
 import { JournalCustomSymptom } from "../components/JournalCustomSymptom";
 import { JOURNAL_ENERGY_OPTIONS, JOURNAL_MOOD_OPTIONS, JOURNAL_SYMPTOM_GROUPS } from "../lib/constants";
-import { actionProps, read, showToast } from "../lib/api";
+import { acknowledgedHostWrite, actionProps, read, showToast, withHostToastsMuted } from "../lib/api";
 
 /**
  * Day log for an arbitrary calendar day, shown as a @deslop/tma ModalView bottom
@@ -27,9 +28,26 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
   const [intimacy, setIntimacy] = useState(false);
   const [custom, setCustom] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saveRevision, setSaveRevision] = useState(0);
+  const saveLock = useRef(null);
+  const saveId = useRef(0);
+  const openSession = useRef({ generation: 0, open: false });
+  const currentIso = useRef(iso);
+  currentIso.current = iso;
+
+  useLayoutEffect(() => {
+    openSession.current = {
+      generation: openSession.current.generation + (open ? 1 : 0),
+      open,
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!iso || !open) return;
+    if (saveLock.current?.iso === iso) {
+      setBusy(true);
+      return;
+    }
     const day = read("getAiwaDayCheckin", iso) || {};
     setSaved(day);
     setSymptoms(day.symptoms || []);
@@ -37,8 +55,8 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
     setMood(day.mood || 0);
     setIntimacy(Boolean(day.intimacy));
     setCustom("");
-    setBusy(false);
-  }, [iso, open]);
+    setBusy(Boolean(saveLock.current));
+  }, [iso, open, saveRevision]);
 
   const toggleSymptom = (code) => {
     setSymptoms((current) => (current.includes(code) ? current.filter((item) => item !== code) : [...current, code]));
@@ -46,28 +64,50 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
   const groups = symptomGroups?.length ? symptomGroups : JOURNAL_SYMPTOM_GROUPS;
 
   const save = async () => {
-    if (busy) return;
+    if (saveLock.current) return;
+    const operation = {
+      id: ++saveId.current,
+      generation: openSession.current.generation,
+      iso,
+    };
+    saveLock.current = operation;
     const savedSymptoms = saved.symptoms || [];
     const extra = custom.trim();
     setBusy(true);
     try {
-      if (energy !== (saved.energy || 0)) await read("setDayCheckin", iso, "energy", energy);
-      if (mood !== (saved.mood || 0)) await read("setDayCheckin", iso, "mood", mood);
-      for (const code of symptoms.filter((item) => !savedSymptoms.includes(item))) {
-        await read("toggleDaySym", iso, code);
-      }
-      for (const code of savedSymptoms.filter((item) => !symptoms.includes(item))) {
-        await read("toggleDaySym", iso, code);
-      }
-      if (intimacy !== Boolean(saved.intimacy)) await read("markPA", iso);
-      // addDayCustomSym toasts on its own; otherwise this is the only confirmation.
-      if (extra) await read("addDayCustomSym", iso, extra);
-      else showToast("Сохранено", { type: "success" });
+      await withHostToastsMuted(async () => {
+        if (energy !== (saved.energy || 0)) await acknowledgedHostWrite("setDayCheckin", iso, "energy", energy);
+        if (mood !== (saved.mood || 0)) await acknowledgedHostWrite("setDayCheckin", iso, "mood", mood);
+        for (const code of symptoms.filter((item) => !savedSymptoms.includes(item))) {
+          await acknowledgedHostWrite("toggleDaySym", iso, code);
+        }
+        for (const code of savedSymptoms.filter((item) => !symptoms.includes(item))) {
+          await acknowledgedHostWrite("toggleDaySym", iso, code);
+        }
+        if (intimacy !== Boolean(saved.intimacy)) await acknowledgedHostWrite("markPA", iso);
+        if (extra) await acknowledgedHostWrite("addDayCustomSym", iso, extra);
+      });
+      if (!openSession.current.open
+          || openSession.current.generation !== operation.generation
+          || currentIso.current !== operation.iso) return;
+      showToast("Сохранено", { type: "success" });
       onClose();
     } catch (error) {
+      if (!openSession.current.open
+          || openSession.current.generation !== operation.generation
+          || currentIso.current !== operation.iso) return;
       showToast(error?.message || "Не удалось сохранить", { type: "error" });
     } finally {
-      setBusy(false);
+      if (saveLock.current?.id === operation.id) {
+        saveLock.current = null;
+        setBusy(false);
+        if (openSession.current.open && (
+          openSession.current.generation !== operation.generation
+          || currentIso.current !== operation.iso
+        )) {
+          setSaveRevision((value) => value + 1);
+        }
+      }
     }
   };
 
@@ -76,11 +116,12 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
       isOpen={open}
       onClose={onClose}
       data-aiwa-day-log-modal="true"
+      aria-label={label || "Журнал за выбранный день"}
     >
       {/* The day being edited is the useful title here; back is the native BackButton. */}
       <AiwaPanelHeader size="large" title={label || "Занести в журнал"} />
 
-      <div className="aiwa-log-scroll">
+      <div className="aiwa-log-scroll" aria-busy={busy || undefined}>
         <SectionList className="aiwa-log-sections">
           <SectionList.Item>
             <JournalChoiceGroup
@@ -119,9 +160,9 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
       </div>
 
       <div className="aiwa-log-footer">
-        <RegularButton
-          variant="filled"
-          label={busy ? "Сохраняю…" : "Сохранить"}
+        <AiwaButton
+          label="Сохранить"
+          loading={busy}
           isFill
           {...actionProps("Сохранить", save)}
         />

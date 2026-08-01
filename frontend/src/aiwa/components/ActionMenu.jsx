@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { cloneElement, isValidElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Text } from "../lib/tma";
 
@@ -37,6 +37,7 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
   const [pos, setPos] = useState({ top: 0, left: 0, originY: "top" });
   const triggerRef = useRef(null);
   const menuRef = useRef(null);
+  const menuId = useId();
 
   const close = useCallback(() => {
     setIsOpen(false);
@@ -84,6 +85,16 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
     item.onSelect?.();
   };
 
+  // The wrapper only measures/positions. The supplied button remains the one
+  // semantic and keyboard target, avoiding nested roles and a duplicate Tab stop.
+  const accessibleTrigger = isValidElement(trigger)
+    ? cloneElement(trigger, {
+      "aria-haspopup": "menu",
+      "aria-expanded": isOpen,
+      "aria-controls": isOpen ? menuId : undefined,
+    })
+    : trigger;
+
   return (
     <>
       <div
@@ -94,10 +105,6 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
           event.stopPropagation();
           isOpen ? close() : setIsOpen(true);
         }}
-        role="button"
-        tabIndex={0}
-        aria-haspopup="menu"
-        aria-expanded={isOpen}
         onKeyDownCapture={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
@@ -106,12 +113,13 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
           }
         }}
       >
-        {trigger}
+        {accessibleTrigger}
       </div>
       {isOpen &&
         createPortal(
           <div
             ref={menuRef}
+            id={menuId}
             role="menu"
             className="aiwa-action-menu"
             data-align={align}
