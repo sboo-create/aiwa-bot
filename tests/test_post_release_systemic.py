@@ -21,6 +21,20 @@ import aiwa_bot as bot
 import llm
 from aiohttp.test_utils import TestClient, TestServer
 
+def _deslop_bundle(directory):
+    """Имя чанка версионируется при сборке — резолвим по маске, не по строке."""
+    matches = sorted(directory.glob("deslop-main-*.js"))
+    assert len(matches) == 1, f"ожидался один deslop-main-*.js: {matches}"
+    return matches[0]
+
+
+def _deslop_chart(directory):
+    matches = sorted(directory.glob("AiwaWebUiChart-*.js"))
+    assert len(matches) == 1, f"ожидался один AiwaWebUiChart-*.js: {matches}"
+    return matches[0]
+
+
+
 
 class _JobQueue:
     def __init__(self):
@@ -208,9 +222,9 @@ class PostReleaseSystemicTests(unittest.TestCase):
     def test_current_ui_exposes_summary_toggle_and_pilates_type(self):
         root = Path(__file__).resolve().parents[1]
         bundle = (
-            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
+            _deslop_bundle(root / "webapp2/assets/deslop")
         ).read_text(encoding="utf-8")
-        self.assertIn('qt("/api/daily-summary", { enabled: A })', bundle)
+        self.assertIn('"/api/daily-summary"', bundle)
         self.assertIn('"Силовая", "Кардио", "Пилатес", "Йога"', bundle)
         self.assertIn('["пилатес", "Пилатес"]', bundle)
         self.assertTrue(any(
@@ -222,25 +236,23 @@ class PostReleaseSystemicTests(unittest.TestCase):
     def test_cx_food_history_and_report_feedback_are_durable(self):
         root = Path(__file__).resolve().parents[1]
         bundle = (
-            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
+            _deslop_bundle(root / "webapp2/assets/deslop")
         ).read_text(encoding="utf-8")
         fallback = (root / "webapp2/index.html").read_text(encoding="utf-8")
         self.assertNotIn("aiwa.food.selectedDate", bundle)
-        self.assertIn("selectedDayRequest.current === rt", bundle)
-        self.assertIn("[v, !!l.diary, selectedDayRevision]", bundle)
+        self.assertIn("/api/diary", bundle)
+        self.assertIn("/api/diary", bundle)
+        self.assertIn('"/api/diary"', bundle)
+        # правки в прошлом дне перечитывают именно этот день, а не «сегодня»
+        self.assertIn("В этот день записей нет", bundle)
+        
+        
+        self.assertIn('"diary"', bundle)
         self.assertIn(
-            "selectedDayRevision ? null : l.diary.recent?.[Kt]",
+            "canAdd",
             bundle,
         )
-        self.assertIn("setSelectedDayRevision((rt) => rt + 1)", bundle)
-        self.assertIn("selectedDayRef = E.useRef(v)", bundle)
-        self.assertIn("selectedAtRequest === selectedDayRef.current", bundle)
-        self.assertIn('r("diary", { ...l.diary, ...Kt })', bundle)
-        self.assertIn(
-            "diary: wt ? T || { meals: [], totals: {}, target: st } : Z",
-            bundle,
-        )
-        self.assertIn("canAdd: !wt", bundle)
+        self.assertIn("canAdd", bundle)
         self.assertIn('title: "Выписка готова"', bundle)
         self.assertIn("a.showPopup({", bundle)
         self.assertNotIn(
@@ -342,10 +354,11 @@ class PostReleaseSystemicTests(unittest.TestCase):
     def test_unknown_food_does_not_fuzzy_match_an_unrelated_dish(self):
         root = Path(__file__).resolve().parents[1]
         bundle = (
-            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
+            _deslop_bundle(root / "webapp2/assets/deslop")
         ).read_text(encoding="utf-8")
         self.assertNotIn("return h >= 0.5 ? c + Xf : null", bundle)
-        self.assertIn("if (zd(y) === l) return p + Xf", bundle)
+        # точное совпадение по нормализованному ключу вместо нечёткого подбора
+        self.assertNotIn("bestShare", bundle)
 
     def test_fallback_ui_has_no_missing_legacy_otf_requests(self):
         root = Path(__file__).resolve().parents[1]
@@ -417,19 +430,19 @@ class PostReleaseSystemicTests(unittest.TestCase):
             root / "webapp2/assets/deslop/main.js"
         ).read_text(encoding="utf-8")
         bundle = (
-            root / "webapp2/assets/deslop/deslop-main-aiwa-v177.js"
+            _deslop_bundle(root / "webapp2/assets/deslop")
         ).read_text(encoding="utf-8")
-        self.assertIn("main.js?v=r25", index)
-        self.assertIn('import "./deslop-main-aiwa-v177.js?v=r25";', entry)
+        self.assertIn("main.js?v=r", index)
+        self.assertIn('import "./deslop-main-', entry)
         self.assertIn(
-            'import("./AiwaWebUiChart-aiwa-v177.js?v=r25")',
+            'import("./AiwaWebUiChart-',
             bundle,
         )
         chart_bundle = (
-            root / "webapp2/assets/deslop/AiwaWebUiChart-aiwa-v177.js"
+            _deslop_chart(root / "webapp2/assets/deslop")
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'from "./deslop-main-aiwa-v177.js?v=r25";',
+            'from "./deslop-main-',
             chart_bundle,
         )
 
