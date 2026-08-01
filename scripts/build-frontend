@@ -8,7 +8,7 @@
 # но раздаются и нужны index.html — их сохраняем.
 set -euo pipefail
 cd "$(dirname "$0")/../frontend"
-REV="${AIWA_UI_REV:-r26}"
+REV="${AIWA_UI_REV:-r27}"
 RUNNER=$(command -v bun || command -v npm)
 "$RUNNER" install
 "$RUNNER" run build:deslop

@@ -273,3 +273,20 @@ jobs:
           if [[ -f "$key_file" ]]; then
             shred -u "$key_file"
           fi
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # no-undef ловит ссылки на несуществующие переменные: именно такая
+      # (menuMissing после переименования) уронила экран «Питание» в проде,
+      # а тесты собранного бандла её не видели.
+      - run: bun install --frozen-lockfile || bun install
+        working-directory: frontend
+      - run: bun run lint
+        working-directory: frontend
+      - name: Сборка должна проходить
+        run: bun run build:deslop
+        working-directory: frontend

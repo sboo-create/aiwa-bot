@@ -1,2 +1,5 @@
 node_modules/
 /assets/
+
+# Собранный артефакт кладём в webapp2 только под выкат (см. deploy/i167/DEPLOY.md),
+# из frontend/ он попадать в коммиты не должен.

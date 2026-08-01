@@ -10,7 +10,8 @@
     "check:ui": "node ./scripts/check-ui-contract.mjs",
     "verify": "npm run check:design-system && npm run check:ui && npm run build:storybook && npm run build:deslop && node ./scripts/verify.mjs",
     "check:web-ui": "web-ui check",
-    "prepare": "web-ui hook"
+    "prepare": "web-ui hook",
+    "lint": "eslint src"
   },
   "dependencies": {
     "@deslop/web-ui": "file:vendor/deslop-web-ui",
@@ -21,6 +22,9 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "5.0.4",
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.8.0",
     "vite": "7.2.4",
     "vite-plugin-svgr": "4.5.0"
   }

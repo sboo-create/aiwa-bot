@@ -326,7 +326,7 @@ export function FoodScreen({ mode, revision = 0 }) {
               message={section.text || "Выбираем простую еду с белком в каждом приёме."}
               onDiscuss={() => openBotChat({ topic: "food" })}
             />
-            {menuMissing ? (
+            {menuRefreshing ? (
               <SectionList.Item header="Меню на сегодня">
                 <PaperRow loading title="Айва собирает меню…" description="Завтрак, обед и ужин под фазу" />
               </SectionList.Item>
