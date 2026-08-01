@@ -184,7 +184,7 @@ def _period_starts(now: float, days: float) -> tuple[float, dict[str, float]]:
         "selected": (day_start - timedelta(days=selected_days - 1)).timestamp(),
         "dau": day_start.timestamp(),
         "wau": (day_start - timedelta(days=day_start.weekday())).timestamp(),
-        "mau": day_start.replace(day=1).timestamp(),
+        "mau": (day_start - timedelta(days=29)).timestamp(),
     }
 
 
