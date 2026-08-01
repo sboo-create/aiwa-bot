@@ -19694,7 +19694,7 @@ function jE({ label: a, value: e, ok: l }) {
 function EE({ metrics: a, title: e = "Статистика" }) {
   return a?.length ? /* @__PURE__ */ m.jsx(yt.Item, { header: e, children: a.map((l) => /* @__PURE__ */ m.jsx(jE, { ...l }, l.label)) }) : null;
 }
-const AE = j.lazy(() => import("./AiwaWebUiChart-aiwa-v180.js?v=r28").then((a) => ({
+const AE = j.lazy(() => import("./AiwaWebUiChart-aiwa-v181.js?v=r29").then((a) => ({
   default: a.AiwaWebUiChart
 })));
 function ME() {

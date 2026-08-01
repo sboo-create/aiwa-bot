@@ -29,15 +29,6 @@ const DEFAULT_SERIES = [
 
 // Empty cycle history keeps the shape of the real chart, but muted and without
 // values, axes, grid lines, month labels, or interactive hints.
-const PLACEHOLDER_DATA = [10, 6, 4].map((value, index) => ({
-  label: String(index),
-  value,
-}));
-
-const PLACEHOLDER_CONFIG = {
-  value: { label: "", color: "var(--aiwa-ink-muted)" },
-};
-
 function isFiniteChartValue(value) {
   return value !== null
     && value !== undefined
@@ -49,37 +40,36 @@ function ChartEmptyState({ gradientId, emptyText }) {
   return (
     <div className="aiwa-area-chart-empty">
       <div className="aiwa-area-chart-empty-plot" aria-hidden="true">
-        <ChartContainer config={PLACEHOLDER_CONFIG} className="h-40 w-full">
-          <AreaChart
-            data={PLACEHOLDER_DATA}
-            margin={{ top: 8, left: 4, right: 4, bottom: 0 }}
-          >
-            <defs>
-              <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="var(--color-value)" stopOpacity={0.26} />
-                <stop offset="95%" stopColor="var(--color-value)" stopOpacity={0.03} />
-              </linearGradient>
-            </defs>
-            <XAxis dataKey="label" hide padding={{ left: 22, right: 22 }} />
-            <YAxis hide domain={[0, 12]} />
-            <Area
-              dataKey="value"
-              type="natural"
-              fill={`url(#${gradientId})`}
-              fillOpacity={1}
-              stroke="var(--color-value)"
-              strokeOpacity={0.7}
-              dot={{
-                r: 4,
-                fill: "var(--color-value)",
-                stroke: "var(--aiwa-surface)",
-                strokeWidth: 3,
-              }}
-              activeDot={false}
-              isAnimationActive={false}
+        <svg
+          className="aiwa-area-chart-empty-svg"
+          viewBox="0 0 320 144"
+          preserveAspectRatio="none"
+        >
+          <defs>
+            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="var(--aiwa-ink-muted)" stopOpacity={0.26} />
+              <stop offset="95%" stopColor="var(--aiwa-ink-muted)" stopOpacity={0.03} />
+            </linearGradient>
+          </defs>
+          <path
+            className="aiwa-area-chart-empty-fill"
+            d="M24 30 C72 40 112 70 160 76 C208 82 252 105 296 110 L296 140 L24 140 Z"
+            fill={`url(#${gradientId})`}
+          />
+          <path
+            className="aiwa-area-chart-empty-line"
+            d="M24 30 C72 40 112 70 160 76 C208 82 252 105 296 110"
+          />
+          {[{ x: 24, y: 30 }, { x: 160, y: 76 }, { x: 296, y: 110 }].map((point) => (
+            <circle
+              key={`${point.x}-${point.y}`}
+              className="aiwa-area-chart-empty-dot"
+              cx={point.x}
+              cy={point.y}
+              r="4"
             />
-          </AreaChart>
-        </ChartContainer>
+          ))}
+        </svg>
       </div>
       <Text
         as="p"
