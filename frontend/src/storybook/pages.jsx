@@ -909,13 +909,14 @@ export function ChartsPage() {
             ariaLabel="Энергия и качество сна за неделю"
           />
         </SectionList.Item>
-        <SectionList.Item header="Загрузка">
-          <AiwaWebUiChart loading />
-        </SectionList.Item>
+        <ChartSection loading title="Загрузка" />
         <SectionList.Item header="Недостаточно данных">
           <AiwaWebUiChart
-            data={[]}
-            emptyText="Добавь ещё одну запись — здесь появится динамика."
+            data={[
+              { label: "июл", value: "—" },
+              { label: "авг", value: null },
+            ]}
+            emptyText="Продолжай вести дневник, чтобы увидеть динамику цикла"
           />
         </SectionList.Item>
       </SectionList>

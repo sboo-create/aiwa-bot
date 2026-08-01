@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
-import { SectionList } from "../lib/tma";
+import { SectionList, Text } from "../lib/tma";
+import "../styles/chart-states.css";
 
 const AiwaWebUiChart = lazy(() => import("../components/AiwaWebUiChart.jsx").then((module) => ({
   default: module.AiwaWebUiChart,
@@ -13,6 +14,22 @@ function ChartLoadingFallback() {
   );
 }
 
+function ChartLoadingSection({ title }) {
+  return (
+    <section className="aiwa-chart-loading-section">
+      <Text
+        as="p"
+        className="aiwa-chart-loading-title"
+        variant="body"
+        weight="semibold"
+      >
+        {title}
+      </Text>
+      <ChartLoadingFallback />
+    </section>
+  );
+}
+
 export function ChartSection({
   data,
   series,
@@ -20,21 +37,22 @@ export function ChartSection({
   band = null,
   loading = false,
   title = "Динамика цикла",
-  emptyText = "Добавь ещё один завершённый цикл — здесь появится график.",
+  emptyText = "Продолжай вести дневник, чтобы увидеть динамику цикла",
 }) {
+  if (loading) return <ChartLoadingSection title={title} />;
+
   return (
-    <SectionList.Item header={title}>
-      <Suspense fallback={<ChartLoadingFallback />}>
+    <Suspense fallback={<ChartLoadingSection title={title} />}>
+      <SectionList.Item header={title}>
         <AiwaWebUiChart
           data={data}
           series={series}
           xKey={xKey}
           band={band}
-          loading={loading}
           ariaLabel={title}
           emptyText={emptyText}
         />
-      </Suspense>
-    </SectionList.Item>
+      </SectionList.Item>
+    </Suspense>
   );
 }

@@ -1,0 +1,53 @@
+.aiwa-area-chart-state.is-loading {
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.aiwa-chart-loading-title {
+  min-height: var(--ui-body-line-height);
+  margin: 0;
+  padding: 0 0 var(--ui-space-8);
+  box-sizing: border-box;
+  color: var(--aiwa-ink) !important;
+}
+
+.aiwa-area-chart-skeleton {
+  border-radius: var(--ui-component-section-radius);
+  background: var(--aiwa-surface);
+}
+
+.aiwa-area-chart-skeleton::after {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--aiwa-ink) 8%, transparent),
+    transparent
+  );
+}
+
+.aiwa-area-chart-empty {
+  display: flex;
+  padding: var(--ui-space-4) 0 var(--ui-space-16);
+  box-sizing: border-box;
+  flex-direction: column;
+  gap: var(--ui-space-4);
+}
+
+.aiwa-area-chart-empty-plot {
+  width: 100%;
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.aiwa-area-chart-empty-plot [data-slot="chart"] {
+  aspect-ratio: auto;
+}
+
+.aiwa-area-chart-empty-text {
+  margin: 0;
+  padding: 0 var(--ui-space-24);
+  color: var(--aiwa-ink-muted);
+  text-align: center;
+}
