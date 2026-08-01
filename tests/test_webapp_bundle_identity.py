@@ -20,7 +20,8 @@ def _deslop_chart(directory):
 
 def test_deslop_module_graph_uses_one_cache_key_for_each_module():
     bootstrap = (DESLOP_DIR / "main.js").read_text(encoding="utf-8")
-    chart = _deslop_chart(DESLOP_DIR).read_text(encoding="utf-8")
+    chart_path = _deslop_chart(DESLOP_DIR)
+    chart = chart_path.read_text(encoding="utf-8")
     bundle = _deslop_bundle(DESLOP_DIR).read_text(encoding="utf-8")
     match = re.fullmatch(
         r'import "(\./deslop-main-[^"]+\.js\?v=([^"]+))";\s*',
@@ -32,7 +33,7 @@ def test_deslop_module_graph_uses_one_cache_key_for_each_module():
     )
     main_url, revision = match.groups()
     assert f'from "{main_url}";' in chart
-    assert f'import("./AiwaWebUiChart-aiwa-v177.js?v={revision}")' in bundle
+    assert f'import("./{chart_path.name}?v={revision}")' in bundle
     assert chart.count(main_url) == 1
 
 
