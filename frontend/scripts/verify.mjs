@@ -27,7 +27,10 @@ const reactSource = [
 ].join("\n");
 // Bespoke data-viz primitives legitimately draw inline <svg>; the icon guard
 // targets handwritten navigation icons, not charts. Keep this allowlist tight.
-const svgDataVizAllowlist = new Set([resolve(root, "src/aiwa/components/CalorieGauge.jsx")]);
+const svgDataVizAllowlist = new Set([
+  resolve(root, "src/aiwa/components/AiwaWebUiChart.jsx"),
+  resolve(root, "src/aiwa/components/CalorieGauge.jsx"),
+]);
 const iconScanSource = [
   read("src/deslop-main.jsx"),
   ...aiwaFiles
