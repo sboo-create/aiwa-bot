@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { RegularButton, SectionList } from "../lib/tma";
+import { SectionList } from "../lib/tma";
+import { AiwaButton } from "../components/AiwaButton";
 import { AiwaModalView } from "../components/AiwaModalView";
 import { AiwaPanelHeader } from "../components/AiwaPanelHeader";
 import { JournalToggle } from "../components/JournalToggle";
@@ -122,9 +123,9 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode }) 
       </div>
 
       <div className="aiwa-log-footer">
-        <RegularButton
-          variant="filled"
-          label={busy ? "Сохраняю…" : "Сохранить"}
+        <AiwaButton
+          label="Сохранить"
+          loading={busy}
           isFill
           {...actionProps("Сохранить", save)}
         />

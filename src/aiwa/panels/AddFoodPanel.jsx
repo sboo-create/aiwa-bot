@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Text, RegularButton, Spinner } from "../lib/tma";
+import { Text, Spinner } from "../lib/tma";
 import { AiwaModalView } from "../components/AiwaModalView";
+import { AiwaButton } from "../components/AiwaButton";
 import { ChoicePills } from "../components/ChoicePills";
 import { FoodEntryForm } from "../components/FoodEntryForm";
 import { Field } from "../components/Field";
@@ -55,10 +56,11 @@ export function AddFoodPanel({ isOpen, onClose, onSaved, editingMeal = null }) {
       <div>
         <div className="aiwa-sheet-scroll aiwa-form-stack">
           {editingMeal ? (
-            <FoodEntryForm meal={editingMeal} onSaved={onSaved} onClose={onClose} />
+            <FoodEntryForm meal={editingMeal} onSaved={onSaved} onClose={onClose} choiceSurface="canvas" />
           ) : (
             <>
               <ChoicePills
+                surface="canvas"
                 options={[
                   { value: "photo", label: "Фото" },
                   { value: "text", label: "Текст" },
@@ -86,16 +88,16 @@ export function AddFoodPanel({ isOpen, onClose, onSaved, editingMeal = null }) {
                     placeholder="Например: 200 г творога и банан"
                     multiline
                   />
-                  <RegularButton
-                    variant="filled"
-                    label={busy ? "Считаю…" : "Добавить приём"}
+                  <AiwaButton
+                    label="Добавить приём"
+                    loading={busy}
                     isFill
-                    disabled={busy || !textValue.trim()}
+                    disabled={!textValue.trim()}
                     {...actionProps("Добавить приём", addText)}
                   />
                 </div>
               ) : null}
-              {method === "manual" ? <FoodEntryForm meal={null} onSaved={onSaved} onClose={onClose} /> : null}
+              {method === "manual" ? <FoodEntryForm meal={null} onSaved={onSaved} onClose={onClose} choiceSurface="canvas" /> : null}
             </>
           )}
         </div>

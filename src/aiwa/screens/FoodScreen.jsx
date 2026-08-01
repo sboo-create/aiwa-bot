@@ -1,29 +1,27 @@
 import { useEffect, useRef, useState } from "react";
-import { TMAProvider, Page, Text, RegularButton, SectionList } from "../lib/tma";
+import { TMAProvider, Page, RegularButton, SectionList } from "../lib/tma";
 import { ScreenLoading } from "../components/ScreenLoading";
 import { MacroCard } from "../components/MacroCard";
 import { CalorieGauge } from "../components/CalorieGauge";
 import { AiwaInsightCard } from "../components/AiwaInsightCard";
+import { AiwaButton } from "../components/AiwaButton";
 import { PaperRow } from "../components/PaperRow";
 import { ActionMenu } from "../components/ActionMenu";
-import { ProfileAvatar } from "../components/ProfileAvatar";
+import { ScreenDayHeader } from "../components/ScreenDayHeader";
 import { AddFoodPanel } from "../panels/AddFoodPanel";
 import { FoodDiaryPanel } from "../panels/FoodDiaryPanel";
 import { RecipePanel } from "../panels/RecipePanel";
+import { CalendarPanel } from "../panels/CalendarPanel";
 import { PlusIcon, ImageIcon, TextIcon } from "../lib/icons";
 import { MEAL_IMAGE } from "../lib/constants";
-import { apiCall, showToast, openBotChat, fmtKcal, actionProps } from "../lib/api";
+import { apiCall, showToast, openBotChat, fmtKcal, actionProps, read } from "../lib/api";
 import { useScreenData } from "../lib/screenData";
 import { ProfilePanel } from "../panels/ProfilePanel";
-import { historyStrip } from "../lib/historyStrip";
-import { Week } from "../components/Week";
+import { dayTitle, todayIso, useSelectedDay } from "../lib/selectedDay";
 
 // Ответы прогреваются на старте, поэтому обычно экран открывается сразу;
 // пока данных нет — на их месте скелетон той же раскладки.
 const KEYS = ["foodSection", "diary"];
-
-// Placeholder thumbnail for recommendations until per-dish images ship.
-const RECOMMENDATION_IMAGE = "/assets/paper-food-placeholder.png";
 
 // Сгенерированные 3d-иконки блюд. Манифест "название -> файл" пишет
 // scripts/gen_food_icons.py. Названия из дневника и меню свободные, поэтому
@@ -31,6 +29,11 @@ const RECOMMENDATION_IMAGE = "/assets/paper-food-placeholder.png";
 // «Курица с рисом» не нужен, но «Омлет с зеленью» → «Омлет с овощами» да).
 const normDish = (value) => String(value || "").toLowerCase().replace(/ё/g, "е");
 const ICON_VERSION = "?v=2";
+const ROOT_FOOD_ASSET = /^\/assets\/food\/[^/]+\.(?:png|jpe?g|webp|gif|svg|avif)$/i;
+const rootFoodImage = (value) => {
+  const path = String(value || "").split(/[?#]/, 1)[0];
+  return ROOT_FOOD_ASSET.test(path) ? value : null;
+};
 const dishWords = (value) => normDish(value).split(/[^а-яa-z0-9]+/).filter((w) => w.length >= 3);
 const sameRoot = (a, b) => {
   const len = Math.min(4, a.length, b.length);
@@ -68,24 +71,21 @@ const dishImageFrom = (icons, name) => {
   return bestShare >= 0.5 ? best + ICON_VERSION : null;
 };
 
-const DAY_LABEL = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
-
 /**
  * Food:
- * - HEADER (keep): title, gauge, macros, primary add CTA
+ * - HEADER: общая шапка дня (аватар, дата, календарь, барабан) + гейдж, макросы и CTA
  * - BLOCKS (TMA): recommendations list, past meals
  */
 export function FoodScreen({ mode, revision = 0 }) {
   const [data, refresh, patch] = useScreenData(KEYS, [mode, revision]);
-  // Мужской режим: главной с профилем нет, поэтому профиль открывается отсюда.
-  const aiwaHost = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
-  const maleProfile = aiwaHost?.mode === "male";
   const [profileOpen, setProfileOpen] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [foodIcons, setFoodIcons] = useState({});
-  // Просмотр прошлого дня: дневник за выбранную дату грузится отдельно,
-  // шапка (гейдж и макросы) всегда остаётся про сегодня.
-  const [historyIso, setHistoryIso] = useState("");
-  const [historyDiary, setHistoryDiary] = useState(null);
+  // Выбранный день общий для всех табов; дневник за прошлый день догружается
+  // отдельным запросом и складывается сюда, чтобы возврат к нему был мгновенным.
+  const selectedIso = useSelectedDay();
+  const today = todayIso();
+  const [dayDiaries, setDayDiaries] = useState({});
   // Рецепт открытого блюда из рекомендаций.
   const [recipeItem, setRecipeItem] = useState(null);
   const [recipeBusy, setRecipeBusy] = useState(false);
@@ -96,6 +96,8 @@ export function FoodScreen({ mode, revision = 0 }) {
   const [editingMeal, setEditingMeal] = useState(null);
   const [uploading, setUploading] = useState(false);
   const photoInputRef = useRef(null);
+  const lastDiary = useRef(null);
+  const failedDays = useRef(new Set());
 
   // Меню генерится моделью и может приехать позже открытия экрана — пока его
   // нет, перечитываем секцию с бэкофом, чтобы блюда появились сами.
@@ -115,18 +117,44 @@ export function FoodScreen({ mode, revision = 0 }) {
   useEffect(() => {
     fetch("/assets/food/manifest.json?v=2")
       .then((r) => (r.ok ? r.json() : {}))
-      .then((icons) => setFoodIcons(icons || {}))
+      .then((icons) => setFoodIcons(Object.fromEntries(
+        Object.entries(icons || {}).filter(([, file]) => rootFoodImage(file)),
+      )))
       .catch(() => {});
   }, []);
+
+  // Неделя назад приезжает вместе с сегодняшним дневником (`recent`), всё
+  // старше — отдельным запросом, один раз на день. Упавший запрос кладёт пустой
+  // день, чтобы шапка не осталась в загрузке, и помечается на перезапрос.
+  const recent = data.diary?.recent || {};
+  useEffect(() => {
+    if (!selectedIso || selectedIso === today) return undefined;
+    if (recent[selectedIso]) return undefined;
+    if (dayDiaries[selectedIso] && !failedDays.current.has(selectedIso)) return undefined;
+    let alive = true;
+    failedDays.current.delete(selectedIso);
+    apiCall("/api/diary", { d: selectedIso })
+      .then((result) => {
+        if (!alive) return;
+        const ok = result && !result.error;
+        if (!ok) failedDays.current.add(selectedIso);
+        setDayDiaries((current) => ({ ...current, [selectedIso]: ok ? result : { meals: [], totals: {} } }));
+      })
+      .catch(() => {
+        if (!alive) return;
+        failedDays.current.add(selectedIso);
+        setDayDiaries((current) => ({ ...current, [selectedIso]: { meals: [], totals: {} } }));
+      });
+    return () => { alive = false; };
+  }, [selectedIso, data.diary]);
 
   // Дневник обновляется после правок сам, меню от Айвы — только по ревизии экрана.
   const reloadDiary = () => refresh("diary");
 
-  if (!data.foodSection || !data.diary) return <ScreenLoading title="Питание" variant="food" />;
+  if (!data.foodSection || !data.diary) return <ScreenLoading variant="food" />;
 
   const section = data.foodSection;
   const diary = data.diary;
-  const totals = diary.totals || {};
   const target = diary.target || {};
   const menuMeals = section.menu?.meals || [];
   // Меню генерится на 4 приёма (завтрак, обед, перекус, ужин) — в рекомендациях
@@ -138,22 +166,44 @@ export function FoodScreen({ mode, revision = 0 }) {
   ];
   const recommended = RECO_SLOTS
     .map((slot) => ({ ...slot, meal: menuMeals[slot.index] }))
-    .filter((item) => item.meal);
-  const kcalTarget = Number(target.kcal || section.kcal || 0);
-  const kcal = Number(totals.kcal || 0);
-  const macroValue = (key) => Number(totals[key] || 0);
-
-  const week = historyStrip(30);
-  const todayIso = week[week.length - 1].iso;
-  const viewingPast = Boolean(historyIso && historyIso !== todayIso);
+    .filter((item) => item.meal)
+    .map((item) => ({
+      ...item,
+      image: rootFoodImage(item.meal.image) || dishImageFrom(foodIcons, item.meal.dish) || MEAL_IMAGE,
+    }));
+  /** Дневник за день: сегодняшний живой, прошлые — из недельной пачки или кэша. */
+  const dayDiary = (iso) => (iso === today ? diary : (dayDiaries[iso] || recent[iso] || null));
+  const viewingPast = selectedIso !== today;
+  const selectedDiary = dayDiary(selectedIso);
+  // Пока день едет с сервера, в шапке остаются цифры предыдущего — иначе гейдж
+  // на каждом обороте барабана мигал бы нулями.
+  if (selectedDiary) lastDiary.current = selectedDiary;
   const shownMeals = viewingPast
-    ? (historyDiary?.meals || [])
+    ? (selectedDiary?.meals || [])
     : (diary.meals || []).slice().reverse();
-  let historyTitle = "Прошедшие приёмы";
-  if (viewingPast) {
-    const parsed = new Date(`${historyIso}T12:00:00`);
-    historyTitle = Number.isNaN(parsed.getTime()) ? "Приёмы за день" : `Приёмы за ${DAY_LABEL.format(parsed)}`;
-  }
+  const historyTitle = viewingPast ? `Приёмы за ${dayTitle(selectedIso)}` : "Прошедшие приёмы";
+  const historyLoading = uploading || (viewingPast && !selectedDiary);
+  const showHistory = shownMeals.length > 0 || historyLoading;
+
+  /* Всё до жёлтой кнопки живёт по выбранному дню: гейдж и макросы перерисовываются
+     под пальцем, как счётчик на главной. Цель по КБЖУ дневная, поэтому берётся
+     из дня, а если сервер её не прислал — из сегодняшней. */
+  const dayHero = (iso) => {
+    const day = dayDiary(iso) || lastDiary.current || diary;
+    const dayTotals = day.totals || {};
+    const dayTarget = day.target || target;
+    const macro = (key) => Number(dayTotals[key] || 0);
+    return (
+      <div className="aiwa-day-hero" data-loading={dayDiary(iso) ? undefined : "true"}>
+        <CalorieGauge kcal={Number(dayTotals.kcal || 0)} kcalTarget={Number(dayTarget.kcal || section.kcal || 0)} />
+        <div className="aiwa-macro-grid">
+          <MacroCard label="Жиры" value={macro("fat")} target={dayTarget.fat} macro="fat" />
+          <MacroCard label="Белки" value={macro("protein")} target={dayTarget.protein} macro="protein" />
+          <MacroCard label="Углеводы" value={macro("carbs")} target={dayTarget.carbs} macro="carbs" />
+        </div>
+      </div>
+    );
+  };
 
   const requestWeekReview = async () => {
     if (weekBusy) return;
@@ -165,18 +215,6 @@ export function FoodScreen({ mode, revision = 0 }) {
     } finally {
       setWeekBusy(false);
     }
-  };
-
-  const pickHistoryDay = async (day) => {
-    const iso = typeof day === "string" ? day : day?.iso || "";
-    setHistoryIso(iso);
-    if (!iso || iso === todayIso) {
-      setHistoryDiary(null);
-      return;
-    }
-    setHistoryDiary(null);
-    const result = await apiCall("/api/diary", { d: iso }).catch(() => null);
-    setHistoryDiary(result || { meals: [] });
   };
 
   const addRecommended = async (meal, slot) => {
@@ -245,40 +283,33 @@ export function FoodScreen({ mode, revision = 0 }) {
       <Page mode="secondary">
         <div className="aiwa-paper-screen aiwa-food-screen">
           {/* ── HEADER ── */}
-          <div className="aiwa-screen-titlebar">
-            <Text className="aiwa-screen-title" variant="title1" weight="semibold">Питание</Text>
-            {maleProfile ? (
-              <ProfileAvatar
-                className="aiwa-screen-profile"
-                onClick={() => setProfileOpen(true)}
-              />
-            ) : null}
-          </div>
-          <CalorieGauge kcal={kcal} kcalTarget={kcalTarget} />
-          <div className="aiwa-macro-grid">
-            <MacroCard label="Жиры" value={macroValue("fat")} target={target.fat} macro="fat" />
-            <MacroCard label="Белки" value={macroValue("protein")} target={target.protein} macro="protein" />
-            <MacroCard label="Углеводы" value={macroValue("carbs")} target={target.carbs} macro="carbs" />
-          </div>
-          <div className="aiwa-screen-cta">
-            <ActionMenu
-              items={addMenuItems}
-              trigger={
-                <RegularButton
-                  variant="filled"
-                  aria-label="Добавить приём"
-                  label={<span className="aiwa-btn-icon-label"><PlusIcon /> Добавить приём</span>}
+          <ScreenDayHeader
+            hero={dayHero}
+            previewDay={dayDiary}
+            onProfile={() => setProfileOpen(true)}
+            onCalendar={() => setCalendarOpen(true)}
+            action={(
+              <div className="aiwa-screen-cta">
+                <ActionMenu
+                  items={addMenuItems}
+                  trigger={
+                    <RegularButton
+                      variant="filled"
+                      aria-label="Добавить приём"
+                      label={<span className="aiwa-btn-icon-label"><PlusIcon /> Добавить приём</span>}
+                    />
+                  }
                 />
-              }
-            />
-            <input
-              ref={photoInputRef}
-              type="file"
-              accept="image/*"
-              hidden
-              onChange={(event) => { uploadPhoto(event.target.files?.[0]); event.target.value = ""; }}
-            />
-          </div>
+                <input
+                  ref={photoInputRef}
+                  type="file"
+                  accept="image/*"
+                  hidden
+                  onChange={(event) => { uploadPhoto(event.target.files?.[0]); event.target.value = ""; }}
+                />
+              </div>
+            )}
+          />
 
           {/* ── TMA BLOCKS ── */}
           <SectionList className="aiwa-tma-blocks">
@@ -296,7 +327,7 @@ export function FoodScreen({ mode, revision = 0 }) {
                 {recommended.map((item) => (
                   <PaperRow
                     key={item.value}
-                    image={item.meal.image || dishImageFrom(foodIcons, item.meal.dish) || RECOMMENDATION_IMAGE}
+                    image={item.image}
                     title={item.meal.dish || "Рекомендация Айвы"}
                     description={[item.label, item.meal.kcal, item.meal.note].filter(Boolean).join(" · ")}
                     onClick={() => setRecipeItem(item)}
@@ -305,65 +336,63 @@ export function FoodScreen({ mode, revision = 0 }) {
               </SectionList.Item>
             ) : null}
 
-            <SectionList.Item header={historyTitle}>
-              <div className="aiwa-food-history-week">
-                <Week days={week} selectedIso={historyIso || todayIso} onSelect={pickHistoryDay} />
-              </div>
-              {uploading ? (
-                <PaperRow loading title="Разбираю фото…" description="Айва считает КБЖУ" />
-              ) : null}
-              {viewingPast && !historyDiary ? (
-                <PaperRow loading title="Загружаю…" description="Дневник за выбранный день" />
-              ) : null}
-              {shownMeals.length ? shownMeals.map((meal) => (
-                <PaperRow
-                  key={meal.id}
-                  image={dishImageFrom(foodIcons, meal.title) || MEAL_IMAGE}
-                  title={meal.title}
-                  description={`${fmtKcal(meal.kcal)} · Б${Math.round(meal.protein || 0)} · Ж${Math.round(meal.fat || 0)} · У${Math.round(meal.carbs || 0)}`}
-                  onClick={viewingPast ? undefined : () => setPanel("diary")}
-                />
-              )) : (uploading || (viewingPast && !historyDiary)) ? null : (
-                <PaperRow
-                  title={viewingPast ? "В этот день записей нет" : "Дневник пока пуст"}
-                  description={viewingPast ? "Дневник за этот день пуст." : "Добавь первый приём — фото, текстом или вручную."}
-                  onClick={viewingPast ? undefined : () => setPanel("diary")}
-                />
-              )}
-              {weekReview ? (
-                <>
-                  <AiwaInsightCard message={weekReview.summary} />
-                  {weekReview.gaps?.length ? (
-                    <>
-                      <PaperRow title="Чего не хватает" description="" />
-                      {weekReview.gaps.map((gap) => (
-                        <PaperRow key={gap} title={gap} />
-                      ))}
-                    </>
-                  ) : null}
-                  {weekReview.tips?.length ? (
-                    <>
-                      <PaperRow title="Советы на неделю" description="" />
-                      {weekReview.tips.map((tip, index) => (
-                        <PaperRow key={tip} title={`${index + 1}. ${tip}`} />
-                      ))}
-                    </>
-                  ) : null}
-                </>
-              ) : null}
-              <div className="aiwa-cell-actions aiwa-week-review-cta">
-                <RegularButton
-                  variant="filled"
-                  label={weekBusy ? "Разбираю неделю…" : "Разобрать питание за неделю"}
-                  isFill
-                  disabled={weekBusy}
-                  {...actionProps("Разобрать питание за неделю", requestWeekReview)}
-                />
-              </div>
-            </SectionList.Item>
+            {showHistory ? (
+              <SectionList.Item header={historyTitle}>
+                {uploading ? (
+                  <PaperRow loading title="Разбираю фото…" description="Айва считает КБЖУ" />
+                ) : null}
+                {viewingPast && !selectedDiary ? (
+                  <PaperRow loading title="Загружаю…" description="Дневник за выбранный день" />
+                ) : null}
+                {shownMeals.map((meal) => (
+                  <PaperRow
+                    key={meal.id}
+                    image={dishImageFrom(foodIcons, meal.title) || MEAL_IMAGE}
+                    title={meal.title}
+                    description={`${fmtKcal(meal.kcal)} · Б${Math.round(meal.protein || 0)} · Ж${Math.round(meal.fat || 0)} · У${Math.round(meal.carbs || 0)}`}
+                    onClick={viewingPast ? undefined : () => setPanel("diary")}
+                  />
+                ))}
+                {weekReview ? (
+                  <>
+                    <AiwaInsightCard message={weekReview.summary} />
+                    {weekReview.gaps?.length ? (
+                      <>
+                        <PaperRow title="Чего не хватает" description="" />
+                        {weekReview.gaps.map((gap) => (
+                          <PaperRow key={gap} title={gap} />
+                        ))}
+                      </>
+                    ) : null}
+                    {weekReview.tips?.length ? (
+                      <>
+                        <PaperRow title="Советы на неделю" description="" />
+                        {weekReview.tips.map((tip, index) => (
+                          <PaperRow key={tip} title={`${index + 1}. ${tip}`} />
+                        ))}
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
+                <div className="aiwa-cell-actions aiwa-week-review-cta">
+                  <AiwaButton
+                    label="Разобрать питание за неделю"
+                    loading={weekBusy}
+                    isFill
+                    {...actionProps("Разобрать питание за неделю", requestWeekReview)}
+                  />
+                </div>
+              </SectionList.Item>
+            ) : null}
           </SectionList>
 
-          {maleProfile ? <ProfilePanel isOpen={profileOpen} onClose={() => setProfileOpen(false)} /> : null}
+          <ProfilePanel isOpen={profileOpen} onClose={() => setProfileOpen(false)} />
+          <CalendarPanel
+            isOpen={calendarOpen}
+            onClose={() => setCalendarOpen(false)}
+            mode={mode}
+            symptomGroups={read("aiwaSymptomGroups")}
+          />
           <AddFoodPanel
             isOpen={panel === "add"}
             onClose={() => setPanel("")}
@@ -373,6 +402,7 @@ export function FoodScreen({ mode, revision = 0 }) {
           <RecipePanel
             isOpen={Boolean(recipeItem)}
             meal={recipeItem?.meal}
+            image={recipeItem?.image}
             slotLabel={recipeItem?.label}
             busy={recipeBusy}
             onClose={() => setRecipeItem(null)}

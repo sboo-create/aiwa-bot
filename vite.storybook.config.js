@@ -6,6 +6,8 @@ import path from "node:path";
 export default defineConfig({
   plugins: [react(), svgr()],
   resolve: {
+    // One React only — see the note in vite.config.js.
+    dedupe: ["react", "react-dom", "react/jsx-runtime", "recharts"],
     alias: {
       "@": path.resolve(__dirname, "vendor/deslop-web-ui/src"),
     },

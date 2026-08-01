@@ -13,6 +13,13 @@ Gemini для фото); поддерживается GigaChat как запас
 - `llm.py` — генерация сводки через GigaChat / LiteLLM-прокси + шаблонный фолбэк
 - `requirements.txt`, `.env.example`
 
+## Фронтенд Mini App
+
+Компоненты живут в `src/aiwa`, локальный каталог — в `src/storybook`. Для
+быстрой работы: `npm run front:dev`; для публикации только фронта в тестового
+бота без рестарта: `npm run front:deploy`. Полный процесс описан в
+[`docs/frontend-workflow.md`](docs/frontend-workflow.md).
+
 ## Что нужно (2 ключа)
 1. **Telegram Bot Token** — открой @BotFather в Телеграме → `/newbot` → имя и @username →
    он выдаст токен вида `123456:ABC...`.

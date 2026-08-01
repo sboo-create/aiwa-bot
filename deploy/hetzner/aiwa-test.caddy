@@ -1,0 +1,24 @@
+# Site-блок тестового стенда AIWA.
+#
+# Вставляется в общий /opt/bizzy-radio/Caddyfile — он же обслуживает
+# gigagochi.serega.works и радио, поэтому перед reload обязательно
+# `caddy validate` и бэкап: синтаксическая ошибка уронит все сайты сразу.
+#
+# sslip.io резолвит имя в зашитый в него IP, так что записи в DNS-регистраторе
+# не нужны, а Let's Encrypt выдаёт обычный сертификат.
+#
+# 172.19.0.1 — гейтвей сети bizzy-radio_default, через него контейнер Caddy
+# видит сервис на хосте.
+
+aiwa-167.233.103.46.sslip.io {
+	encode zstd gzip
+
+	header {
+		>Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		>X-Content-Type-Options "nosniff"
+		>Referrer-Policy "strict-origin-when-cross-origin"
+		-X-Powered-By
+	}
+
+	reverse_proxy 172.19.0.1:9910
+}

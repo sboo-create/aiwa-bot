@@ -1,0 +1,45 @@
+[Unit]
+Description=AIWA test bot and web service (Hetzner)
+# На i167 юнит ждал SSH-туннели до Telegram и OpenRouter. Здесь выход в сеть
+# прямой, поэтому зависимостей, кроме сети, нет.
+After=network-online.target docker.service
+Wants=network-online.target
+# Слушаем docker-гейтвей, а его поднимает docker вместе с сетью bizzy-radio.
+After=docker.service
+
+[Service]
+Type=simple
+User=aiwa-test
+Group=aiwa-test
+WorkingDirectory=/srv/aiwa-test/current
+EnvironmentFile=/srv/aiwa-test/config/app.env
+EnvironmentFile=-/srv/aiwa-test/secrets/providers.env
+LoadCredential=bot_token:/srv/aiwa-test/secrets/bot-token
+Environment=BOT_TOKEN_FILE=/run/credentials/aiwa-test.service/bot_token
+ExecStart=/srv/aiwa-test/venv/bin/python aiwa_bot.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+UMask=0077
+
+# На коробке 3.7 ГБ и swap занят наполовину: жёсткий потолок, чтобы стенд
+# не утащил за собой gigagochi. Локально процесс держит ~32 МБ RSS.
+CPUQuota=100%
+MemoryMax=768M
+TasksMax=256
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/srv/aiwa-test/data
+
+[Install]
+WantedBy=multi-user.target

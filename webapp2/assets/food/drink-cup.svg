@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Напиток">
-  <rect width="128" height="128" rx="28" fill="#fffaf4"/>
-  <path d="M43 29c-7 9 7 12 0 22M62 24c-7 10 7 13 0 24" fill="none" stroke="#f3a35c" stroke-width="6" stroke-linecap="round"/>
-  <path d="M31 55h58v27c0 17-12 28-29 28S31 99 31 82V55Z" fill="#ffb36f"/>
-  <path d="M89 64h7c12 0 15 21 1 27h-9" fill="none" stroke="#e88336" stroke-width="8" stroke-linecap="round"/>
-  <path d="M39 64h42" stroke="#ffe8cf" stroke-width="5" stroke-linecap="round"/>
-</svg>

@@ -4,6 +4,15 @@
   "designTool": "Paper/Figma",
   "components": [
     {
+      "id": "button",
+      "designName": "AIWA/Action/Button",
+      "export": "AiwaButton",
+      "source": "src/aiwa/components/AiwaButton.jsx",
+      "story": "/showcase/button",
+      "layer": "primitive",
+      "variants": ["Primary", "Secondary", "Secondary Canvas", "Outlined", "Disabled"]
+    },
+    {
       "id": "cell",
       "designName": "AIWA/Cell",
       "export": "AiwaCell",
@@ -41,7 +50,8 @@
       "export": "PaperRow",
       "source": "src/aiwa/components/PaperRow.jsx",
       "story": "/showcase/cell",
-      "layer": "pattern"
+      "layer": "pattern",
+      "variants": ["Default", "Extended"]
     },
     {
       "id": "panel-header",
@@ -97,6 +107,14 @@
       "export": "Week",
       "source": "src/aiwa/components/Week.jsx",
       "story": "/aiwa/week",
+      "layer": "composition"
+    },
+    {
+      "id": "screen-day-header",
+      "designName": "AIWA/Screen/Day header",
+      "export": "ScreenDayHeader",
+      "source": "src/aiwa/components/ScreenDayHeader.jsx",
+      "story": "/compositions/main",
       "layer": "composition"
     },
     {

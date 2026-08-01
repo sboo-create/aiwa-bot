@@ -16,5 +16,9 @@ training_screen_proposal.md
 # в webapp2/assets/deslop вручную.
 node_modules/
 assets/deslop/
+storybook-static/
 vendor/*/node_modules/
 vendor/deslop-web-ui/dist/
+
+# Логи локального контура (launchd пишет сюда).
+logs/

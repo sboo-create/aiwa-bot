@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent для локального бота AIWA.
+
+  Ставится симлинком или копией в ~/Library/LaunchAgents/com.aiwa.bot.plist,
+  дальше:  launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.aiwa.bot.plist
+
+  KeepAlive поднимает бота после падения, RunAtLoad — после логина в макбук.
+  Публичный адрес держит Tailscale Funnel: он живёт в самом tailscaled и
+  переживает перезапуски, поэтому отдельного агента под туннель нет.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aiwa.bot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sergejegorov/aiwa-bot/scripts/run_bot.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/sergejegorov/aiwa-bot</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- Без паузы упавший на старте бот уходит в спам-рестарт. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/sergejegorov/aiwa-bot/logs/bot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sergejegorov/aiwa-bot/logs/bot.log</string>
+</dict>
+</plist>

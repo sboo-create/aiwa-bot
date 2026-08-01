@@ -1,9 +1,15 @@
-import { TMAProvider, Page, ImageAvatar, RegularButton, SectionList, Text } from "../lib/tma";
-import { CalendarIcon, PlusIcon } from "../lib/icons";
-import { call, actionProps } from "../lib/api";
-import { ProfileAvatar } from "../components/ProfileAvatar";
-import { AiwaPanelHeader } from "../components/AiwaPanelHeader";
-import { Week } from "../components/Week";
+import { useEffect, useLayoutEffect, useState } from "react";
+import { TMAProvider, Page, RegularButton, SectionList } from "../lib/tma";
+import { PlusIcon } from "../lib/icons";
+import { call, read, actionProps } from "../lib/api";
+import { selectDay } from "../lib/selectedDay";
+import { ScreenDayHeader } from "../components/ScreenDayHeader";
+import { HomeScreenLoading } from "../components/ScreenLoading";
+import {
+  areAiwaPostersReady,
+  preloadAiwaAnimations,
+  preloadAiwaPosters,
+} from "../lib/sequence";
 import { TodaySection } from "../sections/TodaySection";
 import { AiSection } from "../sections/AiSection";
 import { DelaySection } from "../sections/DelaySection";
@@ -17,44 +23,73 @@ import { ProfilePanel } from "../panels/ProfilePanel";
 
 /**
  * Home:
- * - HEADER (paper): PanelHeader + week + countdown + journal CTA
+ * - HEADER (paper): PanelHeader + day ruler + countdown + journal CTA
  * - BLOCKS (TMA white cards): AI, delay, stats, chart, history
  */
 
+/**
+ * What the counter says for a day, without opening it. The host words every day
+ * of the strip the same way it words the one that is open, so the counter can
+ * follow the ruler while the finger is still down. Outside the host — the design
+ * storybook — the screen passes its own `previewDay` instead.
+ */
+const readDayHero = (iso) => {
+  const patch = read("homeSelectedDayPatch", iso);
+  return patch ? { value: patch.heroValue, label: patch.countdownLabel } : null;
+};
+
 export function HomeScreen(props) {
+  const [postersReady, setPostersReady] = useState(areAiwaPostersReady);
+
+  useLayoutEffect(() => {
+    // React is committed behind the static boot skeleton. Swap it for the React
+    // skeleton before paint, then keep navigation hidden only until both poster
+    // frames are decoded. Full sequences continue loading behind the UI.
+    document.querySelector("[data-aiwa-static-boot]")?.remove();
+    document.body.classList.remove("aiwa-booting");
+    document.body.classList.toggle("aiwa-assets-loading", !postersReady);
+    const app = document.getElementById("app");
+    if (postersReady) app?.removeAttribute("aria-busy");
+    else app?.setAttribute("aria-busy", "true");
+  }, [postersReady]);
+
+  useEffect(() => {
+    let active = true;
+    preloadAiwaPosters().then(() => {
+      if (active) setPostersReady(true);
+    });
+    // Deliberately not awaited: every AiwaSequence stays on its decoded poster
+    // and begins playback only after preloadAiwaSequence resolves for it.
+    preloadAiwaAnimations();
+    return () => {
+      active = false;
+      document.body.classList.remove("aiwa-assets-loading");
+    };
+  }, []);
+
   return (
     <TMAProvider>
       <Page mode="secondary">
-        <div className="aiwa-deslop-home">
+        {postersReady ? <div className="aiwa-deslop-home">
           {/* ── HEADER only ── */}
-          <AiwaPanelHeader
+          <ScreenDayHeader
             title={props.dateText}
-            left={<ProfileAvatar />}
-            onLeft={() => window.AiwaDeslop?.openProfile?.()}
-            leftAriaLabel="Открыть профиль"
-            right={<CalendarIcon />}
-            onRight={() => call("openHomePanel", "calendar")}
-            rightAriaLabel="Открыть календарь"
+            days={props.week}
+            selectedIso={props.selectedIso}
+            heroValue={props.heroValue || `${props.countdown} дней`}
+            heroLabel={props.countdownLabel}
+            onSelect={props.onSelectDay ?? ((day) => selectDay(day.iso))}
+            previewDay={props.previewDay ?? readDayHero}
+            onProfile={() => window.AiwaDeslop?.openProfile?.()}
+            onCalendar={() => call("openHomePanel", "calendar")}
+            action={(
+              <RegularButton
+                variant="filled"
+                label={<span className="aiwa-btn-icon-label"><PlusIcon /> Занести в журнал</span>}
+                {...actionProps("Занести в журнал", () => call("openHomePanel", "journal"))}
+              />
+            )}
           />
-
-          <div className="aiwa-overview">
-            <Week
-              days={props.week}
-              selectedIso={props.selectedIso}
-              onSelect={props.onSelectDay ?? ((day) => call("aiwaSelectDay", day.iso))}
-            />
-            <div className="aiwa-countdown">
-              <Text variant="title1" weight="semibold">
-                {props.heroValue || `${props.countdown} дней`}
-              </Text>
-              <Text variant="body" weight="regular">{props.countdownLabel}</Text>
-            </div>
-            <RegularButton
-              variant="filled"
-              label={<span className="aiwa-btn-icon-label"><PlusIcon /> Занести в журнал</span>}
-              {...actionProps("Занести в журнал", () => call("openHomePanel", "journal"))}
-            />
-          </div>
 
           {/* ── All content cards: white TMA sections ── */}
           <SectionList className="aiwa-tma-blocks">
@@ -93,7 +128,12 @@ export function HomeScreen(props) {
             revision={props.panelRevision}
           />
           <ProfilePanel isOpen={props.profileOpen} onClose={props.onProfileClose} />
-        </div>
+        </div> : (
+          <HomeScreenLoading
+            showToday={Boolean((props.dayCheckin ?? props.checkin)?.symptoms?.length)}
+            showDelay={Boolean(props.delay)}
+          />
+        )}
       </Page>
     </TMAProvider>
   );

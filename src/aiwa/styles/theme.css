@@ -37,6 +37,11 @@ body {
      white card containers flip this to the canvas colour so nesting stays legible. */
   --aiwa-control-bg: var(--aiwa-surface);
 
+  /* Extended media cells place opaque PNG illustrations on a quiet surface.
+     The mix resolves to Paper's #F6F6F6 in light mode and still follows
+     the active surface/ink pair in dark mode. */
+  --aiwa-media-bg: color-mix(in srgb, var(--aiwa-surface) 96.2%, var(--aiwa-ink));
+
   /* ── Ink scale ──────────────────────────────────────────────────────────
      Every level is a Deslop role, not a hand-picked hex, so the whole scale
      flips with the kit's own light/dark pair. --ui-elevation-* is the kit's

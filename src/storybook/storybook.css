@@ -232,6 +232,11 @@ body {
   padding: var(--ui-space-12) var(--ui-layout-content-inset);
 }
 
+.aiwa-storybook-button-canvas {
+  display: grid;
+  gap: var(--ui-space-12);
+}
+
 .aiwa-storybook-tabbar {
   position: relative;
   min-height: 104px;
@@ -296,6 +301,13 @@ body {
 
 .aiwa-storybook-main .aiwa-tma-blocks {
   margin-top: 24px;
+}
+
+/* Context sample for the ChoicePills canvas surface variant: the gray inset is
+   the same application canvas the control sits on in full-screen panels. */
+.aiwa-storybook-control-canvas {
+  padding: var(--ui-space-16);
+  background: var(--aiwa-screen-bg);
 }
 
 .aiwa-storybook-macros {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Text, RegularButton } from "../lib/tma";
+import { RegularButton, SectionList } from "../lib/tma";
 import { AiwaModalView } from "../components/AiwaModalView";
 import { Field } from "../components/Field";
 import { apiCall, showToast, actionProps } from "../lib/api";
@@ -20,10 +20,18 @@ export function TrainingProfilePanel({ isOpen, onClose, profile, onSaved }) {
     <AiwaModalView isOpen={isOpen} onClose={onClose}>
       <div>
         <div className="aiwa-sheet-scroll aiwa-form-stack">
-          <Text variant="body" weight="regular">Расскажи, чем занимаешься и что важно беречь. Айва учтёт это в рекомендациях и разборе нагрузки.</Text>
-          <Field label="Формат" value={form.format || ""} onChange={(value) => set("format", value)} placeholder="Зал и прогулки" />
-          <Field label="Цель" value={form.goal || ""} onChange={(value) => set("goal", value)} placeholder="Тонус и больше энергии" />
-          <Field label="Ограничения" value={form.limits || ""} onChange={(value) => set("limits", value)} placeholder="Например, бережём поясницу" />
+          <SectionList className="aiwa-tma-blocks aiwa-settings-page">
+            <SectionList.Item
+              header="Предпочтения в тренировках"
+              description="Расскажи, чем занимаешься и что важно беречь. Айва учтёт это в рекомендациях и разборе нагрузки."
+            >
+              <div className="aiwa-settings-form">
+                <Field label="Формат" value={form.format || ""} onChange={(value) => set("format", value)} placeholder="Зал и прогулки" />
+                <Field label="Цель" value={form.goal || ""} onChange={(value) => set("goal", value)} placeholder="Тонус и больше энергии" />
+                <Field label="Ограничения" value={form.limits || ""} onChange={(value) => set("limits", value)} placeholder="Например, бережём поясницу" />
+              </div>
+            </SectionList.Item>
+          </SectionList>
           <RegularButton variant="filled" label="Сохранить" isFill {...actionProps("Сохранить профиль", save)} />
         </div>
       </div>

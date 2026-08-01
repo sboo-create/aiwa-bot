@@ -58,19 +58,28 @@ export {
   AIWA_SEQUENCE_PAUSE_MS,
   sequenceFrames,
   preloadAiwaSequence,
+  preloadAiwaPosters,
+  areAiwaPostersReady,
+  preloadAiwaAnimations,
+  areAiwaAnimationsReady,
 } from "./lib/sequence.js";
 export * from "./lib/constants.js";
 export * from "./lib/icons.js";
 export { dateCellClassName } from "./lib/dateCellClassName.js";
+export { dayStrip, dayTitle, getSelectedDay, selectDay, todayIso, useSelectedDay } from "./lib/selectedDay.js";
 
 // Primitives / building blocks
 export { AiwaSequence } from "./components/AiwaSequence.jsx";
 export { AiwaWebUiChart } from "./components/AiwaWebUiChart.jsx";
 export { DateCell } from "./components/DateCell.jsx";
 export { Week } from "./components/Week.jsx";
+export { DayWheel } from "./components/DayWheel.jsx";
+export { DayOverview } from "./components/DayOverview.jsx";
+export { ScreenDayHeader } from "./components/ScreenDayHeader.jsx";
 export { StatusIcon } from "./components/StatusIcon.jsx";
 export { MetricCell } from "./components/MetricCell.jsx";
 export { AiwaChip } from "./components/AiwaChip.jsx";
+export { AiwaButton } from "./components/AiwaButton.jsx";
 export { AiwaFab } from "./components/AiwaFab.jsx";
 export { CalendarMarkBar } from "./components/CalendarMarkBar.jsx";
 export { JournalToggle } from "./components/JournalToggle.jsx";
@@ -79,6 +88,7 @@ export { JournalChoiceGroup } from "./components/JournalChoiceGroup.jsx";
 export { JournalSymptomGroup } from "./components/JournalSymptomGroup.jsx";
 export { JournalCustomSymptom } from "./components/JournalCustomSymptom.jsx";
 export { ScreenLoading } from "./components/ScreenLoading.jsx";
+export { HomeScreenLoading } from "./components/ScreenLoading.jsx";
 export { Snackbar } from "./components/Snackbar.jsx";
 export { ChoicePills } from "./components/ChoicePills.jsx";
 export { ActionMenu } from "./components/ActionMenu.jsx";
@@ -108,6 +118,7 @@ export { CalendarDayLogPanel } from "./panels/CalendarDayLogPanel.jsx";
 export { HomePanels } from "./panels/HomePanels.jsx";
 export { AddFoodPanel } from "./panels/AddFoodPanel.jsx";
 export { FoodDiaryPanel } from "./panels/FoodDiaryPanel.jsx";
+export { RecipePanel } from "./panels/RecipePanel.jsx";
 export { WorkoutPanel } from "./panels/WorkoutPanel.jsx";
 export { WorkoutVariantsPanel } from "./panels/WorkoutVariantsPanel.jsx";
 export { TrainingProfilePanel } from "./panels/TrainingProfilePanel.jsx";

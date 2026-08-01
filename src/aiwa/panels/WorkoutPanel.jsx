@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
-import { Text, Tappable, RegularButton } from "../lib/tma";
+import { Text, RegularButton, SectionList } from "../lib/tma";
+import { AiwaButton } from "../components/AiwaButton";
+import { AiwaCell } from "../components/AiwaCell";
 import { AiwaModalView } from "../components/AiwaModalView";
 import { Field } from "../components/Field";
 import { ChoicePills } from "../components/ChoicePills";
 import { WORKOUT_TYPES, WORKOUT_EXERCISES, WORKOUT_GROUPS } from "../lib/constants";
+import { PlusIcon } from "../lib/icons";
 import { apiCall, showToast, trackFlow, actionProps } from "../lib/api";
 
 export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
@@ -82,18 +85,20 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
     }
   };
   const exerciseRow = (name) => (
-    <div key={name}>
-      <Tappable
+    <div className="aiwa-exercise-item" key={name}>
+      <AiwaCell
         as="button"
         type="button"
-        mode="opacity"
-        className="aiwa-exercise-row"
         aria-pressed={selected.includes(name)}
         onClick={() => toggleExercise(name)}
+        end={(
+          <span className={selected.includes(name) ? "aiwa-check is-active" : "aiwa-check"}>
+            {selected.includes(name) ? "✓" : <PlusIcon />}
+          </span>
+        )}
       >
-        <Text variant="body" weight="regular">{name}</Text>
-        <span className={selected.includes(name) ? "aiwa-check is-active" : "aiwa-check"}>{selected.includes(name) ? "✓" : "+"}</span>
-      </Tappable>
+        <AiwaCell.Text title={name} />
+      </AiwaCell>
       {strength && selected.includes(name) ? (
         <div className="aiwa-exercise-nums">
           <input
@@ -144,40 +149,49 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested }) {
       <div>
         <div className="aiwa-sheet-scroll aiwa-form-stack">
           <Field label="Когда" type="date" value={date} onChange={setDate} />
-          <ChoicePills label="Что делала" options={WORKOUT_TYPES} value={type} onChange={(value) => { setType(value); setSelected([]); }} />
-          <div className="aiwa-form-group">
-            <Text className="aiwa-form-label" variant="body" weight="semibold">Упражнения</Text>
-            <div className="aiwa-sheet-card">
-              {strength ? Object.keys(WORKOUT_GROUPS).map((group) => {
-                const chosen = WORKOUT_GROUPS[group].filter((name) => selected.includes(name)).length;
-                const opened = openGroup === group;
-                return (
-                  <div key={group}>
-                    <Tappable
-                      as="button"
-                      type="button"
-                      mode="opacity"
-                      className="aiwa-exercise-row aiwa-exercise-group"
-                      aria-expanded={opened}
-                      onClick={() => setOpenGroup(opened ? "" : group)}
-                    >
-                      <Text variant="body" weight="semibold">{group}</Text>
-                      <Text variant="caption1" weight="regular">{chosen ? `выбрано ${chosen}` : (opened ? "—" : "+")}</Text>
-                    </Tappable>
-                    {opened ? WORKOUT_GROUPS[group].map(exerciseRow) : null}
-                  </div>
-                );
-              }) : (WORKOUT_EXERCISES[type] || []).map(exerciseRow)}
-              <Field label="Добавить своё" value={custom} onChange={setCustom} placeholder="Название упражнения" />
-            </div>
+          <ChoicePills surface="canvas" label="Что делала" options={WORKOUT_TYPES} value={type} onChange={(value) => { setType(value); setSelected([]); }} />
+          <div className="aiwa-workout-exercises">
+            <SectionList>
+              <SectionList.Item header="Упражнения">
+                {strength ? Object.keys(WORKOUT_GROUPS).map((group) => {
+                  const chosen = WORKOUT_GROUPS[group].filter((name) => selected.includes(name)).length;
+                  const opened = openGroup === group;
+                  const groupEnd = chosen ? (
+                    <Text variant="caption1" weight="regular">{`выбрано ${chosen}`}</Text>
+                  ) : opened ? (
+                    <Text variant="caption1" weight="regular">—</Text>
+                  ) : (
+                    <span className="aiwa-exercise-add-icon" aria-hidden="true"><PlusIcon /></span>
+                  );
+                  return (
+                    <div className="aiwa-exercise-item" key={group}>
+                      <AiwaCell
+                        as="button"
+                        type="button"
+                        data-aiwa-exercise-group="true"
+                        aria-expanded={opened}
+                        onClick={() => setOpenGroup(opened ? "" : group)}
+                        end={groupEnd}
+                      >
+                        <AiwaCell.Text title={group} bold />
+                      </AiwaCell>
+                      {opened ? WORKOUT_GROUPS[group].map(exerciseRow) : null}
+                    </div>
+                  );
+                }) : (WORKOUT_EXERCISES[type] || []).map(exerciseRow)}
+                <AiwaCell data-aiwa-exercise-custom="true" tappable={false}>
+                  <Text variant="caption1" weight="regular">Добавить своё</Text>
+                  <AiwaCell.Editable label="Название упражнения" value={custom} onChange={setCustom} />
+                </AiwaCell>
+              </SectionList.Item>
+            </SectionList>
           </div>
-          <ChoicePills label="Длительность" options={["30 мин", "45 мин", "60+ мин"]} value={duration} onChange={setDuration} />
-          <ChoicePills label="Как ощущалось" options={["Легко", "Нормально", "Тяжело"]} value={rpe} onChange={setRpe} />
-          <RegularButton
-            variant="filled"
-            label={busy ? "Сохраняю…" : "Сохранить и разобрать"}
+          <ChoicePills surface="canvas" label="Длительность" options={["30 мин", "45 мин", "60+ мин"]} value={duration} onChange={setDuration} />
+          <ChoicePills surface="canvas" label="Как ощущалось" options={["Легко", "Нормально", "Тяжело"]} value={rpe} onChange={setRpe} />
+          <AiwaButton
+            label="Сохранить и разобрать"
+            loading={busy}
             isFill
-            disabled={busy}
             {...actionProps("Сохранить и разобрать", save)}
           />
         </div>

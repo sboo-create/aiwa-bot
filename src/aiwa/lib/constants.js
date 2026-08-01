@@ -42,7 +42,7 @@ export const JOURNAL_ENERGY_OPTIONS = [[1, "Низкая"], [2, "Средняя"
 export const JOURNAL_MOOD_OPTIONS = [[1, "Плохое"], [2, "Нормальное"], [3, "Хорошее"]];
 
 // Новые залогированные блюда пока без своей 3d-иконки — до генерации показываем
-// общую заглушку; у блюд из assets/food/manifest.json остаются их картинки.
+// корневую food-иллюстрацию. catalog-v2 клиент намеренно не использует.
 export const MEAL_IMAGE = "/assets/food/pancakes.png";
 
 export const FOOD_SLOTS = [

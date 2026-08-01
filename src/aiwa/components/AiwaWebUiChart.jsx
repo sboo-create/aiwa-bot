@@ -16,6 +16,7 @@ import {
   ChartTooltip,
   ChartTooltipContent,
 } from "../../../vendor/deslop-web-ui/src/components/ui/chart.tsx";
+import { Text } from "../lib/tma";
 
 const DEFAULT_SERIES = [
   {
@@ -25,26 +26,108 @@ const DEFAULT_SERIES = [
   },
 ];
 
+// Пустой блок «Динамика» показывает форму будущего графика: тот же Area, но
+// серый и без единого числа — ни подписей, ни осей, ни сетки, ни подсказки.
+// Данных за ним нет, поэтому он aria-hidden, а объясняет его текст снизу.
+const PLACEHOLDER_DATA = [10, 6, 4].map((value, index) => ({
+  label: String(index),
+  value,
+}));
+
+const PLACEHOLDER_CONFIG = {
+  value: { label: "", color: "var(--aiwa-ink-muted)" },
+};
+
+function isFiniteChartValue(value) {
+  return value !== null
+    && value !== undefined
+    && value !== ""
+    && Number.isFinite(Number(value));
+}
+
+function ChartEmptyState({ gradientId, emptyText }) {
+  return (
+    <div className="aiwa-area-chart-empty">
+      <div className="aiwa-area-chart-empty-plot" aria-hidden="true">
+        <ChartContainer config={PLACEHOLDER_CONFIG} className="h-40 w-full">
+          <AreaChart
+            data={PLACEHOLDER_DATA}
+            margin={{ top: 8, left: 4, right: 4, bottom: 0 }}
+          >
+            <defs>
+              <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-value)" stopOpacity={0.26} />
+                <stop offset="95%" stopColor="var(--color-value)" stopOpacity={0.03} />
+              </linearGradient>
+            </defs>
+            <XAxis dataKey="label" hide padding={{ left: 22, right: 22 }} />
+            <YAxis hide domain={[0, 12]} />
+            <Area
+              dataKey="value"
+              type="natural"
+              fill={`url(#${gradientId})`}
+              fillOpacity={1}
+              stroke="var(--color-value)"
+              strokeOpacity={0.7}
+              dot={{
+                r: 4,
+                fill: "var(--color-value)",
+                stroke: "var(--aiwa-surface)",
+                strokeWidth: 3,
+              }}
+              activeDot={false}
+              isAnimationActive={false}
+            />
+          </AreaChart>
+        </ChartContainer>
+      </div>
+      <Text
+        as="p"
+        className="aiwa-area-chart-empty-text"
+        variant="subheadline1"
+        weight="regular"
+        role="status"
+      >
+        {emptyText}
+      </Text>
+    </div>
+  );
+}
+
 export function AiwaWebUiChart({
   data = [],
   series = DEFAULT_SERIES,
   xKey = "label",
   ariaLabel = "График динамики",
-  emptyText = "Пока недостаточно данных для графика.",
+  emptyText = "Продолжай вести дневник, чтобы увидеть динамику цикла",
   loading = false,
-  showLegend = series.length > 1,
+  showLegend,
   band = null,
 }) {
   const gradientPrefix = useId().replaceAll(":", "");
+  const safeData = Array.isArray(data) ? data : [];
+  const safeSeries = Array.isArray(series) ? series : DEFAULT_SERIES;
+  const shouldShowLegend = showLegend ?? safeSeries.length > 1;
   // Длинная история скроллится по горизонтали; открывается на свежих циклах.
   const scrollRef = useRef(null);
   useEffect(() => {
     const box = scrollRef.current;
     if (box) box.scrollLeft = box.scrollWidth;
-  }, [data.length]);
-  const availableSeries = series.filter((item) => (
-    item?.key && data.some((point) => point?.[item.key] != null)
+  }, [safeData.length]);
+  // Одной точки, пустой строки или NaN недостаточно для динамики. Раньше любое
+  // non-null значение включало полный график, и Recharts оставлял белую карточку.
+  const availableSeries = safeSeries.filter((item) => (
+    item?.key
+    && safeData.filter((point) => isFiniteChartValue(point?.[item.key])).length >= 2
   ));
+  const chartData = safeData.map((point) => {
+    const normalized = { ...point };
+    availableSeries.forEach((item) => {
+      const value = point?.[item.key];
+      normalized[item.key] = isFiniteChartValue(value) ? Number(value) : null;
+    });
+    return normalized;
+  });
   const config = Object.fromEntries(availableSeries.map((item) => [
     item.key,
     {
@@ -52,9 +135,9 @@ export function AiwaWebUiChart({
       color: item.color || "var(--aiwa-accent)",
     },
   ]));
-  const values = data.flatMap((point) => (
+  const values = chartData.flatMap((point) => (
     availableSeries
-      .map((item) => Number(point?.[item.key]))
+      .map((item) => point?.[item.key])
       .filter(Number.isFinite)
   ));
   const valueMin = values.length ? Math.min(...values) : 0;
@@ -74,15 +157,11 @@ export function AiwaWebUiChart({
     );
   }
 
-  if (!data.length || !availableSeries.length) {
-    return (
-      <div className="aiwa-area-chart-state" role="status">
-        {emptyText}
-      </div>
-    );
+  if (!safeData.length || !availableSeries.length) {
+    return <ChartEmptyState gradientId={`${gradientPrefix}-empty`} emptyText={emptyText} />;
   }
 
-  const minWidth = Math.max(data.length * 56, 320);
+  const minWidth = Math.max(chartData.length * 56, 320);
   return (
     <div className="aiwa-chart-scroll" data-band={band ? band.join("-") : "none"} ref={scrollRef}>
       <div style={{ minWidth: `${minWidth}px` }}>
@@ -94,7 +173,7 @@ export function AiwaWebUiChart({
         >
       <AreaChart
         accessibilityLayer
-        data={data}
+        data={chartData}
         margin={{ top: 20, left: 4, right: 12 }}
       >
         <defs>
@@ -126,7 +205,7 @@ export function AiwaWebUiChart({
             y1={band[0]}
             y2={band[1]}
             ifOverflow="extendDomain"
-            fill="var(--aiwa-hint-color, #8e8e93)"
+            fill="var(--aiwa-hint-color, var(--aiwa-ink-muted))"
             fillOpacity={0.12}
             stroke="none"
           />
@@ -144,7 +223,7 @@ export function AiwaWebUiChart({
           cursor={false}
           content={<ChartTooltipContent indicator="line" />}
         />
-        {showLegend ? <ChartLegend content={<ChartLegendContent />} /> : null}
+        {shouldShowLegend ? <ChartLegend content={<ChartLegendContent />} /> : null}
         {availableSeries.map((item, index) => (
           <Area
             key={item.key}

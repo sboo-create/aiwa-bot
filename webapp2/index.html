@@ -15,6 +15,27 @@ if(!/^(localhost|127\.0\.0\.1)$/.test(location.hostname))document.write('<script
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html{overscroll-behavior:none}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;overscroll-behavior:none}
 #app{max-width:480px;margin:0 auto;min-height:calc(100vh - var(--safe-top,0px));padding:16px 16px calc(122px + env(safe-area-inset-bottom))}
+/* Первый кадр принадлежит новому приложению. Пока React и данные грузятся,
+   показываем его нейтральный skeleton и не даём legacy-shell промигнуть. */
+body.aiwa-booting{padding-top:var(--safe-top,56px);background:var(--aiwa-screen-bg,#efeff4)}
+body.aiwa-booting #app{max-width:402px;padding:0;background:inherit}
+body.aiwa-booting #deslop-home-root{position:absolute;width:1px;height:1px;overflow:hidden;visibility:hidden}
+body.aiwa-booting #tabs,body.aiwa-assets-loading #tabs{visibility:hidden}
+.aiwa-boot-shell{min-height:calc(100vh - var(--safe-top,56px));padding:0 0 112px;box-sizing:border-box;background:var(--aiwa-screen-bg,#efeff4)}
+.aiwa-boot-header{display:grid;width:100%;height:64px;padding:0 16px 10px;grid-template-columns:44px 1fr 44px;align-items:end;box-sizing:border-box}
+.aiwa-boot-side{display:grid;width:44px;height:44px;place-items:center}.aiwa-boot-side.is-trailing{justify-self:end}
+.aiwa-boot-avatar{width:36px;height:36px;border-radius:18px}.aiwa-boot-calendar{width:32px;height:32px;border-radius:16px}
+.aiwa-boot-title{width:112px;height:20px;margin-bottom:12px;border-radius:10px;justify-self:center}
+.aiwa-boot-overview{display:flex;width:100%;padding:0 20px 32px;flex-direction:column;align-items:center;box-sizing:border-box}
+.aiwa-boot-day-overview{display:flex;width:100%;padding:8px 0 24px;flex-direction:column;align-items:center;box-sizing:border-box}
+.aiwa-boot-wheel{width:100%;height:54px;border-radius:12px}.aiwa-boot-counter{width:176px;height:74px;margin-top:33px;border-radius:20px}
+.aiwa-boot-action{width:208px;height:48px;border-radius:24px}
+.aiwa-skeleton-card-list{display:flex;width:100%;padding:24px 16px 124px;flex-direction:column;gap:24px;box-sizing:border-box;background:var(--aiwa-screen-bg,#efeff4)}
+.aiwa-skeleton-card{display:block;width:100%;flex:0 0 auto;border-radius:26px}.aiwa-skeleton-card.is-insight{height:194px}.aiwa-skeleton-card.is-metrics{height:205px}.aiwa-skeleton-card.is-chart{height:192px}
+.aiwa-boot-skeleton{position:relative;overflow:hidden;background:var(--aiwa-fill-secondary,#d8d8dc)}
+.aiwa-boot-skeleton::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);transform:translateX(-100%);animation:aiwa-boot-shimmer 1.4s ease-in-out infinite}
+@keyframes aiwa-boot-shimmer{to{transform:translateX(100%)}}
+@media(prefers-reduced-motion:reduce){.aiwa-boot-skeleton::after{animation:none}}
 .bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
 .brand{display:flex;align-items:center;gap:8px}.brand .nm{font-family:var(--serif);font-size:21px;font-weight:600}
 .date{font-size:12px;color:var(--inkSoft)}
@@ -511,13 +532,17 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 
 /* The main screen is styled by the exact Deslop package and src/deslop-main.css. */
 </style>
-<link rel="stylesheet" href="/assets/deslop/main.css?v=r9">
-<link rel="stylesheet" href="/assets/deslop/aiwa-v163.css?v=r8">
+<link rel="modulepreload" href="/assets/deslop/deslop-main-aiwa-v227.js?v=r81">
+<link rel="stylesheet" href="/assets/deslop/main.css?v=r81">
+<link rel="stylesheet" href="/assets/deslop/aiwa-v163.css?v=r9">
 </head>
-<body class="apple">
-<div id="app" data-component="Page">
-  <div class="bar"><div class="brand"><span class="blossom" id="logo"></span><span class="nm">Айва</span></div><div class="date" id="date"></div></div>
-  <div id="scr-today"></div>
+<body class="apple aiwa-booting">
+<div id="app" data-component="Page" aria-busy="true">
+  <div id="scr-today"><div class="aiwa-boot-shell" data-aiwa-static-boot aria-hidden="true">
+    <div class="aiwa-boot-header"><span class="aiwa-boot-side"><span class="aiwa-boot-avatar aiwa-boot-skeleton"></span></span><span class="aiwa-boot-title aiwa-boot-skeleton"></span><span class="aiwa-boot-side is-trailing"><span class="aiwa-boot-calendar aiwa-boot-skeleton"></span></span></div>
+    <div class="aiwa-boot-overview"><div class="aiwa-boot-day-overview"><span class="aiwa-boot-wheel aiwa-boot-skeleton"></span><span class="aiwa-boot-counter aiwa-boot-skeleton"></span></div><span class="aiwa-boot-action aiwa-boot-skeleton"></span></div>
+    <div class="aiwa-skeleton-card-list"><span class="aiwa-skeleton-card is-insight aiwa-boot-skeleton"></span><span class="aiwa-skeleton-card is-metrics aiwa-boot-skeleton"></span><span class="aiwa-skeleton-card is-chart aiwa-boot-skeleton"></span></div>
+  </div></div>
   <div id="scr-food" class="hidden"></div>
   <div id="scr-train" class="hidden"></div>
   <div id="scr-chat" class="hidden"><div class="chatwrap" id="chatlog"></div></div>
@@ -527,7 +552,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 <div id="hub" class="hubsheet hidden"></div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="cmic" aria-label="Голосом">🎤</button><button id="csend" aria-label="Отправить">→</button></div>
 <div id="tabs" aria-label="Разделы приложения"></div><input type="file" id="foodfile" accept="image/*" style="display:none">
-<script type="module" src="/assets/deslop/main.js?v=r31"></script>
+<script type="module" src="/assets/deslop/main.js?v=r81"></script>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp;
 const LOCAL_HOST=/^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/;
@@ -535,9 +560,11 @@ const WEB_DEBUG=!(tg&&tg.initData)&&LOCAL_HOST.test(location.hostname);
 const WEB_DEMO=WEB_DEBUG&&new URLSearchParams(location.search).get("demo")==="1";
 const DBG_FORCE=new URLSearchParams(location.search).get("dbg")==="1";
 var tgPlatform=(tg&&tg.platform)||"ios";
-document.body.className=/^(ios|macos)$/.test(tgPlatform)?"apple":"material";
+document.body.classList.remove("apple","material");
+document.body.classList.add(/^(ios|macos)$/.test(tgPlatform)?"apple":"material");
 if(tg&&!WEB_DEBUG){tg.ready();tg.expand();try{tg.disableVerticalSwipes&&tg.disableVerticalSwipes();}catch(e){}try{tg.setBackgroundColor&&tg.setBackgroundColor('secondary_bg_color');tg.setHeaderColor&&tg.setHeaderColor('bg_color');}catch(e){}}
-function haptic(type,style){if(tg&&!WEB_DEBUG&&tg.HapticFeedback&&(!tg.isVersionAtLeast||tg.isVersionAtLeast("6.1"))){try{if(type==="selection")tg.HapticFeedback.selectionChanged();else tg.HapticFeedback.impactOccurred(style||"light");}catch(e){}}}
+var LAST_HAPTIC_AT=0;
+function haptic(){var now=Date.now();if(now-LAST_HAPTIC_AT<50)return;LAST_HAPTIC_AT=now;if(tg&&!WEB_DEBUG&&tg.HapticFeedback&&(!tg.isVersionAtLeast||tg.isVersionAtLeast("6.1"))){try{tg.HapticFeedback.impactOccurred("light");}catch(e){}}}
 const INIT=DBG_FORCE?"aiwa-local-debug":((tg&&tg.initData)||(WEB_DEBUG&&!WEB_DEMO?"aiwa-local-debug":""));
 window.aiwaInit=INIT;
 const NAME=(tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user&&tg.initDataUnsafe.user.first_name)||(WEB_DEBUG?"Анна":"");
@@ -579,7 +606,7 @@ const LVL={1:"низкая",2:"средняя",3:"высокая"};
 var DEMO_MENU={macros:{protein:"92 г",fat:"54 г",carbs:"180 г"},meals:[{time:"08:00",dish:"Омлет с овощами и сыром",note:"Белок и сытость",kcal:"370 ккал"},{time:"13:00",dish:"Курица с рисом и салатом",note:"Белок и сложные углеводы",kcal:"540 ккал"},{time:"16:00",dish:"Греческий йогурт с ягодами",note:"Белок и пробиотики",kcal:"200 ккал"},{time:"20:00",dish:"Рыба с картофелем",note:"Омега-3",kcal:"520 ккал"}]};
 var DEMO_FOODT="Питание сегодня. В фолликулярную фазу тело хорошо усваивает белок: яйца, рыба, курица, зелень. Сложные углеводы дают стабильную энергию.";
 var DEMO_TRAINT="Нагрузка сегодня. Эстроген растёт, чувствительность к инсулину повышена, это хорошее окно для силовых и бодрого кардио.\n• Силовая, средняя-высокая, 45-60 мин\n• Интервальный бег, 25-30 мин\n• Пилатес, 30-40 мин";
-function blossom(el,size){el.style.width=size+'px';el.style.height=size+'px';el.innerHTML='';el.classList.add('bloomanim');for(var i=0;i<5;i++){var p=document.createElement('div');p.className='petal';p.style.width=(size*0.42)+'px';p.style.height=(size*0.58)+'px';p.style.marginLeft=(-size*0.21)+'px';p.style.marginTop=(-size*0.52)+'px';p.style.setProperty('--rot',(i*72)+'deg');p.style.transform='rotate('+(i*72)+'deg)';p.style.animationDelay=(i*55)+'ms';el.appendChild(p);}var c=document.createElement('div');c.className='core';c.style.width=(size*0.22)+'px';c.style.height=(size*0.22)+'px';c.style.marginLeft=(-size*0.11)+'px';c.style.marginTop=(-size*0.11)+'px';el.appendChild(c);}
+function blossom(el,size){if(!el)return;el.style.width=size+'px';el.style.height=size+'px';el.innerHTML='';el.classList.add('bloomanim');for(var i=0;i<5;i++){var p=document.createElement('div');p.className='petal';p.style.width=(size*0.42)+'px';p.style.height=(size*0.58)+'px';p.style.marginLeft=(-size*0.21)+'px';p.style.marginTop=(-size*0.52)+'px';p.style.setProperty('--rot',(i*72)+'deg');p.style.transform='rotate('+(i*72)+'deg)';p.style.animationDelay=(i*55)+'ms';el.appendChild(p);}var c=document.createElement('div');c.className='core';c.style.width=(size*0.22)+'px';c.style.height=(size*0.22)+'px';c.style.marginLeft=(-size*0.11)+'px';c.style.marginTop=(-size*0.11)+'px';el.appendChild(c);}
 blossom(document.getElementById('logo'),26);
 async function api(path,body){if(!INIT)return{error:'preview'};try{var r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({initData:INIT},body))});return await r.json();}catch(e){return{error:'net'};}}
 window.aiwaApi=api;
@@ -785,6 +812,12 @@ function aiwaSelectDay(iso){
   haptic('impact','light');
   renderToday();
 }
+/* Шапка дня одна на все табы: «Питание» и «Нагрузка» — обычные React-экраны и
+   берут отсюда и полосу, и выбранный день, и группы симптомов для календаря
+   (см. src/aiwa/lib/selectedDay.js). Полоса строится ровно та же, что у главной. */
+function aiwaSelectedDay(){return SELECTED_DAY||isoOf(today);}
+function aiwaDayStrip(){return D?homeDayStrip(addDays(today,-((today.getDay()+6)%7))):null;}
+function aiwaSymptomGroups(){var cfg=D?paperModeHomeConfig((D&&D.stats)||{}):null;return (cfg&&cfg.symptomGroups)||SYMGROUPS;}
 /* Полоса дней тянется от первой отметки в истории до конца текущей недели, чтобы
    свайпом можно было дойти до любой даты с данными. Верхняя граница — год, иначе
    лента становится бесконечной; для дальних дат есть календарь в шапке. */
@@ -849,7 +882,7 @@ function homeDayCountdown(iso,dd,mode){
     return{value:symptomsText((homeDayLog(iso).symptoms||[]).length),label:"отмечено в этот день"};
   }
   var inCycle=periodDayNumber(iso,dd);
-  if(inCycle)return{value:inCycle+"-й день",label:"месячных"};
+  if(inCycle)return{value:inCycle+" день",label:"месячных"};
   var next=nextPeriodStartAfter(dd);
   if(next)return{value:daysText(Math.round((next-dd)/86400000)),label:"до месячных"};
   var inf=dayInfo(dd),len=D.cycle_len||28;
@@ -912,14 +945,18 @@ function renderPaperHome(el){
   else{
     // Пока месячные идут, счётчик показывает их день, а не прогноз следующих.
     var runningDay=(!delayed&&(!D.mode||D.mode==='cycle'||D.mode==='irregular'))?periodDayNumber(todayIso,today):0;
-    if(runningDay){payload.heroValue=runningDay+"-й день";payload.countdown=String(runningDay);payload.countdownLabel="месячных";}
+    if(runningDay){payload.heroValue=runningDay+" день";payload.countdown=String(runningDay);payload.countdownLabel="месячных";}
     if(TODAY_NOTE&&!delayed)payload.aiText=TODAY_NOTE;
   }
-  el.className='paper-home';
+  // Именно add: смену дня теперь запускают и другие табы, а `className=` стирал
+  // заодно `hidden` — главная вылезала поверх открытого экрана.
+  el.classList.add('paper-home');
   var homeRoot=el.querySelector('#deslop-home-root');
   if(!homeRoot){
-    el.innerHTML="<div id='deslop-home-root'></div>";
-    homeRoot=el.querySelector('#deslop-home-root');
+    if(!el.querySelector('.aiwa-boot-shell'))el.innerHTML="";
+    homeRoot=document.createElement('div');
+    homeRoot.id='deslop-home-root';
+    el.appendChild(homeRoot);
   }
   calOffset=0;
   window.AiwaDeslop.renderHome(homeRoot,payload);
@@ -1623,7 +1660,12 @@ function go(t){
   if(window.AiwaDeslop)window.AiwaDeslop.renderNav(document.getElementById('tabs'),t);
   var _c=document.getElementById('scr-'+t);if(_c)_c.style.animation='none';window.scrollTo(0,0);
 }
+function finishAiwaBoot(){
+  document.body.classList.remove('aiwa-booting');
+  var app=document.getElementById('app');if(app)app.removeAttribute('aria-busy');
+}
 function showNeedOnboard(){
+  finishAiwaBoot();
   document.getElementById('tabs').style.display='none';
   document.getElementById('composer').classList.add('hidden');
   var el=document.getElementById('app');
@@ -1724,11 +1766,12 @@ function demoAiwaData(){
     chatlog:[]
   };
 }
-function startAiwa(){
-  if(WEB_DEMO){D=demoAiwaData();boot();}
-  else if(INIT){api('/api/data',{name:NAME}).then(function(d){if(d&&d.onboarded){D=d;boot();}else{showNeedOnboard();}});}
-  else{D={onboarded:true,cycle:true,last_period:null,cycle_len:28,name:NAME};boot();}
-}
+/* Данные и React теперь грузятся параллельно. Раньше /api/data стартовал только
+   после aiwa:deslop-ready, добавляя сетевой запрос к критическому пути. */
+var AIWA_BOOT_DATA=WEB_DEMO
+  ?Promise.resolve(demoAiwaData())
+  :(INIT?api('/api/data',{name:NAME}):Promise.resolve({onboarded:true,cycle:true,last_period:null,cycle_len:28,name:NAME}));
+function startAiwa(){AIWA_BOOT_DATA.then(function(d){if(d&&d.onboarded){D=d;boot();}else{showNeedOnboard();}}).catch(showNeedOnboard);}
 if(window.AiwaDeslop)startAiwa();
 else window.addEventListener('aiwa:deslop-ready',startAiwa,{once:true});
 </script>

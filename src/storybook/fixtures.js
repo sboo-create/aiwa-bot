@@ -11,6 +11,10 @@ export const weekDays = [
 const MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 const WD = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"];
 
+/** The host keys days by their local date; fixtures have to agree. */
+const isoOf = (day) =>
+  `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+
 /**
  * Home date strip as a day picker. The host sends the whole tracked range —
  * first logged day through the end of the current week — so the strip scrolls;
@@ -22,7 +26,9 @@ export const pickerWeekDays = (() => {
   const todayIso = "2026-07-23";
   const days = [];
   for (const day = new Date(start); day <= end; day.setDate(day.getDate() + 1)) {
-    const iso = day.toISOString().slice(0, 10);
+    // Local date, not `toISOString`: east of UTC that spells the day before,
+    // and the strip would say «24» over a day it calls `2026-07-23`.
+    const iso = isoOf(day);
     const ahead = iso > todayIso;
     days.push({
       iso,
@@ -74,11 +80,35 @@ export const activityWeekDays = weekDays.map((day, index) => ({
 
 /** What the top of Home shows for each selectable day of the strip. */
 export const weekDaySummaries = {
-  "2026-07-20": { value: "1-й день", label: "месячных", ai: "Идут месячные, эстроген и прогестерон на минимуме. Энергии меньше, это норма, телу нужны отдых, тепло и железо." },
-  "2026-07-21": { value: "2-й день", label: "месячных", ai: "Идут месячные, эстроген и прогестерон на минимуме. Энергии меньше, это норма, телу нужны отдых, тепло и железо." },
+  "2026-07-20": { value: "1 день", label: "месячных", ai: "Идут месячные, эстроген и прогестерон на минимуме. Энергии меньше, это норма, телу нужны отдых, тепло и железо." },
+  "2026-07-21": { value: "2 день", label: "месячных", ai: "Идут месячные, эстроген и прогестерон на минимуме. Энергии меньше, это норма, телу нужны отдых, тепло и железо." },
   "2026-07-22": { value: "27 дней", label: "до месячных", ai: "Эстроген растёт, энергия и настроение идут вверх. Хорошее окно для нагрузок и сложных задач." },
   "2026-07-23": { value: "~26 дней", label: "до месячных", ai: "Сегодня тело на подъёме: эстроген растёт, сил больше обычного. Хороший день для силовой и плотного белкового завтрака." },
 };
+
+/** «23 июля» — the day the home header names. */
+export function formatDayTitle(iso) {
+  const day = new Date(`${iso}T00:00:00`);
+  return `${day.getDate()} ${MONTHS[day.getMonth()]}`;
+}
+
+/**
+ * What the top of Home shows for a day of the strip. The tracked window has its
+ * own copy above; every older day falls back to the same 28-day rhythm, so the
+ * counter keeps counting however far back the strip is scrolled.
+ */
+export function homeDaySummary(iso) {
+  const known = weekDaySummaries[iso];
+  if (known) return known;
+  const day = new Date(`${iso}T00:00:00`);
+  const anchor = new Date("2026-07-20T00:00:00");
+  const cycleLength = 28;
+  const shift = Math.round((day - anchor) / 86400000);
+  const cycleDay = ((shift % cycleLength) + cycleLength) % cycleLength;
+  return cycleDay < 5
+    ? { value: `${cycleDay + 1} день`, label: "месячных" }
+    : { value: `${cycleLength - cycleDay} дней`, label: "до месячных" };
+}
 
 /** Shape the bridge sends with the home payload (`checkin` + `symptomGroups`). */
 export const todayCheckin = {

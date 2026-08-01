@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { hapticLight } from "./haptics";
 
 /**
  * Native Telegram BackButton, driven as a stack. Each open full-screen page
@@ -12,7 +13,10 @@ let wired = false;
 const button = () =>
   typeof window !== "undefined" ? window.Telegram?.WebApp?.BackButton : null;
 
-const dispatch = () => stack[stack.length - 1]?.();
+const dispatch = () => {
+  hapticLight();
+  stack[stack.length - 1]?.();
+};
 
 const sync = () => {
   const native = button();

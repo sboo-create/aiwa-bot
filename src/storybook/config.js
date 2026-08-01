@@ -93,7 +93,7 @@ export const storybookConfig = [
     category: "Compositions",
     pages: [
       { title: "Sections", path: "/compositions/sections", component: SectionsPage, searchTerms: ["TodaySection AiSection DelaySection StatsSection ChartSection HistorySection секции блоки главной задержка"] },
-      { title: "Panels", path: "/compositions/panels", component: PanelsPage, searchTerms: ["JournalPanel CalendarDayLogPanel AddFoodPanel FoodDiaryPanel WorkoutPanel WorkoutVariantsPanel WorkoutHistoryPanel TrainingProfilePanel ProfilePanel панели шторки модалки журнал дневник тренировка профиль"] },
+      { title: "Panels", path: "/compositions/panels", component: PanelsPage, searchTerms: ["JournalPanel CalendarDayLogPanel AddFoodPanel FoodDiaryPanel RecipePanel WorkoutPanel WorkoutVariantsPanel WorkoutHistoryPanel TrainingProfilePanel ProfilePanel панели шторки модалки журнал дневник рецепт тренировка профиль"] },
       { title: "Main Screen Blocks", path: "/compositions/main", component: MainBlocksPage, searchTerms: ["StatsSection HistorySection MacroCard home главная экран блоки"] },
       { title: "Food Header", path: "/compositions/food-header", component: FoodHeaderPage, searchTerms: ["Food gauge MacroCard питание калории КБЖУ"] },
       { title: "Activity Header", path: "/compositions/activity-header", component: ActivityHeaderPage, searchTerms: ["Activity нагрузка тренировки неделя week hero счётчик"] },

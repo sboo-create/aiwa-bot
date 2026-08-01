@@ -1,9 +1,20 @@
-import { CheckIcon, AlertIcon } from "../lib/icons";
+import { CheckIcon, AlertIcon, ClockIcon } from "../lib/icons";
 
-export function StatusIcon({ ok }) {
-  const Icon = ok ? CheckIcon : AlertIcon;
+export function StatusIcon({ ok, pending = false }) {
+  const Icon = pending ? ClockIcon : ok ? CheckIcon : AlertIcon;
+  const className = pending
+    ? "aiwa-status is-pending"
+    : ok
+      ? "aiwa-status is-ok"
+      : "aiwa-status is-alert";
+  const label = pending
+    ? "Рассчитывается"
+    : ok
+      ? "В пределах нормы"
+      : "Требует внимания";
+
   return (
-    <span className={ok ? "aiwa-status is-ok" : "aiwa-status is-alert"} aria-label={ok ? "В пределах нормы" : "Требует внимания"}>
+    <span className={className} aria-label={label}>
       <Icon />
     </span>
   );

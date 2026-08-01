@@ -1,19 +1,19 @@
-import { useEffect, useState } from "react";
-import { TMAProvider, Page, Text, RegularButton, SectionList } from "../lib/tma";
+import { useEffect, useRef, useState } from "react";
+import { TMAProvider, Page, RegularButton, SectionList } from "../lib/tma";
+import { AiwaButton } from "../components/AiwaButton";
 import { ScreenLoading } from "../components/ScreenLoading";
 import { AiwaInsightCard } from "../components/AiwaInsightCard";
-import { AiwaCell } from "../components/AiwaCell";
 import { PaperRow } from "../components/PaperRow";
-import { ProfileAvatar } from "../components/ProfileAvatar";
-import { Week } from "../components/Week";
+import { ScreenDayHeader } from "../components/ScreenDayHeader";
 import { WorkoutPanel } from "../panels/WorkoutPanel";
 import { WorkoutVariantsPanel } from "../panels/WorkoutVariantsPanel";
 import { WorkoutHistoryPanel } from "../panels/WorkoutHistoryPanel";
 import { TrainingProfilePanel } from "../panels/TrainingProfilePanel";
-import { actionProps, apiCall, call, openBotChat } from "../lib/api";
+import { CalendarPanel } from "../panels/CalendarPanel";
+import { actionProps, apiCall, openBotChat, read } from "../lib/api";
 import { useScreenData } from "../lib/screenData";
 import { ProfilePanel } from "../panels/ProfilePanel";
-import { historyStrip } from "../lib/historyStrip";
+import { dayTitle, todayIso, useSelectedDay } from "../lib/selectedDay";
 import { PlusIcon } from "../lib/icons";
 
 // Ответы прогреваются на старте, поэтому обычно экран открывается сразу;
@@ -27,15 +27,6 @@ const workoutsWord = (count) => {
   if (ones === 1) return "тренировка";
   if (ones >= 2 && ones <= 4) return "тренировки";
   return "тренировок";
-};
-
-/**
- * Month-long strip like on Home: Week scrolls it horizontally, backend days
- * with workouts get the accent mark by iso match.
- */
-const overviewStrip = (week) => {
-  const marked = new Set((week || []).filter((day) => day.count).map((day) => day.d));
-  return historyStrip(30).map((day) => ({ ...day, workout: marked.has(day.iso) }));
 };
 
 // 3d-иконки инвентаря (assets/train): тип или группа → файл из манифеста.
@@ -66,21 +57,23 @@ const trainIcon = (icons, ...keys) => {
 
 /**
  * Activity:
- * - HEADER (keep): title + week strip + workouts-this-week hero + primary CTA
+ * - HEADER: общая шапка дня (аватар, дата, календарь, барабан) + счётчик и primary CTA
  * - BLOCKS (TMA): AI intro card, option rows, history, profile link
  */
 export function ActivityScreen({ mode, revision = 0 }) {
   const [data, refresh] = useScreenData(KEYS, [mode, revision]);
-  // Мужской режим: главной с профилем нет, поэтому профиль открывается отсюда.
-  const aiwaHost = typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData;
-  const maleProfile = aiwaHost?.mode === "male";
   const [profileOpen, setProfileOpen] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [panel, setPanel] = useState("");
   const [suggested, setSuggested] = useState(null);
   const [trainIcons, setTrainIcons] = useState({});
-  // Выбранный день в полосе: тренировки за него грузятся отдельно.
-  const [dayIso, setDayIso] = useState("");
-  const [dayWorkouts, setDayWorkouts] = useState(null);
+  // Выбранный день общий для всех табов; тренировки за прошлый день грузятся
+  // отдельно и остаются в кэше, чтобы возврат к нему был мгновенным.
+  const selectedIso = useSelectedDay();
+  const today = todayIso();
+  const [dayWorkouts, setDayWorkouts] = useState({});
+  const lastHero = useRef(null);
+  const failedDays = useRef(new Set());
   useEffect(() => {
     fetch("/assets/train/manifest.json?v=1")
       .then((r) => (r.ok ? r.json() : {}))
@@ -88,16 +81,37 @@ export function ActivityScreen({ mode, revision = 0 }) {
       .catch(() => {});
   }, []);
 
+  // Дни текущей недели приезжают вместе с состоянием экрана, поэтому запрос
+  // нужен только за днями старше понедельника — и только один раз на день.
+  // Упавший запрос считается пустым днём, но помечается на перезапрос.
+  const weekDays = data.train?.week || [];
+  const known = (iso) => (weekDays.find((day) => day.d === iso)?.count === 0 ? [] : dayWorkouts[iso]);
+  useEffect(() => {
+    if (!selectedIso || selectedIso === today) return undefined;
+    if (known(selectedIso) && !failedDays.current.has(selectedIso)) return undefined;
+    let alive = true;
+    failedDays.current.delete(selectedIso);
+    const settle = (workouts, ok) => {
+      if (!alive) return;
+      if (!ok) failedDays.current.add(selectedIso);
+      setDayWorkouts((current) => ({ ...current, [selectedIso]: workouts }));
+    };
+    apiCall("/api/train_day", { d: selectedIso })
+      .then((result) => settle(result?.workouts || [], Boolean(result?.ok)))
+      .catch(() => settle([], false));
+    return () => { alive = false; };
+  }, [selectedIso, data.train]);
+
   // Отметки и профиль перечитываем сразу, разбор от Айвы — только по ревизии экрана.
   const reloadTrain = () => refresh("train");
 
-  if (!data.trainingSection || !data.train) return <ScreenLoading title="Нагрузка" variant="activity" />;
+  if (!data.trainingSection || !data.train) return <ScreenLoading variant="activity" />;
 
   const section = data.trainingSection;
   const trainState = data.train;
   const plan = section.training || {};
   const options = (plan.options || []).slice(0, 4);
-  const today = trainState.today || [];
+  const todayWorkouts = trainState.today || [];
   const week = trainState.week || [];
   const weekRows = week.filter((day) => day.count).slice(-3).reverse();
   const weekWorkouts = week.reduce((total, day) => total + (day.count || 0), 0);
@@ -105,50 +119,55 @@ export function ActivityScreen({ mode, revision = 0 }) {
     setSuggested(option);
     setPanel("workout");
   };
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const viewingPast = Boolean(dayIso && dayIso !== todayIso);
-  const pickDay = async (day) => {
-    const iso = typeof day === "string" ? day : day?.iso || "";
-    setDayIso(iso);
-    if (!iso || iso === todayIso) { setDayWorkouts(null); return; }
-    setDayWorkouts(null);
-    const result = await apiCall("/api/train_day", { d: iso }).catch(() => null);
-    setDayWorkouts(result?.workouts || []);
+  const viewingPast = selectedIso !== today;
+
+  /**
+   * Сколько тренировок в дне, если это известно без запроса: текущая неделя
+   * приходит с числом на каждый день, остальное — из кэша. `null` — «ещё не
+   * знаю», барабан на таком дне счётчик не меняет.
+   */
+  const dayCount = (iso) => {
+    const inWeek = week.find((day) => day.d === iso);
+    if (inWeek) return inWeek.count || 0;
+    const cached = dayWorkouts[iso];
+    return cached ? cached.length : null;
   };
-  const dayLabel = (() => {
-    if (!viewingPast) return "Прошедшие тренировки";
-    const parsed = new Date(`${dayIso}T12:00:00`);
-    return Number.isNaN(parsed.getTime()) ? "Тренировки за день"
-      : `Тренировки за ${new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(parsed)}`;
-  })();
-  const shownWorkouts = viewingPast ? (dayWorkouts || []) : today.slice().reverse();
+  const dayHero = (iso) => {
+    const count = dayCount(iso);
+    return count === null ? null : { value: String(count), label: `${workoutsWord(count)} в этот день` };
+  };
+  // Сегодня считается неделей целиком — так экран отвечает на «сколько я уже
+  // сделала», а не «сделала ли сегодня».
+  const weekHero = { value: String(weekWorkouts), label: `${workoutsWord(weekWorkouts)} на этой неделе` };
+  const hero = (viewingPast ? dayHero(selectedIso) : weekHero) || lastHero.current || weekHero;
+  lastHero.current = hero;
+
+  const dayLabel = viewingPast ? `Тренировки за ${dayTitle(selectedIso)}` : "Прошедшие тренировки";
+  const selectedWorkouts = viewingPast ? known(selectedIso) : todayWorkouts.slice().reverse();
+  const shownWorkouts = selectedWorkouts || [];
+  const showWorkoutHistory = viewingPast
+    ? !selectedWorkouts || shownWorkouts.length > 0
+    : todayWorkouts.length > 0 || weekRows.length > 0;
 
   return (
     <TMAProvider>
       <Page mode="secondary">
         <div className="aiwa-paper-screen aiwa-activity-screen">
           {/* ── HEADER ── */}
-          <div className="aiwa-screen-titlebar">
-            <Text className="aiwa-screen-title" variant="title1" weight="semibold">Нагрузка</Text>
-            {maleProfile ? (
-              <ProfileAvatar
-                className="aiwa-screen-profile"
-                onClick={() => setProfileOpen(true)}
+          <ScreenDayHeader
+            heroValue={hero.value}
+            heroLabel={hero.label}
+            previewDay={dayHero}
+            onProfile={() => setProfileOpen(true)}
+            onCalendar={() => setCalendarOpen(true)}
+            action={(
+              <RegularButton
+                variant="filled"
+                label={<span className="aiwa-btn-icon-label"><PlusIcon /> Отметить тренировку</span>}
+                {...actionProps("Отметить тренировку", () => openWorkout())}
               />
-            ) : null}
-          </div>
-          <div className="aiwa-overview">
-            <Week days={overviewStrip(week)} selectedIso={dayIso || todayIso} onSelect={pickDay} />
-            <div className="aiwa-countdown">
-              <Text variant="title1" weight="semibold">{weekWorkouts}</Text>
-              <Text variant="body" weight="regular">{`${workoutsWord(weekWorkouts)} на этой неделе`}</Text>
-            </div>
-            <RegularButton
-              variant="filled"
-              label={<span className="aiwa-btn-icon-label"><PlusIcon /> Отметить тренировку</span>}
-              {...actionProps("Отметить тренировку", () => openWorkout())}
-            />
-          </div>
+            )}
+          />
 
           {/* ── TMA BLOCKS ── */}
           <SectionList className="aiwa-tma-blocks">
@@ -174,54 +193,58 @@ export function ActivityScreen({ mode, revision = 0 }) {
               </SectionList.Item>
             ) : null}
 
-            <SectionList.Item header={dayLabel}>
-              {viewingPast && !dayWorkouts ? (
-                <PaperRow loading title="Загружаю…" description="Тренировки за выбранный день" />
-              ) : null}
-              {shownWorkouts.length ? shownWorkouts.map((workout) => (
-                <PaperRow
-                  key={workout.id}
-                  image={trainIcon(trainIcons, workout.type)}
-                  title={workout.type || "Тренировка"}
-                  description={[
-                    viewingPast ? "" : "сегодня",
-                    workout.duration,
-                    workout.kcal ? `${Math.round(workout.kcal)} ккал` : "",
-                    String(workout.rpe || "").toLowerCase(),
-                  ].filter(Boolean).join(" · ")}
-                  onClick={() => setPanel("history")}
-                />
-              )) : (viewingPast && !dayWorkouts) ? null : viewingPast ? (
-                <PaperRow title="В этот день тренировок нет" description="Выбери другой день или отметь тренировку." />
-              ) : weekRows.length ? weekRows.map((day) => (
-                <PaperRow
-                  key={day.d}
-                  title={day.type || "Тренировка"}
-                  description={`${day.d} · ${day.count} запись`}
-                  onClick={() => setPanel("history")}
-                />
-              )) : (
-                <PaperRow
-                  title="История пока пуста"
-                  description="Отметь первую тренировку — Айва подготовит разбор."
-                  onClick={() => setPanel("history")}
-                />
-              )}
-            </SectionList.Item>
+            {showWorkoutHistory ? (
+              <SectionList.Item header={dayLabel}>
+                {viewingPast && !selectedWorkouts ? (
+                  <PaperRow loading title="Загружаю…" description="Тренировки за выбранный день" />
+                ) : null}
+                {shownWorkouts.length ? shownWorkouts.map((workout) => (
+                  <PaperRow
+                    key={workout.id}
+                    image={trainIcon(trainIcons, workout.type)}
+                    title={workout.type || "Тренировка"}
+                    description={[
+                      viewingPast ? "" : "сегодня",
+                      workout.duration,
+                      workout.kcal ? `${Math.round(workout.kcal)} ккал` : "",
+                      String(workout.rpe || "").toLowerCase(),
+                    ].filter(Boolean).join(" · ")}
+                    onClick={() => setPanel("history")}
+                  />
+                )) : (viewingPast && !selectedWorkouts) ? null : weekRows.length ? weekRows.map((day) => (
+                  <PaperRow
+                    key={day.d}
+                    title={day.type || "Тренировка"}
+                    description={`${day.d} · ${day.count} запись`}
+                    onClick={() => setPanel("history")}
+                  />
+                )) : (
+                  <PaperRow
+                    title="История пока пуста"
+                    description="Отметь первую тренировку — Айва подготовит разбор."
+                    onClick={() => setPanel("history")}
+                  />
+                )}
+              </SectionList.Item>
+            ) : null}
 
-            <SectionList.Item>
-              <AiwaCell
-                as="button"
-                type="button"
-                onClick={() => setPanel("profile")}
-                end={<AiwaCell.Part type="Chevron" />}
-              >
-                <AiwaCell.Text title="Настроить тренировочный профиль" bold />
-              </AiwaCell>
-            </SectionList.Item>
+            <div className="aiwa-page-action">
+              <AiwaButton
+                variant="secondaryCanvas"
+                label="Изменить предпочтения"
+                isFill
+                {...actionProps("Изменить предпочтения", () => setPanel("profile"))}
+              />
+            </div>
           </SectionList>
 
-          {maleProfile ? <ProfilePanel isOpen={profileOpen} onClose={() => setProfileOpen(false)} /> : null}
+          <ProfilePanel isOpen={profileOpen} onClose={() => setProfileOpen(false)} />
+          <CalendarPanel
+            isOpen={calendarOpen}
+            onClose={() => setCalendarOpen(false)}
+            mode={mode}
+            symptomGroups={read("aiwaSymptomGroups")}
+          />
           <WorkoutPanel isOpen={panel === "workout"} onClose={() => setPanel("")} onSaved={reloadTrain} suggested={suggested} />
           <WorkoutVariantsPanel
             isOpen={panel === "variants"}

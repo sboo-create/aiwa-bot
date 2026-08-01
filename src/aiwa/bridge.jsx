@@ -6,7 +6,9 @@ import { ActivityScreen } from "./screens/ActivityScreen";
 import { ChatScreen } from "./screens/ChatScreen";
 import { Navigation } from "./screens/Navigation";
 import { read } from "./lib/api";
+import { installLightHaptics } from "./lib/haptics";
 import { prefetchScreens } from "./lib/screenData";
+import { preloadAiwaAnimations, preloadAiwaPosters } from "./lib/sequence";
 import { installToast } from "./lib/toast.jsx";
 
 let homeRoot = null;
@@ -140,6 +142,11 @@ export const bridge = {
 };
 
 export function installBridge() {
+  installLightHaptics();
+  // The two poster frames join the critical path; full sequences continue in
+  // the background and each mascot starts moving only when its own is ready.
+  preloadAiwaPosters();
+  preloadAiwaAnimations();
   window.AiwaDeslop = bridge;
   installToast();
   window.dispatchEvent(new CustomEvent("aiwa:deslop-ready"));

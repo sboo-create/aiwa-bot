@@ -5,9 +5,12 @@
   "scripts": {
     "build:deslop": "vite build",
     "storybook": "vite --config vite.storybook.config.js",
+    "front:dev": "vite --config vite.storybook.config.js --host 0.0.0.0",
     "build:storybook": "vite build --config vite.storybook.config.js",
     "check:design-system": "node ./scripts/check-design-system.mjs",
     "check:ui": "node ./scripts/check-ui-contract.mjs",
+    "front:build": "npm run check:design-system && npm run check:ui && npm run build:deslop && python3 ./scripts/publish_webapp_bundle.py",
+    "front:deploy": "./scripts/deploy_frontend.sh",
     "verify": "npm run check:design-system && npm run check:ui && npm run build:storybook && npm run build:deslop && node ./scripts/verify.mjs",
     "check:web-ui": "web-ui check",
     "prepare": "web-ui hook"
@@ -15,6 +18,7 @@
   "dependencies": {
     "@deslop/web-ui": "file:vendor/deslop-web-ui",
     "@deslop/tma": "file:vendor/deslop-tma",
+    "calligraph": "^1.4.1",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "recharts": "^3.8.0"
