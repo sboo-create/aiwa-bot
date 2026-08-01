@@ -1,3 +1,4 @@
+import { Calligraph } from "calligraph";
 import { Text } from "../lib/tma";
 
 /**
@@ -16,8 +17,10 @@ export function MacroCard({ label, value, target, macro, color }) {
       {/* Единица измерения одна на пару: «149 / 216 г» — «149 г / 216 г» не влезает
           в 101px карточки, как только у углеводов появляются три цифры. */}
       <Text variant="body" weight="semibold">
-        {Math.round(value || 0)}{target ? null : " г"}
-        {target ? <span> / {Math.round(target)} г</span> : null}
+        <Calligraph variant="number" animation="snappy">
+          {`${Math.round(value || 0)}${target ? "" : " г"}`}
+        </Calligraph>
+        {target ? <span className="aiwa-macro-target"> / {Math.round(target)} г</span> : null}
       </Text>
       <Text variant="caption1" weight="regular">{label}</Text>
       <span className="aiwa-macro-track" style={{ "--macro-color": track }}>

@@ -11,6 +11,9 @@ export const weekDays = [
 const MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 const WD = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"];
 
+const isoOf = (day) =>
+  `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+
 /**
  * Home date strip as a day picker. The host sends the whole tracked range —
  * first logged day through the end of the current week — so the strip scrolls;
@@ -22,7 +25,7 @@ export const pickerWeekDays = (() => {
   const todayIso = "2026-07-23";
   const days = [];
   for (const day = new Date(start); day <= end; day.setDate(day.getDate() + 1)) {
-    const iso = day.toISOString().slice(0, 10);
+    const iso = isoOf(day);
     const ahead = iso > todayIso;
     days.push({
       iso,
@@ -79,6 +82,24 @@ export const weekDaySummaries = {
   "2026-07-22": { value: "27 дней", label: "до месячных", ai: "Эстроген растёт, энергия и настроение идут вверх. Хорошее окно для нагрузок и сложных задач." },
   "2026-07-23": { value: "~26 дней", label: "до месячных", ai: "Сегодня тело на подъёме: эстроген растёт, сил больше обычного. Хороший день для силовой и плотного белкового завтрака." },
 };
+
+export function formatDayTitle(iso) {
+  const day = new Date(`${iso}T12:00:00`);
+  return Number.isNaN(day.getTime()) ? "" : `${day.getDate()} ${MONTHS[day.getMonth()]}`;
+}
+
+export function homeDaySummary(iso) {
+  const known = weekDaySummaries[iso];
+  if (known) return known;
+  const day = new Date(`${iso}T12:00:00`);
+  const anchor = new Date("2026-07-20T12:00:00");
+  const cycleLength = 28;
+  const shift = Math.round((day - anchor) / 86400000);
+  const cycleDay = ((shift % cycleLength) + cycleLength) % cycleLength;
+  return cycleDay < 5
+    ? { value: `${cycleDay + 1} день`, label: "месячных" }
+    : { value: `${cycleLength - cycleDay} дней`, label: "до месячных" };
+}
 
 /** Shape the bridge sends with the home payload (`checkin` + `symptomGroups`). */
 export const todayCheckin = {

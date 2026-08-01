@@ -40,8 +40,9 @@ wouter router; `SplitView` is an iPad layout; `StoryCard` is a trading card.
 
 ## Approved AIWA components
 
-- Core: `AiwaCell`, `PaperRow`, `AiwaModalView`, `AiwaPanelHeader`
-- Cycle: `Week`, `DateCell`, `MetricCell`, `StatusIcon`
+- Core: `AiwaButton`, `AiwaCell`, `PaperRow`, `AiwaModalView`, `AiwaPanelHeader`,
+  `ScreenDayHeader`
+- Cycle: `Week`, `DayOverview`, `DayWheel`, `DateCell`, `MetricCell`, `StatusIcon`
 - AI: `AiwaInsightCard`, `AiwaCardHeading`, `AiwaSequence`
 - Forms: `Field`, `ChoicePills`, `AiwaChip`, `JournalGroup`, `JournalToggle`,
   `JournalChoiceGroup`, `JournalSymptomGroup`, `JournalCustomSymptom`,

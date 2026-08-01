@@ -232,6 +232,11 @@ body {
   padding: var(--ui-space-12) var(--ui-layout-content-inset);
 }
 
+.aiwa-storybook-button-canvas {
+  display: grid;
+  gap: var(--ui-space-12);
+}
+
 .aiwa-storybook-tabbar {
   position: relative;
   min-height: 104px;

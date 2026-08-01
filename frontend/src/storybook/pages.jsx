@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { ChartAreaGradient } from "../components/web-ui/charts/area";
 import designSystem from "../aiwa/design-system/registry.json";
 import {
   ActionMenu,
   AddFoodPanel,
   AiSection,
+  AiwaButton,
   AiwaCardHeading,
   AiwaCell,
   AiwaChip,
@@ -29,6 +30,8 @@ import {
   ChoicePills,
   Collapsible,
   DateCell,
+  DayOverview,
+  DayWheel,
   DelaySection,
   ErrorBoundary,
   Field,
@@ -62,6 +65,7 @@ import {
   ProfilePanel,
   Redaction,
   RegularButton,
+  ScreenDayHeader,
   ScreenLoading,
   SectionHeader,
   SectionList,
@@ -97,6 +101,8 @@ import {
   CalendarIcon,
   ChatIcon,
   CheckIcon,
+  SelectionCheckIcon,
+  ClockIcon,
   ChevronRightIcon,
   CrossIcon,
   FoodIcon,
@@ -111,13 +117,14 @@ import {
 import profileImage from "../../assets/paper-profile.jpg";
 import foodImage from "../../assets/paper-food-placeholder.png";
 import {
-  activityWeekDays,
   cycleChartData,
   cycleChartSeries,
   delaySection,
   foodDiary,
   history,
   markingMonth,
+  formatDayTitle,
+  homeDaySummary,
   metrics,
   pickerWeekDays,
   symptomGroups,
@@ -246,6 +253,8 @@ const icons = [
   ["Home", HomeIcon],
   ["Calendar", CalendarIcon],
   ["Check", CheckIcon],
+  ["Selection Check", SelectionCheckIcon],
+  ["Clock", ClockIcon],
   ["Alert", AlertIcon],
   ["Chat", ChatIcon],
   ["Food", FoodIcon],
@@ -360,16 +369,29 @@ export function TypographyPage() {
 
 export function ButtonPage() {
   return (
-    <Page>
-      <SectionList>
-        <SectionList.Item header="Regular Button">
+    <Page mode="secondary">
+      <SectionList className="aiwa-tma-blocks">
+        <SectionList.Item header="На белом блоке">
           <div className={padded}>
-            <RegularButton variant="filled" label="Занести в журнал" isFill />
-            <RegularButton className="aiwa-btn-secondary" variant="filled" label="Обсудить с Айвой" isFill />
-            <RegularButton variant="outlined" label="Отмена" isFill />
-            <RegularButton variant="filled" label="Недоступно" disabled isFill />
+            <AiwaButton variant="primary" label="Занести в журнал" isFill />
+            <AiwaButton variant="secondary" label="Обсудить с Айвой" isFill />
+            <AiwaButton variant="outlined" label="Отмена" isFill />
+            <AiwaButton variant="primary" label="Недоступно" disabled isFill />
+            <AiwaButton
+              variant="primary"
+              label={<span className="aiwa-btn-icon-label"><ClockIcon /> Сохранить</span>}
+              loading
+              isFill
+            />
+            <AiwaButton variant="secondary" label="Сохранить" loading isFill />
           </div>
         </SectionList.Item>
+        <div className="aiwa-storybook-button-canvas">
+          <Text variant="subheadline2" weight="semibold">На теле страницы</Text>
+          <AiwaButton variant="secondaryCanvas" label="Сформировать выписку" isFill />
+          <AiwaButton variant="secondaryCanvas" label="Недоступно" disabled isFill />
+          <AiwaButton variant="secondaryCanvas" label="Сформировать выписку" loading isFill />
+        </div>
       </SectionList>
     </Page>
   );
@@ -924,27 +946,65 @@ export function ChartsPage() {
   );
 }
 
-export function MainBlocksPage() {
+export function DaySelectorPage() {
+  const [selectedIso, setSelectedIso] = useState("2026-07-23");
+  const directAreaRef = useRef(null);
+  const summary = homeDaySummary(selectedIso);
+  const select = (day) => {
+    setSelectedIso(day.iso);
+    return day.iso;
+  };
+
   return (
     <Page mode="secondary">
       <div className="aiwa-storybook-main">
-        <AiwaPanelHeader
-          title="23 июля"
-          left={<ImageAvatar src={profileImage} size={36} />}
-          onLeft={() => {}}
-          leftAriaLabel="Открыть профиль"
-          right={<CalendarIcon />}
-          onRight={() => {}}
-          rightAriaLabel="Открыть календарь"
-        />
+        <Text variant="subheadline2" weight="semibold">Overview с живым счётчиком</Text>
         <div className="aiwa-overview">
-          <Week days={weekDays} />
-          <div className="aiwa-countdown">
-            <Text variant="title1" weight="semibold">~26 дней</Text>
-            <Text variant="body">до месячных</Text>
-          </div>
-          <RegularButton variant="filled" label={<span className="aiwa-btn-icon-label"><PlusIcon /> Занести в журнал</span>} />
+          <DayOverview
+            days={pickerWeekDays}
+            selectedIso={selectedIso}
+            heroValue={summary.value}
+            heroLabel={summary.label}
+            onSelect={select}
+            previewDay={homeDaySummary}
+          />
         </div>
+
+        <Text variant="subheadline2" weight="semibold">Wheel без hero</Text>
+        <div className="aiwa-overview">
+          <div className="aiwa-day-overview" ref={directAreaRef}>
+            <DayWheel
+              days={pickerWeekDays}
+              selectedIso={selectedIso}
+              onSelect={select}
+              dragAreaRef={directAreaRef}
+            />
+          </div>
+        </div>
+      </div>
+    </Page>
+  );
+}
+
+export function MainBlocksPage() {
+  const [selectedIso, setSelectedIso] = useState("2026-07-23");
+  const summary = homeDaySummary(selectedIso);
+
+  return (
+    <Page mode="secondary">
+      <div className="aiwa-storybook-main">
+        <ScreenDayHeader
+          title={formatDayTitle(selectedIso)}
+          days={pickerWeekDays}
+          selectedIso={selectedIso}
+          heroValue={summary.value}
+          heroLabel={summary.label}
+          onSelect={(day) => setSelectedIso(day.iso)}
+          previewDay={homeDaySummary}
+          onProfile={() => {}}
+          onCalendar={() => {}}
+          action={<RegularButton variant="filled" label={<span className="aiwa-btn-icon-label"><PlusIcon /> Занести в журнал</span>} />}
+        />
         <SectionList className="aiwa-tma-blocks">
           <TodaySection checkin={todayCheckin} symptomGroups={symptomGroups} onSelect={() => {}} />
           <AiwaInsightCard
@@ -974,18 +1034,24 @@ export function MainBlocksPage() {
 }
 
 export function ActivityHeaderPage() {
+  const [selectedIso, setSelectedIso] = useState("2026-07-23");
+  const past = selectedIso !== "2026-07-23";
+
   return (
     <Page mode="secondary">
       <div className="aiwa-paper-screen aiwa-activity-screen">
-        <Text className="aiwa-screen-title" variant="title1" weight="semibold">Нагрузка</Text>
-        <div className="aiwa-overview">
-          <Week days={activityWeekDays} />
-          <div className="aiwa-countdown">
-            <Text variant="title1" weight="semibold">2</Text>
-            <Text variant="body">тренировки на этой неделе</Text>
-          </div>
-          <RegularButton variant="filled" label={<span className="aiwa-btn-icon-label"><PlusIcon /> Отметить тренировку</span>} />
-        </div>
+        <ScreenDayHeader
+          title={formatDayTitle(selectedIso)}
+          days={pickerWeekDays}
+          selectedIso={selectedIso}
+          heroValue={past ? "1" : "2"}
+          heroLabel={past ? "тренировка в этот день" : "тренировки на этой неделе"}
+          previewDay={() => ({ value: "1", label: "тренировка в этот день" })}
+          onSelect={(day) => setSelectedIso(day.iso)}
+          onProfile={() => {}}
+          onCalendar={() => {}}
+          action={<RegularButton variant="filled" label={<span className="aiwa-btn-icon-label"><PlusIcon /> Отметить тренировку</span>} />}
+        />
         <SectionList className="aiwa-tma-blocks">
           <AiwaInsightCard
             message="Выбирай нагрузку, после которой станет легче, а не хуже."
@@ -1002,17 +1068,30 @@ export function ActivityHeaderPage() {
 }
 
 export function FoodHeaderPage() {
+  const [selectedIso, setSelectedIso] = useState("2026-07-23");
+
   return (
     <Page mode="secondary">
       <div className="aiwa-paper-screen aiwa-food-screen">
-        <Text className="aiwa-screen-title" variant="title1" weight="semibold">Питание</Text>
-        <CalorieGauge kcal={720} kcalTarget={1841} />
-        <div className="aiwa-macro-grid">
-          <MacroCard label="Жиры" value={48} target={65} macro="fat" />
-          <MacroCard label="Белки" value={48} target={90} macro="protein" />
-          <MacroCard label="Углеводы" value={48} target={114} macro="carbs" />
-        </div>
-        <div className="aiwa-screen-cta"><RegularButton variant="filled" label={<span className="aiwa-btn-icon-label"><PlusIcon /> Добавить приём</span>} /></div>
+        <ScreenDayHeader
+          title={formatDayTitle(selectedIso)}
+          days={pickerWeekDays}
+          selectedIso={selectedIso}
+          onSelect={(day) => setSelectedIso(day.iso)}
+          onProfile={() => {}}
+          onCalendar={() => {}}
+          hero={(iso) => (
+            <div className="aiwa-day-hero">
+              <CalorieGauge kcal={iso === "2026-07-23" ? 720 : 1490} kcalTarget={1841} />
+              <div className="aiwa-macro-grid">
+                <MacroCard label="Жиры" value={48} target={65} macro="fat" />
+                <MacroCard label="Белки" value={48} target={90} macro="protein" />
+                <MacroCard label="Углеводы" value={48} target={114} macro="carbs" />
+              </div>
+            </div>
+          )}
+          action={<div className="aiwa-screen-cta"><RegularButton variant="filled" label={<span className="aiwa-btn-icon-label"><PlusIcon /> Добавить приём</span>} /></div>}
+        />
       </div>
     </Page>
   );

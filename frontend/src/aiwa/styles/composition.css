@@ -1057,7 +1057,9 @@ body.redesign-active .bar {
   white-space: nowrap;
 }
 
-.aiwa-macro-card [data-variant="body"] span {
+/* Calligraph renders each animated glyph in a span, so only the actual target
+   suffix receives the smaller secondary treatment. */
+.aiwa-macro-card .aiwa-macro-target {
   color: var(--aiwa-ink-subtle);
   font-size: 13px;
   font-weight: 400;
@@ -1132,30 +1134,107 @@ body.redesign-active .bar {
   line-height: 20px !important;
 }
 
-/* Secondary button state: muted surface fill, dark text (see Paper "secondary button"). */
-.aiwa-btn-secondary {
+/* Product secondary buttons share geometry but use the surface appropriate to
+   their context. The legacy class stays until existing insight call sites move
+   to AiwaButton. */
+.aiwa-btn-secondary,
+[data-aiwa-button-variant="secondary"],
+[data-aiwa-button-variant="secondaryCanvas"] {
   display: flex !important;
   width: 100% !important;
   min-height: 48px !important;
   padding: 14px 16px !important;
   border: 0 !important;
   border-radius: 25px !important;
-  background: var(--aiwa-fill-secondary) !important;
   box-shadow: none !important;
   align-items: center !important;
   justify-content: center !important;
 }
 
-.aiwa-btn-secondary [class*="_glassBorder_"] {
+.aiwa-btn-secondary,
+[data-aiwa-button-variant="secondary"] {
+  background: var(--aiwa-fill-secondary) !important;
+}
+
+[data-aiwa-button-variant="secondaryCanvas"] {
+  background: var(--aiwa-surface) !important;
+}
+
+.aiwa-btn-secondary [class*="_glassBorder_"],
+[data-aiwa-button-variant="secondary"] [class*="_glassBorder_"],
+[data-aiwa-button-variant="secondaryCanvas"] [class*="_glassBorder_"] {
   display: none !important;
 }
 
-.aiwa-btn-secondary [data-variant="body"] {
+.aiwa-btn-secondary [data-variant="body"],
+[data-aiwa-button-variant="secondary"] [data-variant="body"],
+[data-aiwa-button-variant="secondaryCanvas"] [data-variant="body"] {
   color: var(--aiwa-ink-secondary) !important;
   font-family: "SB Sans Interface", var(--ui-font-interface) !important;
   font-size: 16px !important;
   font-weight: 400 !important;
   line-height: 20px !important;
+}
+
+[data-aiwa-button-variant="secondaryCanvas"] [data-variant="body"] {
+  color: var(--aiwa-ink) !important;
+}
+
+[data-aiwa-button-variant][disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Loading keeps button geometry and colour intact, replacing only its label. */
+[data-aiwa-button-variant][data-loading="true"] {
+  opacity: 1;
+  cursor: wait;
+}
+
+.aiwa-button-spinner {
+  display: inline-flex;
+  width: var(--ui-space-20, 20px);
+  height: var(--ui-space-20, 20px);
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+
+.aiwa-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.aiwa-button-spinner > svg {
+  display: block;
+  width: var(--ui-space-20, 20px) !important;
+  height: var(--ui-space-20, 20px) !important;
+  color: inherit !important;
+  animation-timing-function: linear !important;
+  will-change: transform;
+}
+
+body.apple .aiwa-button-spinner > svg path {
+  fill: currentColor !important;
+}
+
+/* Deslop fills every Snackbar path with currentColor. AIWA's status glyphs
+   use their second path and alert/info circle as cut-outs in the light disc. */
+.aiwa-toast-icon path + path {
+  fill: none !important;
+  stroke: var(--toast-background, var(--aiwa-ink-secondary)) !important;
+}
+
+.aiwa-toast-icon circle {
+  fill: var(--toast-background, var(--aiwa-ink-secondary)) !important;
 }
 
 /* Calendar app bar: legend on the left, «Готово» on the right while marking. */
@@ -2215,8 +2294,86 @@ body.material .aiwa-tma-blocks [class*="_card_"] {
   opacity: 0.4;
 }
 
+/* The ruler is turned by a swipe anywhere in its block. pan-y preserves normal
+   page scrolling while the horizontal gesture moves the drum. */
+.aiwa-overview .aiwa-day-overview {
+  display: flex;
+  width: 100%;
+  padding: 8px 0 24px;
+  flex-direction: column;
+  align-items: center;
+  box-sizing: border-box;
+  touch-action: pan-y;
+}
+
+.aiwa-overview:has(> .aiwa-day-overview) {
+  padding-top: 0;
+}
+
+.aiwa-day-overview + [class*="_button_"],
+.aiwa-day-overview + .aiwa-screen-cta,
+.aiwa-day-overview + .aiwa-skeleton-cta {
+  margin-top: 0 !important;
+}
+
+/* The Deslop Wheel keeps its behavior; product tokens dress it as AIWA's quiet
+   date ruler. */
+.aiwa-overview .aiwa-day-wheel {
+  --wheel-height: 54px;
+  --tick-mark-height: 8px;
+}
+
+/* Standalone DayWheel still needs a pointer lifecycle guard. `display: contents`
+   gives its fallback drag-area a DOM event boundary without another surface. */
+.aiwa-day-wheel-area {
+  display: contents;
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_wheelContainer_"]::before {
+  background: linear-gradient(to right, var(--aiwa-screen-bg), transparent);
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_wheelContainer_"]::after {
+  background: linear-gradient(to left, var(--aiwa-screen-bg), transparent);
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_centerIndicator_"] {
+  background: var(--aiwa-surface);
+  box-shadow: var(--aiwa-shadow-raised);
+}
+
+.aiwa-overview .aiwa-day-wheel[data-indicator="label"] [class*="_centerIndicator_"] {
+  top: auto;
+  bottom: calc(var(--ui-space-16) + var(--tick-mark-height));
+  height: calc(var(--ui-subtitle-line-height) + var(--ui-space-8));
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_tickNumber_"] {
+  color: var(--aiwa-ink);
+  font-family: var(--ui-font-interface);
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_tickMark_"] {
+  height: var(--tick-mark-height);
+  background: var(--aiwa-ink-muted);
+  opacity: 0.5;
+}
+
 .aiwa-countdown {
   margin-top: 49px;
+}
+
+.aiwa-overview .aiwa-day-wheel + .aiwa-countdown {
+  margin-top: 33px;
+}
+
+.aiwa-day-hero {
+  width: 100%;
+  transition: opacity 0.2s ease;
+}
+
+.aiwa-day-hero[data-loading="true"] {
+  opacity: 0.5;
 }
 
 /* Shared section rhythm. The header stays outside the white Deslop container. */

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Calligraph } from "calligraph";
 import { Text } from "../lib/tma";
 import { fmtKcal } from "../lib/api";
 
@@ -58,9 +59,14 @@ export function CalorieGauge({ kcal, kcalTarget }) {
         />
         <circle className="aiwa-food-gauge-knob" cx={knobX} cy={knobY} r="11" />
       </svg>
+      {/* Day changes use the same rolling-number language as Home's hero. */}
       <div className="aiwa-food-gauge-center">
-        <Text variant="title1" weight="semibold">{fmtKcal(value)}</Text>
-        <Text variant="body" weight="regular">из {fmtKcal(target)}</Text>
+        <Text variant="title1" weight="semibold">
+          <Calligraph variant="number" animation="snappy">{fmtKcal(value)}</Calligraph>
+        </Text>
+        <Text variant="body" weight="regular">
+          <Calligraph variant="number" animation="snappy">{`из ${fmtKcal(target)}`}</Calligraph>
+        </Text>
       </div>
     </div>
   );
