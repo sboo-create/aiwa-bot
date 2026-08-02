@@ -235,8 +235,10 @@ step("AIWA: the journal saves on its primary button", () => {
   requireText("journal atomic write", reactSource, [
     "buildJournalSavePayload({",
     "date: currentDay.current",
-    "date: currentIso.current",
+    "const targetIso = currentIso.current",
+    "date: targetIso",
     "await acknowledgedHostWrite(\"aiwaSaveJournal\", operation.payload)",
+    "(frozenPayload) => acknowledgedHostWrite(\"aiwaSaveJournal\", frozenPayload)",
     "result.ok === true",
   ]);
   requireText("journal footer styling", compositionCss, [".aiwa-log-footer {"]);

@@ -32,6 +32,33 @@ export const normalizeProfileSettingsSnapshot = (result) => {
   return { data, revision };
 };
 
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+
+/** A mode acknowledgement may stand in for a failed /api/data refresh. */
+export const isCompleteModeSettingsData = (data) => {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const required = [
+    "mode", "cycle", "last_period", "cycle_len", "periods", "cycles",
+    "past_periods", "stats", "preg", "day", "phase", "days_to_next",
+    "days_since", "status", "delay_days",
+  ];
+  if (!required.every((key) => hasOwn(data, key))) return false;
+  if (!Array.isArray(data.periods) || !Array.isArray(data.cycles)
+    || !Array.isArray(data.past_periods) || !data.stats
+    || typeof data.stats !== "object" || Array.isArray(data.stats)) return false;
+  if (["cycle", "irregular"].includes(data.mode)
+    && !Array.isArray(data.stats.history)) return false;
+  if (data.mode === "preg") {
+    return Boolean(data.preg && typeof data.preg === "object"
+      && !data.cycle && data.periods.length === 0 && data.cycles.length === 0);
+  }
+  if (["meno", "none", "male"].includes(data.mode)) {
+    return !data.cycle && data.preg === null
+      && data.periods.length === 0 && data.cycles.length === 0;
+  }
+  return ["cycle", "irregular"].includes(data.mode);
+};
+
 /**
  * Prefer a full data-only refresh. If that network read fails after the
  * mutation was acknowledged, reconcile the host's canonical in-memory data
@@ -45,7 +72,9 @@ export const syncProfileSettingsSnapshot = async (callBridge, actionKey, receipt
     refreshed = null;
   }
   const canonical = normalizeProfileSettingsSnapshot(refreshed);
-  if (canonical) return canonical;
+  if (canonical && (actionKey !== "mode" || isCompleteModeSettingsData(canonical.data))) {
+    return canonical;
+  }
 
   let reconciled = null;
   try {
@@ -53,7 +82,10 @@ export const syncProfileSettingsSnapshot = async (callBridge, actionKey, receipt
   } catch {
     reconciled = null;
   }
-  return normalizeProfileSettingsSnapshot(reconciled);
+  const receiptSnapshot = normalizeProfileSettingsSnapshot(reconciled);
+  if (receiptSnapshot && actionKey === "mode"
+    && !isCompleteModeSettingsData(receiptSnapshot.data)) return null;
+  return receiptSnapshot;
 };
 
 export const reconcileProfileSettingsForm = ({

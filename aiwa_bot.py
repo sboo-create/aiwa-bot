@@ -1884,7 +1884,7 @@ def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
               "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries",
-              "prepared_summaries", "feedback_requests", "chat_mutations", "ai_jobs"):
+              "prepared_summaries", "feedback_requests", "chat_mutations", "ai_jobs", "day_cache"):
         c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))  # nosec B608
     c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid))
     A2.delete_user(c, cid)
@@ -1894,6 +1894,10 @@ def del_user(cid):
     section_cache_clear(cid)
     for key in [key for key in list(_SUM_CACHE) if key and key[0] == cid]:
         _SUM_CACHE.pop(key, None)
+    for key in [key for key in list(globals().get("_WEEK_FOOD_CACHE", {})) if key and key[0] == cid]:
+        _WEEK_FOOD_CACHE.pop(key, None)
+    if "_WEEK_FOOD_REVISION" in globals():
+        _WEEK_FOOD_REVISION[cid] = _WEEK_FOOD_REVISION.get(cid, 0) + 1
     BCAST_PENDING.discard(cid)
 def chatlog_add(cid, role, text):
     if not text: return
@@ -4427,6 +4431,57 @@ def dc_put(cid, kind, payload, key=""):
         c.commit(); c.close()
     except Exception as e:
         log.info("day_cache put %s/%s: %s", cid, kind, e)
+
+def dc_put_for_generation(cid, kind, payload, key, generation):
+    """Publish cache only inside the lifecycle that produced ``payload``.
+
+    The write-allowed check and INSERT share one SQLite write transaction. If
+    /stop wins the lock it deletes the lifecycle before this check; if this
+    writer wins, /stop necessarily deletes the row afterwards.
+    """
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        if not _user_write_allowed(cid, generation, conn=c):
+            c.rollback()
+            return False
+        c.execute(
+            "INSERT OR REPLACE INTO day_cache(chat_id,d,kind,k,js) VALUES(?,?,?,?,?)",
+            (
+                cid, dtoday().isoformat(), kind, str(key)[:120],
+                json.dumps(payload, ensure_ascii=False),
+            ),
+        )
+        c.execute(
+            "DELETE FROM day_cache WHERE d<?",
+            ((dtoday() - timedelta(days=2)).isoformat(),),
+        )
+        c.commit()
+        return True
+    except Exception as e:
+        try:
+            c.rollback()
+        except sqlite3.Error:
+            pass
+        log.info("day_cache guarded put %s/%s: %s", cid, kind, e)
+        return None
+    finally:
+        c.close()
+
+def dc_del_key(cid, kind, key):
+    c = None
+    try:
+        c = db()
+        c.execute(
+            "DELETE FROM day_cache WHERE chat_id=? AND d=? AND kind=? AND k=?",
+            (cid, dtoday().isoformat(), kind, str(key)[:120]),
+        )
+        c.commit()
+    except Exception:
+        pass
+    finally:
+        if c is not None:
+            c.close()
 
 def dc_del(cid, kind=None):
     try:
@@ -8417,6 +8472,7 @@ async def _api_log_history(request):
 
 # Недельный разбор питания: кэш на день, собирается из дневника за 7 дней.
 _WEEK_FOOD_CACHE = {}
+_WEEK_FOOD_REVISION = {}
 
 def _evict_today_cache(cid):
     """Сводка дня зависит от чек-ина, циклов и профиля — сбрасываем при их изменении."""
@@ -8425,6 +8481,7 @@ def _evict_today_cache(cid):
     dc_del(cid, "today")
 
 def _evict_week_food_cache(cid):
+    _WEEK_FOOD_REVISION[cid] = _WEEK_FOOD_REVISION.get(cid, 0) + 1
     for k in [k for k in _WEEK_FOOD_CACHE if k[0] == cid]:
         _WEEK_FOOD_CACHE.pop(k, None)
     dc_del(cid, "week_food")
@@ -8444,12 +8501,35 @@ def _invalidate_mode_dependent_state(cid):
 async def _api_week_food_review(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    generation = _user_generation(cid)
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
-    ck = (cid, dtoday().isoformat(), "v2")
-    hit = _WEEK_FOOD_CACHE.get(ck) or dc_get(cid, "week_food")
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response(
+            _api_error_payload("deleted", "Профиль уже удалён."), status=409
+        ))
+    revision = _WEEK_FOOD_REVISION.get(cid, 0)
+    cache_key = f"{generation}:{revision}:v2"
+    ck = (cid, generation, revision, dtoday().isoformat(), "v2")
+    hit = _WEEK_FOOD_CACHE.get(ck) or dc_get(cid, "week_food", cache_key)
     if hit:
+        # Publish first, then validate. If /stop or a diary mutation won after
+        # the read, its generation/revision change is now observable and this
+        # old key is removed again; if it wins after the checks, its own
+        # invalidation clears the entry.
         _WEEK_FOOD_CACHE[ck] = hit
+        if not _user_write_allowed(cid, generation):
+            _WEEK_FOOD_CACHE.pop(ck, None)
+            return _cors(web.json_response(
+                _api_error_payload("deleted", "Профиль уже удалён."), status=409
+            ))
+        if revision != _WEEK_FOOD_REVISION.get(cid, 0):
+            _WEEK_FOOD_CACHE.pop(ck, None)
+            return _cors(web.json_response(
+                _api_error_payload(
+                    "stale_review", "Дневник изменился — запусти разбор ещё раз."
+                ), status=409
+            ))
         return _cors(web.json_response({"ok": True, "review": hit}))
     lines = []
     for off in range(6, -1, -1):
@@ -8464,15 +8544,53 @@ async def _api_week_food_review(request):
     profile_line = f"цель {prof.get('kcal_goal') or profile_kcal(prof) or '—'} ккал/день" if prof else ""
     try:
         usage = []
-        review = await llm_to_thread(cid, "week_food_review", L.week_food_review, "\n".join(lines), profile_line, usage)
-        if usage: ev(cid, "tokens", sum(usage), meta="week_food", calls=len(usage), usage=usage)
+        review = await llm_to_thread(
+            cid, "week_food_review", L.week_food_review, "\n".join(lines),
+            profile_line, usage, user_generation=generation,
+        )
+        if not _user_write_allowed(cid, generation):
+            return _cors(web.json_response(
+                _api_error_payload("deleted", "Профиль уже удалён."), status=409
+            ))
+        if revision != _WEEK_FOOD_REVISION.get(cid, 0):
+            return _cors(web.json_response(
+                _api_error_payload(
+                    "stale_review", "Дневник изменился — запусти разбор ещё раз."
+                ), status=409
+            ))
+        if usage:
+            ev(
+                cid, "tokens", sum(usage), meta="week_food", calls=len(usage),
+                usage=usage, user_generation=generation,
+            )
         if len(_WEEK_FOOD_CACHE) > 1000: _WEEK_FOOD_CACHE.clear()
         _WEEK_FOOD_CACHE[ck] = review
-        dc_put(cid, "week_food", review)
+        stored = dc_put_for_generation(
+            cid, "week_food", review, cache_key, generation
+        )
+        if stored is False:
+            _WEEK_FOOD_CACHE.pop(ck, None)
+            return _cors(web.json_response(
+                _api_error_payload("deleted", "Профиль уже удалён."), status=409
+            ))
+        # A mutation can win after the pre-publication equality check. The old
+        # revision key makes that write unreachable; remove it as well so an
+        # invalidation cannot leave persisted stale data behind.
+        if revision != _WEEK_FOOD_REVISION.get(cid, 0):
+            _WEEK_FOOD_CACHE.pop(ck, None)
+            dc_del_key(cid, "week_food", cache_key)
+            return _cors(web.json_response(
+                _api_error_payload(
+                    "stale_review", "Дневник изменился — запусти разбор ещё раз."
+                ), status=409
+            ))
         return _cors(web.json_response({"ok": True, "review": review}))
     except Exception as e:
         log.warning("week food review %s: %s", cid, e)
-        ev(cid, "fallback", meta="static:week_food_fail")
+        ev(
+            cid, "fallback", meta="static:week_food_fail",
+            user_generation=generation,
+        )
         return _cors(web.json_response({"ok": False, "text": "Не получилось собрать разбор, попробуй чуть позже."}, status=502))
 
 # Рецепты меню: кэш на день, чтобы повторный тап по блюду не жёг токены.
@@ -8590,6 +8708,123 @@ def _estimated_period_length(period_len, closed_lengths):
     return max(1, min(10, int(estimate)))
 
 
+def _mode_dependent_snapshot(cid, u):
+    """Canonical mode state shared by /api/data and /api/mode receipts.
+
+    The mode mutation can be acknowledged before a follow-up /api/data read
+    succeeds.  Returning every mode-owned field (including explicit empty
+    collections) lets the host replace stale cycle/pregnancy state rather than
+    trying to infer which keys should survive a transition.
+    """
+    mode = (u or {}).get("mode") or "cycle"
+    cycle_user = is_cycle(u)
+    cycle_active = bool(cycle_user and u.get("last_period"))
+    stored_periods = [] if is_male_profile(u) else periods_of(cid)
+    snapshot = {
+        "mode": mode,
+        "cycle": cycle_active,
+        "last_period": u.get("last_period") if cycle_user else None,
+        "cycle_len": (u.get("cycle_len") or 28) if cycle_user else None,
+        "periods": [],
+        "cycles": [],
+        "past_periods": [dict(period) for period in stored_periods],
+        "stats": {},
+        "preg": None,
+        "day": None,
+        "phase": None,
+        "days_to_next": None,
+        "days_since": None,
+        "status": None,
+        "delay_days": None,
+    }
+    if cycle_active or mode == "irregular":
+        if cycle_active:
+            stt = C.cycle_status(
+                date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28
+            )
+            snapshot.update({
+                "day": stt["day"], "phase": stt["phase"],
+                "days_to_next": stt["days_to_next"],
+                "days_since": stt["days_since"], "status": stt["status"],
+                "delay_days": stt["delay_days"],
+            })
+        periods = [dict(period) for period in stored_periods]
+        if u.get("period_end"):
+            for period in periods:
+                if period["start"] == u.get("last_period") and not period.get("end"):
+                    period["end"] = u["period_end"]
+        cycles = [period["start"] for period in periods]
+        snapshot["cycles"] = cycles
+        snapshot["periods"] = periods
+        cycle_lengths = []
+        for index in range(1, len(cycles)):
+            length = (
+                date.fromisoformat(cycles[index])
+                - date.fromisoformat(cycles[index - 1])
+            ).days
+            if 10 <= length <= 90:
+                cycle_lengths.append(length)
+        period_lengths = []
+        for period in periods:
+            if period.get("end"):
+                length = (
+                    date.fromisoformat(period["end"])
+                    - date.fromisoformat(period["start"])
+                ).days + 1
+                if 1 <= length <= 10:
+                    period_lengths.append(length)
+        regularity = None
+        if len(cycle_lengths) >= 2:
+            mean = sum(cycle_lengths) / len(cycle_lengths)
+            deviation = (
+                sum((value - mean) ** 2 for value in cycle_lengths)
+                / len(cycle_lengths)
+            ) ** 0.5
+            regularity = (
+                "регулярный" if deviation <= 2.5
+                else ("умеренный разброс" if deviation <= 5 else "нерегулярный")
+            )
+        history = [{
+            "start": periods[index]["start"],
+            "end": periods[index].get("end"),
+            "period_len": (
+                date.fromisoformat(periods[index]["end"])
+                - date.fromisoformat(periods[index]["start"])
+            ).days + 1 if periods[index].get("end") else None,
+            "len": (
+                date.fromisoformat(cycles[index + 1])
+                - date.fromisoformat(cycles[index])
+            ).days if index + 1 < len(cycles) else None,
+        } for index in range(len(cycles))]
+        snapshot["stats"] = {
+            "cycles_count": len(cycles),
+            "last_cycle_len": cycle_lengths[-1] if cycle_lengths else None,
+            "avg_cycle": round(sum(cycle_lengths) / len(cycle_lengths)) if cycle_lengths else None,
+            "min_cycle": min(cycle_lengths) if cycle_lengths else None,
+            "max_cycle": max(cycle_lengths) if cycle_lengths else None,
+            "spread": (max(cycle_lengths) - min(cycle_lengths)) if cycle_lengths else None,
+            "period_len": period_lengths[-1] if period_lengths else u.get("period_len"),
+            "avg_period": round(sum(period_lengths) / len(period_lengths)) if period_lengths else None,
+            "regularity": regularity,
+            "history": history,
+        }
+        # Expose the same estimated current range used by the full data load.
+        for period in snapshot["periods"]:
+            if period["start"] == u.get("last_period") and not period.get("end"):
+                estimate = _estimated_period_length(u.get("period_len"), period_lengths)
+                virtual_end = min(
+                    dtoday(),
+                    date.fromisoformat(period["start"])
+                    + timedelta(days=max(1, estimate) - 1),
+                )
+                if virtual_end >= date.fromisoformat(period["start"]):
+                    period["end"] = virtual_end.isoformat()
+                    period["end_estimated"] = True
+    elif mode == "preg" and u.get("last_period"):
+        snapshot["preg"] = C.preg_status(u["last_period"])
+    return snapshot
+
+
 def _api_data_sync(cid, body):
     u = row(cid)
     if not u or not is_onboarded(u): return _cors(web.json_response({"onboarded": False}))
@@ -8599,15 +8834,12 @@ def _api_data_sync(cid, body):
         ev(cid, "push_open", meta=campaign)
         if campaign.split(":", 1)[0] == "daily_summary":
             ev(cid, "summary_open", meta="daily_summary")
-    cycle_user = is_cycle(u)
     chatlog = chatlog_get(cid, 60)
     if is_male_profile(u):
         chatlog = _male_safe_history(chatlog, text_key="text")
-    out = {"onboarded": True, "cycle": bool(cycle_user and u.get("last_period")),
+    out = {"onboarded": True,
            "today": dtoday().isoformat(), "timezone": str(TZ),
-           "last_period": (u.get("last_period") if cycle_user else None),
-           "cycle_len": ((u.get("cycle_len") or 28) if cycle_user else None),
-           "mode": u.get("mode") or "cycle", "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog,
+           "name": (body.get("name") or ""), "pa": pa_list(cid), "chatlog": chatlog,
            "bot_username": BOT_USERNAME,
            "partner_linked": bool(partner_of(cid)),
            "proactive_enabled": bool(u.get("proactive_enabled", True)),
@@ -8622,7 +8854,7 @@ def _api_data_sync(cid, body):
     out["sym_log"] = logs_of(
         cid, (dtoday() - timedelta(days=READ_HISTORY_DAYS)).isoformat()
     )
-    out["past_periods"] = [] if is_male_profile(u) else periods_of(cid)
+    out.update(_mode_dependent_snapshot(cid, u))
     try:
         _pr = profile_of(u)
         out["kcal_base"] = profile_kcal(_pr)[0] if _pr else None
@@ -8632,59 +8864,6 @@ def _api_data_sync(cid, body):
         out["streak"] = streak_of(cid)
     except Exception:
         out["streak"] = 0
-    if out["cycle"] or out["mode"] == "irregular":
-        if out["cycle"]:
-            stt = C.cycle_status(date.fromisoformat(u["last_period"]), u.get("cycle_len") or 28)
-            out.update({"day": stt["day"], "phase": stt["phase"], "days_to_next": stt["days_to_next"],
-                        "days_since": stt["days_since"], "status": stt["status"], "delay_days": stt["delay_days"]})
-        periods = periods_of(cid)
-        if u.get("period_end"):
-            for p in periods:
-                if p["start"] == u.get("last_period") and not p.get("end"):
-                    p["end"] = u["period_end"]
-        cyc = [p["start"] for p in periods]
-        out["cycles"] = cyc
-        out["periods"] = periods
-        lens = []
-        for i in range(1, len(cyc)):
-            dd = (date.fromisoformat(cyc[i]) - date.fromisoformat(cyc[i - 1])).days
-            if 10 <= dd <= 90: lens.append(dd)
-        plens = []
-        for p in periods:
-            if p.get("end"):
-                ln = (date.fromisoformat(p["end"]) - date.fromisoformat(p["start"])).days + 1
-                if 1 <= ln <= 10: plens.append(ln)
-        reg = None
-        if len(lens) >= 2:
-            mlen = sum(lens) / len(lens); sd = (sum((x - mlen) ** 2 for x in lens) / len(lens)) ** 0.5
-            reg = "регулярный" if sd <= 2.5 else ("умеренный разброс" if sd <= 5 else "нерегулярный")
-        history = [{"start": periods[i]["start"], "end": periods[i].get("end"),
-                    "period_len": ((date.fromisoformat(periods[i]["end"]) - date.fromisoformat(periods[i]["start"])).days + 1) if periods[i].get("end") else None,
-                    "len": ((date.fromisoformat(cyc[i + 1]) - date.fromisoformat(cyc[i])).days if i + 1 < len(cyc) else None)} for i in range(len(cyc))]
-        out["stats"] = {
-            "cycles_count": len(cyc),
-            "last_cycle_len": lens[-1] if lens else None,
-            "avg_cycle": round(sum(lens) / len(lens)) if lens else None,
-            "min_cycle": min(lens) if lens else None,
-            "max_cycle": max(lens) if lens else None,
-            "spread": (max(lens) - min(lens)) if lens else None,
-            "period_len": (plens[-1] if plens else u.get("period_len")),
-            "avg_period": round(sum(plens) / len(plens)) if plens else None,
-            "regularity": reg,
-            "history": history,
-        }
-        # Текущий период без введённого конца: отдаём оценочный конец, чтобы
-        # идущие дни (2-й, 3-й...) отмечались без ежедневного ввода — иначе
-        # главный экран показывает «до месячных ~N дней» во время месячных.
-        for p in out["periods"]:
-            if p["start"] == u.get("last_period") and not p.get("end"):
-                plen = _estimated_period_length(u.get("period_len"), plens)
-                virt = min(dtoday(), date.fromisoformat(p["start"]) + timedelta(days=max(1, plen) - 1))
-                if virt >= date.fromisoformat(p["start"]):
-                    p["end"] = virt.isoformat()
-                    p["end_estimated"] = True
-    elif out["mode"] == "preg" and u.get("last_period"):
-        out["preg"] = C.preg_status(u["last_period"])
     return _cors(web.json_response(out))
 def _normalize_journal_payload(body):
     parsed, error, status = _validated_moscow_iso(
@@ -8989,60 +9168,164 @@ async def _api_journal(request):
 async def _api_period(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    generation = _user_generation(cid)
     if is_male_profile(row(cid)):
-        ev(cid, "male_mode_block", meta="api_period")
+        ev(
+            cid, "male_mode_block", meta="api_period",
+            user_generation=generation,
+        )
         return _cors(web.json_response(
             {"ok": False, "error": "profile_mode", "text": MALE_PROFILE_FUNCTION_TEXT},
             status=409,
         ))
-    _evict_today_cache(cid)
     action = body.get("action"); ds = body.get("date")
-    try: d = date.fromisoformat(ds) if ds else dtoday()
-    except Exception: d = dtoday()
+    d = None
+    if action in ("start", "delete", "end"):
+        d, error, status = _validated_moscow_iso(
+            ds, max_age=READ_HISTORY_DAYS,
+            field="date",
+        )
+        if error:
+            return _cors(web.json_response(error, status=status))
     if action == "start":
-        db_mark_period(cid, d.isoformat()); ev(cid, "manual", meta="web_period_start")
+        _evict_today_cache(cid)
+        db_mark_period(cid, d.isoformat(), user_generation=generation)
+        ev(
+            cid, "manual", meta="web_period_start",
+            user_generation=generation,
+        )
         return _cors(web.json_response({"ok": True}))
     if action == "replace":
-        periods = body.get("periods") or []
+        periods = body.get("periods")
+        if periods is None:
+            return _cors(web.json_response(
+                _api_error_payload(
+                    "invalid_periods", "Передай полную историю месячных списком."
+                ), status=400
+            ))
+        if not isinstance(periods, list):
+            return _cors(web.json_response(
+                _api_error_payload(
+                    "invalid_periods", "История месячных должна быть списком."
+                ), status=400
+            ))
         clean = []
-        for p in periods:
-            try:
-                s = date.fromisoformat(p.get("start"))
-                e = date.fromisoformat(p.get("end") or p.get("start"))
-                if e < s: e = s
-                if 1 <= (e - s).days + 1 <= 10:
-                    clean.append((s.isoformat(), e.isoformat()))
-            except Exception:
-                continue
-        c = db(); c.execute("DELETE FROM cycles WHERE chat_id=?", (cid,)); c.commit(); c.close()
-        for s, e in clean: cyc_add(cid, s, e)
+        for index, period in enumerate(periods):
+            if not isinstance(period, dict) or not period.get("start"):
+                return _cors(web.json_response(
+                    _api_error_payload(
+                        "invalid_period", f"Период №{index + 1} заполнен неверно."
+                    ), status=400
+                ))
+            start, error, status = _validated_moscow_iso(
+                period.get("start"), max_age=READ_HISTORY_DAYS,
+                field="start",
+            )
+            if error:
+                return _cors(web.json_response(error, status=status))
+            end, error, status = _validated_moscow_iso(
+                period.get("end") or period.get("start"),
+                max_age=READ_HISTORY_DAYS, field="end",
+            )
+            if error:
+                return _cors(web.json_response(error, status=status))
+            length = (end - start).days + 1
+            if not 1 <= length <= 10:
+                return _cors(web.json_response(
+                    _api_error_payload(
+                        "invalid_period_range",
+                        "Каждый период должен длиться от 1 до 10 дней.",
+                    ), status=400
+                ))
+            clean.append((start.isoformat(), end.isoformat()))
+        clean.sort(key=lambda period: period[0])
+        for index in range(1, len(clean)):
+            previous_start, previous_end = clean[index - 1]
+            current_start, _ = clean[index]
+            if current_start <= previous_end:
+                return _cors(web.json_response(
+                    _api_error_payload(
+                        "overlapping_periods",
+                        "Периоды не должны повторяться или пересекаться.",
+                    ), status=400
+                ))
         starts = [s for s, _ in clean]
         latest = max(starts) if starts else None
-        if latest:
-            latest_end = next((e for s, e in clean if s == latest), latest)
-            ln = (date.fromisoformat(latest_end) - date.fromisoformat(latest)).days + 1
-            upsert(cid, last_period=latest, mode="cycle", period_end=latest_end, period_len=ln)
-        else:
-            upsert(cid, last_period=None, period_end=None, period_len=None)
-        ev(cid, "manual", meta="web_period_replace")
+        latest_end = next((e for s, e in clean if s == latest), latest)
+        length = (
+            (date.fromisoformat(latest_end) - date.fromisoformat(latest)).days + 1
+            if latest else None
+        )
+        c = db()
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            if not _user_write_allowed(cid, generation, conn=c):
+                c.rollback()
+                return _cors(web.json_response(
+                    _api_error_payload("deleted", "Профиль уже удалён."), status=409
+                ))
+            c.execute("DELETE FROM cycles WHERE chat_id=?", (cid,))
+            c.executemany(
+                "INSERT INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?)",
+                [(cid, start, end) for start, end in clean],
+            )
+            if latest:
+                c.execute(
+                    """UPDATE users SET last_period=?,mode='cycle',period_end=?,period_len=?
+                       WHERE chat_id=?""",
+                    (latest, latest_end, length, cid),
+                )
+            else:
+                c.execute(
+                    "UPDATE users SET last_period=NULL,period_end=NULL,period_len=NULL WHERE chat_id=?",
+                    (cid,),
+                )
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
+        _evict_today_cache(cid)
+        ev(
+            cid, "manual", meta="web_period_replace",
+            user_generation=generation,
+        )
         return _cors(web.json_response({"ok": True}))
     if action == "delete":
+        _evict_today_cache(cid)
         period_delete_at(cid, d.isoformat())
         cyc = cycles_of(cid)
         upsert(cid, last_period=(max(cyc) if cyc else None))
-        ev(cid, "manual", meta="web_period_del")
+        ev(cid, "manual", meta="web_period_del", user_generation=generation)
         return _cors(web.json_response({"ok": True}))
     if action == "end":
         u = row(cid); ok = False
-        start_iso = body.get("start") or period_start_at_or_before(cid, d.isoformat())
+        start_iso = body.get("start")
+        if start_iso:
+            parsed_start, error, status = _validated_moscow_iso(
+                start_iso, max_age=READ_HISTORY_DAYS, field="start"
+            )
+            if error:
+                return _cors(web.json_response(error, status=status))
+            start_iso = parsed_start.isoformat()
+        else:
+            start_iso = period_start_at_or_before(cid, d.isoformat())
         if is_cycle(u) and start_iso:
             ln = (d - date.fromisoformat(start_iso)).days + 1
-            if 1 <= ln <= 10:
-                cyc_set_end(cid, start_iso, d.isoformat())
-                if start_iso == u.get("last_period"):
-                    upsert(cid, period_end=d.isoformat(), period_len=ln)
-                ok = True
-        ev(cid, "manual", meta="web_period_end")
+            if not 1 <= ln <= 10:
+                return _cors(web.json_response(
+                    _api_error_payload(
+                        "invalid_period_range",
+                        "Конец периода должен быть в пределах 10 дней от начала.",
+                    ), status=400
+                ))
+            _evict_today_cache(cid)
+            cyc_set_end(cid, start_iso, d.isoformat())
+            if start_iso == u.get("last_period"):
+                upsert(cid, period_end=d.isoformat(), period_len=ln)
+            ok = True
+        ev(cid, "manual", meta="web_period_end", user_generation=generation)
         return _cors(web.json_response({"ok": ok}))
     return _cors(web.json_response({"error": "bad action"}, status=400))
 async def _api_pa(request):
@@ -12324,6 +12607,10 @@ def _finalize_food_photo(
         ))
 
     if mutation.get("created"):
+        # A review may start after admission invalidated the old cache but
+        # before the long vision request commits this meal. Bump again at the
+        # actual write boundary so that review cannot publish its old snapshot.
+        _evict_week_food_cache(cid)
         ev(cid, "goal", meta="food_log", user_generation=generation)
         ev(cid, "manual", meta="food_log", user_generation=generation)
     return _food_photo_mutation_response(
@@ -12440,19 +12727,29 @@ async def _api_food_photo_bounded(request):
 async def _api_food_text(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    _evict_week_food_cache(cid)
+    generation = _user_generation(cid)
     u = row(cid)
     if not is_onboarded(u):
         return _cors(web.json_response({"ok": False, "message": "Сначала настрой Айву в боте."}, status=403))
-    generation = _user_generation(cid)
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response(
+            _api_error_payload("deleted", "Профиль уже удалён."), status=409
+        ))
+    _evict_week_food_cache(cid)
     txt = (body.get("text") or "").strip()
     if not txt: return _cors(web.json_response({"ok": False, "message": "Опиши приём пищи."}))
-    ev(cid, "flow_start", meta="food")
-    prof = profile_of(u); usage = []
+    ev(cid, "flow_start", meta="food", user_generation=generation)
+    prof = profile_of(u)
+    journal_v2 = journal_v2_enabled(cid)
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response(
+            _api_error_payload("deleted", "Профиль уже удалён."), status=409
+        ))
+    usage = []
     try:
         parsed = await llm_to_thread(
             cid, "food_text", L.analyze_food_text, txt, prof, usage,
-            journal_v2_enabled(cid),
+            journal_v2,
                                      user_generation=generation)
     except Exception as e:
         log.warning("food_text analyze %s: %s", cid, e); parsed = None
@@ -12475,9 +12772,16 @@ async def _api_food_text(request):
             return _cors(web.json_response(
                 _api_error_payload("deleted", "Профиль уже удалён."), status=409
             ))
+        # The pre-LLM invalidation does not cover a weekly review that starts
+        # while analysis is running. Invalidate again after the atomic insert.
+        _evict_week_food_cache(cid)
         ev(cid, "goal", meta="food_log", user_generation=generation)
         ev(cid, "manual", meta="food_log", user_generation=generation)
         out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid, prof))
+        if not _user_write_allowed(cid, generation):
+            return _cors(web.json_response(
+                _api_error_payload("deleted", "Профиль уже удалён."), status=409
+            ))
         return _cors(web.json_response(out))
     except Exception as e:
         import traceback; log.warning("FOOD save FAIL %s: %s", cid, traceback.format_exc())
@@ -12567,8 +12871,13 @@ def _workout_committed_receipt(cid, mutation, target):
 async def _api_workout(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
+    generation = _user_generation(cid)
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response(
+            _api_error_payload("deleted", "Профиль уже удалён."), status=409
+        ))
     workout_day, error, status = _validated_moscow_iso(
         body.get("date"), max_age=WORKOUT_WRITE_DAYS
     )
@@ -12577,7 +12886,6 @@ async def _api_workout(request):
         # unsupported backfills must never spend tokens or fall back to today.
         return _cors(web.json_response(error, status=status))
     d_iso = workout_day.isoformat()
-    generation = _user_generation(cid)
     ev(cid, "flow_start", meta="workout", user_generation=generation)
     items = []; groups = []
     for i in (body.get("items") or [])[:24]:
@@ -12628,9 +12936,15 @@ async def _api_workout(request):
             ), status=409,
         ))
     _, st = status_of(cid); phase_ru = (st or {}).get("phase_ru") if st else None
+    recent_workouts = workouts_recent(cid)
+    train_profile = train_profile_get(cid)
+    if not _user_write_allowed(cid, generation):
+        return _cors(web.json_response(
+            _api_error_payload("deleted", "Профиль уже удалён."), status=409
+        ))
     usage = []
     try:
-        review = await llm_to_thread(cid, "workout_review", L.training_review, wk, workouts_recent(cid), phase_ru, u.get("mode"), train_profile_get(cid), usage,
+        review = await llm_to_thread(cid, "workout_review", L.training_review, wk, recent_workouts, phase_ru, u.get("mode"), train_profile, usage,
                                      user_generation=generation)
     except Exception as e:
         review = ""; log.warning("train review %s: %s", cid, e)
@@ -12724,6 +13038,164 @@ def _diary_mutation_receipt(cid, target, **extra):
     return payload
 
 
+def _diary_target_snapshot(cid):
+    user = row(cid)
+    prof = profile_of(user) if user else None
+    target = profile_kcal(prof) if prof else None
+    return (
+        {"kcal": target[0], "protein": target[1], "fat": target[2], "carbs": target[3]}
+        if target else None
+    )
+
+
+def _diary_snapshot_conn(c, cid, target, nutrition_target=None):
+    rows = c.execute(
+        """SELECT id,ts,title,kcal,protein,fat,carbs,grams,items,source,
+                  slot,fclass,slot_guessed
+           FROM meals WHERE chat_id=? AND d=? ORDER BY ts""",
+        (cid, target),
+    ).fetchall()
+    meals = [_meal_row_payload(item) for item in rows]
+    return {
+        "meals": meals,
+        "totals": _diary_totals_from_meals(meals),
+        "date": target,
+        "target": nutrition_target,
+    }
+
+
+def _stored_food_mutation_receipt(data, *, duplicate=False):
+    """Materialize the full day stored in the same transaction as a mutation."""
+    if not isinstance(data, dict) or not isinstance(data.get("diary"), dict):
+        raise ValueError("food mutation receipt is incomplete")
+    diary = dict(data["diary"])
+    if not diary.get("date") or not isinstance(diary.get("meals"), list):
+        raise ValueError("food mutation diary is incomplete")
+    diary["asset_revision"] = FA.RESOLVER.generated_revision()
+    _offer_food_asset_candidates(diary.get("meals") or [])
+    payload = {
+        "ok": True,
+        "committed": True,
+        "duplicate": bool(duplicate),
+        "date": diary["date"],
+        "diary": diary,
+        **diary,
+    }
+    for key in ("meal_id", "meal", "rec", "deleted_id"):
+        if key in data:
+            payload[key] = data[key]
+    return payload
+
+
+def _food_mutation_row_conn(c, cid, mutation_key):
+    if not mutation_key:
+        return None
+    return c.execute(
+        """SELECT kind,record_id,args_hash,result_json,reversed_at
+           FROM chat_mutations WHERE chat_id=? AND mutation_key=?""",
+        (cid, mutation_key),
+    ).fetchone()
+
+
+def _food_mutation_data(row_):
+    try:
+        return json.loads(row_[3] or "{}") if row_ else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _delete_diary_meal_atomic(cid, raw_id, request_id, generation, nutrition_target):
+    try:
+        mid = _strict_integer(raw_id)
+        if mid <= 0:
+            raise ValueError("meal id out of range")
+    except (TypeError, ValueError):
+        return None, _api_error_payload(
+            "invalid_meal_id", "Не удалось определить запись дневника."
+        ), 400
+
+    # A meal can only be deleted once, so the record id is a safe legacy fallback
+    # when an older client does not yet send a durable gesture token.
+    stable_id = str(request_id or "").strip() or f"meal:{mid}"
+    mutation_key = chat_mutation_key("webdelete", stable_id)
+    args_hash = chat_mutation_args_hash("food_delete", str(mid))
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        if not _user_write_allowed(cid, generation, conn=c):
+            c.rollback()
+            return None, _api_error_payload("deleted", "Профиль уже удалён."), 409
+
+        prior = _food_mutation_row_conn(c, cid, mutation_key)
+        if prior:
+            if prior[0] != "food_delete" or (prior[2] or "") != args_hash:
+                c.rollback()
+                return None, _api_error_payload(
+                    "food_mutation_conflict",
+                    "Этот запрос уже использован для другой записи.",
+                ), 409
+            data = _food_mutation_data(prior)
+            c.commit()
+            return {"created": False, "data": data}, None, 200
+
+        meal = c.execute(
+            "SELECT d FROM meals WHERE chat_id=? AND id=?", (cid, mid)
+        ).fetchone()
+        if not meal:
+            # Even if a client lost its in-memory token, an owned tombstone is
+            # authoritative and must replay instead of degrading to a 404.
+            tombstone = c.execute(
+                """SELECT kind,record_id,args_hash,result_json,reversed_at
+                   FROM chat_mutations
+                   WHERE chat_id=? AND kind='food_delete' AND record_id=?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (cid, str(mid)),
+            ).fetchone()
+            if tombstone:
+                data = _food_mutation_data(tombstone)
+                c.commit()
+                return {"created": False, "data": data}, None, 200
+            c.rollback()
+            return None, _api_error_payload(
+                "meal_not_found", "Эта запись дневника не найдена."
+            ), 404
+
+        target = str(meal[0])
+        c.execute("DELETE FROM meals WHERE chat_id=? AND id=?", (cid, mid))
+        c.execute(
+            """UPDATE chat_mutations SET reversed_at=?,result_json=NULL
+               WHERE chat_id=?
+                 AND kind IN ('food','food_update','food_move_slot','food_append')
+                 AND record_id=?""",
+            (datetime.now(TZ).isoformat(), cid, str(mid)),
+        )
+        diary = _diary_snapshot_conn(c, cid, target, nutrition_target)
+        data = {"date": target, "deleted_id": mid, "diary": diary}
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                cid, mutation_key, int(generation), "food_delete", str(mid), args_hash,
+                json.dumps(data, ensure_ascii=False, sort_keys=True),
+                datetime.now(TZ).isoformat(),
+            ),
+        )
+        c.commit()
+        return {"created": True, "data": data}, None, 200
+    except Exception as exc:
+        try:
+            c.rollback()
+        except sqlite3.Error:
+            pass
+        log.warning("atomic diary delete failed %s/%s: %s", cid, mid, exc)
+        return None, _api_error_payload(
+            "diary_delete_failed", "Не удалось удалить приём пищи."
+        ), 500
+    finally:
+        c.close()
+
+
 def _owned_meal_for_api(cid, raw_id):
     try:
         mid = _strict_integer(raw_id)
@@ -12757,24 +13229,39 @@ def _api_number(value, *, integer=False):
 async def _api_diary_del(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    if not is_onboarded(row(cid)): return _cors(web.json_response({"error": "onboard"}, status=403))
-    mid, meal, error, status = _owned_meal_for_api(cid, body.get("id"))
-    if error: return _cors(web.json_response(error, status=status))
+    generation = _user_generation(cid)
+    if not is_onboarded(row(cid)):
+        return _cors(web.json_response({"error": "onboard"}, status=403))
+    mutation, error, status = await asyncio.to_thread(
+        _delete_diary_meal_atomic,
+        cid, body.get("id"), body.get("request_id"), generation,
+        _diary_target_snapshot(cid),
+    )
+    if error:
+        return _cors(web.json_response(error, status=status))
+    data = mutation.get("data") or {}
     try:
-        meal_del(cid, mid)
-        if meal_get(cid, mid) is not None:
-            raise RuntimeError("delete verification failed")
+        payload = _stored_food_mutation_receipt(
+            data, duplicate=not mutation.get("created")
+        )
     except Exception as exc:
-        log.warning("diary delete failed %s/%s: %s", cid, mid, exc)
+        log.warning("diary delete receipt failed %s/%s: %s", cid, body.get("id"), exc)
         return _cors(web.json_response(
-            _api_error_payload("diary_delete_failed", "Не удалось удалить приём пищи."),
+            {
+                **_api_error_payload(
+                    "diary_delete_receipt_failed",
+                    "Приём удалён, но дневник пока не обновился. Повтори запрос.",
+                ),
+                "committed": True,
+                "deleted_id": data.get("deleted_id"),
+                "date": data.get("date"),
+            },
             status=500,
         ))
     _evict_week_food_cache(cid)
-    ev(cid, "button", meta="web_diary_del")
-    return _cors(web.json_response(
-        _diary_mutation_receipt(cid, meal["date"], deleted_id=mid)
-    ))
+    if mutation.get("created"):
+        ev(cid, "button", meta="web_diary_del", user_generation=generation)
+    return _cors(web.json_response(payload))
 
 async def _api_diary_scale(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -12928,11 +13415,105 @@ async def _api_diary_edit(request):
         _diary_mutation_receipt(cid, meal["date"], meal=updated)
     ))
 
-def _api_food_manual_sync(cid, body):
-    _evict_week_food_cache(cid)
+def _save_manual_food_atomic(
+    cid, rec, target, request_id, generation, nutrition_target,
+):
+    mutation_key = chat_mutation_key("webmanual", request_id)
+    args_hash = chat_mutation_args_hash(
+        "food_manual",
+        json.dumps({"date": target, "rec": rec}, ensure_ascii=False, sort_keys=True),
+    )
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        if not _user_write_allowed(cid, generation, conn=c):
+            c.rollback()
+            return None, _api_error_payload("deleted", "Профиль уже удалён."), 409
+
+        prior = _food_mutation_row_conn(c, cid, mutation_key)
+        if prior:
+            if prior[0] != "food" or (prior[2] or "") != args_hash:
+                c.rollback()
+                return None, _api_error_payload(
+                    "food_mutation_conflict",
+                    "Этот запрос уже использован для другого приёма пищи.",
+                ), 409
+            if prior[4]:
+                c.rollback()
+                return None, _api_error_payload(
+                    "food_mutation_reversed", "Этот приём уже удалён из дневника."
+                ), 409
+            data = _food_mutation_data(prior)
+            c.commit()
+            return {"created": False, "data": data}, None, 200
+
+        slot = rec.get("slot") or slot_for_now()
+        now = datetime.now(TZ).isoformat()
+        mid = c.execute(
+            """INSERT INTO meals
+               (chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,
+                slot,fclass,slot_guessed)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                cid, target, now, rec["title"], int(rec["kcal"]),
+                float(rec["protein"]), float(rec["fat"]), float(rec["carbs"]),
+                int(rec["grams"]) if rec.get("grams") else None,
+                json.dumps(rec.get("items") or [], ensure_ascii=False),
+                "manual", slot, rec.get("fclass") or None,
+                int(bool(rec.get("slot_guessed"))),
+            ),
+        ).lastrowid
+        saved = _meal_row_payload((
+            mid, now, rec["title"], int(rec["kcal"]), float(rec["protein"]),
+            float(rec["fat"]), float(rec["carbs"]),
+            int(rec["grams"]) if rec.get("grams") else None,
+            json.dumps(rec.get("items") or [], ensure_ascii=False),
+            "manual", slot, rec.get("fclass") or None,
+            int(bool(rec.get("slot_guessed"))),
+        ))
+        saved["date"] = target
+        diary = _diary_snapshot_conn(c, cid, target, nutrition_target)
+        data = {
+            "date": target,
+            "meal_id": mid,
+            "meal": saved,
+            "rec": dict(rec, slot=slot, date=target),
+            "diary": diary,
+        }
+        c.execute(
+            """INSERT INTO chat_mutations
+               (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                cid, mutation_key, int(generation), "food", str(mid), args_hash,
+                json.dumps(data, ensure_ascii=False, sort_keys=True), now,
+            ),
+        )
+        c.commit()
+        return {"created": True, "data": data}, None, 200
+    except Exception as exc:
+        try:
+            c.rollback()
+        except sqlite3.Error:
+            pass
+        log.warning("atomic manual food save failed %s/%s: %s", cid, target, exc)
+        return None, _api_error_payload(
+            "food_manual_save_failed", "Не удалось сохранить приём пищи."
+        ), 500
+    finally:
+        c.close()
+
+
+def _api_food_manual_sync(cid, body, generation):
     if not is_onboarded(row(cid)):
         return {"ok": False, "message": "Сначала настрой Айву."}, 403
-    ev(cid, "flow_start", meta="food")
+    if not _user_write_allowed(cid, generation):
+        return _api_error_payload("deleted", "Профиль уже удалён."), 409
+    parsed_target, error, status = _validated_moscow_iso(
+        body.get("date") or dtoday().isoformat(), max_age=1, field="date"
+    )
+    if error:
+        return error, status
     title = (body.get("title") or "").strip()[:80]
     kcal = int(_num(body.get("kcal")))
     if not title and not kcal:
@@ -12942,14 +13523,47 @@ def _api_food_manual_sync(cid, body):
            "carbs": round(_num(body.get("carbs")), 1), "grams": (int(_num(body.get("grams"))) or None),
            "source": "manual"}
     if body.get("slot") in ("breakfast", "lunch", "snack", "dinner"): rec["slot"] = body["slot"]
-    mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
-    out = {"ok": True, "meal_id": mid, "rec": rec}; out.update(diary_payload(cid))
-    return out, 200
+    # Older clients did not send request_id; keep them functional, while every
+    # current client keeps the generated token across close/reopen and retries.
+    request_id = str(body.get("request_id") or "").strip() or (
+        "legacy-" + secrets.token_hex(16)
+    )
+    mutation, error, status = _save_manual_food_atomic(
+        cid, rec, parsed_target.isoformat(), request_id, generation,
+        _diary_target_snapshot(cid),
+    )
+    if error:
+        return error, status
+    data = mutation.get("data") or {}
+    try:
+        payload = _stored_food_mutation_receipt(
+            data, duplicate=not mutation.get("created")
+        )
+    except Exception as exc:
+        log.warning("manual food receipt failed %s/%s: %s", cid, request_id, exc)
+        return {
+            **_api_error_payload(
+                "food_manual_receipt_failed",
+                "Приём сохранён, но дневник пока не обновился. Повтори запрос.",
+            ),
+            "committed": True,
+            "meal_id": data.get("meal_id"),
+            "date": data.get("date"),
+        }, 500
+    _evict_week_food_cache(cid)
+    if mutation.get("created"):
+        ev(cid, "flow_start", meta="food", user_generation=generation)
+        ev(cid, "goal", meta="food_log", user_generation=generation)
+        ev(cid, "manual", meta="food_log", user_generation=generation)
+    return payload, 200
 
 async def _api_food_manual(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    payload, status = await asyncio.to_thread(_api_food_manual_sync, cid, body)
+    generation = _user_generation(cid)
+    payload, status = await asyncio.to_thread(
+        _api_food_manual_sync, cid, body, generation
+    )
     return _cors(web.json_response(payload, status=status))
 
 async def _api_diary_reco(request):
@@ -13036,12 +13650,16 @@ def _change_mode_atomic(cid, mode, explicit_lmp=None, user_generation=None):
         return _api_error_payload("mode_save_failed", "Не удалось сменить режим."), 500
     finally:
         c.close()
+    canonical_user = row(cid)
+    if not canonical_user or not _user_write_allowed(cid, user_generation):
+        return _api_error_payload("deleted", "Профиль уже удалён."), 409
     return {
         "ok": True,
         "mode": saved[0] or mode,
         "last_period": saved[1],
         "cycle_len": saved[2],
         "seeded_period": seeded,
+        "mode_snapshot": _mode_dependent_snapshot(cid, canonical_user),
     }, 200
 
 

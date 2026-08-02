@@ -5,6 +5,10 @@ import { ChoicePills } from "./ChoicePills";
 import { FOOD_SLOTS, foodFormFromMeal } from "../lib/constants";
 import { apiCall, showToast, actionProps } from "../lib/api";
 import { optimisticFoodEdit } from "../lib/foodDayCache";
+import {
+  completeManualFoodRequest,
+  manualFoodRequestForPayload,
+} from "../lib/foodMutation";
 
 export function FoodEntryForm({ meal, onSaved, onClose, choiceSurface = "container" }) {
   const [form, setForm] = useState(() => foodFormFromMeal(meal));
@@ -18,11 +22,17 @@ export function FoodEntryForm({ meal, onSaved, onClose, choiceSurface = "contain
     }
     setBusy(true);
     try {
+      const manualRequest = meal ? null : manualFoodRequestForPayload(form);
       const result = await apiCall(meal ? "/api/diary_edit" : "/api/food_manual", {
         ...(meal ? { id: meal.id } : {}),
         ...form,
+        ...(manualRequest ? {
+          request_id: manualRequest.id,
+          date: manualRequest.date,
+        } : {}),
       });
       if (result?.ok === false || result?.error) throw new Error(result.message || "Не получилось сохранить");
+      if (manualRequest) completeManualFoodRequest(manualRequest.id);
       showToast(meal ? "Приём обновлён" : "Приём добавлен", { type: "success" });
       await onSaved({
         type: meal ? "edit" : "receipt",

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Text, SectionList } from "../lib/tma";
 import { AiwaButton } from "../components/AiwaButton";
 import { AiwaCell } from "../components/AiwaCell";
@@ -9,6 +9,9 @@ import { WORKOUT_TYPES, WORKOUT_EXERCISES, WORKOUT_GROUPS } from "../lib/constan
 import { PlusIcon } from "../lib/icons";
 import { apiCall, showToast, trackFlow, actionProps } from "../lib/api";
 import { aiwaTodayIso } from "../lib/dates";
+import { acknowledgeWorkoutRequest, workoutRequestForPayload } from "../lib/workoutRequest";
+
+export { workoutRequestForPayload } from "../lib/workoutRequest";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const WORKOUT_BACKDATE_DAYS = 90;
@@ -42,18 +45,6 @@ const initialWorkoutDate = (value, today) => {
   return isWorkoutDateWritable(iso, today) ? iso : today;
 };
 
-const newWorkoutRequestId = () => (
-  globalThis.crypto?.randomUUID?.()
-  || `workout-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-);
-
-export const workoutRequestForPayload = (current, payload, makeId = newWorkoutRequestId) => {
-  const fingerprint = JSON.stringify(payload);
-  return current?.fingerprint === fingerprint
-    ? current
-    : { fingerprint, id: makeId() };
-};
-
 export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteTypes, initialDate, today = aiwaTodayIso() }) {
   // Собственные активности пользовательницы (Сквош и т.п.) — отдельные
   // пилюли перед «Своё»; список отдаёт сервер по последним 60 дням.
@@ -80,7 +71,6 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteType
   const [openGroup, setOpenGroup] = useState("");
   // После сохранения панель показывает разбор и калории вместо формы.
   const [review, setReview] = useState(null);
-  const requestRef = useRef(null);
   useEffect(() => {
     if (!isOpen) return;
     trackFlow("workout");
@@ -103,7 +93,6 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteType
     setOpenGroup(first ? (Object.keys(WORKOUT_GROUPS).find((group) => WORKOUT_GROUPS[group].includes(first)) || "") : "");
     setReview(null);
     setDate(openingDate);
-    requestRef.current = null;
   }, [isOpen, suggested, openingDate]);
   const toggleExercise = (name) => setSelected((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name]);
   const strength = type === "Силовая";
@@ -137,10 +126,10 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteType
           group: strength ? groupOf(name) : null,
         })),
       };
-      requestRef.current = workoutRequestForPayload(requestRef.current, workout);
+      const request = workoutRequestForPayload(workout);
       const result = await apiCall("/api/workout", {
         ...workout,
-        request_id: requestRef.current.id,
+        request_id: request.id,
       });
       if (!result?.ok) throw new Error(result?.text || "Не получилось сохранить тренировку");
       await onSaved?.({
@@ -149,7 +138,7 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteType
         date: result.date || result.d || date,
       });
       setReview({ text: result.review || "", calories: result.calories || 0 });
-      requestRef.current = null;
+      acknowledgeWorkoutRequest(request);
     } catch (error) {
       showToast(error.message || "Не получилось сохранить", { type: "error" });
     } finally {

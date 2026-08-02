@@ -27,6 +27,10 @@ import {
   retireStaleFoodDayAssets,
   resolveFoodDayEntry,
 } from "../lib/foodDayCache";
+import {
+  completeFoodDeleteRequest,
+  foodDeleteRequestForMeal,
+} from "../lib/foodMutation";
 
 // Ответы прогреваются на старте, поэтому обычно экран открывается сразу;
 // пока данных нет — на их месте скелетон той же раскладки.
@@ -547,11 +551,13 @@ export function FoodScreen({ mode, revision = 0 }) {
   const deleteMeal = async (id) => {
     const mutationToken = mutationOrder.current.begin();
     const targetIso = selectedIso;
+    const requestId = foodDeleteRequestForMeal(id);
     try {
-      const result = await apiCall("/api/diary_del", { id });
+      const result = await apiCall("/api/diary_del", { id, request_id: requestId });
       if (!result || result.error || result.ok === false) {
         throw new Error(result?.message || "Не получилось удалить приём");
       }
+      completeFoodDeleteRequest(id, requestId);
       showToast("Приём удалён", { type: "success" });
       await reloadDiary({ type: "delete", id, result, mutationToken, targetIso });
     } catch (error) {

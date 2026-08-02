@@ -9,7 +9,13 @@ import { JournalSymptomGroup } from "../components/JournalSymptomGroup";
 import { JournalCustomSymptom } from "../components/JournalCustomSymptom";
 import { JOURNAL_ENERGY_OPTIONS, JOURNAL_MOOD_OPTIONS, JOURNAL_SYMPTOM_GROUPS } from "../lib/constants";
 import { acknowledgedHostWrite, actionProps, read, showToast } from "../lib/api";
-import { buildJournalSavePayload, isJournalSaveSessionCurrent } from "../lib/journalSave";
+import { buildJournalSavePayload } from "../lib/journalSave";
+import {
+  consumeCalendarDayLogSaveCompletion,
+  getCalendarDayLogSaveState,
+  requestCalendarDayLogSave,
+  subscribeToCalendarDayLogSave,
+} from "../lib/calendarDayLogSave";
 
 /**
  * Day log for an arbitrary calendar day, shown as a @deslop/tma ModalView bottom
@@ -27,88 +33,80 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
   const [mood, setMood] = useState(0);
   const [intimacy, setIntimacy] = useState(false);
   const [custom, setCustom] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [saveRevision, setSaveRevision] = useState(0);
-  const saveLock = useRef(null);
-  const saveId = useRef(0);
-  const openSession = useRef({ generation: 0, open: false });
+  const [saveState, setSaveState] = useState(() => getCalendarDayLogSaveState(iso));
   const draftSeed = useRef("");
+  const openGeneration = useRef(0);
   const currentIso = useRef(iso);
   currentIso.current = iso;
+  const busy = Boolean(saveState.active || (saveState.completion && !saveState.completion.consumed));
+
+  useEffect(() => subscribeToCalendarDayLogSave(iso, setSaveState), [iso]);
 
   useLayoutEffect(() => {
-    openSession.current = {
-      generation: openSession.current.generation + (open ? 1 : 0),
-      open,
-    };
+    if (open) openGeneration.current += 1;
   }, [open]);
 
   useEffect(() => {
     if (!iso || !open) return;
-    if (saveLock.current?.iso === iso) {
-      setBusy(true);
-      return;
-    }
-    const seedKey = `${openSession.current.generation}:${iso}:${saveRevision}`;
+    const shared = getCalendarDayLogSaveState(iso);
+    const adoptedOperation = shared.active || (
+      shared.completion && !shared.completion.consumed ? shared.completion : null
+    );
+    const seedKey = `${openGeneration.current}:${iso}:${adoptedOperation?.id || "canonical"}`;
     if (draftSeed.current === seedKey) return;
     draftSeed.current = seedKey;
+    if (adoptedOperation?.draft) {
+      setSymptoms(adoptedOperation.draft.symptoms);
+      setEnergy(adoptedOperation.draft.energy);
+      setMood(adoptedOperation.draft.mood);
+      setIntimacy(adoptedOperation.draft.intimacy);
+      setCustom(adoptedOperation.draft.custom);
+      return;
+    }
     const day = read("getAiwaDayCheckin", iso) || {};
     setSymptoms(day.symptoms || []);
     setEnergy(day.energy || 0);
     setMood(day.mood || 0);
     setIntimacy(Boolean(day.intimacy));
     setCustom("");
-    setBusy(Boolean(saveLock.current));
-  }, [iso, open, saveRevision]);
+  }, [iso, open]);
 
+  useEffect(() => {
+    const completion = saveState.completion;
+    if (!open || !completion || completion.consumed) return;
+    if (!consumeCalendarDayLogSaveCompletion(iso, completion.id)) return;
+    if (completion.status === "fulfilled") {
+      showToast("Сохранено", { type: "success" });
+      onClose();
+    } else {
+      showToast(completion.error?.message || "Не удалось сохранить", { type: "error" });
+    }
+  }, [iso, onClose, open, saveState.completion]);
+
+  const hasBlockingSave = () => {
+    const shared = getCalendarDayLogSaveState(currentIso.current);
+    return Boolean(shared.active || (shared.completion && !shared.completion.consumed));
+  };
   const toggleSymptom = (code) => {
-    if (saveLock.current) return;
+    if (hasBlockingSave()) return;
     setSymptoms((current) => (current.includes(code) ? current.filter((item) => item !== code) : [...current, code]));
   };
   const groups = symptomGroups?.length ? symptomGroups : JOURNAL_SYMPTOM_GROUPS;
 
-  const save = async () => {
-    if (saveLock.current) return;
-    const operation = {
-      id: ++saveId.current,
-      generation: openSession.current.generation,
-      iso: currentIso.current,
-      payload: buildJournalSavePayload({
-        date: currentIso.current,
-        energy,
-        mood,
-        symptoms,
-        custom,
-        intimacy,
-      }),
-    };
-    saveLock.current = operation;
-    setBusy(true);
-    const isCurrentSaveSession = () => isJournalSaveSessionCurrent({
-      isOpen: openSession.current.open,
-      currentGeneration: openSession.current.generation,
-      startedGeneration: operation.generation,
-      currentDate: currentIso.current,
-      targetDate: operation.iso,
-    });
-    try {
-      await acknowledgedHostWrite("aiwaSaveJournal", operation.payload);
-      if (!isCurrentSaveSession()) return;
-      showToast("Сохранено", { type: "success" });
-      onClose();
-    } catch (error) {
-      if (!isCurrentSaveSession()) return;
-      showToast(error?.message || "Не удалось сохранить", { type: "error" });
-    } finally {
-      if (saveLock.current?.id === operation.id) {
-        const staleSession = openSession.current.open && !isCurrentSaveSession();
-        saveLock.current = null;
-        if (staleSession) {
-          setBusy(true);
-          setSaveRevision((value) => value + 1);
-        } else setBusy(false);
-      }
-    }
+  const save = () => {
+    const targetIso = currentIso.current;
+    if (hasBlockingSave()) return;
+    const draft = { energy, mood, symptoms, custom, intimacy };
+    const payload = buildJournalSavePayload({ date: targetIso, ...draft });
+    const request = requestCalendarDayLogSave(
+      targetIso,
+      payload,
+      (frozenPayload) => acknowledgedHostWrite("aiwaSaveJournal", frozenPayload),
+      { draft },
+    );
+    // The shared lane publishes both success and failure to whichever
+    // same-date panel is mounted when the write settles.
+    void request.promise.catch(() => {});
   };
 
   return (
@@ -133,7 +131,7 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
               label="Энергия"
               options={JOURNAL_ENERGY_OPTIONS}
               value={energy}
-              onChange={(value) => { if (!saveLock.current) setEnergy(value); }}
+              onChange={(value) => { if (!hasBlockingSave()) setEnergy(value); }}
             />
           </SectionList.Item>
 
@@ -142,7 +140,7 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
               label="Настроение"
               options={JOURNAL_MOOD_OPTIONS}
               value={mood}
-              onChange={(value) => { if (!saveLock.current) setMood(value); }}
+              onChange={(value) => { if (!hasBlockingSave()) setMood(value); }}
             />
           </SectionList.Item>
 
@@ -155,7 +153,7 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
           <SectionList.Item>
             <JournalCustomSymptom
               value={custom}
-              onChange={(value) => { if (!saveLock.current) setCustom(value); }}
+              onChange={(value) => { if (!hasBlockingSave()) setCustom(value); }}
             />
           </SectionList.Item>
 
@@ -164,7 +162,7 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
               <JournalToggle
                 label="Близость"
                 active={intimacy}
-                onChange={(value) => { if (!saveLock.current) setIntimacy(value); }}
+                onChange={(value) => { if (!hasBlockingSave()) setIntimacy(value); }}
               />
             </SectionList.Item>
           ) : null}

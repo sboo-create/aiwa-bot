@@ -1027,6 +1027,65 @@ class Phase3BackendContractTests(unittest.TestCase):
         self.assertEqual(bot.row(self.cid)["mode"], "preg")
         self.assertEqual(bot.row(self.cid)["last_period"], explicit)
 
+    def test_mode_receipt_contains_complete_canonical_state_for_refresh_fallback(self):
+        starts = [
+            (bot.dtoday() - timedelta(days=70)).isoformat(),
+            (bot.dtoday() - timedelta(days=41)).isoformat(),
+            (bot.dtoday() - timedelta(days=12)).isoformat(),
+        ]
+        for start in starts:
+            bot.cyc_add(self.cid, start, (
+                date.fromisoformat(start) + timedelta(days=4)
+            ).isoformat())
+        bot.upsert(
+            self.cid, mode="cycle", last_period=starts[-1], cycle_len=29,
+            period_end=(bot.dtoday() - timedelta(days=8)).isoformat(), period_len=5,
+        )
+
+        explicit_lmp = starts[-1]
+        response, pregnancy = self.call(bot._api_mode, {
+            "mode": "preg", "last_period": explicit_lmp,
+        })
+        self.assertEqual(response.status, 200)
+        preg_snapshot = pregnancy["mode_snapshot"]
+        self.assertEqual(preg_snapshot["mode"], "preg")
+        self.assertFalse(preg_snapshot["cycle"])
+        self.assertIsNone(preg_snapshot["last_period"])
+        self.assertEqual(preg_snapshot["preg"]["lmp"], explicit_lmp)
+        self.assertEqual(preg_snapshot["periods"], [])
+        self.assertEqual(preg_snapshot["cycles"], [])
+        self.assertEqual(
+            [period["start"] for period in preg_snapshot["past_periods"]], starts,
+        )
+
+        for mode in ("meno", "none"):
+            response, payload = self.call(bot._api_mode, {"mode": mode})
+            self.assertEqual(response.status, 200)
+            snapshot = payload["mode_snapshot"]
+            self.assertEqual(snapshot["mode"], mode)
+            self.assertFalse(snapshot["cycle"])
+            self.assertIsNone(snapshot["preg"])
+            self.assertEqual(snapshot["periods"], [])
+            self.assertEqual(snapshot["cycles"], [])
+            self.assertEqual(
+                [period["start"] for period in snapshot["past_periods"]], starts,
+            )
+
+        response, irregular = self.call(bot._api_mode, {"mode": "irregular"})
+        self.assertEqual(response.status, 200)
+        irregular_snapshot = irregular["mode_snapshot"]
+        self.assertEqual(irregular_snapshot["mode"], "irregular")
+        self.assertFalse(irregular_snapshot["cycle"])
+        self.assertEqual(irregular_snapshot["cycles"], starts)
+        self.assertEqual(
+            [period["start"] for period in irregular_snapshot["periods"]], starts,
+        )
+        self.assertEqual(len(irregular_snapshot["stats"]["history"]), 3)
+        self.assertEqual(irregular_snapshot["stats"]["avg_cycle"], 29)
+
+        canonical = bot._mode_dependent_snapshot(self.cid, bot.row(self.cid))
+        self.assertEqual(irregular_snapshot, canonical)
+
     def test_legacy_checkin_and_pa_reject_invalid_or_future_dates(self):
         future = (bot.dtoday() + timedelta(days=1)).isoformat()
         response, payload = self.call(bot._api_checkin, {"date": future, "energy": 3})

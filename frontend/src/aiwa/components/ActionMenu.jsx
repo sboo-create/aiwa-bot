@@ -14,6 +14,7 @@ const PAGE_FOCUS_SELECTOR = [
   '[role="button"][tabindex]:not([tabindex="-1"])',
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
+const OVERLAY_FOCUS_SCOPE_SELECTOR = '[data-aiwa-calendar-modal="true"],[aria-modal="true"]';
 
 export function actionMenuFocusIndex(key, currentIndex, count) {
   if (count < 1) return -1;
@@ -49,6 +50,26 @@ export function actionMenuPageFocusCandidate(element, menuElement = null) {
 
   const rects = element.getClientRects?.();
   return !rects || rects.length > 0;
+}
+
+export function actionMenuFocusScope(triggerElement, ownerDocument = globalThis.document) {
+  return triggerElement?.closest?.(OVERLAY_FOCUS_SCOPE_SELECTOR) || ownerDocument;
+}
+
+export function actionMenuRelativeFocusTarget(
+  triggerElement,
+  direction,
+  menuElement = null,
+  ownerDocument = globalThis.document,
+) {
+  if (!triggerElement || !ownerDocument) return null;
+  const scope = actionMenuFocusScope(triggerElement, ownerDocument);
+  const candidates = [...(scope?.querySelectorAll?.(PAGE_FOCUS_SELECTOR) || [])].filter(
+    (element) => actionMenuPageFocusCandidate(element, menuElement),
+  );
+  const index = candidates.indexOf(triggerElement);
+  const targetIndex = actionMenuRelativeFocusIndex(index, candidates.length, direction);
+  return candidates[targetIndex] || triggerElement;
 }
 
 function computePosition(triggerRect, menuRect, align) {
@@ -101,12 +122,12 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
   const focusRelativeToTrigger = useCallback((direction) => {
     const triggerElement = triggerTarget();
     if (!triggerElement) return;
-    const candidates = [...document.querySelectorAll(PAGE_FOCUS_SELECTOR)].filter((element) => (
-      actionMenuPageFocusCandidate(element, menuRef.current)
-    ));
-    const index = candidates.indexOf(triggerElement);
-    const targetIndex = actionMenuRelativeFocusIndex(index, candidates.length, direction);
-    (candidates[targetIndex] || triggerElement).focus?.({ preventScroll: true });
+    actionMenuRelativeFocusTarget(
+      triggerElement,
+      direction,
+      menuRef.current,
+      triggerElement.ownerDocument || document,
+    )?.focus?.({ preventScroll: true });
   }, [triggerTarget]);
 
   const close = useCallback((restoreFocus = false) => {

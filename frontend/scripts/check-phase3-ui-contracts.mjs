@@ -17,6 +17,12 @@ import {
   isJournalSaveSessionCurrent,
 } from "../src/aiwa/lib/journalSave.js";
 import {
+  consumeCalendarDayLogSaveCompletion,
+  getCalendarDayLogSaveState,
+  requestCalendarDayLogSave,
+  subscribeToCalendarDayLogSave,
+} from "../src/aiwa/lib/calendarDayLogSave.js";
+import {
   getProfileMutationState,
   isProfileMutationSessionCurrent,
   requestProfileMutation,
@@ -62,12 +68,9 @@ await check("Journal and CalendarDayLog make one atomic call with a frozen targe
   for (const file of ["JournalPanel.jsx", "CalendarDayLogPanel.jsx"]) {
     const panel = source(`src/aiwa/panels/${file}`);
     assert.equal((panel.match(/acknowledgedHostWrite\("aiwaSaveJournal"/g) || []).length, 1, file);
-    assert.ok(panel.includes("payload: buildJournalSavePayload({"), file);
+    assert.ok(panel.includes("buildJournalSavePayload({"), file);
     assert.ok(panel.includes('inert={busy ? true : undefined}'), file);
     assert.ok(panel.includes('data-haptic="light"'), file);
-    assert.ok(panel.includes("if (saveLock.current) return;"), file);
-    assert.ok(panel.includes("const staleSession = openSession.current.open"), file);
-    assert.match(panel, /if \(staleSession\) \{[\s\S]*setBusy\(true\);[\s\S]*setSaveRevision/);
     for (const legacyMethod of ["setCheckin", "setDayCheckin", "toggleSym", "toggleDaySym", "addCustomSym", "markPA"]) {
       assert.equal(panel.includes(`acknowledgedHostWrite("${legacyMethod}"`), false, `${file}: ${legacyMethod}`);
     }
@@ -77,9 +80,12 @@ await check("Journal and CalendarDayLog make one atomic call with a frozen targe
   assert.ok(journal.includes("dayIso: currentDay.current"));
   assert.ok(journal.includes("currentDate: currentDay.current"));
   assert.ok(journal.includes("targetDate: operation.dayIso"));
-  assert.ok(dayLog.includes("iso: currentIso.current"));
-  assert.ok(dayLog.includes("currentDate: currentIso.current"));
-  assert.ok(dayLog.includes("targetDate: operation.iso"));
+  assert.ok(journal.includes("if (saveLock.current) return;"));
+  assert.ok(journal.includes("const staleSession = openSession.current.open"));
+  assert.match(journal, /if \(staleSession\) \{[\s\S]*setBusy\(true\);[\s\S]*setSaveRevision/);
+  assert.ok(dayLog.includes("requestCalendarDayLogSave("));
+  assert.ok(dayLog.includes("if (hasBlockingSave()) return;"));
+  assert.ok(dayLog.includes("(frozenPayload) => acknowledgedHostWrite"));
 });
 
 await check("Journal panels adopt only same-date reopen outcomes", () => {
@@ -104,15 +110,66 @@ await check("Journal panels adopt only same-date reopen outcomes", () => {
     currentDate: "2026-07-23",
     targetDate: "2026-07-23",
   }), false);
-  for (const [file, target] of [
-    ["JournalPanel.jsx", "saveLock.current?.dayIso === selectedDate"],
-    ["CalendarDayLogPanel.jsx", "saveLock.current?.iso === iso"],
-  ]) {
-    const panel = source(`src/aiwa/panels/${file}`);
-    assert.ok(panel.includes(target), file);
-    assert.ok(panel.includes("const isCurrentSaveSession = () => isJournalSaveSessionCurrent({"), file);
-    assert.ok(panel.includes("const staleSession = openSession.current.open && !isCurrentSaveSession();"), file);
-  }
+  const panel = source("src/aiwa/panels/JournalPanel.jsx");
+  assert.ok(panel.includes("saveLock.current?.dayIso === selectedDate"));
+  assert.ok(panel.includes("const isCurrentSaveSession = () => isJournalSaveSessionCurrent({"));
+  assert.ok(panel.includes("const staleSession = openSession.current.open && !isCurrentSaveSession();"));
+});
+
+await check("Calendar save lane survives parent unmount and adopts one same-date outcome", async () => {
+  const iso = "2026-03-14";
+  const firstPayload = { date: iso, energy: 3, mood: 2, symptoms: ["head"] };
+  const firstDraft = { energy: 3, mood: 2, symptoms: ["head"], custom: "", intimacy: false };
+  let settleFirst;
+  let hostCalls = 0;
+  const ownerStates = [];
+  const unmountOwner = subscribeToCalendarDayLogSave(iso, (state) => ownerStates.push(state));
+  const first = requestCalendarDayLogSave(iso, firstPayload, () => {
+    hostCalls += 1;
+    return new Promise((resolveWrite) => { settleFirst = resolveWrite; });
+  }, { draft: firstDraft });
+  await Promise.resolve();
+  assert.equal(first.owner, true);
+  assert.equal(hostCalls, 1);
+  assert.deepEqual(getCalendarDayLogSaveState(iso).active?.draft, firstDraft);
+
+  // CalendarPanel returns null here: the owner component and its subscription
+  // disappear while the host write remains pending in the module-level lane.
+  unmountOwner();
+  const reopenedStates = [];
+  const unmountReopened = subscribeToCalendarDayLogSave(iso, (state) => reopenedStates.push(state));
+  const attemptedNewDraft = { ...firstDraft, energy: 1, symptoms: ["cramp"] };
+  const second = requestCalendarDayLogSave(iso, { ...firstPayload, energy: 1 }, () => {
+    hostCalls += 1;
+    return Promise.resolve({ ok: true, source: "second" });
+  }, { draft: attemptedNewDraft });
+  assert.equal(second.owner, false);
+  assert.equal(second.promise, first.promise);
+  assert.equal(hostCalls, 1);
+  assert.deepEqual(getCalendarDayLogSaveState(iso).active?.draft, firstDraft);
+  assert.deepEqual(getCalendarDayLogSaveState("2026-03-15"), {
+    active: null,
+    completion: null,
+  });
+
+  // The original response arrives after the attempted second submit. Only its
+  // frozen draft/outcome may be observed by the reopened same-date component.
+  settleFirst({ ok: true, source: "first" });
+  assert.deepEqual(await second.promise, { ok: true, source: "first" });
+  assert.equal(hostCalls, 1);
+  const completion = getCalendarDayLogSaveState(iso).completion;
+  assert.equal(completion?.status, "fulfilled");
+  assert.deepEqual(completion?.value, { ok: true, source: "first" });
+  assert.deepEqual(completion?.draft, firstDraft);
+  assert.equal(reopenedStates.at(-1)?.completion?.id, first.operation.id);
+  assert.deepEqual(getCalendarDayLogSaveState("2026-03-15"), {
+    active: null,
+    completion: null,
+  });
+  assert.equal(consumeCalendarDayLogSaveCompletion(iso, first.operation.id), true);
+  assert.equal(consumeCalendarDayLogSaveCompletion(iso, first.operation.id), false);
+  assert.equal(getCalendarDayLogSaveState(iso).completion?.consumed, true);
+  unmountReopened();
 });
 
 await check("Profile mutations are single-flight across mounted panels", async () => {
@@ -265,8 +322,9 @@ await check("ActionMenu follows the keyboard focus and restore contract", () => 
     'initialFocus.current === "last"',
     'focus?.({ preventScroll: true })',
     'focusRelativeToTrigger(event.shiftKey ? -1 : 1)',
-    'actionMenuPageFocusCandidate(element, menuRef.current)',
-    'actionMenuRelativeFocusIndex(index, candidates.length, direction)',
+    'actionMenuRelativeFocusTarget(',
+    'triggerElement.ownerDocument || document',
+    'const OVERLAY_FOCUS_SCOPE_SELECTOR',
     'const PAGE_FOCUS_SELECTOR',
     'trigger.props.onKeyDown?.(event)',
     'trigger.props.onClick?.(event)',

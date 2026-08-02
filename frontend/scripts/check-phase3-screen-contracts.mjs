@@ -18,7 +18,10 @@ import {
   workoutReceiptEntry,
   workoutHeroForDay,
 } from "../src/aiwa/screens/ActivityScreen.jsx";
-import { workoutRequestForPayload } from "../src/aiwa/panels/WorkoutPanel.jsx";
+import {
+  acknowledgeWorkoutRequest,
+  workoutRequestForPayload,
+} from "../src/aiwa/lib/workoutRequest.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = (path) => readFileSync(resolve(root, path), "utf8");
@@ -191,18 +194,34 @@ await check("Workout retries reuse one durable request id until acknowledgement"
     rpe: "Нормально",
     items: [],
   };
-  const first = workoutRequestForPayload(null, payload, makeId);
-  const retry = workoutRequestForPayload(first, { ...payload }, makeId);
-  const changed = workoutRequestForPayload(first, { ...payload, duration: "60+ мин" }, makeId);
+  const first = workoutRequestForPayload(payload, makeId);
+  // Simulate closing/unmounting the owner: the next panel instance has no ref,
+  // but the module-level identity remains keyed by the canonical payload.
+  const retry = workoutRequestForPayload({ ...payload, items: [] }, makeId);
+  const reordered = workoutRequestForPayload({
+    items: [],
+    rpe: payload.rpe,
+    duration: payload.duration,
+    type: payload.type,
+    date: payload.date,
+  }, makeId);
+  const changed = workoutRequestForPayload({ ...payload, duration: "60+ мин" }, makeId);
   assert.equal(retry.id, first.id);
+  assert.equal(reordered.id, first.id);
   assert.notEqual(changed.id, first.id);
   assert.equal(sequence, 2);
+  assert.equal(acknowledgeWorkoutRequest(first), true);
+  const afterAcknowledgement = workoutRequestForPayload(payload, makeId);
+  assert.notEqual(afterAcknowledgement.id, first.id);
+  assert.equal(sequence, 3);
+  assert.equal(acknowledgeWorkoutRequest(afterAcknowledgement), true);
+  assert.equal(acknowledgeWorkoutRequest(changed), true);
 
   const panel = source("src/aiwa/panels/WorkoutPanel.jsx");
-  assert.ok(panel.includes("request_id: requestRef.current.id"));
-  assert.ok(panel.includes("requestRef.current = workoutRequestForPayload"));
+  assert.ok(panel.includes("const request = workoutRequestForPayload(workout)"));
+  assert.ok(panel.includes("request_id: request.id"));
   assert.ok(panel.includes("setReview({ text: result.review"));
-  assert.ok(panel.indexOf("requestRef.current = null;", panel.indexOf("setReview({ text: result.review")) > -1);
+  assert.ok(panel.indexOf("acknowledgeWorkoutRequest(request);", panel.indexOf("setReview({ text: result.review")) > -1);
 });
 
 await check("Activity explicit day cache wins over stale week counters", () => {

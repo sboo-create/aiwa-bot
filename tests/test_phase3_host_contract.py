@@ -165,6 +165,55 @@ process.stdout.write(JSON.stringify({{
             "revision": 5,
         })
 
+    def test_mode_receipt_fully_replaces_mode_state_when_refresh_fails(self):
+        apply_receipt = function_source("applySettingsMutationReceipt")
+        script = f"""
+var D={{profile:{{}},mode:"cycle",cycle:true,last_period:"2026-07-01",cycle_len:28,
+  periods:[{{start:"2026-07-01",end:"2026-07-05"}}],cycles:["2026-07-01"],
+  past_periods:[{{start:"2026-07-01",end:"2026-07-05"}}],stats:{{history:[{{start:"2026-07-01"}}]}},
+  preg:{{lmp:"stale"}},day:12,phase:"follicular",days_to_next:16,days_since:12,status:"normal",delay_days:0}};
+var ACTIVE_SCREEN="food",loadedFood=true,loadedTrain=true;
+var SETTINGS_DATA_REVISION=2,SETTINGS_DATA_REQUEST=3,SETTINGS_DATA_LATEST=null;
+function applyCanonicalToday(){{}}
+function syncMarks(){{}}
+function renderCurrentDataScreen(){{}}
+{apply_receipt}
+function base(mode){{return{{mode:mode,cycle:false,last_period:null,cycle_len:null,
+  periods:[],cycles:[],past_periods:[{{start:"2026-06-01",end:"2026-06-05"}}],stats:{{}},preg:null,
+  day:null,phase:null,days_to_next:null,days_since:null,status:null,delay_days:null}};}}
+function apply(snapshot){{return applySettingsMutationReceipt("mode",{{ok:true,mode:snapshot.mode,mode_snapshot:snapshot}});}}
+var preg=base("preg");preg.preg={{lmp:"2026-06-01",week:9,day:0,trimester:1,due:"2027-03-08",days_left:218}};
+var pregResult=apply(preg);
+var pregState={{ok:!!pregResult.data,preg:D.preg&&D.preg.lmp,periods:D.periods.length,cycles:D.cycles.length,past:D.past_periods.length}};
+var modes={{}};
+["meno","none"].forEach(function(mode){{D.periods=[{{start:"stale"}}];D.cycles=["stale"];D.preg={{lmp:"stale"}};var result=apply(base(mode));modes[mode]={{ok:!!result.data,periods:D.periods.length,cycles:D.cycles.length,preg:D.preg}};}});
+var irregular=base("irregular");irregular.periods=[{{start:"2026-05-01",end:"2026-05-05"}}];irregular.cycles=["2026-05-01"];irregular.stats={{history:[{{start:"2026-05-01",end:"2026-05-05"}}],avg_cycle:29}};
+var irregularResult=apply(irregular);
+var irregularState={{ok:!!irregularResult.data,cycles:D.cycles.slice(),history:D.stats.history.length,preg:D.preg}};
+var before=D.mode;var incomplete=applySettingsMutationReceipt("mode",{{ok:true,mode:"preg",mode_snapshot:base("preg")}});
+process.stdout.write(JSON.stringify({{preg:pregState,modes:modes,irregular:irregularState,incomplete:incomplete.error,modeAfterIncomplete:D.mode,before:before}}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], check=True, capture_output=True, text=True
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "preg": {
+                "ok": True, "preg": "2026-06-01", "periods": 0,
+                "cycles": 0, "past": 1,
+            },
+            "modes": {
+                "meno": {"ok": True, "periods": 0, "cycles": 0, "preg": None},
+                "none": {"ok": True, "periods": 0, "cycles": 0, "preg": None},
+            },
+            "irregular": {
+                "ok": True, "cycles": ["2026-05-01"], "history": 1,
+                "preg": None,
+            },
+            "incomplete": "incomplete_mode_receipt",
+            "modeAfterIncomplete": "irregular",
+            "before": "irregular",
+        })
+
     def test_calendar_period_toggle_refreshes_data_without_switching_tabs(self):
         toggle = function_source("toggleCalendarPeriodDay")
 
@@ -283,7 +332,8 @@ var window={{AiwaDeslop:{{refreshPanel:function(){{panelCalls+=1;}}}}}};
         self.assertIn("sessionStorage.setItem(key,JSON.stringify(pending))", pending)
         self.assertIn("pending.target!==todayIso&&pending.target!==yesterdayIso", pending)
         self.assertIn("target:todayIso", pending)
-        self.assertEqual(upload.count("sessionStorage.removeItem(pending.key)"), 1)
+        self.assertIn("failure.code==='food_target_expired'", upload)
+        self.assertEqual(upload.count("sessionStorage.removeItem(pending.key)"), 2)
         self.assertLess(
             upload.index("sessionStorage.removeItem(pending.key)"),
             upload.index("return r;"),
@@ -291,6 +341,69 @@ var window={{AiwaDeslop:{{refreshPanel:function(){{panelCalls+=1;}}}}}};
         self.assertIn("_applyDiary(r);", fallback)
         for field in ("error.code=", "error.status=", "error.payload="):
             self.assertIn(field, error)
+
+    def test_expired_photo_request_retires_pending_but_committed_replay_keeps_identity(self):
+        upload = function_source("uploadFoodPhoto")
+        digest = function_source("foodUploadDigest")
+        pending = function_source("foodUploadPending")
+        error = function_source("foodUploadError")
+        script = f"""
+var day="2026-08-02",store={{}},responses=[],submissions=[],uuid=0,INIT="signed";
+function moscowDateIso(){{return day;}}
+var sessionStorage={{
+  getItem:function(key){{return Object.prototype.hasOwnProperty.call(store,key)?store[key]:null;}},
+  setItem:function(key,value){{store[key]=value;}},
+  removeItem:function(key){{delete store[key];}}
+}};
+var window={{crypto:{{randomUUID:function(){{uuid+=1;return"uuid-"+uuid;}}}}}};
+function compressImage(file){{return Promise.resolve(file);}}
+function showFoodLoading(){{}}
+function hideFoodLoading(){{}}
+function FormData(){{this.values={{}};}}
+FormData.prototype.append=function(key,value){{this.values[key]=value;}};
+async function fetch(_url,options){{
+  submissions.push(Object.assign({{}},options.body.values));
+  var response=responses.shift();
+  return{{ok:response.ok,status:response.status,json:async function(){{return response.body;}}}};
+}}
+{error}
+{digest}
+{pending}
+{upload}
+var file={{name:"meal.jpg",size:4,lastModified:7,arrayBuffer:async function(){{return new ArrayBuffer(4);}}}};
+var key="aiwa:food-upload:meal.jpg:4:7";
+(async function(){{
+  store[key]=JSON.stringify({{request_id:"yesterday-uncommitted",target:"2026-08-01"}});
+  responses.push({{ok:false,status:409,body:{{ok:false,error:"food_target_expired",message:"expired"}}}});
+  var expired="";try{{await uploadFoodPhoto(file);}}catch(failure){{expired=failure.code;}}
+  var retired=!Object.prototype.hasOwnProperty.call(store,key);
+
+  responses.push({{ok:true,status:200,body:{{ok:true,meal_id:12,date:"2026-08-02"}}}});
+  await uploadFoodPhoto(file);
+  var fresh=submissions[1];
+
+  store[key]=JSON.stringify({{request_id:"yesterday-committed",target:"2026-08-01"}});
+  responses.push({{ok:true,status:200,body:{{ok:true,duplicate:true,meal_id:9,date:"2026-08-01"}}}});
+  var replay=await uploadFoodPhoto(file),committed=submissions[2];
+  process.stdout.write(JSON.stringify({{
+    expired:expired,retired:retired,freshRequest:fresh.request_id,
+    freshTarget:fresh.target,replayRequest:committed.request_id,
+    replayTarget:committed.target,duplicate:replay.duplicate
+  }}));
+}})().catch(function(failure){{console.error(failure);process.exit(1);}});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], check=True, capture_output=True, text=True
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "expired": "food_target_expired",
+            "retired": True,
+            "freshRequest": "uuid-1",
+            "freshTarget": "2026-08-02",
+            "replayRequest": "yesterday-committed",
+            "replayTarget": "2026-08-01",
+            "duplicate": True,
+        })
 
 
 if __name__ == "__main__":

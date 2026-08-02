@@ -159,8 +159,10 @@ await check("Journal closes only after explicit acknowledgement and current-day 
   assert.ok(journal.includes("[isOpen, saveRevision, selectedDate, sourceCheckin]"));
   assert.ok(journal.includes("currentDate: currentDay.current"));
   assert.ok(journal.includes("targetDate: operation.dayIso"));
-  assert.ok(dayLog.includes("currentDate: currentIso.current"));
-  assert.ok(dayLog.includes("targetDate: operation.iso"));
+  assert.ok(dayLog.includes("requestCalendarDayLogSave("));
+  assert.ok(dayLog.includes("const targetIso = currentIso.current;"));
+  assert.ok(dayLog.includes("date: targetIso"));
+  assert.ok(dayLog.includes("if (hasBlockingSave()) return;"));
 });
 
 await check("Reports are single-flight across Profile and History", async () => {

@@ -1111,16 +1111,18 @@ function applySettingsMutationReceipt(action,result){
   }else if(action==="proactive"){
     D.proactive_enabled=!!result.proactive_enabled;
   }else if(action==="mode"){
-    D.mode=result.mode;
-    D.cycle=result.mode==="cycle"&&!!result.last_period;
-    D.last_period=D.cycle?result.last_period:null;
-    D.cycle_len=D.cycle?(result.cycle_len||28):null;
-    if(result.mode==="male"){
-      D.periods=[];D.cycles=[];D.past_periods=[];
-    }else if(D.cycle&&result.last_period){
-      D.cycles=D.cycles||[];
-      if(D.cycles.indexOf(result.last_period)<0)D.cycles.push(result.last_period);
-    }
+    var snapshot=result.mode_snapshot,required=["mode","cycle","last_period","cycle_len","periods","cycles","past_periods","stats","preg","day","phase","days_to_next","days_since","status","delay_days"];
+    var complete=!!snapshot&&snapshot.mode===result.mode;
+    for(var i=0;complete&&i<required.length;i++)complete=Object.prototype.hasOwnProperty.call(snapshot,required[i]);
+    complete=complete&&Array.isArray(snapshot.periods)&&Array.isArray(snapshot.cycles)&&Array.isArray(snapshot.past_periods)&&snapshot.stats&&typeof snapshot.stats==="object";
+    if(complete&&(snapshot.mode==="cycle"||snapshot.mode==="irregular"))complete=Array.isArray(snapshot.stats.history);
+    if(complete&&snapshot.mode==="preg")complete=!!snapshot.preg&&typeof snapshot.preg==="object"&&!snapshot.cycle&&snapshot.periods.length===0&&snapshot.cycles.length===0;
+    if(complete&&(snapshot.mode==="meno"||snapshot.mode==="none"||snapshot.mode==="male"))complete=!snapshot.cycle&&snapshot.preg===null&&snapshot.periods.length===0&&snapshot.cycles.length===0;
+    if(!complete)return{ok:false,error:"incomplete_mode_receipt",message:"Сервер не вернул полное состояние режима"};
+    required.forEach(function(key){D[key]=snapshot[key];});
+    // These legacy keys are absent from a full /api/data snapshot. Removing
+    // them keeps receipt-only reconciliation equivalent to replacing D.
+    delete D.period_len;delete D.period_end;
   }else if(action==="partner"){
     D.partner_linked=!!result.linked;
   }else{
@@ -1466,7 +1468,9 @@ function _gv(id){var e=document.getElementById(id);return e?e.value:'';}
 function rescaleEdit(pid){var ed=document.getElementById('ed-'+pid);if(!ed)return;var bg=parseFloat(ed.getAttribute('data-bg'))||0;if(bg<=0)return;var g=parseFloat(String(_gv('f-g-'+pid)||'').replace(',','.'))||0;if(g<=0)return;var k=g/bg;var sv=function(id2,base,dec){var e=document.getElementById(id2);if(!e)return;var b=parseFloat(base);if(isNaN(b))return;e.value=dec?Math.round(b*k*10)/10:Math.round(b*k);};sv('f-kcal-'+pid,ed.getAttribute('data-bk'),0);sv('f-p-'+pid,ed.getAttribute('data-bp'),1);sv('f-f-'+pid,ed.getAttribute('data-bf'),1);sv('f-c-'+pid,ed.getAttribute('data-bc'),1);}
 async function saveMealEdit(id,pid){var p=document.getElementById('ed-'+pid);var body={id:id,title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};var r=await api('/api/diary_edit',body);if(_applyDiary(r)){haptic('impact','light');toast('Сохранено');}}
 function openManual(){var e=document.getElementById('ed-manual');if(!e)return;document.querySelectorAll('.djedit.open').forEach(function(x){if(x!==e)x.classList.remove('open');});e.classList.add('open');var t=document.getElementById('f-title-manual');if(t)setTimeout(function(){t.focus();},60);}
-async function saveManual(pid){var p=document.getElementById('ed-'+pid);var body={title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};if(!((body.title||'').trim())&&!((body.kcal||'').trim())){toast('Укажи название или калории');return;}showFoodLoading();var r=await api('/api/food_manual',body);hideFoodLoading();if(r&&r.ok){_applyDiary(r);toast('Добавлено');haptic('impact','light');}else toast((r&&r.message)||'Не получилось');}
+function foodGestureId(prefix){return(window.crypto&&typeof window.crypto.randomUUID==='function')?window.crypto.randomUUID():(prefix+'-'+Date.now()+'-'+Math.random().toString(36).slice(2));}
+function manualFoodPending(body){var fingerprint=JSON.stringify({title:String(body.title||'').trim(),kcal:String(body.kcal||'').trim(),protein:String(body.protein||'').trim(),fat:String(body.fat||'').trim(),carbs:String(body.carbs||'').trim(),grams:String(body.grams||'').trim(),slot:String(body.slot||'')}),key='aiwa:food-manual-pending',pending=null,today=moscowDateIso();try{pending=JSON.parse(sessionStorage.getItem(key)||'null');}catch(error){}if(!pending||pending.fingerprint!==fingerprint){pending={fingerprint:fingerprint,request_id:foodGestureId('food-manual'),date:today};try{sessionStorage.setItem(key,JSON.stringify(pending));}catch(error){}}return{key:key,request_id:pending.request_id,date:pending.date};}
+async function saveManual(pid){var p=document.getElementById('ed-'+pid);var body={title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};if(!((body.title||'').trim())&&!((body.kcal||'').trim())){toast('Укажи название или калории');return;}var pending=manualFoodPending(body);body.request_id=pending.request_id;body.date=pending.date;showFoodLoading();var r=await api('/api/food_manual',body);hideFoodLoading();if(r&&r.ok){try{sessionStorage.removeItem(pending.key);}catch(error){}_applyDiary(r);toast('Добавлено');haptic('impact','light');}else toast((r&&r.message)||'Не получилось');}
 function pickFoodPhoto(){var f=document.getElementById('foodfile');if(f)f.click();}
 async function onFoodFile(e){
   var file=e.target.files&&e.target.files[0];e.target.value='';if(!file)return;
@@ -1518,6 +1522,10 @@ async function uploadFoodPhoto(file){
         if(!resp.ok||!r||r.ok!==true){
           var failure=foodUploadError(r,resp.status,resp.ok?'Не разобрала фото':'Сервер не принял фото ('+resp.status+')');
           if(attempt===0&&(!failure.status||failure.status>=500))continue;
+          // An uncommitted request pinned to yesterday must not poison the
+          // next attempt with the same bytes. A committed replay is returned
+          // above as success and keeps its original idempotency identity.
+          if(failure.code==='food_target_expired')try{sessionStorage.removeItem(pending.key);}catch(retireError){}
           throw failure;
         }
         try{sessionStorage.removeItem(pending.key);}catch(clearError){}
@@ -1533,7 +1541,8 @@ async function uploadFoodPhoto(file){
 window.aiwaUploadFoodPhoto=uploadFoodPhoto;
 function toggleFoodText(){var b=document.getElementById('foodtextbox');if(!b)return;b.classList.toggle('hidden');var i=document.getElementById('foodtextin');if(i&&!b.classList.contains('hidden'))setTimeout(function(){i.focus();},50);}
 async function sendFoodText(){var i=document.getElementById('foodtextin');var t=(i&&i.value||'').trim();if(!t)return;i.value='';toast('Считаю…');showFoodLoading();var r=await api('/api/food_text',{text:t});hideFoodLoading();if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}else toast((r&&r.message)||'Не поняла блюдо');}
-async function delMeal(id){var r=await api('/api/diary_del',{id:id});if(_applyDiary(r))haptic('selection');}
+function foodDeletePending(id){var key='aiwa:food-delete:'+id,requestId='';try{requestId=sessionStorage.getItem(key)||'';}catch(error){}if(!requestId){requestId=foodGestureId('food-delete');try{sessionStorage.setItem(key,requestId);}catch(error){}}return{key:key,request_id:requestId};}
+async function delMeal(id){var pending=foodDeletePending(id),r=await api('/api/diary_del',{id:id,request_id:pending.request_id});if(_applyDiary(r)){try{sessionStorage.removeItem(pending.key);}catch(error){}haptic('selection');}}
 async function diaryReco(){var box=document.getElementById('diarreco');if(box)box.innerHTML=thinkHTML('Айва смотрит дневник');var r=await api('/api/diary_reco',{});if(box)box.textContent=(r&&r.text)||'Не получилось, попробуй позже.';}
 (function(){var f=document.getElementById('foodfile');if(f)f.addEventListener('change',onFoodFile);})();
 async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;if(window.AiwaDeslop){el.className='paper-screen';window.AiwaDeslop.renderActivity(el,{mode:D&&D.mode||"cycle"});loadedTrain=true;return;}var isMale=!!(D&&D.mode==="male");el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Безопаснее опираться на сон, энергию, боль и общее состояние.",hormones:["Главные ориентиры: энергия, боль, сон и восстановление.","Повышай интенсивность постепенно и оставляй время на восстановление.","При сильной боли, слабости или головокружении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли и рывков"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости или боли",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость или головокружение",recovery:"вода, белок после нагрузки, сон и спокойная заминка",suggestions:["Мало сил сегодня?","Что после нагрузки?","Можно при боли?"]};}
