@@ -655,6 +655,14 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         if surface_events[surface]
     ]
 
+    # События окна, разложенные по устройству один раз на все воронки. Без
+    # этого каждая воронка прочёсывала весь `selected` на КАЖДОГО своего
+    # пользователя: 57k событий × 300 пользователей — миллионы проходов, и
+    # именно они, а не чтение из базы, определяли цену 30-дневного окна.
+    by_device: dict[str, list[dict[str, Any]]] = {}
+    for item in selected:
+        by_device.setdefault(item["device_id"], []).append(item)
+
     def _feature_funnel(label: str, start_names: set[str], done_names: set[str], help_text: str,
                         done_predicate=None) -> dict[str, Any]:
         started_at: dict[str, float] = {}
@@ -663,9 +671,12 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                 started_at.setdefault(item["device_id"], item["ts"])
         completed = 0
         for user, start_ts in started_at.items():
-            if any(item["device_id"] == user and item["ts"] >= start_ts
+            # Тот же предикат, тот же набор событий — только без перебора
+            # чужих устройств, которые прежний `item["device_id"] == user`
+            # всё равно отбрасывал.
+            if any(item["ts"] >= start_ts
                    and ((done_predicate(item) if done_predicate else item["name"] in done_names))
-                   for item in selected):
+                   for item in by_device.get(user, ())):
                 completed += 1
         return {"label": label, "started": len(started_at), "completed": completed,
                 "rate": _percent(completed, len(started_at)) if started_at else None, "help": help_text}
