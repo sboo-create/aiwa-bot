@@ -16,7 +16,7 @@ import time
 import uuid
 from collections import Counter, defaultdict, deque
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -1158,7 +1158,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         "installs": len(ever_ids), "dau": len(selected_ids), "events": len(selected),
         "errors": (failed_requests if requests else 0) + explicit_errors, "overview": overview,
         "metrics": [{"label": x["label"], "value": ("—" if x["value"] is None else str(x["value"])),
-                     "good": True} for x in primary],
+                     "good": True} for x in primary] + _retention_cards(),
         "primary": primary,
         "audience": {"ever_used": len(ever_ids), "active": len(selected_ids), "dau": len(dau_ids),
                      "wau": len(wau_ids), "mau": len(mau_ids), "avg_dau": round(avg_dau, 1),
@@ -1374,6 +1374,86 @@ def dashboard_data(days: float = 1.0, source: str = "mixed") -> JSONResponse:
 @app.get("/logo.png")
 def dashboard_logo() -> FileResponse:
     return FileResponse(HERE / "logo.png", media_type="image/png")
+
+
+def compute_retention(now: float | None = None) -> dict:
+    """Fleet retention standard (RETENTION_ROLLOUT.md).
+
+    Two complementary views, both per canonical actor (until a product has
+    auth, user_id = device_id per the 02.08 pass-through decision):
+
+    - rolling d1/d7/d30 — share of a cohort that returned at least once
+      within N days of first use; mature cohorts only, last 90 days,
+      size-weighted (MultiTool reference);
+    - weekly cohort table — cohort = Moscow ISO week of first appearance,
+      distinct returners per week offset (concierge reference).
+
+    Activity = any event on a Moscow date. Cohorts start at the first event
+    ever recorded, so young modules simply show short tables.
+    """
+    now = now or time.time()
+    rows = _db.execute(
+        "SELECT device_id, ts FROM events WHERE device_id != ''",
+    ).fetchall()
+    to_day = lambda ts: datetime.fromtimestamp(ts, PRODUCT_TZ).date().toordinal()
+    active_days: dict[str, set[int]] = {}
+    for actor, ts in rows:
+        active_days.setdefault(actor, set()).add(to_day(ts))
+    today = to_day(now)
+    first = {actor: min(days) for actor, days in active_days.items()}
+
+    horizons = (1, 7, 30)
+    num = {n: 0 for n in horizons}
+    den = {n: 0 for n in horizons}
+    for actor, days in active_days.items():
+        cohort = first[actor]
+        if cohort < today - 90:
+            continue
+        for n in horizons:
+            if cohort + n <= today:  # only cohorts mature enough
+                den[n] += 1
+                if any(cohort < d <= cohort + n for d in days):
+                    num[n] += 1
+    rolling = {
+        f"d{n}": (num[n] / den[n]) if den[n] else None for n in horizons
+    }
+
+    monday = lambda ordinal: ordinal - date.fromordinal(ordinal).weekday()
+    this_week = monday(today)
+    weeks: dict[str, dict[str, int]] = {}
+    sizes: dict[str, int] = {}
+    for actor, days in active_days.items():
+        cohort_week = monday(first[actor])
+        if cohort_week < this_week - 12 * 7:
+            continue
+        key = date.fromordinal(cohort_week).isoformat()
+        sizes[key] = sizes.get(key, 0) + 1
+        for offset in {(monday(d) - cohort_week) // 7 for d in days}:
+            bucket = weeks.setdefault(key, {})
+            bucket[str(offset)] = bucket.get(str(offset), 0) + 1
+    return {
+        "computed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "actors": len(active_days),
+        "rolling": rolling,
+        "weekly_cohorts": {"sizes": sizes, "weeks": weeks},
+    }
+
+
+def _retention_cards() -> list[dict]:
+    try:
+        rolling = compute_retention()["rolling"]
+        return [
+            {"label": f"Retention {h.upper()} · rolling, 90d cohorts",
+             "value": f"{rolling[h] * 100:.0f}%"}
+            for h in ("d1", "d7") if rolling.get(h) is not None
+        ]
+    except Exception:  # noqa: BLE001 — cards degrade, the core survives
+        return []
+
+
+@app.get("/retention")
+def retention() -> JSONResponse:
+    return _no_store(compute_retention())
 
 
 @app.get("/")
