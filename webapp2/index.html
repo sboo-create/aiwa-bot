@@ -775,15 +775,26 @@ function closeHomePanel(){HOME_PANEL="";if(window.AiwaDeslop){window.AiwaDeslop.
 /* ── Недельная лента как переключатель дня ─────────────────────────────────
    Тап по дню перестраивает верх главной: счётчик, сводку Айвы и отметки за
    этот день. Статистика, график и история ниже остаются общими. */
+function canonicalSelectableDay(iso){
+  iso=String(iso||"");
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(iso))return"";
+  var parsed=new Date(iso+"T00:00:00Z");
+  if(isNaN(parsed.getTime())||parsed.toISOString().slice(0,10)!==iso)return"";
+  var t=isoOf(today),floor=isoOf(addDays(today,-364));
+  return iso>=floor&&iso<=t?iso:"";
+}
+function aiwaSelectedDay(){return SELECTED_DAY||isoOf(today);}
 function aiwaSelectDay(iso){
-  if(!iso)return;
-  var t=isoOf(today);
-  if(iso>t)return;
-  var next=(iso===t)?"":iso;
-  if(next===SELECTED_DAY)return;
+  var canonical=canonicalSelectableDay(iso);
+  if(!canonical)return aiwaSelectedDay();
+  var next=(canonical===isoOf(today))?"":canonical;
+  if(next===SELECTED_DAY)return aiwaSelectedDay();
   SELECTED_DAY=next;
+  // DayWheel suppresses its per-tick feedback when this host selector exists;
+  // the settled, canonical selection owns exactly one impact.
   haptic('impact','light');
   renderToday();
+  return aiwaSelectedDay();
 }
 /* Полоса дней тянется от первой отметки в истории до конца текущей недели, чтобы
    свайпом можно было дойти до любой даты с данными. Верхняя граница — год, иначе
@@ -802,7 +813,9 @@ function homeStripStart(monday){
     var e=new Date(earliest+"T00:00:00");e.setHours(0,0,0,0);
     if(e<start)start=addDays(e,-((e.getDay()+6)%7));
   }
-  var floor=addDays(monday,-364);
+  // Reads are available through the Moscow day exactly 364 days ago. Do not
+  // expose the preceding Monday when it falls outside that backend window.
+  var floor=addDays(today,-364);
   if(start<floor)start=floor;
   return start;
 }
@@ -814,6 +827,20 @@ function homeDayStrip(monday){
     state.label=WD[(date.getDay()+6)%7];
     state.monthLabel=MONTHS[date.getMonth()];
     if(!showPhases){state.phase=null;state.predictedPeriod=false;}
+    days.push(state);
+  }
+  return days;
+}
+function aiwaDayStrip(){
+  var days=[],floor=addDays(today,-364);
+  for(var date=floor;date<=today;date=addDays(date,1)){
+    var state=aiwaCalendarDateState(date);
+    state.iso=isoOf(date);
+    state.date=String(date.getDate());
+    state.label=WD[(date.getDay()+6)%7].toLowerCase();
+    state.monthLabel=MONTHS[date.getMonth()];
+    state.today=state.iso===isoOf(today);
+    state.disabled=false;
     days.push(state);
   }
   return days;
@@ -1022,7 +1049,96 @@ function syncMarks(){
   });
   (D.cycles||[]).forEach(function(x){CYCLE_SET[x]=true;if(!PERIOD_DAY[x]){PERIOD_DAY[x]=x;PERIOD_START[x]=true;PERIOD_END[x]=true;}});
 }
-async function reloadAfterEdit(){var d=await api("/api/data",{name:NAME});if(d&&d.onboarded){D=d;loadedFood=false;loadedTrain=false;syncMarks();renderToday();if(ACTIVE_SCREEN!=="today")go("today");}}
+var SETTINGS_DATA_REVISION=0,SETTINGS_DATA_REQUEST=0,SETTINGS_DATA_LATEST=null;
+function renderCurrentDataScreen(screen){
+  // Home can stay mounted under another tab and must receive the same canonical
+  // marks. Re-rendering the active root keeps its tab in place without navigation.
+  renderToday();
+  if(screen==="food"){
+    loadedFood=false;
+    renderFood();
+  }else if(screen==="train"){
+    loadedTrain=false;
+    renderTrain();
+  }else if(screen==="stats"){
+    renderStats();
+  }else if(screen==="chat"&&window.AiwaDeslop){
+    window.AiwaDeslop.renderChat(document.getElementById("scr-chat"),{messages:(D&&D.chatlog)||[]});
+  }
+  if(window.AiwaDeslop&&window.AiwaDeslop.refreshPanel)window.AiwaDeslop.refreshPanel();
+}
+async function reloadSettingsData(){
+  var request=++SETTINGS_DATA_REQUEST;
+  var operation=(async function(){
+    var d=await api("/api/data",{name:NAME});
+    if(request!==SETTINGS_DATA_REQUEST){
+      var latest=SETTINGS_DATA_LATEST;
+      return latest&&latest.id!==request?await latest.promise:{ok:false,error:"stale_refresh",message:"Данные уже обновляются"};
+    }
+    if(!d||d.error||!d.onboarded){
+      return{ok:false,error:(d&&d.error)||"refresh_failed",message:(d&&d.message)||"Не удалось обновить данные"};
+    }
+    D=d;
+    applyCanonicalToday();
+    loadedFood=false;loadedTrain=false;
+    syncMarks();
+    // The user may switch tabs while /api/data is in flight. Commit the
+    // canonical snapshot into whichever screen is current now.
+    renderCurrentDataScreen(ACTIVE_SCREEN);
+    SETTINGS_DATA_REVISION+=1;
+    return{data:D,revision:SETTINGS_DATA_REVISION};
+  })();
+  SETTINGS_DATA_LATEST={id:request,promise:operation};
+  return await operation;
+}
+function applySettingsMutationReceipt(action,result){
+  if(!result||result.ok!==true)return{ok:false,error:"invalid_receipt",message:"Сервер не подтвердил изменение"};
+  D=D||{};D.profile=D.profile||{};
+  if(action==="profile"){
+    D.profile=Object.assign({},D.profile,result.profile||{});
+    if(Object.prototype.hasOwnProperty.call(result,"cycle_len"))D.cycle_len=result.cycle_len;
+    if(Object.prototype.hasOwnProperty.call(result,"kcal_base"))D.kcal_base=result.kcal_base;
+  }else if(action==="preferences"){
+    D.profile.diet_note=result.diet_note||"";
+    D.profile.kcal_goal=result.kcal_goal==null?null:result.kcal_goal;
+    D.diet_note=D.profile.diet_note;D.kcal_goal=D.profile.kcal_goal;
+    if(Object.prototype.hasOwnProperty.call(result,"kcal_base"))D.kcal_base=result.kcal_base;
+  }else if(action==="summary"){
+    D.send_time=result.send_time;
+    D.daily_summary_enabled=!!result.daily_summary_enabled;
+  }else if(action==="daily-summary"){
+    D.daily_summary_enabled=!!result.daily_summary_enabled;
+  }else if(action==="proactive"){
+    D.proactive_enabled=!!result.proactive_enabled;
+  }else if(action==="mode"){
+    D.mode=result.mode;
+    D.cycle=result.mode==="cycle"&&!!result.last_period;
+    D.last_period=D.cycle?result.last_period:null;
+    D.cycle_len=D.cycle?(result.cycle_len||28):null;
+    if(result.mode==="male"){
+      D.periods=[];D.cycles=[];D.past_periods=[];
+    }else if(D.cycle&&result.last_period){
+      D.cycles=D.cycles||[];
+      if(D.cycles.indexOf(result.last_period)<0)D.cycles.push(result.last_period);
+    }
+  }else if(action==="partner"){
+    D.partner_linked=!!result.linked;
+  }else{
+    return{ok:false,error:"unsupported_receipt",message:"Неизвестный тип настройки"};
+  }
+  // Retire any older /api/data read that started before this acknowledged
+  // mutation receipt; it must not overwrite the newer in-memory state.
+  SETTINGS_DATA_REQUEST+=1;SETTINGS_DATA_LATEST=null;
+  applyCanonicalToday();loadedFood=false;loadedTrain=false;syncMarks();
+  renderCurrentDataScreen(ACTIVE_SCREEN);
+  SETTINGS_DATA_REVISION+=1;
+  return{data:D,revision:SETTINGS_DATA_REVISION};
+}
+async function reloadAfterEdit(){
+  var snapshot=await reloadSettingsData();
+  if(snapshot&&snapshot.data&&ACTIVE_SCREEN!=="today")go("today");
+  return snapshot;
+}
 var UNDO_PERIOD=null;
 function toast(msg,action){
   if(!window.aiwaToast)return;
@@ -1088,21 +1204,63 @@ async function undoPeriod(){var p=UNDO_PERIOD;if(!p)return;try{await api("/api/p
 async function markPA(iso){haptic("impact","light");try{var r=await api("/api/pa",{date:iso});if(r&&!r.skip){D.pa=D.pa||[];if(r.marked){PA_SET[iso]=true;if(D.pa.indexOf(iso)<0)D.pa.push(iso);}else{delete PA_SET[iso];D.pa=D.pa.filter(function(x){return x!==iso;});}drawCal();if(window.AiwaDeslop)window.AiwaDeslop.refreshPanel();return r.marked;}}catch(e){if(iso===isoOf(today)){renderToday();toast("Не удалось сохранить отметку");}}return !!PA_SET[iso];}
 async function toggleTodayIntimacy(){return markPA(isoOf(today));}
 async function toggleCalendarPeriodDay(iso){
-  if(!iso||iso>isoOf(today))return;
+  if(!iso||iso>isoOf(today))return{ok:false,error:"invalid_date",text:"Нельзя изменить этот день"};
   var wasMarked=!!PERIOD_DAY[iso],nextMarked=!wasMarked;
   seedEditDaysFromActual();
   if(nextMarked)EDIT_DAYS[iso]=true;else delete EDIT_DAYS[iso];
   haptic("selection");
   try{
     var ranges=rangesFromEditDays(),r=await api("/api/period",{action:"replace",periods:ranges});
-    if(!r||r.error)throw new Error("period");
-    EDIT_DAYS={};await reloadAfterEdit();
+    if(!r||r.ok!==true){
+      var saveText=(r&&(r.text||r.message))||"Не удалось сохранить отметку";
+      EDIT_DAYS={};renderToday();if(window.AiwaDeslop)window.AiwaDeslop.refreshPanel();toast(saveText);
+      return{ok:false,error:(r&&r.error)||"period_save_failed",text:saveText,date:iso,marked:wasMarked,receipt:r||null};
+    }
+    EDIT_DAYS={};
+    var snapshot=await reloadSettingsData();
+    if(!snapshot||!snapshot.data){
+      toast("Отметка сохранена, но данные не обновились");
+      return{ok:false,error:"refresh_failed",text:"Отметка сохранена, но данные не обновились",date:iso,marked:nextMarked,receipt:r};
+    }
     if(window.AiwaDeslop)window.AiwaDeslop.refreshPanel();
-    return nextMarked;
-  }catch(e){EDIT_DAYS={};renderToday();if(window.AiwaDeslop)window.AiwaDeslop.refreshPanel();toast("Не удалось сохранить отметку");return wasMarked;}
+    return{ok:true,date:iso,marked:!!PERIOD_DAY[iso],receipt:r,data:snapshot.data,revision:snapshot.revision};
+  }catch(e){
+    EDIT_DAYS={};renderToday();if(window.AiwaDeslop)window.AiwaDeslop.refreshPanel();
+    toast("Не удалось сохранить отметку");
+    return{ok:false,error:"period_save_failed",text:"Не удалось сохранить отметку",date:iso,marked:wasMarked,receipt:null};
+  }
 }
 function dayLogFor(iso){var log=null;if(iso===isoOf(today))log=D.today_log;((D&&D.sym_log)||[]).forEach(function(l){if(!log&&(l.date||l.log_date)===iso)log=l;});return log;}
 function getAiwaDayCheckin(iso){var l=dayLogFor(iso)||{};return{date:iso,energy:l.energy||0,mood:l.mood||0,symptoms:(l.symptoms||[]).slice(),intimacy:!!PA_SET[iso],today:iso===isoOf(today)};}
+function journalRequestSnapshot(payload){
+  var source=payload&&typeof payload==="object"?payload:{};
+  var body={
+    date:source.date,
+    energy:source.energy,
+    mood:source.mood,
+    symptoms:Array.isArray(source.symptoms)?source.symptoms.slice():source.symptoms,
+    custom_symptoms:Array.isArray(source.custom_symptoms)?source.custom_symptoms.slice():source.custom_symptoms,
+    intimacy:source.intimacy
+  };
+  if(Object.prototype.hasOwnProperty.call(source,"period"))body.period=source.period;
+  return body;
+}
+async function aiwaSaveJournal(payload){
+  // Capture the absolute target and arrays before the request. A day switch or
+  // draft edit while it is in flight cannot redirect this idempotent write.
+  var body=journalRequestSnapshot(payload);
+  var result=await api("/api/journal",body);
+  if(!result||result.ok!==true){
+    return result||{ok:false,error:"journal_failed",text:"Не удалось сохранить журнал"};
+  }
+  // The bridge is deliberately quiet. React owns the one toast and the initiating
+  // button owns the one haptic; only canonical data refresh happens here.
+  var snapshot=await reloadSettingsData();
+  if(!snapshot||!snapshot.data){
+    return{ok:false,error:"refresh_failed",text:"Запись сохранена, но данные не обновились",receipt:result};
+  }
+  return Object.assign({},result,{data:snapshot.data,revision:snapshot.revision});
+}
 function ensureDayLog(iso){D.sym_log=D.sym_log||[];var found=dayLogFor(iso);if(!found){found={date:iso,symptoms:[]};D.sym_log.push(found);}found.symptoms=found.symptoms||[];if(iso===isoOf(today))D.today_log=found;return found;}
 async function setDayCheckin(iso,kind,val){var seq=++CHECKIN_SEQ,lg=ensureDayLog(iso);lg[kind]=val;haptic("selection");var body={date:iso};body[kind]=val;var r=await api("/api/checkin",body);if(seq===CHECKIN_SEQ&&r&&r.log){var t=ensureDayLog(iso);t.energy=r.log.energy;t.mood=r.log.mood;t.symptoms=(r.log.symptoms||[]).slice();}if(window.AiwaDeslop)window.AiwaDeslop.refreshPanel();}
 async function toggleDaySym(iso,code){var seq=++CHECKIN_SEQ,lg=ensureDayLog(iso),ss=lg.symptoms,i=ss.indexOf(code);if(i>=0)ss.splice(i,1);else ss.push(code);haptic("selection");var r=await api("/api/checkin",{date:iso,symptom:code});if(seq===CHECKIN_SEQ&&r&&r.log){ensureDayLog(iso).symptoms=(r.log.symptoms||[]).slice();}if(window.AiwaDeslop)window.AiwaDeslop.refreshPanel();}
@@ -1310,14 +1468,68 @@ async function saveMealEdit(id,pid){var p=document.getElementById('ed-'+pid);var
 function openManual(){var e=document.getElementById('ed-manual');if(!e)return;document.querySelectorAll('.djedit.open').forEach(function(x){if(x!==e)x.classList.remove('open');});e.classList.add('open');var t=document.getElementById('f-title-manual');if(t)setTimeout(function(){t.focus();},60);}
 async function saveManual(pid){var p=document.getElementById('ed-'+pid);var body={title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};if(!((body.title||'').trim())&&!((body.kcal||'').trim())){toast('Укажи название или калории');return;}showFoodLoading();var r=await api('/api/food_manual',body);hideFoodLoading();if(r&&r.ok){_applyDiary(r);toast('Добавлено');haptic('impact','light');}else toast((r&&r.message)||'Не получилось');}
 function pickFoodPhoto(){var f=document.getElementById('foodfile');if(f)f.click();}
-async function onFoodFile(e){var file=e.target.files&&e.target.files[0];e.target.value='';if(file)await uploadFoodPhoto(file);}
+async function onFoodFile(e){
+  var file=e.target.files&&e.target.files[0];e.target.value='';if(!file)return;
+  toast('Сжимаю и разбираю фото…');
+  try{
+    var r=await uploadFoodPhoto(file);
+    _applyDiary(r);
+    toast('Добавлено: '+((r.rec&&r.rec.title)||'приём')+' · '+((r.rec&&r.rec.kcal)||0)+' ккал');
+    haptic('impact','light');
+  }catch(error){toast(error&&error.message||'Не удалось отправить фото, попробуй ещё раз');}
+}
 function compressImage(file,maxDim,quality){return new Promise(function(resolve){try{if(!/^image\//.test(file.type||'')){resolve(file);return;}var url=URL.createObjectURL(file),img=new Image();img.onload=function(){try{URL.revokeObjectURL(url);}catch(e){}var w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;if(!w||!h){resolve(file);return;}var scale=Math.min(1,maxDim/Math.max(w,h));var cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));var c=document.createElement('canvas');c.width=cw;c.height=ch;var ctx=c.getContext('2d');ctx.drawImage(img,0,0,cw,ch);if(c.toBlob){c.toBlob(function(b){resolve(b&&b.size?b:file);},'image/jpeg',quality||0.82);}else{try{var d=c.toDataURL('image/jpeg',quality||0.82),bin=atob(d.split(',')[1]),ar=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)ar[i]=bin.charCodeAt(i);resolve(new Blob([ar],{type:'image/jpeg'}));}catch(e){resolve(file);}}};img.onerror=function(){try{URL.revokeObjectURL(url);}catch(e){}resolve(file);};img.src=url;}catch(e){resolve(file);}});}
-async function uploadFoodPhoto(file){toast('Сжимаю и разбираю фото…');var blob=file;try{blob=await compressImage(file,1600,0.82);}catch(e){}showFoodLoading();try{var fd=new FormData();fd.append('initData',INIT);fd.append('photo',blob,'food.jpg');
-  var resp=await fetch('/api/food_photo',{method:'POST',body:fd});
-  if(!resp.ok){hideFoodLoading();toast(resp.status===413?'Фото слишком большое':'Сервер не принял фото ('+resp.status+')');return;}
-  hideFoodLoading();var r=await resp.json();
-  if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.title)||'приём')+' · '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}
-  else{toast((r&&r.message)||'Не разобрала фото');}}catch(e){hideFoodLoading();toast('Не удалось отправить фото, попробуй ещё раз');}}
+function foodUploadError(payload,status,fallback){
+  var message=payload&&(payload.text||payload.message);
+  if(!message&&status===413)message='Фото слишком большое';
+  var error=new Error(message||fallback||'Не удалось отправить фото, попробуй ещё раз');
+  error.code=payload&&payload.error||'food_upload_failed';
+  error.status=Number(status)||0;
+  error.payload=payload||null;
+  return error;
+}
+async function foodUploadDigest(blob,file){
+  try{
+    var bytes=await blob.arrayBuffer(),hash=await window.crypto.subtle.digest('SHA-256',bytes),view=new Uint8Array(hash),hex='';
+    for(var i=0;i<view.length;i++)hex+=view[i].toString(16).padStart(2,'0');
+    return hex;
+  }catch(error){return [file&&file.name||'food',file&&file.size||blob.size||0,file&&file.lastModified||0].join(':');}
+}
+function foodUploadPending(digest){
+  var key='aiwa:food-upload:'+digest,pending=null,todayIso=moscowDateIso(),yesterdayDate=new Date(todayIso+'T00:00:00Z');
+  yesterdayDate.setUTCDate(yesterdayDate.getUTCDate()-1);var yesterdayIso=yesterdayDate.toISOString().slice(0,10);
+  try{pending=JSON.parse(sessionStorage.getItem(key)||'null');}catch(error){}
+  if(!pending||!pending.request_id||(pending.target!==todayIso&&pending.target!==yesterdayIso)){
+    pending={request_id:(window.crypto&&typeof window.crypto.randomUUID==="function")?window.crypto.randomUUID():("food-"+Date.now()+"-"+Math.random().toString(36).slice(2)),target:todayIso};
+    try{sessionStorage.setItem(key,JSON.stringify(pending));}catch(error){}
+  }
+  return{key:key,request_id:pending.request_id,target:pending.target};
+}
+async function uploadFoodPhoto(file){
+  var blob=file;try{blob=await compressImage(file,1600,0.82);}catch(e){}
+  var digest=await foodUploadDigest(blob,file),pending=foodUploadPending(digest),requestId=pending.request_id,target=pending.target;
+  showFoodLoading();
+  try{
+    for(var attempt=0;attempt<2;attempt++){
+      try{
+        var fd=new FormData();fd.append('initData',INIT);fd.append('photo',blob,'food.jpg');fd.append('request_id',requestId);fd.append('target',target);
+        var resp=await fetch('/api/food_photo',{method:'POST',body:fd}),r=null;
+        try{r=await resp.json();}catch(parseError){}
+        if(!resp.ok||!r||r.ok!==true){
+          var failure=foodUploadError(r,resp.status,resp.ok?'Не разобрала фото':'Сервер не принял фото ('+resp.status+')');
+          if(attempt===0&&(!failure.status||failure.status>=500))continue;
+          throw failure;
+        }
+        try{sessionStorage.removeItem(pending.key);}catch(clearError){}
+        return r;
+      }catch(error){
+        if(attempt===0&&(!error||!error.code))continue;
+        if(error&&error.code)throw error;
+        throw foodUploadError(null,0,error&&error.message);
+      }
+    }
+  }finally{hideFoodLoading();}
+}
 window.aiwaUploadFoodPhoto=uploadFoodPhoto;
 function toggleFoodText(){var b=document.getElementById('foodtextbox');if(!b)return;b.classList.toggle('hidden');var i=document.getElementById('foodtextin');if(i&&!b.classList.contains('hidden'))setTimeout(function(){i.focus();},50);}
 async function sendFoodText(){var i=document.getElementById('foodtextin');var t=(i&&i.value||'').trim();if(!t)return;i.value='';toast('Считаю…');showFoodLoading();var r=await api('/api/food_text',{text:t});hideFoodLoading();if(r&&r.ok){_applyDiary(r);toast('Добавлено: '+((r.rec&&r.rec.kcal)||0)+' ккал');haptic('impact','light');}else toast((r&&r.message)||'Не поняла блюдо');}
@@ -1664,7 +1876,7 @@ function switchPreg(){chooseMode('preg');}
 async function saveHubPrefs(){var t=(document.getElementById('hubPrefs').value||"").trim();var _kc=(document.getElementById('hubKcal')&&document.getElementById('hubKcal').value||"").trim();var r=await api('/api/prefs',{diet_note:t,kcal_goal:_kc});if(r&&r.ok){D.profile=D.profile||{};D.profile.diet_note=r.diet_note;if('kcal_goal' in r)D.profile.kcal_goal=r.kcal_goal;if(r.kcal_base)D.kcal_base=r.kcal_base;loadedFood=false;toast(_kc&&r.kcal_goal?("Цель: "+r.kcal_goal+" ккал"):"Сохранила предпочтения");renderHub();}else toast("Не получилось сохранить");}
 async function saveHubProfile(){var h=parseFloat(String(document.getElementById('hubH').value||"").replace(",","."));var w=parseFloat(String(document.getElementById('hubW').value||"").replace(",","."));var a=parseInt(String(document.getElementById('hubA').value||""),10);if(!(h>120&&h<220&&w>30&&w<250&&a>10&&a<80)){toast("Проверь рост, вес и возраст");return;}var _cy=parseInt(String(document.getElementById('hubCycle')&&document.getElementById('hubCycle').value||''),10);var _body={height:h,weight:w,age:a};if(_cy>=15&&_cy<=60)_body.cycle_len=_cy;var r=await api('/api/profile',_body);if(r&&r.ok){D.profile=Object.assign(D.profile||{},r.profile);if(r.kcal_base)D.kcal_base=r.kcal_base;if(r.cycle_len)D.cycle_len=r.cycle_len;loadedFood=false;loadedTrain=false;toast("Данные обновлены");renderHub();}else toast((r&&r.text)||"Не получилось сохранить");}
 function setKcalPreset(m){var b=(D&&D.kcal_base)||0;if(!b){toast('Заполни рост, вес и возраст');return;}var el=document.getElementById('hubKcal');if(el)el.value=Math.round(b*m/10)*10;}
-async function saveHubTime(){var t=(document.getElementById('hubTime').value||"").trim();var r=await api('/api/settime',{time:t});if(r&&r.ok){D.send_time=r.send_time;toast("Сводка в "+r.send_time);renderHub();}else toast((r&&r.text)||"Время в формате 09:00");}
+async function saveHubTime(){var t=(document.getElementById('hubTime').value||"").trim();var r=await api('/api/settime',{time:t,daily_summary_enabled:!!(D&&D.daily_summary_enabled)});if(r&&r.ok){D.send_time=r.send_time;D.daily_summary_enabled=!!r.daily_summary_enabled;toast("Сводка в "+r.send_time);renderHub();}else toast((r&&r.text)||"Время в формате 09:00");}
 function getReport(){
   var h="<div class='hubhead'><div class='hubtitle'>"+(D&&D.mode==="male"?"Выписка по самочувствию":"Выписка для врача")+"</div><button class='hubclose' aria-label='Закрыть' onclick='closeHub()'>✕</button></div><div class='hubpanel'>";
   h+="<div class='cc' style='margin-bottom:12px'>За какой период собрать выписку? PDF придёт в чат бота.</div>";
@@ -1694,7 +1906,15 @@ function symptomDiary(){var logs=(D&&D.sym_log)||[];logs=logs.filter(function(l)
 function applyViewport(){if(!tg)return;try{var sa=(tg.safeAreaInset&&tg.safeAreaInset.top)||0;var ca=(tg.contentSafeAreaInset&&tg.contentSafeAreaInset.top)||0;var t=sa+ca;if(tg.isFullscreen&&t<44)t=56;document.documentElement.style.setProperty('--safe-top',t+'px');}catch(e){}}
 if(tg){try{tg.onEvent&&tg.onEvent('viewportChanged',applyViewport);tg.onEvent&&tg.onEvent('safeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('contentSafeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('fullscreenChanged',applyViewport);}catch(e){}applyViewport();setTimeout(applyViewport,800);}
 
-document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('.pbtn,.chip,.swapbtn,.copylink');if(!b)return;haptic('impact','light');var r=document.createElement('span');r.className='ripple';var rc=b.getBoundingClientRect();r.style.left=(e.clientX-rc.left)+'px';r.style.top=(e.clientY-rc.top)+'px';b.appendChild(r);setTimeout(function(){if(r.parentNode)r.parentNode.removeChild(r);},600);});
+document.addEventListener('click',function(e){
+  var b=e.target.closest&&e.target.closest('.pbtn,.chip,.swapbtn,.copylink,[data-haptic="light"]');
+  if(!b||b.closest(':disabled,[inert],[aria-disabled="true"],[data-disabled="true"],[data-haptic="off"]'))return;
+  haptic('impact','light');
+  // React actions opt in to feedback only. The legacy button classes retain
+  // their old ripple without adding a second listener/haptic owner.
+  if(!(b.matches&&b.matches('.pbtn,.chip,.swapbtn,.copylink')))return;
+  var r=document.createElement('span');r.className='ripple';var rc=b.getBoundingClientRect();r.style.left=(e.clientX-rc.left)+'px';r.style.top=(e.clientY-rc.top)+'px';b.appendChild(r);setTimeout(function(){if(r.parentNode)r.parentNode.removeChild(r);},600);
+},true);
 function boot(){applyCanonicalToday();installDayRollover();renderToday();try{if(window.AiwaDeslop&&window.AiwaDeslop.prefetch)window.AiwaDeslop.prefetch();}catch(e){}var _tab=null;try{_tab=new URLSearchParams(location.search).get('tab');}catch(e){}var _ok={today:1,food:1,train:1,chat:1};go(_ok[_tab]?_tab:'today');}
 function demoAiwaData(){
   var p1=isoOf(addDays(today,-99)),p2=isoOf(addDays(today,-71)),p3=isoOf(addDays(today,-40)),p4=isoOf(addDays(today,-11));
