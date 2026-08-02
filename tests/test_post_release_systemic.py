@@ -254,7 +254,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
         )
         self.assertIn("canAdd", bundle)
         self.assertIn('title: "Выписка готова"', bundle)
-        self.assertIn("a.showPopup({", bundle)
+        self.assertRegex(bundle, r"\.showPopup\(\s*\{")
         self.assertNotIn(
             'Ot("PDF отправлен — открываю чат", { type: "success" })',
             bundle,

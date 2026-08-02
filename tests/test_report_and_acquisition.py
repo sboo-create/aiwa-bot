@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import types
@@ -344,18 +345,28 @@ class ReportAndAcquisitionTests(unittest.TestCase):
             ))
 
     def test_current_mini_app_confirms_delivery_and_returns_to_chat(self):
-        bundle = _deslop_bundle(
-            Path(__file__).resolve().parents[1] / "webapp2/assets/deslop"
-        ).read_text(encoding="utf-8")
-        self.assertIn('y?.ok && y?.delivered', bundle)
+        root = Path(__file__).resolve().parents[1]
+        bundle = _deslop_bundle(root / "webapp2/assets/deslop").read_text(encoding="utf-8")
+        delivery_checks = re.findall(
+            r'([A-Za-z_$][\w$]*)\?\.ok && \1\?\.delivered', bundle,
+        )
         # оба места запроса выписки (профиль и журнал симптомов) проверяют доставку
-        self.assertGreaterEqual(bundle.count("?.delivered"), 2)
-        # кнопка выписки блокируется на время сборки
-        self.assertIn('"Собираю…"', bundle)
+        self.assertGreaterEqual(len(delivery_checks), 2)
+        # обе кнопки передают busy-state в общий AiwaButton, который блокирует
+        # взаимодействие и сообщает занятость assistive-технологиям
+        profile_panel = (root / "frontend/src/aiwa/panels/ProfilePanel.jsx").read_text(encoding="utf-8")
+        history_section = (root / "frontend/src/aiwa/sections/SymptomHistorySection.jsx").read_text(encoding="utf-8")
+        aiwa_button = (root / "frontend/src/aiwa/components/AiwaButton.jsx").read_text(encoding="utf-8")
+        self.assertIn('label="Собрать выписку"', profile_panel)
+        self.assertIn("loading={reportBusy}", profile_panel)
+        self.assertIn('label="Сформировать выписку"', history_section)
+        self.assertIn("loading={busy}", history_section)
+        self.assertIn("const inactive = disabled || loading;", aiwa_button)
+        self.assertIn("aria-busy={loading || undefined}", aiwa_button)
         self.assertIn('"Собрать выписку"', bundle)
         self.assertIn('title: "Выписка готова"', bundle)
-        self.assertIn("a.showPopup({", bundle)
-        self.assertIn("a?.close?.()", bundle)
+        self.assertRegex(bundle, r"\.showPopup\(\s*\{")
+        self.assertRegex(bundle, r"\(\) => [A-Za-z_$][\w$]*\.close\?\.\(\)")
 
 
 if __name__ == "__main__":

@@ -357,7 +357,10 @@ step("AIWA: production bundle", () => {
   }
   if (existsSync(cssPath)) {
     const css = readFileSync(cssPath, "utf8");
-    if (statSync(cssPath).size < 500_000) failures.push("Deslop CSS bundle is unexpectedly small");
+    // The canonical minified v181 bundle on main is ~263 KB. Keep enough
+    // headroom for deterministic minifier changes while still catching an
+    // empty, truncated, or token-only stylesheet.
+    if (statSync(cssPath).size < 250_000) failures.push("Deslop CSS bundle is unexpectedly small");
     requireText("production CSS", css, ["--ui-font-interface", "--ui-action-primary-background", "@font-face"]);
   }
 });
