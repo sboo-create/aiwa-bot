@@ -8,7 +8,8 @@ import { JournalChoiceGroup } from "../components/JournalChoiceGroup";
 import { JournalSymptomGroup } from "../components/JournalSymptomGroup";
 import { JournalCustomSymptom } from "../components/JournalCustomSymptom";
 import { JOURNAL_ENERGY_OPTIONS, JOURNAL_MOOD_OPTIONS, JOURNAL_SYMPTOM_GROUPS } from "../lib/constants";
-import { acknowledgedHostWrite, actionProps, read, showToast, withHostToastsMuted } from "../lib/api";
+import { acknowledgedHostWrite, actionProps, read, showToast } from "../lib/api";
+import { buildJournalSavePayload, isJournalSaveSessionCurrent } from "../lib/journalSave";
 
 /**
  * Day log for an arbitrary calendar day, shown as a @deslop/tma ModalView bottom
@@ -21,7 +22,6 @@ import { acknowledgedHostWrite, actionProps, read, showToast, withHostToastsMute
  * day be toggled from two places in one gesture.
  */
 export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, showIntimacy = true }) {
-  const [saved, setSaved] = useState({});
   const [symptoms, setSymptoms] = useState([]);
   const [energy, setEnergy] = useState(0);
   const [mood, setMood] = useState(0);
@@ -32,6 +32,7 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
   const saveLock = useRef(null);
   const saveId = useRef(0);
   const openSession = useRef({ generation: 0, open: false });
+  const draftSeed = useRef("");
   const currentIso = useRef(iso);
   currentIso.current = iso;
 
@@ -48,8 +49,10 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
       setBusy(true);
       return;
     }
+    const seedKey = `${openSession.current.generation}:${iso}:${saveRevision}`;
+    if (draftSeed.current === seedKey) return;
+    draftSeed.current = seedKey;
     const day = read("getAiwaDayCheckin", iso) || {};
-    setSaved(day);
     setSymptoms(day.symptoms || []);
     setEnergy(day.energy || 0);
     setMood(day.mood || 0);
@@ -59,6 +62,7 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
   }, [iso, open, saveRevision]);
 
   const toggleSymptom = (code) => {
+    if (saveLock.current) return;
     setSymptoms((current) => (current.includes(code) ? current.filter((item) => item !== code) : [...current, code]));
   };
   const groups = symptomGroups?.length ? symptomGroups : JOURNAL_SYMPTOM_GROUPS;
@@ -68,45 +72,41 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
     const operation = {
       id: ++saveId.current,
       generation: openSession.current.generation,
-      iso,
+      iso: currentIso.current,
+      payload: buildJournalSavePayload({
+        date: currentIso.current,
+        energy,
+        mood,
+        symptoms,
+        custom,
+        intimacy,
+      }),
     };
     saveLock.current = operation;
-    const savedSymptoms = saved.symptoms || [];
-    const extra = custom.trim();
     setBusy(true);
+    const isCurrentSaveSession = () => isJournalSaveSessionCurrent({
+      isOpen: openSession.current.open,
+      currentGeneration: openSession.current.generation,
+      startedGeneration: operation.generation,
+      currentDate: currentIso.current,
+      targetDate: operation.iso,
+    });
     try {
-      await withHostToastsMuted(async () => {
-        if (energy !== (saved.energy || 0)) await acknowledgedHostWrite("setDayCheckin", iso, "energy", energy);
-        if (mood !== (saved.mood || 0)) await acknowledgedHostWrite("setDayCheckin", iso, "mood", mood);
-        for (const code of symptoms.filter((item) => !savedSymptoms.includes(item))) {
-          await acknowledgedHostWrite("toggleDaySym", iso, code);
-        }
-        for (const code of savedSymptoms.filter((item) => !symptoms.includes(item))) {
-          await acknowledgedHostWrite("toggleDaySym", iso, code);
-        }
-        if (intimacy !== Boolean(saved.intimacy)) await acknowledgedHostWrite("markPA", iso);
-        if (extra) await acknowledgedHostWrite("addDayCustomSym", iso, extra);
-      });
-      if (!openSession.current.open
-          || openSession.current.generation !== operation.generation
-          || currentIso.current !== operation.iso) return;
+      await acknowledgedHostWrite("aiwaSaveJournal", operation.payload);
+      if (!isCurrentSaveSession()) return;
       showToast("Сохранено", { type: "success" });
       onClose();
     } catch (error) {
-      if (!openSession.current.open
-          || openSession.current.generation !== operation.generation
-          || currentIso.current !== operation.iso) return;
+      if (!isCurrentSaveSession()) return;
       showToast(error?.message || "Не удалось сохранить", { type: "error" });
     } finally {
       if (saveLock.current?.id === operation.id) {
+        const staleSession = openSession.current.open && !isCurrentSaveSession();
         saveLock.current = null;
-        setBusy(false);
-        if (openSession.current.open && (
-          openSession.current.generation !== operation.generation
-          || currentIso.current !== operation.iso
-        )) {
+        if (staleSession) {
+          setBusy(true);
           setSaveRevision((value) => value + 1);
-        }
+        } else setBusy(false);
       }
     }
   };
@@ -121,14 +121,19 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
       {/* The day being edited is the useful title here; back is the native BackButton. */}
       <AiwaPanelHeader size="large" title={label || "Занести в журнал"} />
 
-      <div className="aiwa-log-scroll" aria-busy={busy || undefined}>
+      <div
+        className="aiwa-log-scroll"
+        aria-busy={busy || undefined}
+        aria-disabled={busy || undefined}
+        inert={busy ? true : undefined}
+      >
         <SectionList className="aiwa-log-sections">
           <SectionList.Item>
             <JournalChoiceGroup
               label="Энергия"
               options={JOURNAL_ENERGY_OPTIONS}
               value={energy}
-              onChange={setEnergy}
+              onChange={(value) => { if (!saveLock.current) setEnergy(value); }}
             />
           </SectionList.Item>
 
@@ -137,7 +142,7 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
               label="Настроение"
               options={JOURNAL_MOOD_OPTIONS}
               value={mood}
-              onChange={setMood}
+              onChange={(value) => { if (!saveLock.current) setMood(value); }}
             />
           </SectionList.Item>
 
@@ -148,12 +153,19 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
           ))}
 
           <SectionList.Item>
-            <JournalCustomSymptom value={custom} onChange={setCustom} />
+            <JournalCustomSymptom
+              value={custom}
+              onChange={(value) => { if (!saveLock.current) setCustom(value); }}
+            />
           </SectionList.Item>
 
           {showIntimacy ? (
             <SectionList.Item>
-              <JournalToggle label="Близость" active={intimacy} onChange={setIntimacy} />
+              <JournalToggle
+                label="Близость"
+                active={intimacy}
+                onChange={(value) => { if (!saveLock.current) setIntimacy(value); }}
+              />
             </SectionList.Item>
           ) : null}
         </SectionList>
@@ -163,6 +175,7 @@ export function CalendarDayLogPanel({ iso, label, open, onClose, symptomGroups, 
         <AiwaButton
           label="Сохранить"
           loading={busy}
+          data-haptic="light"
           isFill
           {...actionProps("Сохранить", save)}
         />

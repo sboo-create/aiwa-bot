@@ -29,6 +29,59 @@ const workoutsWord = (count) => {
   return "тренировок";
 };
 
+export const mergeWorkoutReceipt = (workouts = [], workout = null) => {
+  if (!workout || typeof workout !== "object") return workouts;
+  const id = workout.id;
+  const withoutSaved = id == null ? workouts : workouts.filter((item) => item?.id !== id);
+  return [...withoutSaved, workout];
+};
+
+export const workoutReceiptEntry = (current, workout) => {
+  const complete = current?.status === "loaded";
+  return {
+    status: complete ? "loaded" : "partial",
+    workouts: mergeWorkoutReceipt(complete ? current.workouts : [], workout),
+    ...(complete ? {} : {
+      message: "Тренировка сохранена, но день загрузился не полностью. Нажми, чтобы обновить.",
+    }),
+  };
+};
+
+export const workoutDayEntry = ({ iso, week = [], explicit = {} }) => {
+  if (Object.prototype.hasOwnProperty.call(explicit, iso)) return explicit[iso];
+  const inWeek = week.find((day) => day.d === iso);
+  return inWeek && Number(inWeek.count || 0) === 0
+    ? { status: "loaded", workouts: [] }
+    : undefined;
+};
+
+export const workoutDayCount = ({ iso, week = [], explicit = {} }) => {
+  if (Object.prototype.hasOwnProperty.call(explicit, iso)) {
+    const entry = explicit[iso];
+    return entry?.status === "loaded" || entry?.status === "partial"
+      ? entry.workouts.length
+      : null;
+  }
+  const inWeek = week.find((day) => day.d === iso);
+  return inWeek ? Number(inWeek.count || 0) : null;
+};
+
+export const workoutHeroForDay = ({ iso, today, status, count, weekCount = 0 }) => {
+  if (iso === today) {
+    return { value: String(weekCount), label: `${workoutsWord(weekCount)} на этой неделе` };
+  }
+  if (status === "error") return { value: "—", label: "Данные за этот день недоступны" };
+  if (status === "partial") {
+    const value = Number(count || 0);
+    return { value: String(value), label: "Тренировка сохранена · обнови день" };
+  }
+  if (status !== "loaded") {
+    return { value: "…", label: `Загружаю тренировки за ${dayTitle(iso)}` };
+  }
+  const value = Number(count || 0);
+  return { value: String(value), label: `${workoutsWord(value)} в этот день` };
+};
+
 // 3d-иконки инвентаря (assets/train): тип или группа → файл из манифеста.
 // Названия вариантов свободные («Лёгкая силовая», «Прогулка в парке»), поэтому
 // точное совпадение дополняем словарём корней.
@@ -77,7 +130,6 @@ export function ActivityScreen({ mode, revision = 0 }) {
   const dayRequestSequence = useRef(0);
   const activeDayRequests = useRef({});
   const [dayRequestRevision, setDayRequestRevision] = useState(0);
-  const lastHero = useRef(null);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -97,13 +149,14 @@ export function ActivityScreen({ mode, revision = 0 }) {
     if (!data.train || !selectedIso || selectedIso === today) return;
     const inWeek = (data.train?.week || []).find((day) => day.d === selectedIso);
     if (inWeek && Number(inWeek.count || 0) === 0) return undefined;
-    if (Object.prototype.hasOwnProperty.call(dayWorkoutsRef.current, selectedIso)) return undefined;
+    const previous = dayWorkoutsRef.current[selectedIso];
+    if (previous && previous.status !== "retrying") return undefined;
 
     const requestId = ++dayRequestSequence.current;
     activeDayRequests.current = { ...activeDayRequests.current, [selectedIso]: requestId };
     dayWorkoutsRef.current = {
       ...dayWorkoutsRef.current,
-      [selectedIso]: { status: "loading", workouts: [] },
+      [selectedIso]: { status: "loading", workouts: previous?.workouts || [] },
     };
     setDayWorkouts(dayWorkoutsRef.current);
 
@@ -116,7 +169,11 @@ export function ActivityScreen({ mode, revision = 0 }) {
     apiCall("/api/train_day", { d: selectedIso })
       .then((result) => {
         if (!result?.ok || (result.d && result.d !== selectedIso)) {
-          settle({
+          settle(previous?.workouts?.length ? {
+            status: "partial",
+            workouts: previous.workouts,
+            message: result?.text || "Тренировка сохранена, но день не удалось обновить.",
+          } : {
             status: "error",
             workouts: [],
             message: result?.text || "Не получилось загрузить тренировки.",
@@ -128,7 +185,11 @@ export function ActivityScreen({ mode, revision = 0 }) {
           workouts: Array.isArray(result.workouts) ? result.workouts : [],
         });
       })
-      .catch((error) => settle({
+      .catch((error) => settle(previous?.workouts?.length ? {
+        status: "partial",
+        workouts: previous.workouts,
+        message: error?.message || "Тренировка сохранена, но день не удалось обновить.",
+      } : {
         status: "error",
         workouts: [],
         message: error?.message || "Не получилось загрузить тренировки.",
@@ -156,15 +217,20 @@ export function ActivityScreen({ mode, revision = 0 }) {
     const mutationRequestId = hasMutation && mutationDate !== today
       ? ++dayRequestSequence.current
       : 0;
+    const receiptWorkout = mutation?.workout && typeof mutation.workout === "object"
+      ? mutation.workout
+      : null;
+    let receiptEntry = null;
     if (mutationRequestId) {
       activeDayRequests.current = {
         ...activeDayRequests.current,
         [mutationDate]: mutationRequestId,
       };
-      dayWorkoutsRef.current = {
-        ...dayWorkoutsRef.current,
-        [mutationDate]: { status: "loading", workouts: [] },
-      };
+      const current = dayWorkoutsRef.current[mutationDate];
+      receiptEntry = receiptWorkout
+        ? workoutReceiptEntry(current, receiptWorkout)
+        : { status: "loading", workouts: [] };
+      dayWorkoutsRef.current = { ...dayWorkoutsRef.current, [mutationDate]: receiptEntry };
       setDayWorkouts(dayWorkoutsRef.current);
     }
 
@@ -178,7 +244,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
           status: "loaded",
           workouts: Array.isArray(refreshed.workouts) ? refreshed.workouts : [],
         }
-        : {
+        : receiptEntry || {
           status: "error",
           workouts: [],
           message: refreshed?.text || "Тренировка сохранена, но день не удалось обновить.",
@@ -190,8 +256,11 @@ export function ActivityScreen({ mode, revision = 0 }) {
 
   const retryDay = (iso) => {
     if (!iso || iso === today) return;
-    const next = { ...dayWorkoutsRef.current };
-    delete next[iso];
+    const current = dayWorkoutsRef.current[iso];
+    const next = {
+      ...dayWorkoutsRef.current,
+      [iso]: { ...current, status: "retrying" },
+    };
     delete activeDayRequests.current[iso];
     dayWorkoutsRef.current = next;
     setDayWorkouts(next);
@@ -236,37 +305,29 @@ export function ActivityScreen({ mode, revision = 0 }) {
     return true;
   };
   const viewingPast = selectedIso !== today;
-  const knownDay = (iso) => {
-    const inWeek = week.find((day) => day.d === iso);
-    if (inWeek && Number(inWeek.count || 0) === 0) {
-      return { status: "loaded", workouts: [] };
-    }
-    return Object.prototype.hasOwnProperty.call(dayWorkouts, iso) ? dayWorkouts[iso] : undefined;
-  };
-  const dayCount = (iso) => {
-    const inWeek = week.find((day) => day.d === iso);
-    if (inWeek) return Number(inWeek.count || 0);
-    const known = knownDay(iso);
-    return known?.status === "loaded" ? known.workouts.length : null;
-  };
-  const weekHero = { value: String(weekWorkouts), label: `${workoutsWord(weekWorkouts)} на этой неделе` };
-  const unavailableHero = { value: "—", label: "Данные за этот день недоступны" };
+  const knownDay = (iso) => workoutDayEntry({ iso, week, explicit: dayWorkouts });
+  const dayCount = (iso) => workoutDayCount({ iso, week, explicit: dayWorkouts });
+  const weekHero = workoutHeroForDay({ iso: today, today, status: "loaded", weekCount: weekWorkouts });
   const dayHero = (iso) => {
-    if (iso === today) return weekHero;
-    if (knownDay(iso)?.status === "error") return unavailableHero;
-    const count = dayCount(iso);
-    return count === null ? null : { value: String(count), label: `${workoutsWord(count)} в этот день` };
+    const known = knownDay(iso);
+    return workoutHeroForDay({
+      iso,
+      today,
+      status: iso === today ? "loaded" : known?.status,
+      count: dayCount(iso),
+      weekCount: weekWorkouts,
+    });
   };
-  const resolvedHero = viewingPast ? dayHero(selectedIso) : weekHero;
-  const hero = resolvedHero || lastHero.current || weekHero;
-  if (resolvedHero && resolvedHero !== unavailableHero) lastHero.current = resolvedHero;
+  const hero = viewingPast ? dayHero(selectedIso) : weekHero;
 
   const dayLabel = viewingPast ? `Тренировки за ${dayTitle(selectedIso)}` : "Прошедшие тренировки";
   const selectedDay = viewingPast ? knownDay(selectedIso) : null;
-  const loadingPast = viewingPast && (!selectedDay || selectedDay.status === "loading");
-  const errorPast = viewingPast && selectedDay?.status === "error";
+  const loadingPast = viewingPast && (
+    !selectedDay || selectedDay.status === "loading" || selectedDay.status === "retrying"
+  );
+  const errorPast = viewingPast && (selectedDay?.status === "error" || selectedDay?.status === "partial");
   const shownWorkouts = viewingPast
-    ? (selectedDay?.status === "loaded" ? selectedDay.workouts : [])
+    ? (["loaded", "partial", "loading", "retrying"].includes(selectedDay?.status) ? selectedDay.workouts : [])
     : todayWorkouts.slice().reverse();
 
   return (

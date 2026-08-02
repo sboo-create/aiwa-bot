@@ -43,6 +43,7 @@ export function AddFoodPanel({ isOpen, onClose, onSaved, editingMeal = null }) {
       if (typeof fn !== "function") throw new Error("Загрузка фото недоступна");
       const result = await fn(file);
       await onSaved(result && typeof result === "object" ? { type: "receipt", result } : null);
+      showToast("Приём добавлен", { type: "success" });
       onClose();
     } catch (error) {
       showToast(error.message || "Не получилось разобрать фото", { type: "error" });

@@ -188,12 +188,9 @@ step("AIWA: browser integration keeps current product logic", () => {
     "window.AiwaDeslop?.openProfile?.()",
     "call(\"openHomePanel\", \"calendar\")",
     "call(\"openHomePanel\", \"journal\")",
-    // The journal defers these to «Сохранить» and requires an explicit host
-    // acknowledgement before React confirms or closes the draft.
-    "acknowledgedHostWrite(\"setCheckin\"",
-    "acknowledgedHostWrite(\"toggleSym\"",
-    "acknowledgedHostWrite(\"toggleTodayPeriod\")",
-    "acknowledgedHostWrite(\"toggleTodayIntimacy\")",
+    // The journal defers one absolute snapshot to «Сохранить» and requires an
+    // explicit host acknowledgement before React confirms or closes the draft.
+    "acknowledgedHostWrite(\"aiwaSaveJournal\"",
     "data-aiwa-log-modal=\"true\"",
     "data-aiwa-calendar-modal=\"true\"",
     "function DateCell",
@@ -235,28 +232,25 @@ step("AIWA: the journal saves on its primary button", () => {
     "loading={busy}",
     "{...actionProps(\"Сохранить\", save)}",
   ]);
-  requireText("journal deferred writes", reactSource, [
-    "await acknowledgedHostWrite(\"toggleTodayPeriod\")",
-    "await acknowledgedHostWrite(\"setCheckin\", \"energy\", energy)",
-    "await acknowledgedHostWrite(\"toggleSym\", code)",
-    "await acknowledgedHostWrite(\"toggleTodayIntimacy\")",
-    "await acknowledgedHostWrite(\"addCustomSym\", extra)",
-    "await acknowledgedHostWrite(\"setDayCheckin\", dayIso, \"energy\", energy)",
-    "await acknowledgedHostWrite(\"toggleDaySym\", dayIso, code)",
-    "await acknowledgedHostWrite(\"markPA\", dayIso)",
-    "await acknowledgedHostWrite(\"addDayCustomSym\", dayIso, extra)",
+  requireText("journal atomic write", reactSource, [
+    "buildJournalSavePayload({",
+    "date: currentDay.current",
+    "date: currentIso.current",
+    "await acknowledgedHostWrite(\"aiwaSaveJournal\", operation.payload)",
     "result.ok === true",
   ]);
   requireText("journal footer styling", compositionCss, [".aiwa-log-footer {"]);
 });
 
-step("AIWA: journal refresh preserves the mounted bottom sheet", () => {
+step("AIWA: canonical refresh preserves the mounted screen", () => {
   requireText("stable home root", html, [
     "var homeRoot=el.querySelector('#deslop-home-root')",
     "window.AiwaDeslop.renderHome(homeRoot,payload)",
     "var keepsPaperHome=!!window.AiwaDeslop",
     "if(!keepsPaperHome&&window.AiwaDeslop)window.AiwaDeslop.unmountHome()",
-    "if(ACTIVE_SCREEN!==\"today\")go(\"today\")",
+    "var d=await api(\"/api/data\",{name:NAME})",
+    "renderCurrentDataScreen(ACTIVE_SCREEN)",
+    "return{data:D,revision:SETTINGS_DATA_REVISION}",
   ]);
 });
 

@@ -21,15 +21,14 @@ export const showToast = (message, options = {}) => toast(message, options);
 
 /**
  * Journal writes must be acknowledged by the host before React confirms or
- * closes a draft. Phase 3 will make every bridge method return this `{ ok }`
- * contract consistently; until then an undefined/legacy boolean is deliberately
- * treated as unconfirmed instead of turning a network failure into success UI.
+ * closes a draft. Undefined and legacy boolean results are deliberately treated
+ * as unconfirmed instead of turning a network failure into success UI.
  */
 export const acknowledgedHostWrite = async (name, ...args) => {
   const result = await read(name, ...args);
   if (result && typeof result === "object" && result.ok === true) return result;
   const detail = result && typeof result === "object"
-    ? result.message || result.text
+    ? result.message || result.text || result.error?.message
     : "";
   throw new Error(detail || "Не удалось подтвердить сохранение. Попробуй ещё раз.");
 };

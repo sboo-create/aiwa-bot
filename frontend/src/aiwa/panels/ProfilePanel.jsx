@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Text, SectionList } from "../lib/tma";
 import { AiwaModalView } from "../components/AiwaModalView";
 import { AiwaButton } from "../components/AiwaButton";
@@ -14,10 +14,17 @@ import {
   subscribeToReportRequest,
 } from "../lib/reportRequest";
 import {
-  normalizeProfileSettingsSnapshot,
   profileSettingsFormFromData,
   reconcileProfileSettingsForm,
+  syncProfileSettingsSnapshot,
 } from "../lib/profileSettings";
+import {
+  getProfileMutationState,
+  isProfileMutationSessionCurrent,
+  isProfileMutationInFlight,
+  requestProfileMutation,
+  subscribeToProfileMutation,
+} from "../lib/profileMutation";
 import { SelectionCheckIcon } from "../lib/icons";
 
 const REPORT_PERIOD_OPTIONS = [
@@ -29,19 +36,11 @@ const PARTNER_ACTIONS = new Set(["copy-partner", "unlink-partner"]);
 
 const modeLabel = (value) => MODE_OPTIONS.find((option) => option.value === value)?.label || "Не выбран";
 
-const syncSettingsData = async () => {
-  try {
-    // Phase 3 host contract: refresh aiwaData/marks and the active screen
-    // without `go("today")`. Never fall back to the legacy navigational
-    // reloadAfterEdit bridge from a settings mutation.
-    const result = await call("reloadSettingsData");
-    return normalizeProfileSettingsSnapshot(result);
-  } catch {
-    // The API mutation already succeeded; a host sync failure must not turn it
-    // into a second write. The next explicit host refresh can reconcile data.
-    return null;
-  }
-};
+const syncSettingsData = (actionKey, receipt) => (
+  // Both bridges are data-only. The receipt fallback is local and cannot
+  // navigate; it prevents an acknowledged server write from leaving D stale.
+  syncProfileSettingsSnapshot(call, actionKey, receipt)
+);
 
 function SelectionCell({ label, selected, disabled = false, onClick }) {
   const moveSelection = (event) => {
@@ -96,10 +95,10 @@ export function ProfilePanel({ isOpen, onClose }) {
   const [reportPeriod, setReportPeriod] = useState("3");
   const [form, setForm] = useState({});
   const [reportBusy, setReportBusy] = useState(isReportRequestInFlight);
-  const [actionBusy, setActionBusy] = useState("");
-  const actionLock = useRef(null);
-  const operationId = useRef(0);
+  const [mutationState, setMutationState] = useState(getProfileMutationState);
+  const mutationOwnerId = useId();
   const openSession = useRef({ generation: 0, open: false });
+  const adoptedMutation = useRef(null);
   const viewRef = useRef(view);
   const userDraftVersion = useRef(0);
   const appliedSettingsRevision = useRef(-Infinity);
@@ -113,12 +112,14 @@ export function ProfilePanel({ isOpen, onClose }) {
   }, [isOpen]);
 
   useEffect(() => subscribeToReportRequest(setReportBusy), []);
+  useEffect(() => subscribeToProfileMutation(setMutationState), []);
 
   const currentMode = data.mode || MODE_OPTIONS[0].value;
   const isCycleMode = currentMode === "cycle";
   const isMaleMode = currentMode === "male";
   const name = profileName();
-  const actionLocked = Boolean(actionBusy);
+  const actionBusy = mutationState.active?.key || "";
+  const actionLocked = Boolean(mutationState.active);
 
   const updateDraft = (field, value) => {
     userDraftVersion.current += 1;
@@ -126,12 +127,12 @@ export function ProfilePanel({ isOpen, onClose }) {
   };
 
   const openView = (nextView) => {
-    if (actionLock.current) return;
+    if (isProfileMutationInFlight()) return;
     setView(nextView);
   };
 
   const handleBack = () => {
-    if (viewRef.current === "main" || actionLock.current) onClose();
+    if (viewRef.current === "main" || isProfileMutationInFlight()) onClose();
     else setView("main");
   };
 
@@ -152,30 +153,73 @@ export function ProfilePanel({ isOpen, onClose }) {
     }));
   };
 
+  const reconcileMutationReceipt = async (
+    actionKey,
+    receipt,
+    isCurrentSession,
+    operation,
+  ) => {
+    const snapshot = await syncSettingsData(actionKey, receipt);
+    if (!snapshot) {
+      if (isCurrentSession()) {
+        showToast(
+          "Изменение сохранено, но данные профиля не обновились. Попробуй открыть профиль ещё раз.",
+          { type: "error" },
+        );
+      }
+      return null;
+    }
+    reconcileSettingsData(snapshot, operation);
+    return snapshot;
+  };
+
   useEffect(() => {
     if (!isOpen) return;
     const next = read("aiwaData") || {};
     // Reopening during a settings request keeps its page and loading affordance.
     // Partner actions are different: their data is cleared below, so keeping
     // that page would strand the new session on an empty loading state.
-    const lockedAction = actionLock.current?.key;
-    const preserveActionView = lockedAction && !PARTNER_ACTIONS.has(lockedAction);
+    const lockedMutation = getProfileMutationState().active;
+    const lockedAction = lockedMutation?.key;
+    const preserveActionView = lockedMutation?.ownerId === mutationOwnerId
+      && !PARTNER_ACTIONS.has(lockedAction);
     const preserveReportView = isReportRequestInFlight() && viewRef.current === "report";
     if (!preserveActionView && !preserveReportView) setView("main");
+    adoptedMutation.current = preserveActionView
+      ? {
+        id: lockedMutation.id,
+        generation: openSession.current.generation,
+      }
+      : null;
     setPartner(null);
-    setActionBusy(actionLock.current?.key || "");
     setReportBusy(isReportRequestInFlight());
     // Do not replace an in-flight submitted draft with the host's pre-mutation
     // aiwaData snapshot. The operation's data-only sync reconciles it later.
-    if (!actionLock.current) {
+    if (!isProfileMutationInFlight()) {
       setData(next);
       setForm(profileSettingsFormFromData(next));
       userDraftVersion.current += 1;
     }
-  }, [isOpen]);
+  }, [isOpen, mutationOwnerId]);
+
+  useEffect(() => {
+    const completion = mutationState.completion;
+    if (!isOpen
+        || !completion
+        || completion.value?.synced !== true
+        || completion.ownerId === mutationOwnerId
+        || viewRef.current !== "main") return;
+    // A different mounted profile may have owned the mutation. This instance
+    // stayed read-only on its main page, so it is safe to adopt the host's
+    // canonical data once the shared lock clears.
+    const next = read("aiwaData") || {};
+    setData(next);
+    setForm(profileSettingsFormFromData(next));
+    userDraftVersion.current += 1;
+  }, [isOpen, mutationOwnerId, mutationState.completion]);
 
   const openPartner = async () => {
-    if (actionLock.current) return;
+    if (isProfileMutationInFlight()) return;
     const generation = openSession.current.generation;
     setView("partner");
     const result = await apiCall("/api/partner", {}).catch(() => null);
@@ -184,28 +228,37 @@ export function ProfilePanel({ isOpen, onClose }) {
     }
   };
 
-  const runAction = async (key, action) => {
-    if (actionLock.current) return;
+  const runAction = (key, action) => {
+    if (isProfileMutationInFlight()) return null;
     const operation = {
-      id: ++operationId.current,
+      id: null,
       key,
       generation: openSession.current.generation,
       draftVersion: userDraftVersion.current,
     };
-    actionLock.current = operation;
-    setActionBusy(key);
-    const isCurrentSession = () => (
-      openSession.current.open
-      && openSession.current.generation === operation.generation
+    const isCurrentSession = () => isProfileMutationSessionCurrent({
+      isOpen: openSession.current.open,
+      currentGeneration: openSession.current.generation,
+      startedGeneration: operation.generation,
+      operationId: operation.id,
+      adoptedOperationId: adoptedMutation.current?.id,
+      adoptedGeneration: adoptedMutation.current?.generation,
+    });
+    const request = requestProfileMutation(
+      key,
+      () => action(isCurrentSession, operation),
+      { ownerId: mutationOwnerId },
     );
-    try {
-      await action(isCurrentSession, operation);
-    } finally {
-      if (actionLock.current?.id === operation.id) {
-        actionLock.current = null;
-        setActionBusy((current) => (current === key ? "" : current));
-      }
+    operation.id = request.operation.id;
+    if (request.owner) {
+      request.promise.catch((error) => {
+        if (isCurrentSession()) {
+          showToast(error?.message || "Не получилось сохранить настройку", { type: "error" });
+        }
+      });
+      return request.promise;
     }
+    return null;
   };
 
   const saveProfile = () => runAction("profile", async (isCurrentSession, operation) => {
@@ -216,9 +269,11 @@ export function ProfilePanel({ isOpen, onClose }) {
       ...(isCycleMode ? { cycle_len: form.cycle_len } : {}),
     }).catch(() => null);
     if (result?.ok) {
-      const snapshot = await syncSettingsData();
-      reconcileSettingsData(snapshot, operation);
-      if (!isCurrentSession()) return;
+      const snapshot = await reconcileMutationReceipt(
+        "profile", result, isCurrentSession, operation,
+      );
+      if (!snapshot) return { synced: false };
+      if (!isCurrentSession()) return { synced: true };
       showToast("Данные сохранены", { type: "success" });
       setView("main");
     } else if (isCurrentSession()) {
@@ -226,6 +281,7 @@ export function ProfilePanel({ isOpen, onClose }) {
         ? "Проверь рост, вес, возраст и длину цикла"
         : "Проверь рост, вес и возраст"), { type: "error" });
     }
+    return { synced: Boolean(result?.ok) };
   });
 
   const savePreferences = () => runAction("preferences", async (isCurrentSession, operation) => {
@@ -234,30 +290,37 @@ export function ProfilePanel({ isOpen, onClose }) {
       kcal_goal: form.kcal_goal,
     }).catch(() => null);
     if (result?.ok) {
-      const snapshot = await syncSettingsData();
-      reconcileSettingsData(snapshot, operation);
-      if (!isCurrentSession()) return;
+      const snapshot = await reconcileMutationReceipt(
+        "preferences", result, isCurrentSession, operation,
+      );
+      if (!snapshot) return { synced: false };
+      if (!isCurrentSession()) return { synced: true };
       showToast("Предпочтения сохранены", { type: "success" });
       setView("main");
     } else if (isCurrentSession()) {
       showToast(result?.text || "Не получилось сохранить предпочтения", { type: "error" });
     }
+    return { synced: Boolean(result?.ok) };
   });
 
   const saveSummaryTime = () => runAction("summary", async (isCurrentSession, operation) => {
+    const sendTime = String(form.send_time || "");
     const dailySummaryEnabled = form.daily_summary_enabled !== false;
-    // Forward Phase 3 contract: time + enabled must be one atomic mutation.
-    // The current host ignores daily_summary_enabled and does not acknowledge
-    // it, so source refuses to claim success until the host implements both.
+    // Time + enabled are one atomic mutation. Both echoed values must match the
+    // submitted snapshot before the UI can claim success.
     const result = await apiCall("/api/settime", {
-      time: form.send_time,
+      time: sendTime,
       daily_summary_enabled: dailySummaryEnabled,
     }).catch(() => null);
+    let snapshot = null;
     if (result?.ok) {
-      const snapshot = await syncSettingsData();
-      reconcileSettingsData(snapshot, operation);
+      snapshot = await reconcileMutationReceipt(
+        "summary", result, isCurrentSession, operation,
+      );
+      if (!snapshot) return { synced: false };
     }
     const acknowledged = result?.ok
+      && result.send_time === sendTime
       && result.daily_summary_enabled === dailySummaryEnabled;
     if (!acknowledged) {
       if (isCurrentSession()) {
@@ -265,11 +328,12 @@ export function ProfilePanel({ isOpen, onClose }) {
           ? "Настройки сводки сохранены не полностью. Попробуй позже"
           : "Проверь время утренней сводки"), { type: "error" });
       }
-      return;
+      return { synced: false };
     }
-    if (!isCurrentSession()) return;
+    if (!isCurrentSession()) return { synced: true };
     showToast("Время сводки сохранено", { type: "success" });
     setView("main");
+    return { synced: true };
   });
 
   const requestReport = async () => {
@@ -297,10 +361,12 @@ export function ProfilePanel({ isOpen, onClose }) {
         setForm((current) => ({ ...current, proactive_enabled: previous }));
       }
       if (isCurrentSession()) showToast("Не получилось изменить настройку", { type: "error" });
-      return;
+      return { synced: false };
     }
-    const snapshot = await syncSettingsData();
-    reconcileSettingsData(snapshot, operation);
+    const snapshot = await reconcileMutationReceipt(
+      "proactive", result, isCurrentSession, operation,
+    );
+    return { synced: Boolean(snapshot) };
   });
 
   const setDailySummary = (enabled) => runAction("daily-summary", async (isCurrentSession, operation) => {
@@ -312,10 +378,12 @@ export function ProfilePanel({ isOpen, onClose }) {
         setForm((current) => ({ ...current, daily_summary_enabled: previous }));
       }
       if (isCurrentSession()) showToast("Не получилось изменить настройку", { type: "error" });
-      return;
+      return { synced: false };
     }
-    const snapshot = await syncSettingsData();
-    reconcileSettingsData(snapshot, operation);
+    const snapshot = await reconcileMutationReceipt(
+      "daily-summary", result, isCurrentSession, operation,
+    );
+    return { synced: Boolean(snapshot) };
   });
 
   const chooseMode = (mode) => runAction("mode", async (isCurrentSession, operation) => {
@@ -324,11 +392,13 @@ export function ProfilePanel({ isOpen, onClose }) {
       if (isCurrentSession()) {
         showToast(result?.text || "Не получилось сменить режим", { type: "error" });
       }
-      return;
+      return { synced: false };
     }
-    const snapshot = await syncSettingsData();
-    reconcileSettingsData(snapshot, operation);
-    if (!isCurrentSession()) return;
+    const snapshot = await reconcileMutationReceipt(
+      "mode", result, isCurrentSession, operation,
+    );
+    if (!snapshot) return { synced: false };
+    if (!isCurrentSession()) return { synced: true };
     showToast(`Режим: ${modeLabel(mode)}`, {
       type: "success",
       description: result.seeded_period
@@ -336,31 +406,36 @@ export function ProfilePanel({ isOpen, onClose }) {
         : undefined,
     });
     onClose();
+    return { synced: true };
   });
 
   const copyPartner = () => runAction("copy-partner", async (isCurrentSession) => {
     if (!partner?.link) return;
     try {
       await navigator.clipboard.writeText(partner.link);
-      if (!isCurrentSession()) return;
+      if (!isCurrentSession()) return { synced: false };
       showToast("Ссылка скопирована", { type: "success" });
     } catch {
-      if (!isCurrentSession()) return;
+      if (!isCurrentSession()) return { synced: false };
       showToast("Ссылка готова — выдели и скопируй", { type: "error" });
     }
+    return { synced: false };
   });
 
   const unlinkPartner = () => runAction("unlink-partner", async (isCurrentSession, operation) => {
     const result = await apiCall("/api/partner", { action: "unlink" }).catch(() => null);
     if (result?.ok) {
-      const snapshot = await syncSettingsData();
-      reconcileSettingsData(snapshot, operation);
-      if (!isCurrentSession()) return;
+      const snapshot = await reconcileMutationReceipt(
+        "partner", result, isCurrentSession, operation,
+      );
+      if (!snapshot) return { synced: false };
+      if (!isCurrentSession()) return { synced: true };
       setPartner({ linked: false });
       showToast("Партнёр отключён", { type: "success" });
     } else if (isCurrentSession()) {
       showToast(result?.text || "Не получилось отключить партнёра", { type: "error" });
     }
+    return { synced: Boolean(result?.ok) };
   });
 
   return (
@@ -450,6 +525,7 @@ export function ProfilePanel({ isOpen, onClose }) {
                 <AiwaButton
                   label="Сохранить"
                   loading={actionBusy === "profile"}
+                  disabled={actionLocked && actionBusy !== "profile"}
                   isFill
                   {...actionProps("Сохранить данные", saveProfile)}
                 />
@@ -481,6 +557,7 @@ export function ProfilePanel({ isOpen, onClose }) {
                 <AiwaButton
                   label="Сохранить"
                   loading={actionBusy === "preferences"}
+                  disabled={actionLocked && actionBusy !== "preferences"}
                   isFill
                   {...actionProps("Сохранить предпочтения", savePreferences)}
                 />
@@ -569,7 +646,7 @@ export function ProfilePanel({ isOpen, onClose }) {
                       key={option.value}
                       label={option.label}
                       selected={reportPeriod === option.value}
-                      disabled={reportBusy}
+                      disabled={reportBusy || actionLocked}
                       onClick={() => setReportPeriod(option.value)}
                     />
                   ))}
@@ -579,6 +656,7 @@ export function ProfilePanel({ isOpen, onClose }) {
                 <AiwaButton
                   label="Собрать выписку"
                   loading={reportBusy}
+                  disabled={actionLocked}
                   isFill
                   {...actionProps("Собрать выписку", requestReport)}
                 />

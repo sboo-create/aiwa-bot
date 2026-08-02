@@ -150,13 +150,17 @@ await check("Journal closes only after explicit acknowledgement and current-day 
 
   const journal = source("src/aiwa/panels/JournalPanel.jsx");
   const dayLog = source("src/aiwa/panels/CalendarDayLogPanel.jsx");
-  for (const method of [
-    "setCheckin", "setDayCheckin", "toggleSym", "toggleDaySym",
-    "addCustomSym", "addDayCustomSym", "toggleTodayPeriod", "markPA",
-  ]) assert.ok(`${journal}\n${dayLog}`.includes(`acknowledgedHostWrite("${method}"`), method);
-  assert.ok(journal.includes("[checkin, dayIso, isOpen, saveRevision, todayIso]"));
-  assert.ok(journal.includes("currentDay.current !== operation.dayIso"));
-  assert.ok(dayLog.includes("currentIso.current !== operation.iso"));
+  for (const panel of [journal, dayLog]) {
+    assert.equal((panel.match(/acknowledgedHostWrite\("aiwaSaveJournal"/g) || []).length, 1);
+    for (const legacyMethod of ["setCheckin", "setDayCheckin", "toggleSym", "toggleDaySym", "markPA"]) {
+      assert.equal(panel.includes(`acknowledgedHostWrite("${legacyMethod}"`), false, legacyMethod);
+    }
+  }
+  assert.ok(journal.includes("[isOpen, saveRevision, selectedDate, sourceCheckin]"));
+  assert.ok(journal.includes("currentDate: currentDay.current"));
+  assert.ok(journal.includes("targetDate: operation.dayIso"));
+  assert.ok(dayLog.includes("currentDate: currentIso.current"));
+  assert.ok(dayLog.includes("targetDate: operation.iso"));
 });
 
 await check("Reports are single-flight across Profile and History", async () => {
@@ -184,9 +188,12 @@ await check("Reports are single-flight across Profile and History", async () => 
 
 await check("Profile settings use forward atomic and non-navigating contracts", () => {
   const profile = source("src/aiwa/panels/ProfilePanel.jsx");
+  const settings = source("src/aiwa/lib/profileSettings.js");
   const history = source("src/aiwa/sections/SymptomHistorySection.jsx");
   assert.equal(profile.includes('call("reloadAfterEdit"'), false);
-  assert.equal((profile.match(/call\("reloadSettingsData"\)/g) || []).length, 1);
+  assert.equal(settings.includes('callBridge("reloadAfterEdit"'), false);
+  assert.equal((settings.match(/callBridge\("reloadSettingsData"\)/g) || []).length, 1);
+  assert.equal((settings.match(/callBridge\("applySettingsMutationReceipt"/g) || []).length, 1);
   assert.equal((profile.match(/apiCall\("\/api\/settime"/g) || []).length, 1);
   assert.ok(profile.includes("daily_summary_enabled: dailySummaryEnabled"));
   assert.ok(profile.includes("result.daily_summary_enabled === dailySummaryEnabled"));

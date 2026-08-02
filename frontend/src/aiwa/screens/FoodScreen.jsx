@@ -18,7 +18,15 @@ import { apiCall, showToast, openBotChat, fmtKcal, actionProps, read } from "../
 import { useScreenData } from "../lib/screenData";
 import { ProfilePanel } from "../panels/ProfilePanel";
 import { dayTitle, todayIso, useSelectedDay } from "../lib/selectedDay";
-import { foodDiaryForIso, resolveFoodDayEntry } from "../lib/foodDayCache";
+import {
+  createFoodMutationOrder,
+  foodDayAssetRevision,
+  foodDayReadFallback,
+  foodDiaryForIso,
+  mergeTodayDiaryReceipt,
+  retireStaleFoodDayAssets,
+  resolveFoodDayEntry,
+} from "../lib/foodDayCache";
 
 // Ответы прогреваются на старте, поэтому обычно экран открывается сразу;
 // пока данных нет — на их месте скелетон той же раскладки.
@@ -90,6 +98,7 @@ export function FoodScreen({ mode, revision = 0 }) {
   const [weekBusy, setWeekBusy] = useState(false);
   const [panel, setPanel] = useState("");
   const [editingMeal, setEditingMeal] = useState(null);
+  const [editingMutation, setEditingMutation] = useState(null);
   const [uploading, setUploading] = useState(false);
   const photoInputRef = useRef(null);
   const lastDiary = useRef(null);
@@ -99,6 +108,15 @@ export function FoodScreen({ mode, revision = 0 }) {
   const latestDayRequest = useRef(new Map());
   const canonicalDiaryRef = useRef(null);
   const canonicalVersion = useRef(0);
+  const mutationOrder = useRef(null);
+  if (!mutationOrder.current) mutationOrder.current = createFoodMutationOrder();
+  const canonicalAssetRevision = Math.max(
+    Number(data.foodSection?.asset_revision || 0),
+    Number(data.diary?.asset_revision || 0),
+  );
+  const diaryAssetRevision = Number(data.diary?.asset_revision || 0);
+  const assetRevisionRef = useRef(canonicalAssetRevision);
+  assetRevisionRef.current = Math.max(assetRevisionRef.current, canonicalAssetRevision);
   if (data.diary && data.diary !== canonicalDiaryRef.current) {
     canonicalDiaryRef.current = data.diary;
     canonicalVersion.current += 1;
@@ -110,31 +128,92 @@ export function FoodScreen({ mode, revision = 0 }) {
     setDayDiaries(next);
   }, []);
 
+  const replaceDayEntries = useCallback((entries) => {
+    dayDiariesRef.current = entries;
+    setDayDiaries(entries);
+  }, []);
+
+  const invalidateDayAssetCache = useCallback((revision) => {
+    const current = dayDiariesRef.current;
+    const active = [...dayRequests.current.keys()];
+    const staleRecent = Number(revision || 0) > diaryAssetRevision
+      ? Object.keys(data.diary?.recent || {})
+      : [];
+    const retired = retireStaleFoodDayAssets(
+      current,
+      revision,
+      [...active, ...staleRecent],
+    );
+    if (!retired.stale.length) return retired.stale;
+
+    // A request started against the previous global asset revision must not
+    // settle after invalidation. Its replacement gets a fresh request id.
+    for (const iso of retired.stale) {
+      latestDayRequest.current.set(iso, ++dayRequestSequence.current);
+      dayRequests.current.delete(iso);
+    }
+    replaceDayEntries(retired.entries);
+    return retired.stale;
+  }, [data.diary?.recent, diaryAssetRevision, replaceDayEntries]);
+
   const requestDayDiary = useCallback((iso, { force = false, preserveLoadedOnError = false } = {}) => {
     const pending = dayRequests.current.get(iso);
     if (pending && !force) return pending;
     const requestId = ++dayRequestSequence.current;
     latestDayRequest.current.set(iso, requestId);
     const requestCanonicalVersion = canonicalVersion.current;
+    const requestAssetRevision = assetRevisionRef.current;
     const preserved = dayDiariesRef.current[iso];
+    const requiredAssetRevision = Number(
+      preserved?.requiredAssetRevision
+      || (preserved?.status === "stale-assets" ? foodDayAssetRevision(preserved) : 0),
+    );
+    const terminalError = {
+      status: "error",
+      diary: null,
+      ...(requiredAssetRevision > 0
+        ? { requiredAssetRevision, assetRevision: requiredAssetRevision }
+        : {}),
+    };
     if (!(preserveLoadedOnError && preserved?.status === "loaded")) {
-      commitDayEntry(iso, { status: "loading", diary: null });
+      commitDayEntry(iso, {
+        status: "loading",
+        diary: null,
+        ...(requiredAssetRevision > 0
+          ? { requiredAssetRevision, assetRevision: requiredAssetRevision }
+          : {}),
+      });
     }
     const request = apiCall("/api/diary", { d: iso })
       .then((result) => {
         const requestedDiary = foodDiaryForIso(result, iso);
-        return requestedDiary
-          ? { status: "loaded", diary: requestedDiary, canonicalVersion: requestCanonicalVersion }
-          : (preserveLoadedOnError && preserved?.status === "loaded"
-            ? preserved
-            : { status: "error", diary: null });
+        const responseAssetRevision = Number(requestedDiary?.asset_revision || 0);
+        return requestedDiary && (
+          requiredAssetRevision <= 0 || responseAssetRevision >= requiredAssetRevision
+        )
+          ? {
+            status: "loaded",
+            diary: requestedDiary,
+            canonicalVersion: requestCanonicalVersion,
+            assetRevision: Math.max(
+              responseAssetRevision,
+              requestAssetRevision,
+            ),
+          }
+          : foodDayReadFallback(preserved, preserveLoadedOnError, terminalError);
       })
-      .catch(() => (preserveLoadedOnError && preserved?.status === "loaded"
-        ? preserved
-        : { status: "error", diary: null }))
+      .catch(() => foodDayReadFallback(preserved, preserveLoadedOnError, terminalError))
       .then((entry) => {
         if (latestDayRequest.current.get(iso) === requestId) {
           commitDayEntry(iso, entry);
+          const observedRevision = foodDayAssetRevision(entry);
+          if (entry?.status === "loaded" && observedRevision > 0) {
+            assetRevisionRef.current = Math.max(
+              assetRevisionRef.current,
+              observedRevision,
+            );
+            invalidateDayAssetCache(observedRevision);
+          }
         }
         return entry;
       })
@@ -143,7 +222,7 @@ export function FoodScreen({ mode, revision = 0 }) {
       });
     dayRequests.current.set(iso, request);
     return request;
-  }, [commitDayEntry]);
+  }, [commitDayEntry, invalidateDayAssetCache]);
 
   // Меню генерится моделью и может приехать позже открытия экрана — пока его
   // нет, перечитываем секцию с бэкофом, чтобы блюда появились сами.
@@ -178,8 +257,9 @@ export function FoodScreen({ mode, revision = 0 }) {
   const assetRefreshNeeded = assetRows.some((row) => row?.asset_state === "missing"
     || row?.image_source === "catalog_family" || row?.image_source === "catalog_canonical");
   const payloadAssetRevision = Math.max(
-    Number(data.foodSection?.asset_revision || 0),
-    Number(data.diary?.asset_revision || 0),
+    assetRevisionRef.current,
+    canonicalAssetRevision,
+    ...Object.values(dayDiaries).map(foodDayAssetRevision),
   );
   useEffect(() => {
     if (!assetRefreshNeeded) { assetPoll.current = { revision: null, attempts: 0 }; return undefined; }
@@ -194,7 +274,9 @@ export function FoodScreen({ mode, revision = 0 }) {
         if (Number.isFinite(revision)) {
           const previous = assetPoll.current.revision;
           assetPoll.current.revision = revision;
+          assetRevisionRef.current = Math.max(assetRevisionRef.current, revision);
           if (previous !== null && revision !== previous) {
+            invalidateDayAssetCache(revision);
             await refresh("foodSection", "diary");
             if (alive && selectedIso !== today) await requestDayDiary(selectedIso, { force: true });
           }
@@ -207,7 +289,18 @@ export function FoodScreen({ mode, revision = 0 }) {
     };
     timer = setTimeout(tick, 15000 + Math.floor(Math.random() * 20000));
     return () => { alive = false; if (timer) clearTimeout(timer); };
-  }, [assetRefreshNeeded, payloadAssetRevision, refresh, requestDayDiary, selectedIso, today]);
+  }, [assetRefreshNeeded, invalidateDayAssetCache, payloadAssetRevision, refresh, requestDayDiary, selectedIso, today]);
+
+  // Host/profile refreshes can advance the same global revision without this
+  // screen owning the polling tick. Retire older explicit days immediately;
+  // the selected one is re-read now, every other day when it is revisited.
+  useEffect(() => {
+    if (!canonicalAssetRevision) return;
+    const invalidated = invalidateDayAssetCache(canonicalAssetRevision);
+    if (selectedIso !== today && invalidated.includes(selectedIso)) {
+      void requestDayDiary(selectedIso, { force: true });
+    }
+  }, [canonicalAssetRevision, invalidateDayAssetCache, requestDayDiary, selectedIso, today]);
 
   useEffect(() => {
     fetch("/assets/food/manifest.json?v=3")
@@ -220,6 +313,11 @@ export function FoodScreen({ mode, revision = 0 }) {
   // запрашивается один раз и получает отдельный loaded/error sentinel.
   useEffect(() => {
     if (!data.diary || !selectedIso || selectedIso === today) return;
+    const explicit = dayDiaries[selectedIso];
+    if (explicit?.status === "stale-assets") {
+      void requestDayDiary(selectedIso, { force: true });
+      return;
+    }
     if (hasOwn(data.diary.recent || {}, selectedIso) || hasOwn(dayDiaries, selectedIso)) return;
     void requestDayDiary(selectedIso);
   }, [data.diary, dayDiaries, requestDayDiary, selectedIso, today]);
@@ -228,45 +326,85 @@ export function FoodScreen({ mode, revision = 0 }) {
   // прошлый день, его cache тоже перечитывается, чтобы edit/delete не оставляли
   // в панели старые строки.
   const reloadDiary = async (mutation = null) => {
-    let preserveSelected = false;
-    if (mutation?.result) {
-      const receipt = foodDiaryForIso(mutation.result, today);
-      if (receipt) {
-        patch("diary", {
-          ...(data.diary || {}),
-          ...receipt,
-          recent: data.diary?.recent || {},
+    const mutationTargetIso = String(mutation?.targetIso || "").trim();
+    const receiptIso = String(
+      mutation?.result?.date || mutation?.result?.diary?.date
+      || ((mutation?.type === "edit" || mutation?.type === "delete")
+        ? (mutationTargetIso || selectedIso)
+        : today),
+    );
+    const orderedMutation = mutation?.type === "edit" || mutation?.type === "delete";
+    const receiptIsCurrent = !orderedMutation || mutationOrder.current.accept(
+      receiptIso,
+      mutation?.mutationToken,
+    );
+    // A late older receipt can still trigger a canonical read. If that read
+    // fails, retain the newer receipt already shown for the selected past day.
+    let preserveSelected = !receiptIsCurrent && receiptIso === selectedIso;
+    const receipt = mutation?.result ? foodDiaryForIso(mutation.result, receiptIso) : null;
+    const canonicalReceipt = receipt && Array.isArray(receipt.meals) ? receipt : null;
+
+    if (receiptIsCurrent && canonicalReceipt) {
+      const receiptAssetRevision = Number(canonicalReceipt.asset_revision || 0);
+      if (receiptAssetRevision > 0) {
+        assetRevisionRef.current = Math.max(
+          assetRevisionRef.current,
+          receiptAssetRevision,
+        );
+        invalidateDayAssetCache(receiptAssetRevision);
+      }
+      if (receiptIso === today) {
+        patch("diary", mergeTodayDiaryReceipt(data.diary, canonicalReceipt));
+      } else {
+        commitDayEntry(receiptIso, {
+          status: "loaded",
+          diary: canonicalReceipt,
+          canonicalVersion: canonicalVersion.current + 1,
+          assetRevision: Math.max(
+            Number(canonicalReceipt.asset_revision || 0),
+            assetRevisionRef.current,
+          ),
         });
+        if (hasOwn(data.diary?.recent || {}, receiptIso)) {
+          patch("diary", {
+            ...(data.diary || {}),
+            recent: { ...(data.diary?.recent || {}), [receiptIso]: canonicalReceipt },
+          });
+        }
+        preserveSelected = receiptIso === selectedIso;
       }
     }
 
-    if (selectedIso && selectedIso !== today && (mutation?.type === "edit" || mutation?.type === "delete")) {
+    if (receiptIsCurrent && !canonicalReceipt && receiptIso && receiptIso !== today
+        && (mutation?.type === "edit" || mutation?.type === "delete")) {
       const current = resolveFoodDayEntry({
-        iso: selectedIso,
+        iso: receiptIso,
         today,
         diary: data.diary,
         recent: data.diary?.recent || {},
         explicit: dayDiariesRef.current,
         canonicalVersion: canonicalVersion.current,
+        diaryAssetRevision,
       }).diary;
       if (current) {
         const meals = mutation.type === "delete"
           ? (current.meals || []).filter((meal) => meal.id !== mutation.id)
           : (current.meals || []).map((meal) => (meal.id === mutation.meal?.id ? mutation.meal : meal));
-        const updated = { ...current, meals, totals: totalsFromMeals(meals), date: selectedIso };
-        commitDayEntry(selectedIso, {
+        const updated = { ...current, meals, totals: totalsFromMeals(meals), date: receiptIso };
+        commitDayEntry(receiptIso, {
           status: "loaded",
           diary: updated,
           canonicalVersion: canonicalVersion.current + 1,
+          assetRevision: assetRevisionRef.current,
         });
-        if (hasOwn(data.diary?.recent || {}, selectedIso)) {
+        if (hasOwn(data.diary?.recent || {}, receiptIso)) {
           patch("diary", {
             ...(data.diary || {}),
             ...(foodDiaryForIso(mutation.result, today) || {}),
-            recent: { ...(data.diary?.recent || {}), [selectedIso]: updated },
+            recent: { ...(data.diary?.recent || {}), [receiptIso]: updated },
           });
         }
-        preserveSelected = true;
+        preserveSelected = receiptIso === selectedIso;
       }
     }
 
@@ -333,6 +471,7 @@ export function FoodScreen({ mode, revision = 0 }) {
     recent,
     explicit: dayDiaries,
     canonicalVersion: canonicalVersion.current,
+    diaryAssetRevision,
   });
   const selectedEntry = dayEntry(selectedIso);
   const selectedDiary = selectedEntry.diary;
@@ -406,15 +545,23 @@ export function FoodScreen({ mode, revision = 0 }) {
   };
 
   const deleteMeal = async (id) => {
-    const result = await apiCall("/api/diary_del", { id }).catch(() => null);
-    if (result && !hasOwn(result, "error")) {
+    const mutationToken = mutationOrder.current.begin();
+    const targetIso = selectedIso;
+    try {
+      const result = await apiCall("/api/diary_del", { id });
+      if (!result || result.error || result.ok === false) {
+        throw new Error(result?.message || "Не получилось удалить приём");
+      }
       showToast("Приём удалён", { type: "success" });
-      await reloadDiary({ type: "delete", id, result });
+      await reloadDiary({ type: "delete", id, result, mutationToken, targetIso });
+    } catch (error) {
+      showToast(error?.message || "Не получилось удалить приём", { type: "error" });
     }
   };
 
   const openAdd = () => {
     if (viewingPast) return;
+    setEditingMutation(null);
     setEditingMeal(null);
     setPanel("add");
   };
@@ -428,8 +575,9 @@ export function FoodScreen({ mode, revision = 0 }) {
     try {
       const fn = window.aiwaUploadFoodPhoto;
       if (typeof fn !== "function") throw new Error("Загрузка фото недоступна");
-      await fn(file);
-      await reloadDiary();
+      const result = await fn(file);
+      await reloadDiary(result && typeof result === "object" ? { type: "receipt", result } : null);
+      showToast("Приём добавлен", { type: "success" });
     } catch (error) {
       showToast(error.message || "Не получилось разобрать фото", { type: "error" });
     } finally {
@@ -590,7 +738,11 @@ export function FoodScreen({ mode, revision = 0 }) {
           <AddFoodPanel
             isOpen={panel === "add" && (!viewingPast || Boolean(editingMeal))}
             onClose={() => setPanel("")}
-            onSaved={reloadDiary}
+            onSaved={(mutation) => reloadDiary(mutation?.type === "edit" ? {
+              ...mutation,
+              mutationToken: editingMutation?.token,
+              targetIso: editingMutation?.targetIso,
+            } : mutation)}
             editingMeal={editingMeal}
           />
           <RecipePanel
@@ -609,6 +761,10 @@ export function FoodScreen({ mode, revision = 0 }) {
             canAdd={!viewingPast}
             onAdd={openAdd}
             onEdit={(meal) => {
+              setEditingMutation({
+                token: mutationOrder.current.begin(),
+                targetIso: selectedIso,
+              });
               setEditingMeal(meal);
               setPanel("add");
             }}

@@ -32,6 +32,30 @@ export const normalizeProfileSettingsSnapshot = (result) => {
   return { data, revision };
 };
 
+/**
+ * Prefer a full data-only refresh. If that network read fails after the
+ * mutation was acknowledged, reconcile the host's canonical in-memory data
+ * from the endpoint receipt instead of claiming success against stale D.
+ */
+export const syncProfileSettingsSnapshot = async (callBridge, actionKey, receipt) => {
+  let refreshed = null;
+  try {
+    refreshed = await callBridge("reloadSettingsData");
+  } catch {
+    refreshed = null;
+  }
+  const canonical = normalizeProfileSettingsSnapshot(refreshed);
+  if (canonical) return canonical;
+
+  let reconciled = null;
+  try {
+    reconciled = await callBridge("applySettingsMutationReceipt", actionKey, receipt);
+  } catch {
+    reconciled = null;
+  }
+  return normalizeProfileSettingsSnapshot(reconciled);
+};
+
 export const reconcileProfileSettingsForm = ({
   current,
   data,

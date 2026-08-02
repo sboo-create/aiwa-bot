@@ -4,6 +4,52 @@ import { Text } from "../lib/tma";
 
 const MARGIN = 8;
 const GAP = 6;
+const MENU_ITEM_SELECTOR = '[role="menuitem"]:not(:disabled)';
+const PAGE_FOCUS_SELECTOR = [
+  'a[href]',
+  'button:not(:disabled)',
+  'input:not(:disabled)',
+  'select:not(:disabled)',
+  'textarea:not(:disabled)',
+  '[role="button"][tabindex]:not([tabindex="-1"])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+export function actionMenuFocusIndex(key, currentIndex, count) {
+  if (count < 1) return -1;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowDown") return currentIndex < 0 ? 0 : (currentIndex + 1) % count;
+  if (key === "ArrowUp") return currentIndex < 0 ? count - 1 : (currentIndex - 1 + count) % count;
+  return currentIndex;
+}
+
+export function actionMenuRestoresFocusAfterSelect(item) {
+  return item?.restoreFocus !== false;
+}
+
+export function actionMenuRelativeFocusIndex(currentIndex, count, direction) {
+  if (count < 1) return -1;
+  if (currentIndex < 0) return direction < 0 ? count - 1 : 0;
+  return (currentIndex + (direction < 0 ? -1 : 1) + count) % count;
+}
+
+export function actionMenuPageFocusCandidate(element, menuElement = null) {
+  if (!element || menuElement?.contains?.(element)) return false;
+  if (element.closest?.('.hidden,[inert],[hidden],[aria-hidden="true"]')) return false;
+  if (element.getAttribute?.("aria-disabled") === "true") return false;
+
+  const style = globalThis.getComputedStyle?.(element);
+  if (style && (
+    style.display === "none"
+    || style.visibility === "hidden"
+    || style.visibility === "collapse"
+    || style.contentVisibility === "hidden"
+  )) return false;
+
+  const rects = element.getClientRects?.();
+  return !rects || rects.length > 0;
+}
 
 function computePosition(triggerRect, menuRect, align) {
   const vw = window.innerWidth;
@@ -26,7 +72,7 @@ function computePosition(triggerRect, menuRect, align) {
 /**
  * Portal action menu: icon + label rows, each firing its own onSelect.
  * Local fork of the Deslop TMA DropdownMenu, adapted for actions (no motion dep).
- * @param {{label: string, icon?: import("react").ReactNode, onSelect: () => void}[]} props.items
+ * @param {{label: string, icon?: import("react").ReactNode, disabled?: boolean, restoreFocus?: boolean, onSelect: () => void}[]} props.items
  * @param {import("react").ReactNode} props.trigger Element that toggles the menu.
  * @param {string} [props.className] Goes on the trigger wrapper, not the trigger:
  *   the wrapper is what the menu measures, so a host screen that positions the
@@ -37,10 +83,40 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
   const [pos, setPos] = useState({ top: 0, left: 0, originY: "top" });
   const triggerRef = useRef(null);
   const menuRef = useRef(null);
+  const initialFocus = useRef("first");
   const menuId = useId();
+  const generatedTriggerId = useId();
+  const triggerId = isValidElement(trigger) && trigger.props.id
+    ? trigger.props.id
+    : generatedTriggerId;
 
-  const close = useCallback(() => {
+  const triggerTarget = useCallback(() => triggerRef.current?.querySelector(
+      'button, a[href], input, [role="button"], [tabindex]:not([tabindex="-1"])',
+    ), []);
+
+  const focusTrigger = useCallback(() => {
+    triggerTarget()?.focus?.({ preventScroll: true });
+  }, [triggerTarget]);
+
+  const focusRelativeToTrigger = useCallback((direction) => {
+    const triggerElement = triggerTarget();
+    if (!triggerElement) return;
+    const candidates = [...document.querySelectorAll(PAGE_FOCUS_SELECTOR)].filter((element) => (
+      actionMenuPageFocusCandidate(element, menuRef.current)
+    ));
+    const index = candidates.indexOf(triggerElement);
+    const targetIndex = actionMenuRelativeFocusIndex(index, candidates.length, direction);
+    (candidates[targetIndex] || triggerElement).focus?.({ preventScroll: true });
+  }, [triggerTarget]);
+
+  const close = useCallback((restoreFocus = false) => {
     setIsOpen(false);
+    if (restoreFocus) setTimeout(focusTrigger, 0);
+  }, [focusTrigger]);
+
+  const open = useCallback((focus = "first") => {
+    initialFocus.current = focus;
+    setIsOpen(true);
   }, []);
 
   useLayoutEffect(() => {
@@ -54,6 +130,11 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
       setPos(computePosition(t, m, align));
     };
     place();
+    const menuItems = [...menuRef.current.querySelectorAll(MENU_ITEM_SELECTOR)];
+    const focusTarget = initialFocus.current === "last"
+      ? menuItems[menuItems.length - 1]
+      : menuItems[0];
+    (focusTarget || menuRef.current).focus?.({ preventScroll: true });
     window.addEventListener("resize", place);
     window.addEventListener("scroll", place, true);
     return () => {
@@ -70,7 +151,10 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
       close();
     };
     const onKey = (event) => {
-      if (event.key === "Escape") close();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close(true);
+      }
     };
     document.addEventListener("pointerdown", onPointer, true);
     document.addEventListener("keydown", onKey);
@@ -81,17 +165,60 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
   }, [isOpen, close]);
 
   const handleSelect = (item) => {
-    close();
+    if (item.disabled) return;
+    close(actionMenuRestoresFocusAfterSelect(item));
     item.onSelect?.();
+  };
+
+  const handleMenuKeyDown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      close();
+      setTimeout(() => focusRelativeToTrigger(event.shiftKey ? -1 : 1), 0);
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const menuItems = [...(menuRef.current?.querySelectorAll(MENU_ITEM_SELECTOR) || [])];
+    if (!menuItems.length) return;
+    event.preventDefault();
+    const currentIndex = menuItems.indexOf(document.activeElement);
+    const nextIndex = actionMenuFocusIndex(event.key, currentIndex, menuItems.length);
+    menuItems[nextIndex]?.focus?.({ preventScroll: true });
   };
 
   // The wrapper only measures/positions. The supplied button remains the one
   // semantic and keyboard target, avoiding nested roles and a duplicate Tab stop.
   const accessibleTrigger = isValidElement(trigger)
     ? cloneElement(trigger, {
+      id: triggerId,
       "aria-haspopup": "menu",
       "aria-expanded": isOpen,
       "aria-controls": isOpen ? menuId : undefined,
+      onClick: (event) => {
+        trigger.props.onClick?.(event);
+        if (event.defaultPrevented) return;
+        isOpen ? close() : open("first");
+      },
+      onKeyDown: (event) => {
+        trigger.props.onKeyDown?.(event);
+        if (event.defaultPrevented) return;
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          open(event.key === "ArrowUp" ? "last" : "first");
+        } else if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          isOpen ? close() : open("first");
+        } else if (event.key === "Escape" && isOpen) {
+          event.preventDefault();
+          close(true);
+        }
+      },
     })
     : trigger;
 
@@ -100,18 +227,6 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
       <div
         ref={triggerRef}
         className={`aiwa-action-menu-trigger${className ? ` ${className}` : ""}`}
-        onClickCapture={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          isOpen ? close() : setIsOpen(true);
-        }}
-        onKeyDownCapture={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            event.stopPropagation();
-            isOpen ? close() : setIsOpen(true);
-          }
-        }}
       >
         {accessibleTrigger}
       </div>
@@ -121,8 +236,12 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
             ref={menuRef}
             id={menuId}
             role="menu"
+            aria-labelledby={triggerId}
+            aria-orientation="vertical"
+            tabIndex={-1}
             className="aiwa-action-menu"
             data-align={align}
+            onKeyDown={handleMenuKeyDown}
             style={{
               position: "fixed",
               top: pos.top,
@@ -135,6 +254,8 @@ export function ActionMenu({ items, trigger, align = "start", className = "" }) 
                 key={item.label}
                 type="button"
                 role="menuitem"
+                tabIndex={-1}
+                disabled={item.disabled || undefined}
                 className="aiwa-action-menu-item"
                 onClick={() => handleSelect(item)}
               >

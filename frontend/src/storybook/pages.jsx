@@ -1585,7 +1585,6 @@ export function PanelsPage() {
         onAdd={() => {}}
         onEdit={() => {}}
         onDelete={() => {}}
-        onReco={() => {}}
       />
       <RecipePanel
         isOpen={open === "recipe"}
@@ -1618,6 +1617,7 @@ export function PanelsPage() {
         suggested={{ name: "Пилатес", exercises: [] }}
         favoriteTypes={["Сквош"]}
         initialDate="2026-07-23"
+        today="2026-07-23"
       />
       <WorkoutVariantsPanel
         isOpen={open === "workoutVariants"}

@@ -42,9 +42,10 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
   // and marking a period is five taps in a row. One call at a time.
   const queue = useRef(Promise.resolve());
   const inflight = useRef(0);
+  const pageRef = useRef(null);
   // Год истории и восемь месяцев вперёд; открывается на текущем месяце.
   const months = Array.from({ length: 20 }, (_, index) => read("getAiwaCalendarMonth", index - 12)).filter(Boolean);
-  const canEditPeriods = mode !== "preg" && mode !== "meno" && mode !== "male";
+  const canEditPeriods = !["preg", "meno", "male", "none"].includes(mode);
   const markOptions = calendarMarkOptions(canEditPeriods ? ["period", "symptoms", "intimacy"] : ["symptoms", "intimacy"]);
   const activeMark = CALENDAR_MARK_MODES[markMode] || CALENDAR_MARK_MODES.symptoms;
 
@@ -67,6 +68,9 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
 
   const markMenuItems = markOptions.map((option) => ({
     label: option.label,
+    // Selecting a mode replaces the FAB trigger. ActionMenu must not restore
+    // focus to that unmounted node; the marking state owns the live target.
+    restoreFocus: false,
     onSelect: () => startMarking(option.value),
   }));
 
@@ -91,6 +95,11 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
     }
     setMarkMode(canEditPeriods ? "period" : "symptoms");
   }, [isOpen, canEditPeriods]);
+
+  useEffect(() => {
+    if (!isOpen || !marking) return;
+    pageRef.current?.querySelector(".aiwa-calendar-done")?.focus({ preventScroll: true });
+  }, [isOpen, marking]);
 
   const isChecked = (day) => {
     const optimistic = pending[`${markMode}:${day.iso}`];
@@ -135,6 +144,7 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
 
   return createPortal(
     <div
+      ref={pageRef}
       className="aiwa-calendar-page"
       data-aiwa-calendar-modal="true"
       data-marking={marking ? "true" : undefined}
