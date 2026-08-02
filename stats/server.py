@@ -227,7 +227,6 @@ _db.execute("CREATE INDEX IF NOT EXISTS ix_events_name_ts ON events(name,ts)")
 _db.commit()
 DB_LOCK = threading.RLock()
 CACHE_LOCK = threading.RLock()
-_EVENT_ROWS_CACHE: dict[str, Any] = {"changes": -1, "rows": None}
 _DASHBOARD_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 _DASHBOARD_KEY_LOCKS: dict[tuple[int, str], threading.Lock] = {}
 DASHBOARD_CACHE_SECONDS = max(1.0, float(os.environ.get("STATS_DASHBOARD_CACHE_SECONDS", "15")))
@@ -257,6 +256,40 @@ def _is_active(name: str) -> bool:
     return _canonical(name) not in SYSTEM_NAMES
 
 
+def _inactive_raw_names() -> tuple[str, ...]:
+    """Raw event names for which `_is_active()` is False.
+
+    Derived from ALIASES and SYSTEM_NAMES rather than restated, so the SQL
+    predicate below cannot drift away from the Python one. A raw name is
+    inactive exactly when its canonical form is a system name, which means
+    aliases pointing at a system name are inactive, and system names that are
+    themselves alias keys are *not* (they canonicalise to something else).
+    """
+    return tuple(sorted(
+        {raw for raw, canonical in ALIASES.items() if canonical in SYSTEM_NAMES}
+        | {name for name in SYSTEM_NAMES if name not in ALIASES}
+    ))
+
+
+INACTIVE_RAW_NAMES: tuple[str, ...] = _inactive_raw_names()
+# `_is_active(row["name"])` expressed over the raw stored column.
+ACTIVE_NAME_SQL = "name NOT IN (%s)" % ",".join("?" * len(INACTIVE_RAW_NAMES))
+# `_row_from_record()` lets a row's own properties override the provenance
+# column (`props.get("provenance") or provenance or "observed"`), and every
+# consumer only ever asks whether the result equals "observed". This mirrors
+# that decision in SQL, including the fall-through on falsy property values and
+# on properties that do not parse.
+IS_OBSERVED_SQL = (
+    "CASE WHEN json_valid(properties)"
+    "      AND json_extract(properties,'$.provenance') IS NOT NULL"
+    "      AND json_extract(properties,'$.provenance') <> ''"
+    "      AND json_extract(properties,'$.provenance') <> 0"
+    "     THEN json_extract(properties,'$.provenance') = 'observed'"
+    "     WHEN provenance IS NOT NULL AND provenance <> '' THEN provenance = 'observed'"
+    "     ELSE 1 END"
+)
+
+
 def _percent(n: float, d: float, digits: int = 1) -> float:
     return round(n * 100.0 / d, digits) if d else 0.0
 
@@ -284,43 +317,96 @@ def _safe_properties(raw: Any) -> dict[str, Any]:
     return out
 
 
-def _event_rows() -> list[dict[str, Any]]:
-    with DB_LOCK:
-        changes = _db.total_changes
-        with CACHE_LOCK:
-            if (_EVENT_ROWS_CACHE["changes"] == changes and
-                    _EVENT_ROWS_CACHE["rows"] is not None):
-                return _EVENT_ROWS_CACHE["rows"]
-        rows = _db.execute(
-            "SELECT event_id,ts,device_id,name,properties,ingested_at,provenance,confidence,payload_version "
-            "FROM events ORDER BY ts,event_id"
-        ).fetchall()
-    result = []
-    for event_id, ts, device_id, name, props_json, ingested_at, provenance, confidence, version in rows:
-        try:
-            props = json.loads(props_json or "{}")
-        except (TypeError, ValueError):
-            props = {}
-        result.append({
-            "event_id": event_id, "ts": float(ts), "device_id": device_id,
-            "name": _canonical(name), "raw_name": name, "properties": props,
-            "ingested_at": float(ingested_at or 0),
-            "provenance": props.get("provenance") or provenance or "observed",
-            "confidence": props.get("confidence") or confidence or "high",
-            "payload_version": int(props.get("payload_version") or version or 1),
-        })
-    with CACHE_LOCK:
-        _EVENT_ROWS_CACHE["changes"] = changes
-        _EVENT_ROWS_CACHE["rows"] = result
-    return result
+EVENT_COLUMNS = ("SELECT event_id,ts,device_id,name,properties,ingested_at,"
+                 "provenance,confidence,payload_version FROM events")
 
 
-def _active_ids(rows: list[dict[str, Any]], cutoff: float, until: float) -> set[str]:
+def _row_from_record(record: tuple) -> dict[str, Any]:
+    event_id, ts, device_id, name, props_json, ingested_at, provenance, confidence, version = record
+    try:
+        props = json.loads(props_json or "{}")
+    except (TypeError, ValueError):
+        props = {}
     return {
-        r["device_id"]
-        for r in rows
-        if cutoff <= r["ts"] <= until and _is_active(r["name"])
+        "event_id": event_id, "ts": float(ts), "device_id": device_id,
+        "name": _canonical(name), "raw_name": name, "properties": props,
+        "ingested_at": float(ingested_at or 0),
+        "provenance": props.get("provenance") or provenance or "observed",
+        "confidence": props.get("confidence") or confidence or "high",
+        "payload_version": int(props.get("payload_version") or version or 1),
     }
+
+
+def _window_rows(since: float, source_mode: str) -> list[dict[str, Any]]:
+    """Materialise only the events a dashboard window can reach.
+
+    Deliberately open-ended on the right: clock-skewed future events were
+    visible to the previous full-table read (onboarding follow-ups and push
+    open windows look forward from an event), so they stay visible here. The
+    source filter runs inside SQL, which is where every all-time aggregate
+    applies it too.
+    """
+    sql = EVENT_COLUMNS + " WHERE ts >= ?"
+    params: list[Any] = [since]
+    if source_mode == "observed":
+        sql += " AND " + IS_OBSERVED_SQL
+    sql += " ORDER BY ts,event_id"
+    with DB_LOCK:
+        records = _db.execute(sql, params).fetchall()
+    return [_row_from_record(record) for record in records]
+
+
+def _history_facts(source_mode: str) -> dict[str, Any]:
+    """All-time facts that survive windowing, as aggregates instead of rows.
+
+    `first_last` is the first and last *active* event per device over the whole
+    history under the selected source. It carries both the ever-used population
+    and every cohort birthday retention needs, so the two can never disagree.
+    The observed/reconstructed totals intentionally ignore the source filter,
+    exactly like the full-table read they replace.
+    """
+    source_clause = (" AND " + IS_OBSERVED_SQL) if source_mode == "observed" else ""
+    with DB_LOCK:
+        first_last = _db.execute(
+            "SELECT device_id, MIN(ts), MAX(ts) FROM events WHERE "
+            + ACTIVE_NAME_SQL + source_clause + " GROUP BY device_id",
+            INACTIVE_RAW_NAMES,
+        ).fetchall()
+        total, observed_events, min_ts, observed_start, latest_observed_ts = _db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(is_observed),0), MIN(ts),"
+            " MIN(CASE WHEN is_observed THEN ts END), MAX(CASE WHEN is_observed THEN ts END)"
+            " FROM (SELECT ts, (" + IS_OBSERVED_SQL + ") AS is_observed FROM events)"
+        ).fetchone()
+    return {
+        "first_last": {device: (float(first), float(last)) for device, first, last in first_last},
+        "data_start": (observed_start if source_mode == "observed" else min_ts),
+        "observed_events": int(observed_events),
+        "reconstructed_events": int(total) - int(observed_events),
+        "observed_start": observed_start,
+        "latest_observed_ts": latest_observed_ts,
+    }
+
+
+def _rolling_active_counts(period_starts: dict[str, float], until: float,
+                           source_mode: str) -> dict[str, int]:
+    """DAU/WAU/MAU as distinct-device counts, over the same predicate as the rest.
+
+    These are the only windowed figures that reach further back than the
+    selected period — MAU always spans 30 days — so counting them in SQL is
+    what lets a 1-day dashboard read a single day of rows instead of a month.
+    Nothing downstream needs the identities behind the counts.
+    """
+    source_clause = (" AND " + IS_OBSERVED_SQL) if source_mode == "observed" else ""
+    with DB_LOCK:
+        dau, wau, mau = _db.execute(
+            "SELECT COUNT(DISTINCT CASE WHEN ts >= ? THEN device_id END),"
+            "       COUNT(DISTINCT CASE WHEN ts >= ? THEN device_id END),"
+            "       COUNT(DISTINCT device_id)"
+            " FROM events WHERE ts >= ? AND ts <= ? AND " + ACTIVE_NAME_SQL + source_clause,
+            (period_starts["dau"], period_starts["wau"],
+             period_starts["mau"], until) + INACTIVE_RAW_NAMES,
+        ).fetchone()
+    return {"dau": int(dau), "wau": int(wau), "mau": int(mau)}
 
 
 def _sessions(
@@ -354,22 +440,29 @@ def _feature(row: dict[str, Any]) -> str | None:
     return props.get("feature")
 
 
-def _retention(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    active_days: dict[str, set[str]] = defaultdict(set)
-    for row in rows:
-        if _is_active(row["name"]):
-            active_days[row["device_id"]].add(_product_day(row["ts"]))
+def _retention(first_last: dict[str, tuple[float, float]]) -> dict[str, Any]:
+    """Cohort retention over the whole history, from per-device first/last activity.
+
+    Windowing this is the one change that would silently move the numbers, so it
+    still reads all of history — as two timestamps per device rather than every
+    row. That is exact, not an approximation: `_product_day` is monotonic in ts,
+    so the first and last active product day are the product days of the first
+    and last active event; a device counts as returned when some day after its
+    first is at least `horizon` days later, and the last day is by definition
+    the best candidate (every other day is closer to the first one, and a device
+    seen on a single day can never qualify).
+    """
+    spans = [(date.fromisoformat(_product_day(first)), date.fromisoformat(_product_day(last)))
+             for first, last in first_last.values()]
     today = datetime.now(PRODUCT_TZ).date()
     out: dict[str, Any] = {}
     for horizon in (1, 7, 30):
         eligible = 0; returned = 0
-        for days in active_days.values():
-            dates = sorted(datetime.fromisoformat(d).date() for d in days)
-            first = dates[0]
+        for first, last in spans:
             if (today - first).days < horizon:
                 continue
             eligible += 1
-            if any((d - first).days >= horizon for d in dates[1:]):
+            if (last - first).days >= horizon:
                 returned += 1
         out[f"d{horizon}"] = {"rate": _percent(returned, eligible), "eligible": eligible, "returned": returned}
     return out
@@ -420,11 +513,19 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     window_days, period_starts = _period_starts(now, days)
     since = period_starts["selected"]
     source_mode = "observed" if str(source).lower() == "observed" else "mixed"
-    all_rows = _event_rows()
-    rows = ([r for r in all_rows if r["provenance"] == "observed"]
-            if source_mode == "observed" else all_rows)
+    # Every row-level consumer below reads from `since` or later; everything the
+    # dashboard needs from before it — the all-time facts and the rolling
+    # DAU/WAU/MAU windows — is an aggregate now, not a materialised row.
+    # Held together under one lock so the three reads still describe a single
+    # state of the table, exactly like the one full-table read they replace: an
+    # ingest landing mid-dashboard must not add a device to the all-time
+    # population that the windowed rows have never heard of.
+    with DB_LOCK:
+        history = _history_facts(source_mode)
+        rolling = _rolling_active_counts(period_starts, now, source_mode)
+        rows = _window_rows(since, source_mode)
     selected = [r for r in rows if since <= r["ts"] <= now]
-    data_start = min((r["ts"] for r in rows), default=None)
+    data_start = history["data_start"]
     available_start = max(since, data_start) if data_start is not None else None
     requested_days = max(1, int(math.ceil(window_days)))
     available_days = (min(requested_days,
@@ -432,11 +533,11 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                            datetime.fromtimestamp(available_start, PRODUCT_TZ).date()).days + 1)
                       if available_start is not None else 0)
     active_selected = [r for r in selected if _is_active(r["name"])]
-    ever_ids = {r["device_id"] for r in rows if _is_active(r["name"])}
+    # Same predicate, same source filter, all of history: the devices that have
+    # ever been active are exactly the devices retention has a cohort for.
+    ever_ids = set(history["first_last"])
     selected_ids = {r["device_id"] for r in active_selected}
-    dau_ids = _active_ids(rows, period_starts["dau"], now)
-    wau_ids = _active_ids(rows, period_starts["wau"], now)
-    mau_ids = _active_ids(rows, period_starts["mau"], now)
+    dau_count = rolling["dau"]; wau_count = rolling["wau"]; mau_count = rolling["mau"]
 
     daily_users: dict[str, set[str]] = defaultdict(set)
     for row in active_selected:
@@ -921,17 +1022,20 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "help": "Доля AI-запросов, где понадобился retry или переключение провайдера. Чем ниже, тем стабильнее основной маршрут."},
     ]
 
-    observed = [r for r in all_rows if r["provenance"] == "observed"]
-    reconstructed = [r for r in all_rows if r["provenance"] != "observed"]
-    observed_start = min((r["ts"] for r in observed), default=None)
+    # Counted across the whole table and deliberately not through the source
+    # filter: this block reports what the collector holds, not what the current
+    # dashboard window looked at.
+    observed_events = history["observed_events"]
+    reconstructed_events = history["reconstructed_events"]
+    observed_start = history["observed_start"]
     coverage_days = (now - observed_start) / 86400 if observed_start else 0
     quality = {
-        "mode": ("observed" if source_mode == "observed" or not reconstructed else "mixed"),
+        "mode": ("observed" if source_mode == "observed" or not reconstructed_events else "mixed"),
         "source_mode": source_mode,
         "observed_start": datetime.fromtimestamp(observed_start, timezone.utc).isoformat(timespec="seconds") if observed_start else None,
         "coverage_days": round(coverage_days, 1),
         "requested_days": requested_days, "available_days": available_days,
-        "observed_events": len(observed), "reconstructed_events": len(reconstructed),
+        "observed_events": observed_events, "reconstructed_events": reconstructed_events,
         "request_id_coverage": _percent(request_covered, len(ai_rows)),
         "token_split_coverage": _percent(token_covered, len(ai_rows)),
         "model_coverage": _percent(model_covered, len(ai_rows)),
@@ -940,13 +1044,13 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                     (["Request ID покрывает меньше 80% AI-попыток; успех пользовательских запросов пока не показывается."] if ai_rows and _percent(request_covered, len(ai_rows)) < 80 else []) +
                     ([f"Выбрано {requested_days} дн., но источник содержит только {available_days} дн.; средние и график не включают дни до начала сбора."] if 0 < available_days < requested_days else []) +
                     (["Показаны только события, которые новая аналитика v2 записала напрямую. Восстановленная старая история исключена из расчётов."]
-                     if source_mode == "observed" and reconstructed else []) +
+                     if source_mode == "observed" and reconstructed_events else []) +
                     (["Добавлены события, восстановленные из старой таблицы. Они расширяют историю, но могут быть неполными; стоимость по ним не считается."]
-                     if source_mode == "mixed" and reconstructed else []),
+                     if source_mode == "mixed" and reconstructed_events else []),
     }
 
     series_data = _series(rows, window_days, now, available_start)
-    avg_dau = (len(dau_ids) if window_days <= 1.1 else
+    avg_dau = (dau_count if window_days <= 1.1 else
                (sum(point["active"] for point in series_data) / len(series_data)
                 if series_data else 0))
     avg_dau_note = ("с 00:00 текущей московской даты" if window_days <= 1.1 else
@@ -1022,7 +1126,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         and r["provenance"] == "observed"
         for r in rows
     )
-    per_dau = lambda n: (round(n / len(dau_ids), 2) if dau_ids else (0 if not n else None))
+    per_dau = lambda n: (round(n / dau_count, 2) if dau_count else (0 if not n else None))
     # AIWA's product-defined Tool is one actual AI-provider invocation. This
     # preserves the original Traction contract and mirrors MultiTool's volume
     # semantics: completed and failed attempts both count as usage, while
@@ -1048,9 +1152,9 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         {"id": "ai_provider_attempts", "label": "AI provider attempts / DAU",
          "value": per_dau(day_ai_attempts), "numerator": day_ai_attempts,
          "numerator_label": "точных AI-попыток с 00:00 МСК",
-         "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
+         "denominator": dau_count, "denominator_label": overview_tool_denominator,
          "status": ("no_data" if not day_ai_attempts else
-                    "no_active_users" if not dau_ids else "ok"),
+                    "no_active_users" if not dau_count else "ok"),
          "selected_for_overview": True,
          "help": overview_tool_help},
         {"id": "logical_ai_requests", "label": "Logical AI requests / DAU",
@@ -1075,8 +1179,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "value": per_dau(day_successful_tool_executions),
          "numerator": day_successful_tool_executions,
          "numerator_label": "успешных tool executions с 00:00 МСК",
-         "denominator": len(dau_ids), "denominator_label": overview_tool_denominator,
-         "status": ("no_active_users" if not dau_ids else "ok"),
+         "denominator": dau_count, "denominator_label": overview_tool_denominator,
+         "status": ("no_active_users" if not dau_count else "ok"),
          "selected_for_overview": False,
          "help": "Только успешно завершённые структурированные function calls с 00:00 МСК. Это диагностическая подметрика, а не общий Tools / DAU: неуспешный вызов всё равно является фактической попыткой использования инструмента."},
         {"id": "useful_tool_outcomes", "label": "Useful outcomes after tool / DAU",
@@ -1090,7 +1194,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     ]
 
     overview = {
-        "ever_used": len(ever_ids), "dau": len(dau_ids), "wau": len(wau_ids), "mau": len(mau_ids),
+        "ever_used": len(ever_ids), "dau": dau_count, "wau": wau_count, "mau": mau_count,
         "sessions_per_dau": per_dau(day_sessions),
     }
     if overview_tools_per_dau is not None:
@@ -1098,11 +1202,11 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     primary = [
         {"label": "Ever used", "value": len(ever_ids), "note": "уникальные пользователи · всё время",
          "help": "Уникальные псевдонимные пользователи, у которых было хотя бы одно продуктовое действие за всю доступную историю."},
-        {"label": "DAU", "value": len(dau_ids), "note": "с 00:00 текущей даты МСК",
+        {"label": "DAU", "value": dau_count, "note": "с 00:00 текущей даты МСК",
          "help": "Уникальные пользователи с продуктовой активностью в текущую московскую календарную дату. Технические AI-попытки и push-отправки не считаются активностью."},
-        {"label": "WAU", "value": len(wau_ids), "note": "текущая ISO-неделя МСК",
+        {"label": "WAU", "value": wau_count, "note": "текущая ISO-неделя МСК",
          "help": "Уникальные пользователи с продуктовой активностью с понедельника 00:00 МСК."},
-        {"label": "MAU", "value": len(mau_ids), "note": "текущий месяц МСК",
+        {"label": "MAU", "value": mau_count, "note": "текущий месяц МСК",
          "help": "Уникальные пользователи с продуктовой активностью с первого числа текущего московского месяца."},
         {"label": "Sessions / DAU", "value": overview["sessions_per_dau"],
          "note": "сессии сегодня МСК / DAU сегодня",
@@ -1113,10 +1217,9 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     ]
 
     classified_active = sum(_feature(r) is not None for r in active_selected)
-    observed_rows = [r for r in all_rows if r["provenance"] == "observed"]
     ingest_lags = [max(0.0, r["ingested_at"] - r["ts"]) for r in selected
                    if r["provenance"] == "observed" and r["ingested_at"] > 0]
-    latest_observed_ts = max((r["ts"] for r in observed_rows), default=None)
+    latest_observed_ts = history["latest_observed_ts"]
     diagnostics = [
         {"label": "Avg DAU", "value": round(avg_dau, 1), "unit": "number",
          "note": avg_dau_note,
@@ -1168,8 +1271,8 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
                      "good": True} for x in primary] + _retention_cards(fleet_retention or None)
                     + _canonical_cards(now, fleet_retention or None),
         "primary": primary,
-        "audience": {"ever_used": len(ever_ids), "active": len(selected_ids), "dau": len(dau_ids),
-                     "wau": len(wau_ids), "mau": len(mau_ids), "avg_dau": round(avg_dau, 1),
+        "audience": {"ever_used": len(ever_ids), "active": len(selected_ids), "dau": dau_count,
+                     "wau": wau_count, "mau": mau_count, "avg_dau": round(avg_dau, 1),
                      "active_user_days": active_user_days},
         "engagement": {"sessions": sessions, "messages": messages, "responses": responses,
                        "sessions_per_active_day": per_active_day(sessions),
@@ -1194,7 +1297,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         "diagnostics": diagnostics,
         "funnel": funnel, "value_delivery": value_delivery, "feature_funnels": feature_funnels,
         "product_health": product_health, "answer_quality": answer_quality,
-        "push_funnel": push_funnel, "retention": _retention(rows),
+        "push_funnel": push_funnel, "retention": _retention(history["first_last"]),
         "series": series_data,
         "ai": {"attempts": len(ai_rows), "requests": len(requests), "untraced_attempts": len(ai_rows) - request_covered,
                "successful_requests": successful_requests,
