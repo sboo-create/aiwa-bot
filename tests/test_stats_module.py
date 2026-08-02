@@ -498,3 +498,156 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(calls, [(30, "mixed")])
         self.assertEqual(statuses.count("miss"), 1)
         self.assertEqual(statuses.count("hit"), 3)
+
+    # --- windowed read: the aggregates must stay identical to a full scan ---
+
+    def _all_rows(self, source_mode="mixed"):
+        """Every row in the table, built exactly like a window read builds them."""
+        return self.module._window_rows(-1e18, source_mode)
+
+    def test_sql_active_predicate_matches_is_active_for_every_known_name(self):
+        names = sorted(set(self.module.SYSTEM_NAMES) | set(self.module.ALIASES)
+                       | set(self.module.ALIASES.values())
+                       | set(self.module.PRODUCT_ACTION_NAMES)
+                       | set(self.module.ENGAGEMENT_NAMES)
+                       | {"app_opened", "screen_viewed", "legacy_button",
+                          "an_event_nobody_has_defined_yet"})
+        for index, name in enumerate(names):
+            self.add(f"n{index}", "u1", name)
+
+        active_in_sql = {row[0] for row in self.module._db.execute(
+            "SELECT name FROM events WHERE " + self.module.ACTIVE_NAME_SQL,
+            self.module.INACTIVE_RAW_NAMES).fetchall()}
+
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(name in active_in_sql, self.module._is_active(name))
+
+    def test_history_aggregates_match_a_row_by_row_scan(self):
+        now = time.time()
+        # Ordinary traffic, an alias name, a device that only ever emits system
+        # events, an empty device_id, and properties overriding the column in
+        # both directions.
+        self.add("a1", "u1", "app_opened", ts=now - 5 * 86400)
+        self.add("a2", "u1", "user_message_sent", ts=now - 86400)
+        self.add("a3", "u2", "legacy_signup", ts=now - 9 * 86400, provenance="reconstructed")
+        self.add("a4", "u2", "checkin_completed", ts=now - 2 * 86400, provenance="reconstructed")
+        self.add("a5", "sys", "ai_call", {"status": "success"}, now - 3 * 86400)
+        self.add("a6", "sys", "push_sent", {"campaign_id": "c:1"}, now - 3 * 86400)
+        self.add("a7", "", "user_message_sent", ts=now - 4 * 86400)
+        self.add("a8", "u3", "app_opened", {"provenance": "reconstructed"}, now - 6 * 86400)
+        self.add("a9", "u4", "app_opened", {"provenance": "observed"}, now - 7 * 86400,
+                 provenance="reconstructed")
+        self.module._db.execute(
+            "INSERT INTO events(event_id,ts,device_id,name,properties,ingested_at,provenance,"
+            "confidence,payload_version) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("a10", now - 8 * 86400, "u5", "app_opened", "{not json", now, "observed", "high", 2))
+        self.module._db.commit()
+
+        for source_mode in ("mixed", "observed"):
+            with self.subTest(source=source_mode):
+                every_row = self._all_rows("mixed")
+                scoped = ([r for r in every_row if r["provenance"] == "observed"]
+                          if source_mode == "observed" else every_row)
+                expected_first_last = {}
+                for row in scoped:
+                    if self.module._is_active(row["name"]):
+                        first, last = expected_first_last.get(
+                            row["device_id"], (row["ts"], row["ts"]))
+                        expected_first_last[row["device_id"]] = (
+                            min(first, row["ts"]), max(last, row["ts"]))
+                observed = [r for r in every_row if r["provenance"] == "observed"]
+
+                facts = self.module._history_facts(source_mode)
+
+                self.assertEqual(facts["first_last"], expected_first_last)
+                self.assertEqual(facts["data_start"], min(r["ts"] for r in scoped))
+                self.assertEqual(facts["observed_events"], len(observed))
+                self.assertEqual(facts["reconstructed_events"], len(every_row) - len(observed))
+                self.assertEqual(facts["observed_start"], min(r["ts"] for r in observed))
+                self.assertEqual(facts["latest_observed_ts"], max(r["ts"] for r in observed))
+
+    def test_rolling_counts_match_a_row_by_row_scan(self):
+        now = time.time()
+        self.add("r1", "u1", "app_opened", ts=now - 60)
+        self.add("r2", "u2", "user_message_sent", ts=now - 3 * 86400)
+        self.add("r3", "u3", "app_opened", ts=now - 20 * 86400)
+        self.add("r4", "u4", "ai_call", {"status": "success"}, now - 60)
+        self.add("r5", "u5", "app_opened", ts=now - 40 * 86400)
+        self.add("r6", "u6", "app_opened", ts=now - 60, provenance="reconstructed")
+
+        _, period_starts = self.module._period_starts(now, 1)
+        for source_mode in ("mixed", "observed"):
+            with self.subTest(source=source_mode):
+                rows = self._all_rows(source_mode)
+                expected = {
+                    key: len({r["device_id"] for r in rows
+                              if period_starts[key] <= r["ts"] <= now
+                              and self.module._is_active(r["name"])})
+                    for key in ("dau", "wau", "mau")
+                }
+                self.assertEqual(
+                    self.module._rolling_active_counts(period_starts, now, source_mode),
+                    expected)
+
+    def test_retention_matches_the_active_day_set_definition(self):
+        now = time.time()
+        # u1 returns after 8 days, u2 only ever appears once, u3 returns the
+        # next day, u4 is active on many days across a long span.
+        for index, (user, offsets) in enumerate({
+            "u1": (40, 32),
+            "u2": (40,),
+            "u3": (40, 39),
+            "u4": (60, 55, 30, 5),
+            "u5": (0,),
+        }.items()):
+            for step, offset in enumerate(offsets):
+                self.add(f"ret-{index}-{step}", user, "app_opened", ts=now - offset * 86400)
+        self.add("ret-sys", "u6", "ai_call", {"status": "success"}, now - 40 * 86400)
+
+        rows = self._all_rows("mixed")
+        active_days = {}
+        for row in rows:
+            if self.module._is_active(row["name"]):
+                active_days.setdefault(row["device_id"], set()).add(
+                    self.module._product_day(row["ts"]))
+        today = datetime.now(self.module.PRODUCT_TZ).date()
+        expected = {}
+        for horizon in (1, 7, 30):
+            eligible = returned = 0
+            for days in active_days.values():
+                dates = sorted(datetime.fromisoformat(d).date() for d in days)
+                first = dates[0]
+                if (today - first).days < horizon:
+                    continue
+                eligible += 1
+                if any((d - first).days >= horizon for d in dates[1:]):
+                    returned += 1
+            expected[f"d{horizon}"] = {"rate": self.module._percent(returned, eligible),
+                                       "eligible": eligible, "returned": returned}
+
+        facts = self.module._history_facts("mixed")
+
+        self.assertEqual(self.module._retention(facts["first_last"]), expected)
+        self.assertEqual(set(facts["first_last"]), set(active_days))
+
+    def test_window_read_keeps_future_dated_events(self):
+        now = time.time()
+        self.add("w1", "u1", "user_message_sent", ts=now - 60)
+        self.add("w2", "u1", "assistant_message_sent", ts=now + 3600)
+
+        _, period_starts = self.module._period_starts(now, 1)
+        rows = self.module._window_rows(period_starts["selected"], "mixed")
+
+        self.assertEqual({r["event_id"] for r in rows}, {"w1", "w2"})
+
+    def test_inactive_name_derivation_follows_aliases(self):
+        """Adding an alias must move the SQL predicate too, with no second list to edit."""
+        with mock.patch.dict(self.module.ALIASES,
+                             {"legacy_ping": "ai_call", "push_sent": "app_opened"},
+                             clear=False):
+            derived = set(self.module._inactive_raw_names())
+            for name in ("legacy_ping", "push_sent", "app_opened", "ai_call",
+                         "legacy_signup", "user_message_sent"):
+                with self.subTest(name=name):
+                    self.assertEqual(name not in derived, self.module._is_active(name))
