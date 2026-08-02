@@ -8,6 +8,8 @@ import { optimisticFoodEdit } from "../lib/foodDayCache";
 import {
   completeManualFoodRequest,
   manualFoodRequestForPayload,
+  manualFoodResponseExpiresTarget,
+  retireManualFoodRequest,
 } from "../lib/foodMutation";
 
 export function FoodEntryForm({ meal, onSaved, onClose, choiceSurface = "container" }) {
@@ -21,8 +23,9 @@ export function FoodEntryForm({ meal, onSaved, onClose, choiceSurface = "contain
       return;
     }
     setBusy(true);
+    let manualRequest = null;
     try {
-      const manualRequest = meal ? null : manualFoodRequestForPayload(form);
+      manualRequest = meal ? null : manualFoodRequestForPayload(form);
       const result = await apiCall(meal ? "/api/diary_edit" : "/api/food_manual", {
         ...(meal ? { id: meal.id } : {}),
         ...form,
@@ -31,7 +34,12 @@ export function FoodEntryForm({ meal, onSaved, onClose, choiceSurface = "contain
           date: manualRequest.date,
         } : {}),
       });
-      if (result?.ok === false || result?.error) throw new Error(result.message || "Не получилось сохранить");
+      if (result?.ok === false || result?.error) {
+        if (manualRequest && manualFoodResponseExpiresTarget(result)) {
+          retireManualFoodRequest(manualRequest.id);
+        }
+        throw new Error(result.message || "Не получилось сохранить");
+      }
       if (manualRequest) completeManualFoodRequest(manualRequest.id);
       showToast(meal ? "Приём обновлён" : "Приём добавлен", { type: "success" });
       await onSaved({

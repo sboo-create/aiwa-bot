@@ -1894,6 +1894,12 @@ def del_user(cid):
     section_cache_clear(cid)
     for key in [key for key in list(_SUM_CACHE) if key and key[0] == cid]:
         _SUM_CACHE.pop(key, None)
+    for key in [key for key in list(globals().get("_TODAY_CACHE", {})) if key and key[0] == cid]:
+        _TODAY_CACHE.pop(key, None)
+    if "_TODAY_CACHE_REVISION" in globals():
+        _TODAY_CACHE_REVISION[cid] = _TODAY_CACHE_REVISION.get(cid, 0) + 1
+    for key in [key for key in list(globals().get("_CARD_CACHE", {})) if key and key[0] == cid]:
+        _CARD_CACHE.pop(key, None)
     for key in [key for key in list(globals().get("_WEEK_FOOD_CACHE", {})) if key and key[0] == cid]:
         _WEEK_FOOD_CACHE.pop(key, None)
     if "_WEEK_FOOD_REVISION" in globals():
@@ -4231,19 +4237,34 @@ def _card_ctx(cid, u, st=None, preg=None):
     if p and p.get("age"): bits.append(f"Возраст {p['age']}")
     return ". ".join(bits)
 
-async def _card_captions(cid, mode, ctx, summary=None):
+async def _card_captions(
+    cid, mode, ctx, summary=None, *, user_generation=None,
+):
+    generation = (
+        _user_generation(cid) if user_generation is None else user_generation
+    )
+    if not _user_write_allowed(cid, generation):
+        return {}
     key = (cid, dtoday().isoformat(), AIWA_VERSION, mode, bool(summary))
     hit = _CARD_CACHE.get(key)
-    if hit is not None: return hit
+    if hit is not None:
+        return hit if _user_write_allowed(cid, generation) else {}
     if summary:
         ctx = (ctx or "") + " || Текст сегодняшней сводки — строки карточки ОБЯЗАНЫ быть согласованы с ним: питание — суть блока про питание, нагрузка — суть блока про нагрузку, не выдумывай нового: " + str(summary)[:1800]
     _cu = []
     caps = {}
     try:
-        caps = await llm_to_thread(cid, "card_captions", L.card_captions, mode, ctx, _cu) or {}
+        caps = await llm_to_thread(
+            cid, "card_captions", L.card_captions, mode, ctx, _cu,
+            user_generation=generation,
+        ) or {}
     except Exception as e:
         log.warning("card_captions %s: %s", cid, e)
-    if _cu: ev(cid, "tokens", sum(_cu), meta="card", calls=len(_cu), usage=_cu)
+    if _cu:
+        ev(
+            cid, "tokens", sum(_cu), meta="card", calls=len(_cu), usage=_cu,
+            user_generation=generation,
+        )
     def _cut(v, lim=80):
         v = str(v).strip()
         if len(v) <= lim: return v
@@ -4251,14 +4272,28 @@ async def _card_captions(cid, mode, ctx, summary=None):
         if len(cut) < lim // 2: cut = v[:lim]      # строка без пробелов — чистый срез
         return cut + "…"
     caps = {k: _cut(v, 40 if k in ("focus", "theme") else 80) for k, v in caps.items()}
+    if not _user_write_allowed(cid, generation):
+        return {}
     _CARD_CACHE[key] = caps; _prune_day(_CARD_CACHE)
+    # Publish first and validate again. If /stop completed before publication,
+    # the pinned generation is stale and this removes the late entry. If /stop
+    # starts afterwards, del_user() owns the final cache clear.
+    if not _user_write_allowed(cid, generation):
+        if _CARD_CACHE.get(key) is caps:
+            _CARD_CACHE.pop(key, None)
+        return {}
     return caps
 
-async def _cycle_card_png(cid, u, st, summary=None):
+async def _cycle_card_png(
+    cid, u, st, summary=None, *, user_generation=None,
+):
     """Белая персональная карточка цикла; None, если выключено/не собралось."""
     if not (IMG and new_cards_on(cid) and hasattr(IMG, "render_daily_card")): return None
     try:
-        caps = await _card_captions(cid, "cycle", _card_ctx(cid, u, st=st), summary=summary)
+        caps = await _card_captions(
+            cid, "cycle", _card_ctx(cid, u, st=st), summary=summary,
+            user_generation=user_generation,
+        )
         if not caps.get("food"):
             ev(cid, "fallback", meta="static:card_caps_empty"); return None
         data = {"day": st["day"], "total": st["cycle_len"], "to_period": st["days_to_next"],
@@ -4267,7 +4302,7 @@ async def _cycle_card_png(cid, u, st, summary=None):
     except Exception as e:
         log.warning("cycle card %s: %s", cid, e); return None
 
-async def _general_card_png(cid, u, summary=None):
+async def _general_card_png(cid, u, summary=None, *, user_generation=None):
     """Белая карточка для беременности/менопаузы; None, если выключено/не собралось."""
     if not (IMG and new_cards_on(cid) and hasattr(IMG, "render_daily_card")): return None
     mode = (u or {}).get("mode") or "none"
@@ -4278,7 +4313,10 @@ async def _general_card_png(cid, u, summary=None):
     _m = "preg" if pregnancy else ("meno" if mode == "meno" else None)
     if not _m: return None
     try:
-        caps = await _card_captions(cid, _m, _card_ctx(cid, u, preg=pregnancy), summary=summary)
+        caps = await _card_captions(
+            cid, _m, _card_ctx(cid, u, preg=pregnancy), summary=summary,
+            user_generation=user_generation,
+        )
         if not caps.get("food"):
             ev(cid, "fallback", meta="static:card_caps_empty"); return None
         if _m == "preg":
@@ -4293,10 +4331,13 @@ async def _general_card_png(cid, u, summary=None):
 
 async def send_infographic(bot, cid):
     if not IMG: return
+    generation = _user_generation(cid)
     u, st = status_of(cid)
     if not st: return
     try:
-        png = await _cycle_card_png(cid, u, st)
+        png = await _cycle_card_png(
+            cid, u, st, user_generation=generation,
+        )
         if png is None:
             png = await asyncio.to_thread(IMG.render_cycle, date.fromisoformat(u["last_period"]), u["cycle_len"], dtoday())
         bio = io.BytesIO(png); bio.name = "cycle.png"
@@ -4308,6 +4349,7 @@ async def send_infographic(bot, cid):
 async def send_general_infographic(bot, cid, u=None):
     """Картинка к сводке для беременности и режимов без прогноза фазы цикла."""
     if not IMG: return False
+    generation = _user_generation(cid)
     u = u or row(cid)
     if not u: return False
     mode = u.get("mode") or "none"
@@ -4321,7 +4363,10 @@ async def send_general_infographic(bot, cid, u=None):
         _m = ("preg" if (mode == "preg" and pregnancy) else ("meno" if mode == "meno" else None)) if new_cards_on(cid) else None
         png = None
         if _m and hasattr(IMG, "render_daily_card"):
-            caps = await _card_captions(cid, _m, _card_ctx(cid, u, preg=pregnancy))
+            caps = await _card_captions(
+                cid, _m, _card_ctx(cid, u, preg=pregnancy),
+                user_generation=generation,
+            )
             if caps.get("food"):
                 if _m == "preg":
                     data = {"week": pregnancy.get("week"), "trimester": pregnancy.get("trimester"),
@@ -5360,9 +5405,16 @@ def _delivery_summary_fallback(u, st=None, pregnancy=None):
         "- Выбирай обычный сбалансированный рацион и комфортную активность по самочувствию."
     )
 
-async def push_general(context, cid, with_image=True, campaign=None):
+async def push_general(
+    context, cid, with_image=True, campaign=None, *, user_generation=None,
+):
+    generation = (
+        _user_generation(cid) if user_generation is None else user_generation
+    )
     u = row(cid)
     if not u or not is_onboarded(u):
+        return False
+    if not _user_write_allowed(cid, generation):
         return False
     if u.get("mode") == "male":
         with_image = False   # мужская сводка — только текст, без инфографики
@@ -5373,7 +5425,6 @@ async def push_general(context, cid, with_image=True, campaign=None):
             log.info("summary push skipped as duplicate: %s %s", cid, campaign)
             return False
     try:
-        generation = _user_generation(cid)
         usage = []; day = dtoday().isoformat()
         _, pregnancy = _summary_state_for_day(u, day)
         key = _summary_key(cid, u, day, None, pregnancy)
@@ -5404,7 +5455,11 @@ async def push_general(context, cid, with_image=True, campaign=None):
         clean, extra = L.split_followups(body)
         kb = sugg_kb(cid, merge_summary_suggestions(u, None, extra), app_user=u,
                      app_label=APP_BUTTON_TEXT, campaign=campaign)
-        _png = (await _general_card_png(cid, u, summary=clean)) if (with_image and new_cards_on(cid)) else None
+        _png = (
+            await _general_card_png(
+                cid, u, summary=clean, user_generation=generation,
+            )
+        ) if (with_image and new_cards_on(cid)) else None
         if _png is not None:
             try:
                 await send_rich_with_photo(context.bot, cid, guard_aiwa_reply(cid, clean), _png, reply_markup=kb)
@@ -5739,11 +5794,17 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         return await msg.reply_text("Напиши дату начала последних месячных, например 25.05.2026, или нажми кнопку. Потом даты можно редактировать в приложении.", reply_markup=PERIOD_KB)
 
 async def push_summary(context, cid, with_image=True, campaign=None):
+    generation = _user_generation(cid)
     u0 = row(cid)
     if u0 and not is_cycle(u0):
-        return await push_general(context, cid, with_image=with_image, campaign=campaign)
+        return await push_general(
+            context, cid, with_image=with_image, campaign=campaign,
+            user_generation=generation,
+        )
     u, st = status_of(cid)
     if not st: return
+    if not _user_write_allowed(cid, generation):
+        return False
     if st["status"] != "normal":
         return await send_delay(context, cid, st, campaign=campaign)
     claimed = False; sent_any = False
@@ -5753,7 +5814,6 @@ async def push_summary(context, cid, with_image=True, campaign=None):
             log.info("summary push skipped as duplicate: %s %s", cid, campaign)
             return False
     try:
-        generation = _user_generation(cid)
         usage = []; day = dtoday().isoformat()
         key = _summary_key(cid, u, day, st, None)
         value = _SUM_CACHE.get(key)
@@ -5783,7 +5843,11 @@ async def push_summary(context, cid, with_image=True, campaign=None):
         clean, extra = L.split_followups(body)
         kb = sugg_kb(cid, merge_summary_suggestions(u, st, extra), app_user=u,
                      app_label=APP_BUTTON_TEXT, campaign=campaign)
-        _png = (await _cycle_card_png(cid, u, st, summary=clean)) if (with_image and new_cards_on(cid)) else None
+        _png = (
+            await _cycle_card_png(
+                cid, u, st, summary=clean, user_generation=generation,
+            )
+        ) if (with_image and new_cards_on(cid)) else None
         if _png is not None:
             try:
                 await send_rich_with_photo(context.bot, cid, guard_aiwa_reply(cid, clean), _png, reply_markup=kb)
@@ -8441,13 +8505,38 @@ async def _serve_index(request):
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"})
     return web.Response(text="webapp not found", status=404)
 
+def _today_cache_keys(cid, mode, *, generation=None, revision=None, day=None):
+    generation = _user_generation(cid) if generation is None else int(generation)
+    revision = (
+        _TODAY_CACHE_REVISION.get(cid, 0) if revision is None else int(revision)
+    )
+    day = day or dtoday().isoformat()
+    mode = str(mode or "")
+    return (
+        (cid, generation, revision, day, mode),
+        f"{generation}:{revision}:{mode}",
+    )
+
+
 async def _prewarm_today(cid):
     """Schedule one durable daily-summary job without waiting for the model."""
     try:
         u = row(cid)
         if not is_onboarded(u): return
-        ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
-        if _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or ""): return
+        generation = _user_generation(cid)
+        revision = _TODAY_CACHE_REVISION.get(cid, 0)
+        ck, disk_key = _today_cache_keys(
+            cid, u.get("mode") or "", generation=generation, revision=revision,
+        )
+        hit = (
+            _TODAY_CACHE.get(ck)
+            or dc_get(cid, "today", disk_key)
+            or dc_get(cid, "today", u.get("mode") or "")
+        )
+        if hit and _user_write_allowed(cid, generation) and (
+            revision == _TODAY_CACHE_REVISION.get(cid, 0)
+        ):
+            return
         _, st = status_of(cid)
         await asyncio.to_thread(_enqueue_today_job, cid, u, st)
         if _AI_JOB_WAKE is not None:
@@ -8476,6 +8565,7 @@ _WEEK_FOOD_REVISION = {}
 
 def _evict_today_cache(cid):
     """Сводка дня зависит от чек-ина, циклов и профиля — сбрасываем при их изменении."""
+    _TODAY_CACHE_REVISION[cid] = _TODAY_CACHE_REVISION.get(cid, 0) + 1
     for k in [k for k in _TODAY_CACHE if k[0] == cid]:
         _TODAY_CACHE.pop(k, None)
     dc_del(cid, "today")
@@ -9702,8 +9792,8 @@ def _recent_workouts_text(cid):
                   "или похожие по духу, а не только стандартный набор.")
     return txt
 
-def _recent_syms_text(cid):
-    lg = log_get(cid, dtoday().isoformat()) or {}
+def _recent_syms_text(cid, day=None):
+    lg = log_get(cid, day or dtoday().isoformat()) or {}
     out = []
     e = lg.get("energy"); m = lg.get("mood")
     if e: out.append("энергия " + {1: "низкая", 2: "средняя", 3: "высокая"}.get(e, str(e)))
@@ -10318,6 +10408,7 @@ async def _shutdown_food_asset_workers():
         executor.shutdown(wait=False, cancel_futures=True)
 # Сводка дня в мини-аппе: кэш на день, чтобы апп открывался сразу, а не ждал модель.
 _TODAY_CACHE = {}
+_TODAY_CACHE_REVISION = {}
 _AI_JOB_WAKE = None
 _AI_JOB_TASKS = []
 _AI_JOB_COMPLETIONS = deque(maxlen=200)
@@ -10440,13 +10531,14 @@ def _today_note_mode_guard(mode, note):
         }
     return clean
 
-def _today_job_payload(cid, u, st):
+def _today_job_payload(cid, u, st, cache_revision, target_day):
     return {
-        "date": dtoday().isoformat(),
+        "date": target_day,
         "mode": str(u.get("mode") or ""),
+        "cache_revision": int(cache_revision),
         "profile": profile_of(u),
         "state": st,
-        "recent_syms": _recent_syms_text(cid),
+        "recent_syms": _recent_syms_text(cid, target_day),
     }
 
 def _today_job_key(cid, payload):
@@ -10454,16 +10546,31 @@ def _today_job_key(cid, payload):
     digest = _hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
     return f"today:{cid}:{payload['date']}:{payload['mode']}:{digest}"
 
-def _enqueue_today_job(cid, u, st):
-    payload = _today_job_payload(cid, u, st)
+def _enqueue_today_job(cid, _caller_u=None, _caller_st=None):
+    # Callers may have taken their screen snapshot before /stop + /start. Pin
+    # the lifecycle first, then rebuild every private input inside that pin so
+    # an old profile can never be queued under the reactivated generation.
+    generation = _user_generation(cid)
+    revision = _TODAY_CACHE_REVISION.get(cid, 0)
+    target_day = dtoday().isoformat()
+    u, st = status_of(cid)
+    if not is_onboarded(u):
+        return None
+    payload = _today_job_payload(cid, u, st, revision, target_day)
     dedupe_key = _today_job_key(cid, payload)
     now = datetime.now(TZ).isoformat()
-    expires = datetime.combine(dtoday() + timedelta(days=2), dtime.min, tzinfo=TZ).isoformat()
-    generation = _user_generation(cid)
+    expires = datetime.combine(
+        date.fromisoformat(target_day) + timedelta(days=2),
+        dtime.min, tzinfo=TZ,
+    ).isoformat()
     c = db()
     try:
         c.execute("BEGIN IMMEDIATE")
-        if not _user_write_allowed(cid, generation, conn=c):
+        if (
+            not _user_write_allowed(cid, generation, conn=c)
+            or revision != _TODAY_CACHE_REVISION.get(cid, 0)
+            or target_day != dtoday().isoformat()
+        ):
             c.rollback()
             return None
         existing = c.execute(
@@ -10538,6 +10645,7 @@ def _enqueue_today_job(cid, u, st):
         "result": json.loads(row_[3]) if row_[3] else None,
         "created_at": row_[4], "started_at": row_[5], "finished_at": row_[6],
         "error": row_[7], "deduped": bool(existing),
+        "generation": generation, "payload": payload,
     }
 
 def _claim_ai_job():
@@ -10717,6 +10825,56 @@ def _today_job_fallback(st, job=None):
         }
     return out
 
+
+def _publish_today_note_for_generation(job, note):
+    """Publish an AI result only into the lifecycle that requested it."""
+    cid = job["chat_id"]
+    generation = job["generation"]
+    payload = job["payload"]
+    mode = str(payload.get("mode") or "")
+    revision = int(payload.get("cache_revision", 0))
+    payload_day = str(payload.get("date") or "")
+    ck, disk_key = _today_cache_keys(
+        cid, mode, generation=generation, revision=revision,
+        day=payload_day,
+    )
+    if (
+        payload_day != dtoday().isoformat()
+        or revision != _TODAY_CACHE_REVISION.get(cid, 0)
+    ):
+        return False
+    # Memory goes first: a concurrent /stop either clears it afterwards or is
+    # already visible to the generation-aware durable write, which rejects it.
+    _TODAY_CACHE[ck] = note
+    if not dc_put_for_generation(cid, "today", note, disk_key, generation):
+        if _TODAY_CACHE.get(ck) is note:
+            _TODAY_CACHE.pop(ck, None)
+        return False
+    if (
+        not _user_write_allowed(cid, generation)
+        or revision != _TODAY_CACHE_REVISION.get(cid, 0)
+        or payload_day != dtoday().isoformat()
+    ):
+        if _TODAY_CACHE.get(ck) is note:
+            _TODAY_CACHE.pop(ck, None)
+        dc_del_key(cid, "today", disk_key)
+        return False
+    return True
+
+
+def _today_cache_identity_current(cid, cache_key):
+    try:
+        key_cid, generation, revision, day, _mode = cache_key
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        key_cid == cid
+        and day == dtoday().isoformat()
+        and revision == _TODAY_CACHE_REVISION.get(cid, 0)
+        and _user_write_allowed(cid, generation)
+    )
+
+
 async def _ai_job_worker(worker_no):
     while True:
         job = await asyncio.to_thread(_claim_ai_job)
@@ -10753,6 +10911,13 @@ async def _ai_job_worker(worker_no):
             if not isinstance(note, dict) or not (note.get("summary") or "").strip():
                 raise ValueError("empty_response")
             note = _today_note_mode_guard(payload.get("mode"), note)
+            if not await asyncio.to_thread(
+                _user_write_allowed, job["chat_id"], job["generation"]
+            ):
+                await asyncio.to_thread(
+                    _finish_ai_job, job, "superseded", None, "user_inactive"
+                )
+                continue
             current = row(job["chat_id"])
             if not current or str(current.get("mode") or "") != str(payload.get("mode") or ""):
                 _finish_ai_job(job, "superseded", error="context_changed")
@@ -10761,11 +10926,13 @@ async def _ai_job_worker(worker_no):
             if st:
                 note.setdefault("day", st.get("day"))
                 note.setdefault("phase", st.get("phase_ru") or "")
-            ck = (job["chat_id"], payload["date"], str(payload.get("mode") or ""))
-            _TODAY_CACHE[ck] = note
-            await asyncio.to_thread(
-                dc_put, job["chat_id"], "today", note, payload.get("mode") or ""
-            )
+            if not await asyncio.to_thread(
+                _publish_today_note_for_generation, job, note
+            ):
+                await asyncio.to_thread(
+                    _finish_ai_job, job, "superseded", None, "user_inactive"
+                )
+                continue
             await asyncio.to_thread(_finish_ai_job, job, "completed", note)
             _AI_JOB_COMPLETIONS.append(time.monotonic())
             ev(job["chat_id"], "ai_job", meta="completed|today_note")
@@ -10786,28 +10953,72 @@ def _api_today_lookup(cid):
     u = row(cid)
     if not is_onboarded(u):
         return None, None, None, None
+    lookup_day = dtoday().isoformat()
+    generation = _user_generation(cid)
+    revision = _TODAY_CACHE_REVISION.get(cid, 0)
     _, st = status_of(cid); ev(cid, "button", meta="web_today")
-    ck = (cid, dtoday().isoformat(), str(u.get("mode") or ""))
-    hit = _TODAY_CACHE.get(ck) or dc_get(cid, "today", u.get("mode") or "")
+    mode = str(u.get("mode") or "")
+    ck, disk_key = _today_cache_keys(
+        cid, mode, generation=generation, revision=revision, day=lookup_day,
+    )
+    hit = _TODAY_CACHE.get(ck) or dc_get(cid, "today", disk_key)
+    legacy_hit = False
+    if not hit:
+        # Existing deployments used mode as the key. /stop and every same-life
+        # invalidation delete all today rows, so this is safe to migrate once.
+        hit = dc_get(cid, "today", mode)
+        legacy_hit = bool(hit)
     if hit:
+        if (
+            not _user_write_allowed(cid, generation)
+            or revision != _TODAY_CACHE_REVISION.get(cid, 0)
+        ):
+            return u, st, ck, None
         guarded = _today_note_mode_guard(u.get("mode"), hit)
+        repaired_legacy = legacy_hit and guarded != hit
         if guarded != hit:
             # Repair already-generated stale content without paying for another
             # model call; subsequent opens read only the corrected cache entry.
             hit = guarded
-            _TODAY_CACHE[ck] = hit
-            dc_put(cid, "today", hit, u.get("mode") or "")
             ev(cid, "fallback", meta="today_note_mode_guard")
+        cache_job = {
+            "chat_id": cid,
+            "generation": generation,
+            "payload": {
+                "date": lookup_day, "mode": mode,
+                "cache_revision": revision,
+            },
+        }
+        if not _publish_today_note_for_generation(cache_job, hit):
+            return u, st, ck, None
+        if repaired_legacy:
+            # Keep the legacy row internally consistent during the one-release
+            # migration; new publications only use generation+revision keys.
+            dc_put_for_generation(cid, "today", hit, mode, generation)
+            if (
+                not _user_write_allowed(cid, generation)
+                or revision != _TODAY_CACHE_REVISION.get(cid, 0)
+            ):
+                dc_del_key(cid, "today", mode)
+                return u, st, ck, None
     return u, st, ck, hit
 
 async def _api_today(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
-    u, st, ck, hit = await asyncio.to_thread(_api_today_lookup, cid)
-    if not u: return _cors(web.json_response({"error": "onboard"}, status=403))
-    if hit:
-        _TODAY_CACHE[ck] = hit
-        return _cors(web.json_response(dict(hit, cached=True, refreshing=False)))
+    hit = None
+    for _attempt in range(2):
+        u, st, ck, hit = await asyncio.to_thread(_api_today_lookup, cid)
+        if not u:
+            return _cors(web.json_response({"error": "onboard"}, status=403))
+        if not hit:
+            break
+        if await asyncio.to_thread(_today_cache_identity_current, cid, ck):
+            return _cors(web.json_response(
+                dict(hit, cached=True, refreshing=False)
+            ))
+    else:
+        hit = None
     job = await asyncio.to_thread(_enqueue_today_job, cid, u, st)
     if job and job.get("status") == "rejected":
         ev(cid, "ai_job", meta="rejected|today_note|queue_full")
@@ -10818,8 +11029,13 @@ async def _api_today(request):
     if _AI_JOB_WAKE is not None:
         _AI_JOB_WAKE.set()
     if job and job.get("status") == "completed" and job.get("result"):
-        _TODAY_CACHE[ck] = job["result"]
-        return _cors(web.json_response(dict(job["result"], cached=True, refreshing=False)))
+        if await asyncio.to_thread(
+            _publish_today_note_for_generation, job, job["result"]
+        ):
+            return _cors(web.json_response(
+                dict(job["result"], cached=True, refreshing=False)
+            ))
+        job = dict(job, status="superseded", result=None)
     return _cors(web.json_response(_today_job_fallback(st, job)))
 
 async def _api_chat(request):
@@ -13240,6 +13456,11 @@ async def _api_diary_del(request):
     if error:
         return _cors(web.json_response(error, status=status))
     data = mutation.get("data") or {}
+    if mutation.get("created"):
+        # The durable mutation, not receipt materialization, is the cache
+        # invalidation boundary. A lost acknowledgement must still invalidate
+        # once, while a canonical retry must not advance the revision again.
+        _evict_week_food_cache(cid)
     try:
         payload = _stored_food_mutation_receipt(
             data, duplicate=not mutation.get("created")
@@ -13258,7 +13479,6 @@ async def _api_diary_del(request):
             },
             status=500,
         ))
-    _evict_week_food_cache(cid)
     if mutation.get("created"):
         ev(cid, "button", meta="web_diary_del", user_generation=generation)
     return _cors(web.json_response(payload))
@@ -13535,6 +13755,10 @@ def _api_food_manual_sync(cid, body, generation):
     if error:
         return error, status
     data = mutation.get("data") or {}
+    if mutation.get("created"):
+        # Receipt generation may fail after commit; invalidate from the durable
+        # created flag so the first attempt advances the cache revision once.
+        _evict_week_food_cache(cid)
     try:
         payload = _stored_food_mutation_receipt(
             data, duplicate=not mutation.get("created")
@@ -13550,7 +13774,6 @@ def _api_food_manual_sync(cid, body, generation):
             "meal_id": data.get("meal_id"),
             "date": data.get("date"),
         }, 500
-    _evict_week_food_cache(cid)
     if mutation.get("created"):
         ev(cid, "flow_start", meta="food", user_generation=generation)
         ev(cid, "goal", meta="food_log", user_generation=generation)

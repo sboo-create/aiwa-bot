@@ -1469,8 +1469,9 @@ function rescaleEdit(pid){var ed=document.getElementById('ed-'+pid);if(!ed)retur
 async function saveMealEdit(id,pid){var p=document.getElementById('ed-'+pid);var body={id:id,title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};var r=await api('/api/diary_edit',body);if(_applyDiary(r)){haptic('impact','light');toast('Сохранено');}}
 function openManual(){var e=document.getElementById('ed-manual');if(!e)return;document.querySelectorAll('.djedit.open').forEach(function(x){if(x!==e)x.classList.remove('open');});e.classList.add('open');var t=document.getElementById('f-title-manual');if(t)setTimeout(function(){t.focus();},60);}
 function foodGestureId(prefix){return(window.crypto&&typeof window.crypto.randomUUID==='function')?window.crypto.randomUUID():(prefix+'-'+Date.now()+'-'+Math.random().toString(36).slice(2));}
-function manualFoodPending(body){var fingerprint=JSON.stringify({title:String(body.title||'').trim(),kcal:String(body.kcal||'').trim(),protein:String(body.protein||'').trim(),fat:String(body.fat||'').trim(),carbs:String(body.carbs||'').trim(),grams:String(body.grams||'').trim(),slot:String(body.slot||'')}),key='aiwa:food-manual-pending',pending=null,today=moscowDateIso();try{pending=JSON.parse(sessionStorage.getItem(key)||'null');}catch(error){}if(!pending||pending.fingerprint!==fingerprint){pending={fingerprint:fingerprint,request_id:foodGestureId('food-manual'),date:today};try{sessionStorage.setItem(key,JSON.stringify(pending));}catch(error){}}return{key:key,request_id:pending.request_id,date:pending.date};}
-async function saveManual(pid){var p=document.getElementById('ed-'+pid);var body={title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};if(!((body.title||'').trim())&&!((body.kcal||'').trim())){toast('Укажи название или калории');return;}var pending=manualFoodPending(body);body.request_id=pending.request_id;body.date=pending.date;showFoodLoading();var r=await api('/api/food_manual',body);hideFoodLoading();if(r&&r.ok){try{sessionStorage.removeItem(pending.key);}catch(error){}_applyDiary(r);toast('Добавлено');haptic('impact','light');}else toast((r&&r.message)||'Не получилось');}
+function manualFoodPending(body){var fingerprint=JSON.stringify({title:String(body.title||'').trim(),kcal:String(body.kcal||'').trim(),protein:String(body.protein||'').trim(),fat:String(body.fat||'').trim(),carbs:String(body.carbs||'').trim(),grams:String(body.grams||'').trim(),slot:String(body.slot||'')}),key='aiwa:food-manual-pending:'+encodeURIComponent(fingerprint),pending=null,today=moscowDateIso(),yesterdayDate=new Date(today+'T00:00:00Z');yesterdayDate.setUTCDate(yesterdayDate.getUTCDate()-1);var yesterday=yesterdayDate.toISOString().slice(0,10);try{pending=JSON.parse(sessionStorage.getItem(key)||'null');}catch(error){}if(!pending||pending.fingerprint!==fingerprint||!pending.request_id||(pending.date!==today&&pending.date!==yesterday)){pending={fingerprint:fingerprint,request_id:foodGestureId('food-manual'),date:today};try{sessionStorage.setItem(key,JSON.stringify(pending));}catch(error){}}return{key:key,request_id:pending.request_id,date:pending.date};}
+function clearManualFoodPending(pending){var current=null;try{current=JSON.parse(sessionStorage.getItem(pending.key)||'null');}catch(error){}if(!current||current.request_id!==pending.request_id)return false;try{sessionStorage.removeItem(pending.key);}catch(error){return false;}return true;}
+async function saveManual(pid){var p=document.getElementById('ed-'+pid);var body={title:_gv('f-title-'+pid),kcal:_gv('f-kcal-'+pid),protein:_gv('f-p-'+pid),fat:_gv('f-f-'+pid),carbs:_gv('f-c-'+pid),grams:_gv('f-g-'+pid),slot:p?p.getAttribute('data-slot'):null};if(!((body.title||'').trim())&&!((body.kcal||'').trim())){toast('Укажи название или калории');return;}var pending=manualFoodPending(body),submit=async function(){body.request_id=pending.request_id;body.date=pending.date;return await api('/api/food_manual',body);};showFoodLoading();var r=await submit();if(r&&!r.ok&&(r.error==='date_out_of_range'||r.error==='food_target_expired')&&clearManualFoodPending(pending)){pending=manualFoodPending(body);r=await submit();}hideFoodLoading();if(r&&r.ok){clearManualFoodPending(pending);_applyDiary(r);toast('Добавлено');haptic('impact','light');}else toast((r&&r.message)||'Не получилось');}
 function pickFoodPhoto(){var f=document.getElementById('foodfile');if(f)f.click();}
 async function onFoodFile(e){
   var file=e.target.files&&e.target.files[0];e.target.value='';if(!file)return;
@@ -1688,14 +1689,22 @@ function trAddCustom(tag){
   var o=trcur.ex[nm];if(o){o.sel=true;node.classList.add('sel');updGrp(group);}
   if(inp)inp.value='';
 }
+function workoutPending(body){
+  var canonical={type:String(body.type||'').trim(),items:(body.items||[]).map(function(item){return{name:String(item.name||'').trim(),weight:item.weight==null?null:item.weight,sets:item.sets==null?null:item.sets,reps:item.reps==null?null:item.reps,unit:item.unit==null?null:item.unit,group:item.group==null?null:String(item.group)};}),duration:String(body.duration||''),rpe:String(body.rpe||''),date:String(body.date||'')};
+  var fingerprint=JSON.stringify(canonical),key='aiwa:workout-pending:'+encodeURIComponent(fingerprint),pending=null;
+  try{pending=JSON.parse(sessionStorage.getItem(key)||'null');}catch(error){}
+  if(!pending||pending.fingerprint!==fingerprint||!pending.request_id){pending={fingerprint:fingerprint,request_id:foodGestureId('workout')};try{sessionStorage.setItem(key,JSON.stringify(pending));}catch(error){}}
+  return{key:key,request_id:pending.request_id};
+}
 async function saveWorkout(){
   var sel=Object.keys(trcur.ex).filter(function(k){return trcur.ex[k].sel;});
   if(!sel.length){toast('Отметь хотя бы одно упражнение');return;}
   var items=sel.map(function(k){var o=trcur.ex[k];return {name:k,weight:(o.kind==='w'?o.w:null),sets:o.strength?o.sets:null,reps:o.strength?o.reps:null,unit:(o.timed?'sec':null),group:o.group||null};});
   var tp=(trcur.type==='Своё')?(((document.getElementById('trCustomType')||{}).value||trcur.customType||'').trim()||'Тренировка'):trcur.type;
   toast('Айва разбирает тренировку…');
-  var r=await api('/api/workout',{type:tp,items:items,duration:trcur.dur,rpe:trcur.rpe,date:trcur.date});
-  if(r&&r.ok){closeHub();loadTrWeek();renderTrReview(r.review||"",r.calories,r.muscles);toast('Записала тренировку');window.scrollTo({top:0,behavior:'smooth'});}
+  var body={type:tp,items:items,duration:trcur.dur,rpe:trcur.rpe,date:trcur.date},pending=workoutPending(body);body.request_id=pending.request_id;
+  var r=await api('/api/workout',body);
+  if(r&&r.ok){try{sessionStorage.removeItem(pending.key);}catch(error){}closeHub();loadTrWeek();renderTrReview(r.review||"",r.calories,r.muscles);toast('Записала тренировку');window.scrollTo({top:0,behavior:'smooth'});}
   else{toast((r&&r.text)||'Не получилось сохранить');}
 }
 function openTrProfile(){

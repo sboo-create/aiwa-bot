@@ -60,6 +60,237 @@ def function_source(name):
 
 
 class Phase3HostContractTests(unittest.TestCase):
+    def test_legacy_workout_reuses_persisted_identity_after_lost_ack(self):
+        pending = function_source("workoutPending")
+        save = function_source("saveWorkout")
+        gesture = function_source("foodGestureId")
+
+        self.assertIn("sessionStorage.getItem(key)", pending)
+        self.assertIn("sessionStorage.setItem(key,JSON.stringify(pending))", pending)
+        self.assertIn("date:String(body.date||'')", pending)
+        self.assertIn("body.request_id=pending.request_id", save)
+        self.assertIn("sessionStorage.removeItem(pending.key)", save)
+
+        script = f"""
+var store={{}},submissions=[],uuid=0;
+var sessionStorage={{
+  getItem:function(key){{return Object.prototype.hasOwnProperty.call(store,key)?store[key]:null;}},
+  setItem:function(key,value){{store[key]=value;}},
+  removeItem:function(key){{delete store[key];}}
+}};
+var window={{
+  crypto:{{randomUUID:function(){{uuid+=1;return"uuid-"+uuid;}}}},
+  scrollTo:function(){{}}
+}};
+var document={{getElementById:function(){{return null;}}}};
+var trcur={{type:"Ходьба",dur:"30",rpe:"5",date:"2026-08-01",ex:{{
+  "Быстрая ходьба":{{sel:true,kind:false,strength:false,timed:false,group:"Кардио"}}
+}}}};
+var responseQueue=[
+  {{ok:false,text:"lost acknowledgement A"}},
+  {{ok:false,text:"lost acknowledgement B"}},
+  {{ok:true,review:"ok",calories:120,muscles:"ноги"}}
+];
+async function api(_url,body){{submissions.push(JSON.parse(JSON.stringify(body)));return responseQueue.shift();}}
+function toast(){{}}
+function closeHub(){{}}
+function loadTrWeek(){{}}
+function renderTrReview(){{}}
+{gesture}
+{pending}
+{save}
+(async function(){{
+  await saveWorkout();
+  var pendingKeys=Object.keys(store).filter(function(key){{return key.indexOf("aiwa:workout-pending:")===0;}});
+  var kept=JSON.parse(store[pendingKeys[0]]||"null");
+  // A different failed gesture must not overwrite A's unacknowledged identity.
+  trcur={{type:"Йога",dur:"20",rpe:"3",date:"2026-08-01",ex:{{
+    "Мягкая йога":{{sel:true,kind:false,strength:false,timed:false,group:"Мобильность"}}
+  }}}};
+  await saveWorkout();
+  // Recreate A's legacy panel state: only sessionStorage survives the reopen.
+  trcur={{type:"Ходьба",dur:"30",rpe:"5",date:"2026-08-01",ex:{{
+    "Быстрая ходьба":{{sel:true,kind:false,strength:false,timed:false,group:"Кардио"}}
+  }}}};
+  await saveWorkout();
+  var remaining=Object.keys(store).filter(function(key){{return key.indexOf("aiwa:workout-pending:")===0;}}).map(function(key){{return JSON.parse(store[key]).request_id;}});
+  process.stdout.write(JSON.stringify({{
+    first:submissions[0].request_id,other:submissions[1].request_id,
+    retry:submissions[2].request_id,date:submissions[2].date,kept:kept&&kept.request_id,
+    remaining:remaining,
+    uuid:uuid
+  }}));
+}})().catch(function(error){{console.error(error);process.exit(1);}});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], check=True, capture_output=True, text=True
+        )
+        self.assertEqual(json.loads(completed.stdout), {
+            "first": "uuid-1",
+            "other": "uuid-2",
+            "retry": "uuid-1",
+            "date": "2026-08-01",
+            "kept": "uuid-1",
+            "remaining": ["uuid-2"],
+            "uuid": 2,
+        })
+
+    def test_legacy_manual_food_rotates_after_two_midnights_and_recovers_expiry(self):
+        pending = function_source("manualFoodPending")
+        clear = function_source("clearManualFoodPending")
+        save = function_source("saveManual")
+        gesture = function_source("foodGestureId")
+
+        self.assertIn("pending.date!==today&&pending.date!==yesterday", pending)
+        self.assertIn("aiwa:food-manual-pending:", pending)
+        self.assertIn("current.request_id!==pending.request_id", clear)
+        self.assertIn("r.error==='date_out_of_range'", save)
+        self.assertIn("r.error==='food_target_expired'", save)
+
+        script = f"""
+var day="2026-08-02",store={{}},submissions=[],uuid=0,applied=0;
+var sessionStorage={{
+  getItem:function(key){{return Object.prototype.hasOwnProperty.call(store,key)?store[key]:null;}},
+  setItem:function(key,value){{store[key]=value;}},
+  removeItem:function(key){{delete store[key];}}
+}};
+var window={{crypto:{{randomUUID:function(){{uuid+=1;return"uuid-"+uuid;}}}}}};
+function moscowDateIso(){{return day;}}
+{gesture}
+{pending}
+{clear}
+var form={{title:"Каша",kcal:"320",protein:"12",fat:"8",carbs:"45",grams:"250",slot:"breakfast"}};
+var first=manualFoodPending(form);
+day="2026-08-03";
+var withinWindow=manualFoodPending(form);
+day="2026-08-04";
+var afterTwoMidnights=manualFoodPending(form);
+
+var responseQueue=[
+  {{ok:false,error:"date_out_of_range",message:"expired"}},
+  {{ok:true,date:"2026-08-05",meal_id:7}}
+];
+var document={{getElementById:function(id){{
+  if(id==="ed-manual")return{{getAttribute:function(){{return"breakfast";}}}};
+  return null;
+}}}};
+function _gv(id){{return ({{
+  "f-title-manual":"Каша","f-kcal-manual":"320","f-p-manual":"12",
+  "f-f-manual":"8","f-c-manual":"45","f-g-manual":"250"
+}})[id]||"";}}
+async function api(_url,body){{submissions.push(JSON.parse(JSON.stringify(body)));return responseQueue.shift();}}
+function showFoodLoading(){{}}
+function hideFoodLoading(){{}}
+function toast(){{}}
+function haptic(){{}}
+function _applyDiary(){{applied+=1;return true;}}
+{save}
+(async function(){{
+  // The Aug 4 identity is still yesterday on Aug 5, but a structured server
+  // expiry retires it and retries once with a fresh current-day identity.
+  day="2026-08-05";
+  await saveManual("manual");
+  process.stdout.write(JSON.stringify({{
+    first:first,within:withinWindow,rotated:afterTwoMidnights,
+    retryIds:submissions.map(function(item){{return item.request_id;}}),
+    retryDates:submissions.map(function(item){{return item.date;}}),
+    cleared:Object.keys(store).every(function(key){{return key.indexOf("aiwa:food-manual-pending:")!==0;}}),
+    applied:applied,uuid:uuid
+  }}));
+}})().catch(function(error){{console.error(error);process.exit(1);}});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], check=True, capture_output=True, text=True
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["first"]["request_id"], "uuid-1")
+        self.assertEqual(result["within"], result["first"])
+        self.assertTrue(
+            result["rotated"]["key"].startswith("aiwa:food-manual-pending:")
+        )
+        self.assertEqual(result["rotated"]["request_id"], "uuid-2")
+        self.assertEqual(result["rotated"]["date"], "2026-08-04")
+        self.assertEqual(result["retryIds"], ["uuid-2", "uuid-3"])
+        self.assertEqual(result["retryDates"], ["2026-08-04", "2026-08-05"])
+        self.assertTrue(result["cleared"])
+        self.assertEqual(result["applied"], 1)
+        self.assertEqual(result["uuid"], 3)
+
+    def test_legacy_manual_food_late_response_cannot_retire_new_identity(self):
+        pending = function_source("manualFoodPending")
+        clear = function_source("clearManualFoodPending")
+        save = function_source("saveManual")
+        gesture = function_source("foodGestureId")
+
+        script = f"""
+var day="2026-08-02",store={{}},submissions=[],deferred=[],uuid=0,title="Каша";
+var sessionStorage={{
+  getItem:function(key){{return Object.prototype.hasOwnProperty.call(store,key)?store[key]:null;}},
+  setItem:function(key,value){{store[key]=value;}},
+  removeItem:function(key){{delete store[key];}}
+}};
+var window={{crypto:{{randomUUID:function(){{uuid+=1;return"uuid-"+uuid;}}}}}};
+function moscowDateIso(){{return day;}}
+{gesture}
+{pending}
+{clear}
+var document={{getElementById:function(id){{if(id==="ed-manual")return{{getAttribute:function(){{return"breakfast";}}}};return null;}}}};
+function _gv(id){{return id==="f-title-manual"?title:({{
+  "f-kcal-manual":"320","f-p-manual":"12","f-f-manual":"8",
+  "f-c-manual":"45","f-g-manual":"250"
+}})[id]||"";}}
+function api(_url,body){{submissions.push(JSON.parse(JSON.stringify(body)));return new Promise(function(resolve){{deferred.push(resolve);}});}}
+function showFoodLoading(){{}}
+function hideFoodLoading(){{}}
+function toast(){{}}
+function haptic(){{}}
+function _applyDiary(){{return true;}}
+{save}
+(async function(){{
+  var oldSave=saveManual("manual");
+  await Promise.resolve();
+  // The same payload rotates after two Moscow midnights while the old request
+  // remains unresolved, so both requests share a storage key but not an ID.
+  day="2026-08-04";
+  var newSave=saveManual("manual");
+  await Promise.resolve();
+  deferred[0]({{ok:true,date:"2026-08-02",meal_id:1}});
+  await oldSave;
+  var keys=Object.keys(store).filter(function(key){{return key.indexOf("aiwa:food-manual-pending:")===0;}});
+  var afterLateSuccess=JSON.parse(store[keys[0]]||"null");
+  deferred[1]({{ok:false,error:"network",message:"retry later"}});
+  await newSave;
+  day="2026-08-06";
+  var expiringOld=saveManual("manual");
+  await Promise.resolve();
+  day="2026-08-08";
+  var latest=saveManual("manual");
+  await Promise.resolve();
+  deferred[2]({{ok:false,error:"food_target_expired",message:"expired"}});
+  await expiringOld;
+  var afterLateExpiry=JSON.parse(store[keys[0]]||"null");
+  deferred[3]({{ok:false,error:"network",message:"retry later"}});
+  await latest;
+  process.stdout.write(JSON.stringify({{
+    ids:submissions.map(function(item){{return item.request_id;}}),
+    afterLateSuccess:afterLateSuccess,
+    afterLateExpiry:afterLateExpiry,
+    finalPending:JSON.parse(store[keys[0]]||"null"),uuid:uuid
+  }}));
+}})().catch(function(error){{console.error(error);process.exit(1);}});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], check=True, capture_output=True, text=True
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            result["ids"], ["uuid-1", "uuid-2", "uuid-3", "uuid-4"]
+        )
+        self.assertEqual(result["afterLateSuccess"]["request_id"], "uuid-2")
+        self.assertEqual(result["afterLateExpiry"]["request_id"], "uuid-4")
+        self.assertEqual(result["finalPending"]["request_id"], "uuid-4")
+        self.assertEqual(result["uuid"], 4)
+
     def test_atomic_journal_uses_fixed_snapshot_and_refreshes_before_resolve(self):
         snapshot = function_source("journalRequestSnapshot")
         bridge = function_source("aiwaSaveJournal")

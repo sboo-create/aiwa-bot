@@ -28,8 +28,12 @@ class Phase3FoodMutationContracts(unittest.TestCase):
         self.cid = 9401
         bot._activate_user(self.cid)
         bot.upsert(self.cid, mode="irregular", height=168, weight=62, age=31)
+        bot._WEEK_FOOD_CACHE.clear()
+        bot._WEEK_FOOD_REVISION.clear()
 
     def tearDown(self):
+        bot._WEEK_FOOD_CACHE.clear()
+        bot._WEEK_FOOD_REVISION.clear()
         bot.DB = self.old_db
         self.tmp.cleanup()
 
@@ -64,6 +68,7 @@ class Phase3FoodMutationContracts(unittest.TestCase):
         self.assertEqual(second["diary"]["date"], bot.dtoday().isoformat())
 
     def test_manual_receipt_failure_rolls_forward_to_durable_retry(self):
+        initial_revision = bot._WEEK_FOOD_REVISION.get(self.cid, 0)
         original = bot._stored_food_mutation_receipt
         with mock.patch.object(
             bot, "_stored_food_mutation_receipt", side_effect=RuntimeError("after commit")
@@ -72,12 +77,17 @@ class Phase3FoodMutationContracts(unittest.TestCase):
         self.assertEqual(failed_response.status, 500)
         self.assertTrue(failed["committed"])
         self.assertEqual(len(bot.meals_of(self.cid)), 1)
+        committed_revision = bot._WEEK_FOOD_REVISION.get(self.cid, 0)
+        self.assertEqual(committed_revision, initial_revision + 1)
 
         with mock.patch.object(bot, "_stored_food_mutation_receipt", wraps=original):
             retry_response, retry = self.call(bot._api_food_manual, self.manual_body())
         self.assertEqual(retry_response.status, 200)
         self.assertTrue(retry["duplicate"])
         self.assertEqual(len(bot.meals_of(self.cid)), 1)
+        self.assertEqual(
+            bot._WEEK_FOOD_REVISION.get(self.cid, 0), committed_revision
+        )
 
     def test_delete_receipt_failure_replays_tombstone_instead_of_404(self):
         target = bot.dtoday().isoformat()
@@ -86,6 +96,7 @@ class Phase3FoodMutationContracts(unittest.TestCase):
             "carbs": 44, "grams": 250, "items": [], "source": "manual",
         }, d=target)
         body = {"id": mid, "request_id": "delete-1"}
+        initial_revision = bot._WEEK_FOOD_REVISION.get(self.cid, 0)
 
         with mock.patch.object(
             bot, "_stored_food_mutation_receipt", side_effect=RuntimeError("after commit")
@@ -94,6 +105,8 @@ class Phase3FoodMutationContracts(unittest.TestCase):
         self.assertEqual(failed_response.status, 500)
         self.assertTrue(failed["committed"])
         self.assertIsNone(bot.meal_get(self.cid, mid))
+        committed_revision = bot._WEEK_FOOD_REVISION.get(self.cid, 0)
+        self.assertEqual(committed_revision, initial_revision + 1)
 
         retry_response, retry = self.call(bot._api_diary_del, body)
         self.assertEqual(retry_response.status, 200)
@@ -101,6 +114,9 @@ class Phase3FoodMutationContracts(unittest.TestCase):
         self.assertEqual(retry["deleted_id"], mid)
         self.assertEqual(retry["date"], target)
         self.assertEqual(retry["meals"], [])
+        self.assertEqual(
+            bot._WEEK_FOOD_REVISION.get(self.cid, 0), committed_revision
+        )
 
         # Losing the client token is still safe because the owned tombstone is
         # discoverable by immutable meal id.
@@ -109,6 +125,9 @@ class Phase3FoodMutationContracts(unittest.TestCase):
         )
         self.assertEqual(recovered_response.status, 200)
         self.assertTrue(recovered["duplicate"])
+        self.assertEqual(
+            bot._WEEK_FOOD_REVISION.get(self.cid, 0), committed_revision
+        )
 
     def test_delete_failure_inside_transaction_rolls_back_meal_and_tombstone(self):
         mid = bot.meal_add(self.cid, {

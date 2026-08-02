@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest import mock
 
@@ -34,10 +34,16 @@ class StableReviewBackendTests(unittest.TestCase):
         )
         bot._WEEK_FOOD_CACHE.clear()
         bot._WEEK_FOOD_REVISION.clear()
+        bot._TODAY_CACHE.clear()
+        bot._TODAY_CACHE_REVISION.clear()
+        bot._CARD_CACHE.clear()
 
     def tearDown(self):
         bot._WEEK_FOOD_CACHE.clear()
         bot._WEEK_FOOD_REVISION.clear()
+        bot._TODAY_CACHE.clear()
+        bot._TODAY_CACHE_REVISION.clear()
+        bot._CARD_CACHE.clear()
         bot.DB = self.old_db
         self.tmp.cleanup()
 
@@ -52,6 +58,42 @@ class StableReviewBackendTests(unittest.TestCase):
             "carbs": 52, "items": [],
         })
 
+    def run_today_worker_once(self, job, llm):
+        async def scenario():
+            claimed = False
+            statuses = []
+            finished = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            old_wake = bot._AI_JOB_WAKE
+            bot._AI_JOB_WAKE = asyncio.Event()
+
+            def claim_once():
+                nonlocal claimed
+                if claimed:
+                    return None
+                claimed = True
+                return job
+
+            def finish(_job, status, *_args, **_kwargs):
+                statuses.append(status)
+                loop.call_soon_threadsafe(finished.set)
+
+            try:
+                with (
+                    mock.patch.object(bot, "_claim_ai_job", side_effect=claim_once),
+                    mock.patch.object(bot, "_finish_ai_job", side_effect=finish),
+                    mock.patch.object(bot, "llm_to_thread", new=llm),
+                ):
+                    task = asyncio.create_task(bot._ai_job_worker(1))
+                    await asyncio.wait_for(finished.wait(), timeout=1)
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            finally:
+                bot._AI_JOB_WAKE = old_wake
+            return statuses
+
+        return asyncio.run(scenario())
+
     def test_stop_clears_persisted_and_memory_food_review_cache(self):
         generation = bot._user_generation(self.cid)
         revision = bot._WEEK_FOOD_REVISION.get(self.cid, 0)
@@ -59,6 +101,18 @@ class StableReviewBackendTests(unittest.TestCase):
         disk_key = f"{generation}:{revision}:v2"
         bot._WEEK_FOOD_CACHE[key] = "старый разбор"
         bot.dc_put(self.cid, "week_food", "старый разбор", disk_key)
+        today_key = (
+            self.cid, bot.dtoday().isoformat(), "irregular",
+        )
+        card_key = (
+            self.cid, bot.dtoday().isoformat(), bot.AIWA_VERSION,
+            "irregular", False,
+        )
+        bot._TODAY_CACHE[today_key] = {"summary": "прошлая жизнь"}
+        bot._CARD_CACHE[card_key] = {"food": "прошлая жизнь"}
+        bot.dc_put(
+            self.cid, "today", {"summary": "прошлая жизнь"}, "irregular"
+        )
 
         message = SimpleNamespace(reply_text=mock.AsyncMock())
         update = SimpleNamespace(
@@ -71,8 +125,263 @@ class StableReviewBackendTests(unittest.TestCase):
         asyncio.run(bot.stop(update, context))
 
         self.assertFalse(any(key[0] == self.cid for key in bot._WEEK_FOOD_CACHE))
+        self.assertFalse(any(key[0] == self.cid for key in bot._TODAY_CACHE))
+        self.assertFalse(any(key[0] == self.cid for key in bot._CARD_CACHE))
         self.assertIsNone(bot.dc_get(self.cid, "week_food", disk_key))
+        self.assertIsNone(bot.dc_get(self.cid, "today", "irregular"))
         self.assertIsNone(bot.row(self.cid))
+
+    def test_old_today_and_card_generation_cannot_publish_after_reactivation(self):
+        old_generation = bot._user_generation(self.cid)
+        target = bot.dtoday().isoformat()
+        job = {
+            "job_id": "old-today-job",
+            "chat_id": self.cid,
+            "generation": old_generation,
+            "kind": "today_note",
+            "payload": {
+                "date": target,
+                "mode": "irregular",
+                "state": None,
+                "profile": {},
+                "recent_syms": "",
+            },
+            "attempts": 1,
+        }
+
+        async def reactivate_in_llm(*_args, **_kwargs):
+            bot.del_user(self.cid)
+            bot._activate_user(self.cid)
+            bot.upsert(
+                self.cid, mode="irregular", height=171, weight=65, age=33,
+            )
+            return {"summary": "сводка прошлого lifecycle", "suggestions": []}
+
+        statuses = self.run_today_worker_once(job, reactivate_in_llm)
+        self.assertIn("superseded", statuses)
+        self.assertNotEqual(old_generation, bot._user_generation(self.cid))
+        self.assertFalse(any(key[0] == self.cid for key in bot._TODAY_CACHE))
+        self.assertIsNone(bot.dc_get(self.cid, "today", "irregular"))
+
+        async def card_llm(*_args, **_kwargs):
+            bot.del_user(self.cid)
+            bot._activate_user(self.cid)
+            bot.upsert(
+                self.cid, mode="irregular", height=172, weight=66, age=34,
+            )
+            return {"food": "подпись прошлого lifecycle"}
+
+        with mock.patch.object(bot, "llm_to_thread", new=card_llm):
+            captions = asyncio.run(
+                bot._card_captions(self.cid, "irregular", "private context")
+            )
+        self.assertEqual(captions, {})
+        self.assertFalse(any(key[0] == self.cid for key in bot._CARD_CACHE))
+
+    def test_today_revision_rejects_invalidation_during_llm_and_publish(self):
+        generation = bot._user_generation(self.cid)
+        revision = bot._TODAY_CACHE_REVISION.get(self.cid, 0)
+        target = bot.dtoday().isoformat()
+        job = {
+            "job_id": "stale-context-job",
+            "chat_id": self.cid,
+            "generation": generation,
+            "kind": "today_note",
+            "payload": {
+                "date": target,
+                "mode": "irregular",
+                "cache_revision": revision,
+                "state": None,
+                "profile": {},
+                "recent_syms": "",
+            },
+            "attempts": 1,
+        }
+
+        async def invalidate_in_llm(*_args, **_kwargs):
+            bot._evict_today_cache(self.cid)
+            return {"summary": "устаревшая сводка", "suggestions": []}
+
+        statuses = self.run_today_worker_once(job, invalidate_in_llm)
+        self.assertIn("superseded", statuses)
+        old_memory_key, old_disk_key = bot._today_cache_keys(
+            self.cid, "irregular", generation=generation,
+            revision=revision, day=target,
+        )
+        self.assertNotIn(old_memory_key, bot._TODAY_CACHE)
+        self.assertIsNone(bot.dc_get(self.cid, "today", old_disk_key))
+
+        current_revision = bot._TODAY_CACHE_REVISION.get(self.cid, 0)
+        write_race_job = dict(job, payload=dict(
+            job["payload"], cache_revision=current_revision,
+        ))
+        original_put = bot.dc_put_for_generation
+
+        def invalidate_during_put(cid, kind, payload, key, pinned_generation):
+            bot._evict_today_cache(cid)
+            return original_put(cid, kind, payload, key, pinned_generation)
+
+        with mock.patch.object(
+            bot, "dc_put_for_generation", side_effect=invalidate_during_put,
+        ):
+            published = bot._publish_today_note_for_generation(
+                write_race_job,
+                {"summary": "устаревшая запись", "suggestions": []},
+            )
+        write_memory_key, write_disk_key = bot._today_cache_keys(
+            self.cid, "irregular", generation=generation,
+            revision=current_revision, day=target,
+        )
+        self.assertFalse(published)
+        self.assertNotIn(write_memory_key, bot._TODAY_CACHE)
+        self.assertIsNone(bot.dc_get(self.cid, "today", write_disk_key))
+
+    def test_today_enqueue_rebuilds_snapshot_inside_pinned_lifecycle(self):
+        stale_user = bot.row(self.cid)
+        _, stale_status = bot.status_of(self.cid)
+        stale_generation = bot._user_generation(self.cid)
+
+        bot.del_user(self.cid)
+        new_generation = bot._activate_user(self.cid)
+        bot.upsert(
+            self.cid, mode="male", height=188, weight=91, age=42,
+        )
+
+        queued = bot._enqueue_today_job(self.cid, stale_user, stale_status)
+
+        self.assertNotEqual(stale_generation, new_generation)
+        self.assertEqual(queued["generation"], new_generation)
+        self.assertEqual(queued["payload"]["mode"], "male")
+        self.assertTrue(queued["payload"]["profile"]["male"])
+        self.assertEqual(queued["payload"]["profile"]["weight"], 91)
+
+    def test_today_enqueue_rejects_snapshot_crossing_cache_revision(self):
+        original_status = bot.status_of
+
+        def invalidate_after_snapshot(cid):
+            snapshot = original_status(cid)
+            bot._evict_today_cache(cid)
+            return snapshot
+
+        with mock.patch.object(
+            bot, "status_of", side_effect=invalidate_after_snapshot,
+        ):
+            queued = bot._enqueue_today_job(self.cid, bot.row(self.cid), None)
+
+        self.assertIsNone(queued)
+        conn = bot.db()
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM ai_jobs WHERE chat_id=?", (self.cid,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(count, 0)
+
+    def test_today_enqueue_rejects_snapshot_crossing_moscow_midnight(self):
+        with mock.patch.object(
+            bot, "dtoday", side_effect=[date(2026, 8, 1), date(2026, 8, 2)],
+        ):
+            queued = bot._enqueue_today_job(self.cid, bot.row(self.cid), None)
+
+        self.assertIsNone(queued)
+        conn = bot.db()
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM ai_jobs WHERE chat_id=?", (self.cid,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(count, 0)
+
+    def test_today_publish_rejects_job_from_previous_moscow_day(self):
+        generation = bot._user_generation(self.cid)
+        job = {
+            "chat_id": self.cid,
+            "generation": generation,
+            "payload": {
+                "date": "2026-08-01",
+                "mode": "irregular",
+                "cache_revision": bot._TODAY_CACHE_REVISION.get(self.cid, 0),
+            },
+        }
+        with (
+            mock.patch.object(bot, "dtoday", return_value=date(2026, 8, 2)),
+            mock.patch.object(bot, "dc_put_for_generation") as durable_put,
+        ):
+            published = bot._publish_today_note_for_generation(
+                job, {"summary": "вчерашняя сводка", "suggestions": []},
+            )
+        self.assertFalse(published)
+        durable_put.assert_not_called()
+        self.assertFalse(any(key[0] == self.cid for key in bot._TODAY_CACHE))
+
+    def test_today_api_rechecks_identity_after_lookup_invalidation(self):
+        user = bot.row(self.cid)
+        generation = bot._user_generation(self.cid)
+        revision = bot._TODAY_CACHE_REVISION.get(self.cid, 0)
+        stale_key, _ = bot._today_cache_keys(
+            self.cid, "irregular", generation=generation, revision=revision,
+        )
+        bot._evict_today_cache(self.cid)
+        fresh_key, _ = bot._today_cache_keys(
+            self.cid, "irregular", generation=generation,
+            revision=bot._TODAY_CACHE_REVISION.get(self.cid, 0),
+        )
+        lookups = [
+            (user, None, stale_key, {
+                "summary": "private stale summary", "suggestions": [],
+            }),
+            (user, None, fresh_key, None),
+        ]
+        with (
+            mock.patch.object(bot, "_verify_init", return_value=self.cid),
+            mock.patch.object(bot, "_api_today_lookup", side_effect=lookups) as lookup,
+            mock.patch.object(
+                bot, "_enqueue_today_job",
+                return_value={"status": "rejected", "reason": "queue_full"},
+            ),
+            mock.patch.object(bot, "_AI_JOB_WAKE", None),
+        ):
+            response = asyncio.run(bot._api_today(FakeJsonRequest({})))
+        payload = json.loads(response.text)
+        self.assertEqual(lookup.call_count, 2)
+        self.assertNotIn("private stale summary", payload["summary"])
+
+    def test_today_lookup_cannot_migrate_legacy_note_across_midnight(self):
+        legacy = {"summary": "вчерашняя сводка", "suggestions": []}
+        with (
+            mock.patch.object(
+                bot, "dtoday",
+                side_effect=[date(2026, 8, 1), date(2026, 8, 2)],
+            ),
+            mock.patch.object(bot, "dc_get", side_effect=[None, legacy]),
+            mock.patch.object(bot, "dc_put_for_generation") as durable_put,
+        ):
+            user, _status, cache_key, hit = bot._api_today_lookup(self.cid)
+
+        self.assertIsNotNone(user)
+        self.assertEqual(cache_key[3], "2026-08-01")
+        self.assertIsNone(hit)
+        durable_put.assert_not_called()
+        self.assertFalse(any(key[0] == self.cid for key in bot._TODAY_CACHE))
+
+    def test_card_caption_rejects_upstream_snapshot_from_old_lifecycle(self):
+        old_generation = bot._user_generation(self.cid)
+        old_context = bot._card_ctx(self.cid, bot.row(self.cid))
+        bot.del_user(self.cid)
+        bot._activate_user(self.cid)
+        bot.upsert(self.cid, mode="male", height=188, weight=91, age=42)
+
+        llm = mock.AsyncMock(return_value={"food": "old private caption"})
+        with mock.patch.object(bot, "llm_to_thread", new=llm):
+            captions = asyncio.run(bot._card_captions(
+                self.cid, "irregular", old_context,
+                summary="old private summary", user_generation=old_generation,
+            ))
+        self.assertEqual(captions, {})
+        llm.assert_not_awaited()
+        self.assertFalse(any(key[0] == self.cid for key in bot._CARD_CACHE))
 
     def test_week_food_publication_rejects_mutation_and_lifecycle_races(self):
         self.seed_food()

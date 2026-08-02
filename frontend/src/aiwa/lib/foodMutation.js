@@ -2,6 +2,11 @@ import { aiwaTodayIso } from "./dates";
 
 let pendingManual = null;
 const pendingDeletes = new Map();
+const EXPIRED_MANUAL_TARGETS = new Set([
+  "date_out_of_range",
+  "food_target_expired",
+  "target_expired",
+]);
 
 const requestId = (prefix) => (
   globalThis.crypto?.randomUUID?.()
@@ -18,6 +23,26 @@ const manualFingerprint = (payload) => JSON.stringify({
   slot: String(payload?.slot || ""),
 });
 
+const isoDayNumber = (iso) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(iso || ""))) return null;
+  const parsed = Date.parse(`${iso}T00:00:00Z`);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString().slice(0, 10) !== iso) return null;
+  return Math.floor(parsed / 86400000);
+};
+
+/** The manual-food API accepts a frozen target for Moscow today or yesterday. */
+export const manualFoodTargetIsReplayable = (target, today = aiwaTodayIso()) => {
+  const targetDay = isoDayNumber(target);
+  const todayDay = isoDayNumber(today);
+  if (targetDay === null || todayDay === null) return false;
+  const age = todayDay - targetDay;
+  return age >= 0 && age <= 1;
+};
+
+export const manualFoodResponseExpiresTarget = (result) => (
+  EXPIRED_MANUAL_TARGETS.has(result?.error)
+);
+
 /** Keep one manual-food gesture stable across failure, close and panel remount. */
 export const manualFoodRequestForPayload = (
   payload,
@@ -25,13 +50,22 @@ export const manualFoodRequestForPayload = (
   makeId = () => requestId("food-manual"),
 ) => {
   const fingerprint = manualFingerprint(payload);
-  if (!pendingManual || pendingManual.fingerprint !== fingerprint) {
+  if (
+    !pendingManual
+    || pendingManual.fingerprint !== fingerprint
+    || !manualFoodTargetIsReplayable(pendingManual.date, today)
+  ) {
     pendingManual = { fingerprint, id: makeId(), date: today };
   }
   return pendingManual;
 };
 
 export const completeManualFoodRequest = (id) => {
+  if (pendingManual?.id === id) pendingManual = null;
+};
+
+/** Retire an uncommitted target rejected by the server without touching newer work. */
+export const retireManualFoodRequest = (id) => {
   if (pendingManual?.id === id) pendingManual = null;
 };
 
