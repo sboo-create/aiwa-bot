@@ -581,19 +581,22 @@ def _validate_generated_image(
         return 1.0
     data = _validation_chat(
         "Act as a strict food-image quality gate. Compare the image with the "
-        "target dish. EVERY component named in the label must be individually "
-        "identifiable on the plate with the right preparation form — a missing "
-        "component, a merged blob, or a lookalike stand-in (couscous shown for "
-        "bulgur, pork for turkey) is a rejection, not an acceptable garnish "
-        "difference. Reject substitutions caused by similar-sounding words (for "
-        "example fish versus carrots), non-food objects, visible text/logos or "
-        "people. List every component you could not identify. Return only JSON: "
-        '{"matches":true,"confidence":0.0,"missing":[],"reason":"short reason"}. '
+        "target dish. Every component named in the label must have its own "
+        "visible portion on the plate — a component that is absent, replaced by "
+        "a different food, or merged into an unidentifiable blob is a rejection, "
+        "not an acceptable garnish difference. In \"absent\" list ONLY components "
+        "you cannot find at all or that are clearly a different food. If a "
+        "plausible portion is there but you cannot confirm the exact variety "
+        "(bulgur versus couscous, one white fish versus another), that is NOT "
+        "absent — leave it out of the list. Reject substitutions caused by "
+        "similar-sounding words (for example fish versus carrots), non-food "
+        "objects, visible text/logos or people. Return only JSON: "
+        '{"matches":true,"confidence":0.0,"absent":[],"reason":"short reason"}. '
         "Original Russian label: " + json.dumps(label, ensure_ascii=False)
         + ". Literal English target: " + json.dumps(description),
         image=image,
     )
-    missing = data.get("missing")
+    missing = data.get("absent")
     matches = data.get("matches") is True
     if isinstance(missing, list) and any(str(item).strip() for item in missing):
         absent = [str(item) for item in missing if str(item).strip()]
