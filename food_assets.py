@@ -145,15 +145,21 @@ def _tokens(value: object) -> frozenset[str]:
     )
 
 
-def _vocabulary(manifest: dict[str, str]) -> frozenset[str]:
-    """Слова, которые каталог считает знакомыми: из них и берутся исправления."""
+def _vocabulary(manifest: dict[str, str] | None = None) -> frozenset[str]:
+    """Опорные слова каталога — и только они.
+
+    Первая версия брала словарь из всех названий манифеста плюс морфологические
+    алиасы, и «варенье» тут же исправилось в «вареные»: слово из алиасов, ровно
+    одна правка. Поэтому словарь сузили до слов, которые реально определяют
+    картинку, — головных продуктов из групп якорей и семейных фолбэков. Слова
+    вроде «варенье», «инжирное», «домашний» в него не входят и остаются нетронутыми.
+    """
     words: set[str] = set()
-    for label in manifest:
-        for word in normalize_label(label).split():
-            if len(word) >= 4 and not word.isdigit():
-                words.add(word)
-    words.update(_TOKEN_ALIASES)
-    return frozenset(words)
+    for group in _ANCHOR_GROUPS:
+        words.update(group)
+    for required, _ in _FAMILY_DEFAULTS:
+        words.update(required)
+    return frozenset(w for w in words if len(w) >= 5)
 
 
 def _distance_one(a: str, b: str) -> bool:
@@ -206,9 +212,6 @@ def correct_typos(label: object, manifest: dict[str, str] | None = None) -> str:
     text = str(label or "")
     if not text.strip():
         return text
-    if manifest is None:
-        with _MANIFEST_PATH.open("r", encoding="utf-8") as source:
-            manifest = json.load(source)
     vocabulary = _vocabulary(manifest)
 
     def fix(match: "re.Match[str]") -> str:

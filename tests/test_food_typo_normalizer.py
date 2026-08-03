@@ -50,15 +50,24 @@ class TypoNormalizerTests(unittest.TestCase):
         self.assertEqual(self.fix("сук"), "сук")
 
     def test_ambiguous_correction_is_declined(self):
-        manifest = {"Каша": "/a.png", "Кашка": "/b.png", "Марш": "/c.png"}
-        # «карша» одинаково близка к нескольким словам — не угадываем
-        text = "карша"
-        result = FA.correct_typos(text, manifest)
-        self.assertIn(result, {text})
+        """Два кандидата на одном расстоянии — оставляем как было."""
+        import food_assets
+        original = food_assets._ANCHOR_GROUPS
+        try:
+            food_assets._ANCHOR_GROUPS = ({"творог", "творох"},)
+            self.assertEqual(FA.correct_typos("твороГ".lower()[:-1] + "к"), "творок")
+        finally:
+            food_assets._ANCHOR_GROUPS = original
 
-    def test_transposition_and_insertion_and_deletion(self):
-        self.assertEqual(self.fix("гречнвая каша"), "гречневая каша")
-        self.assertEqual(self.fix("греччневая каша"), "гречневая каша")
+    def test_transposition_insertion_deletion_on_anchor_words(self):
+        self.assertEqual(self.fix("греяка с овощами"), "гречка с овощами")   # замена
+        self.assertEqual(self.fix("гречкка с овощами"), "гречка с овощами")  # вставка
+        self.assertEqual(self.fix("гречк с овощами"), "гречка с овощами")    # пропуск
+
+    def test_words_outside_the_anchor_vocabulary_are_untouched(self):
+        """«варенье» едва не стало «вареными», когда словарь был широким."""
+        self.assertEqual(self.fix("творог, варенье инжирное"), "творог, варенье инжирное")
+        self.assertEqual(self.fix("каша домашняя"), "каша домашняя")
 
     def test_empty_and_none_are_safe(self):
         self.assertEqual(FA.correct_typos(None, MANIFEST), "")
