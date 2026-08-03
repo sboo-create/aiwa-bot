@@ -34,7 +34,10 @@ ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = _deslop_bundle(ROOT / "webapp2" / "assets" / "deslop")
 WRAPPER = ROOT / "webapp2" / "assets" / "deslop" / "main.js"
 CHART_BUNDLE = _deslop_chart(ROOT / "webapp2" / "assets" / "deslop")
-V163_CSS = ROOT / "webapp2" / "assets" / "deslop" / "aiwa-v163.css"
+# Правки поверх примитивов deslop живут в исходниках и попадают в сборку.
+# Раньше это был статический webapp2/assets/deslop/aiwa-v163.css, который
+# подключался после main.css и молча перебивал всё, что правили в src.
+OVERRIDES_CSS = ROOT / "frontend" / "src" / "aiwa" / "styles" / "overrides.css"
 INDEX = ROOT / "webapp2" / "index.html"
 PROFILE_PANEL = ROOT / "frontend" / "src" / "aiwa" / "panels" / "ProfilePanel.jsx"
 DATES_SOURCE = ROOT / "frontend" / "src" / "aiwa" / "lib" / "dates.js"
@@ -268,7 +271,7 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         )
 
     def test_mascot_has_an_unclipped_layout_contract(self):
-        css = V163_CSS.read_text(encoding="utf-8")
+        css = OVERRIDES_CSS.read_text(encoding="utf-8")
 
         self.assertIn("grid-template-columns: 52px minmax(0, 1fr)", css)
         self.assertIn("height: 58px", css)
@@ -335,13 +338,18 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         self.assertIn('decoding: "sync"', component)
 
     def test_aiwa_art_stays_inside_telegram_safe_area(self):
-        css = V163_CSS.read_text(encoding="utf-8")
+        css = OVERRIDES_CSS.read_text(encoding="utf-8")
         index = INDEX.read_text(encoding="utf-8")
 
-        self.assertIn("aiwa-v163.css", index)
+        self.assertNotIn("aiwa-v163.css", index)
         self.assertIn(".aiwa-insight-content .aiwa-paper-ai-heading .aiwa-sequence", css)
         self.assertIn("overflow: visible", css)
-        self.assertIn("env(safe-area-inset-bottom, 0px)", css)
+        # Маскот НЕ добавляет свой env(): бар safe-area не учитывает, потому что
+        # apple/material-правила перебивают базовый padding-bottom шорткатом
+        # padding. Лишний терм поднимал маскота над баром на устройствах с
+        # home indicator. Он центруется по бару смещением -3.5px.
+        self.assertNotIn("env(safe-area-inset-bottom", css)
+        self.assertIn("var(--bottom-clearance, 21px) - 3.5px", css)
 
     def test_food_and_training_use_telegram_photo_avatar(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
