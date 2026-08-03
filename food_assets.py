@@ -299,7 +299,7 @@ def _family_match(
 #: «Corona» — это шоколадный батончик, протеиновый батончик и пиво; заводить
 #: на каждую марку свою картинку бессмысленно и юридически мутно.
 _BRAND_CATEGORIES = (
-    ("Шоколадный батончик", (
+    (("Шоколадный батончик",), (
         "твикс", "twix", "сникерс", "snickers", "марс", "mars", "баунти",
         "bounty", "kitkat", "kit kat", "milka", "милка", "alpen gold",
         "альпен", "picnic", "пикник",
@@ -307,25 +307,36 @@ _BRAND_CATEGORIES = (
     # Иглы сравниваются с нормализованным названием, где «M&M's» превращается
     # в «m m s»: писать здесь «m&m» бесполезно, амперсанд до этой строки не
     # доживает.
-    ("Драже в глазури", ("m m", "mms", "эмэндэмс", "skittles", "скитлс", "драже")),
-    ("Протеиновый батончик", ("bombbar", "бомбар", "bonbar", "protein bar", "протеиновый бат")),
-    ("Газировка", (
+    (("Драже в глазури",), ("m m", "mms", "эмэндэмс", "skittles", "скитлс", "драже")),
+    (("Протеиновый батончик",), ("bombbar", "бомбар", "bonbar", "protein bar", "протеиновый бат")),
+    (("Газировка", "Лимонад"), (
         "доктор пеппер", "dr pepper", "pepper", "кола", "cola", "пепси",
         "pepsi", "спрайт", "sprite", "фанта", "fanta", "швепс", "schweppes",
     )),
-    ("Пиво", ("corona", "heineken", "балтика", "жигул", "туборг", "tuborg", "budweiser")),
+    (("Пиво",), ("corona", "heineken", "балтика", "жигул", "туборг", "tuborg", "budweiser")),
 )
 
 
-def brand_category(label: object) -> str | None:
-    """Категория для брендового продукта, если он узнан."""
+def brand_categories(label: object) -> tuple[str, ...]:
+    """Кандидаты-категории для брендового продукта, по убыванию точности.
+
+    Кандидатов несколько намеренно: «Газировка» может не пройти гейт генерации,
+    и тогда весь класс брендов остался бы без картинки из-за одной неудачи.
+    Резолвер берёт первого, кто реально есть в каталоге.
+    """
     low = normalize_label(label)
     if not low:
-        return None
-    for category, needles in _BRAND_CATEGORIES:
+        return ()
+    for candidates, needles in _BRAND_CATEGORIES:
         if any(n in low for n in needles):
-            return category
-    return None
+            return tuple(candidates)
+    return ()
+
+
+def brand_category(label: object) -> str | None:
+    """Первый кандидат — для проверок и логов."""
+    found = brand_categories(label)
+    return found[0] if found else None
 
 class FoodAssetResolver:
     """Immutable manifest index plus a tiny locked generated-asset overlay."""
@@ -372,16 +383,23 @@ class FoodAssetResolver:
     def _subset_match(self, query_tokens: frozenset[str]) -> tuple[str, str] | None:
         if not query_tokens:
             return None
-        best: tuple[int, str] | None = None
+        best_size = 0
+        winners: list[str] = []
         for label, label_tokens in self._tokens.items():
             if not label_tokens or not label_tokens <= query_tokens:
                 continue
             size = len(label_tokens)
-            if best is None or size > best[0]:
-                best = (size, label)
-        if best is None:
+            if size > best_size:
+                best_size, winners = size, [label]
+            elif size == best_size:
+                winners.append(label)
+        # Ничья — отказ. «Омлет с сыром и грибами» подходит и «Омлету с сыром»,
+        # и «Омлету с грибами»; выбрать любую значит показать блюдо, которого
+        # человек не ел. Пусть решает семейный фолбэк по голове названия — он
+        # для того и сделан, — а не порядок словаря.
+        if len(winners) != 1:
             return None
-        return best[1], self.manifest[best[1]]
+        return winners[0], self.manifest[winners[0]]
 
     def _manifest_match(self, label: str) -> tuple[str, str, str] | None:
         normalized = normalize_label(label)
@@ -395,12 +413,12 @@ class FoodAssetResolver:
                 self._match_cache[normalized] = result
             return result
 
-        brand = brand_category(label)
-        if brand and brand in self.manifest:
-            result = (brand, self.manifest[brand], "catalog_brand")
-            with self._match_cache_lock:
-                self._match_cache[normalized] = result
-            return result
+        for brand in brand_categories(label):
+            if brand in self.manifest:
+                result = (brand, self.manifest[brand], "catalog_brand")
+                with self._match_cache_lock:
+                    self._match_cache[normalized] = result
+                return result
 
         alias_label = _EXPLICIT_ALIASES.get(normalized)
         if alias_label and alias_label in self.manifest:
