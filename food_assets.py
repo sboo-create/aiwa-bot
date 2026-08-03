@@ -145,6 +145,86 @@ def _tokens(value: object) -> frozenset[str]:
     )
 
 
+def _vocabulary(manifest: dict[str, str]) -> frozenset[str]:
+    """Слова, которые каталог считает знакомыми: из них и берутся исправления."""
+    words: set[str] = set()
+    for label in manifest:
+        for word in normalize_label(label).split():
+            if len(word) >= 4 and not word.isdigit():
+                words.add(word)
+    words.update(_TOKEN_ALIASES)
+    return frozenset(words)
+
+
+def _distance_one(a: str, b: str) -> bool:
+    """Ровно одна правка: замена, вставка, удаление или перестановка соседних."""
+    if a == b:
+        return False
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+        if len(diff) == 1:
+            return True
+        # «таорог» → «творог»: соседние буквы поменялись местами
+        if len(diff) == 2 and diff[1] == diff[0] + 1:
+            i = diff[0]
+            return a[i] == b[i + 1] and a[i + 1] == b[i]
+        return False
+    short, long = (a, b) if la < lb else (b, a)
+    i = j = 0
+    skipped = False
+    while i < len(short) and j < len(long):
+        if short[i] != long[j]:
+            if skipped:
+                return False
+            skipped = True
+            j += 1
+            continue
+        i += 1
+        j += 1
+    return True
+
+
+def correct_typos(label: object, manifest: dict[str, str] | None = None) -> str:
+    """Исправить очевидные опечатки в названии блюда по словарю каталога.
+
+    Зачем. Запись «таорог, варенье инжирное» попадала в дневник как есть: одна
+    переставленная буква — и блюдо не находит ни картинку, ни семейство, а
+    пользователь видит заглушку вместо творога. Модель исправлять такое не
+    должна (ей прямо запрещено достраивать догадками незнакомые слова, иначе
+    она начнёт выдумывать еду), поэтому правка детерминированная и узкая:
+
+    * трогаем только слова, которых в словаре каталога НЕТ — знакомое слово
+      остаётся как есть, «торт» не превращается в «торты»;
+    * только длиной от пяти букв: короткие слова слишком близки друг к другу;
+    * ровно одна правка расстояния, включая перестановку соседних букв;
+    * и только если кандидат ровно один. Два кандидата — оставляем как было,
+      потому что «красиво, но неверно» хуже честной опечатки.
+    """
+    text = str(label or "")
+    if not text.strip():
+        return text
+    if manifest is None:
+        with _MANIFEST_PATH.open("r", encoding="utf-8") as source:
+            manifest = json.load(source)
+    vocabulary = _vocabulary(manifest)
+
+    def fix(match: "re.Match[str]") -> str:
+        word = match.group(0)
+        low = word.casefold().replace("ё", "е")
+        if len(low) < 5 or low in vocabulary or low.isdigit():
+            return word
+        hits = [c for c in vocabulary if _distance_one(low, c)]
+        if len(hits) != 1:
+            return word
+        fixed = hits[0]
+        return fixed.capitalize() if word[:1].isupper() else fixed
+
+    return _WORD_RE.sub(fix, text)
+
+
 def canonical_id(value: object) -> str:
     normalized = normalize_label(value) or "unknown"
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]

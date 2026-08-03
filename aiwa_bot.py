@@ -3730,13 +3730,16 @@ ONB_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Женщина", callback_data="onb_female")],
     [InlineKeyboardButton("Мужчина", callback_data="mode:male")],
 ])
+# Беременность — самостоятельное состояние, а не разновидность «нет цикла».
+# Она лежала уровнем ниже, за кнопкой «Нет регулярного цикла», и беременные
+# на первом экране онбординга себя не находили.
 FEMALE_ONB_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
+    [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
     [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
 ])
 NOCYCLE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Нерегулярный цикл", callback_data="mode:irregular")],
-    [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
     [InlineKeyboardButton("Менопауза", callback_data="mode:meno")],
     [InlineKeyboardButton("Сейчас нет месячных", callback_data="mode:none")],
 ])
@@ -8062,7 +8065,7 @@ async def on_cb(update, context):
     if data == "no_cycle":
         return await q.message.reply_text(
             "Выбери, что ближе сейчас — это можно поменять позже.\n\n"
-            "Айва работает и без регулярного цикла: при нерегулярных месячных, беременности и менопаузе.", reply_markup=NOCYCLE_KB)
+            "Айва работает и без регулярного цикла: при нерегулярных месячных и менопаузе.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
         m = data.split(":")[1]; upsert(cid, mode=m)
         _invalidate_mode_dependent_state(cid)
