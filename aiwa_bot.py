@@ -2585,6 +2585,17 @@ def match_intent(t):
         )
     )
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
+    # Выгрузка данных. Без явного интента фраза «пришли мои данные» уходила в
+    # справку о приватности: та отвечает на «какие данные вы храните», а тут
+    # человек просит сами записи.
+    if re.search(r"(пришл\w*|отправ\w*|скач\w*|выгруз\w*|экспорт\w*|дай|отдай)\w*[^.]{0,24}"
+                 r"(мои\s+данн\w*|мои\s+запис\w*|все\s+данн\w*|выгрузк\w*|бэкап|архив)", t) \
+            or re.search(r"\b(экспорт|выгрузк\w*)\s+(данн\w*|запис\w*)", t): return "export"
+    # Чек-ин самочувствия утверждением: «сегодня мало энергии» — это отметка,
+    # а не вопрос, и раньше уходило в обычный ответ ИИ.
+    if re.search(r"(сегодня|сейчас|у меня)[^.]{0,24}(мало|низк\w*|нет|много|высок\w*|средн\w*|норм\w*)"
+                 r"[^.]{0,12}(энерги\w*|сил)", t) \
+            or re.search(r"(энерги\w*|сил)[^.]{0,16}(мало|низк\w*|много|высок\w*|средн\w*)", t): return "energy"
     if re.search(r"(добав|ввес|внес|загруз|импорт)\w*.{0,16}(истори\w*\s*цикл|цикл)|истори\w*\s*цикл\w*\s*вручную|(импорт|перенес\w*).{0,12}(flo|фло)", t): return "addcycles"
     if re.search(r"(ввес\w*|поменя\w*|измен\w*|обнов\w*|исправ\w*|задат\w*|укаж\w*|написа\w*|внес\w*|поправ\w*)\s*(свой|свои|мой|мои)?\s*(вес|рост|возраст|данные|параметр)|мой вес|новый вес|неправильн\w*.{0,18}(вес|рост|возраст|данные)", t): return "profile"
     if re.search(r"фаз", t) and re.search(r"(что так|что значит|расскаж|объясн|не понима|не разбира|какие бывают|подробнее|про фаз)", t): return "phases"
@@ -5729,6 +5740,30 @@ def cycle_text_analysis(cid):
     parts.append("\nПодробную выписку для врача можно собрать кнопкой ниже.")
     return "\n".join(parts)
 
+async def _start_action(context, update, cid, name, text, prompt=None, reply_markup=None):
+    """Начать действие, забрав из фразы то, что в ней уже сказано.
+
+    «Поставь сводку на 9:15» содержит ответ на единственный вопрос действия —
+    переспрашивать в таком случае глупо. Разбираем текст теми же парсерами, и
+    если всё нужное нашлось, сразу выполняем; чего не хватает — спрашиваем.
+    """
+    action = dialog.get(name)
+    known = {}
+    for param in action.params:
+        try:
+            value = param.parse(text or "")
+        except Exception:
+            value = None
+        if value is not None:
+            known[param.name] = value
+    step = dialog.begin(name, known)
+    if isinstance(step, dialog.Done):
+        upsert(cid, state=None)
+        return await _apply_action(context, update, cid, step)
+    upsert(cid, state=step.state)
+    message = getattr(update, "message", None) or update.effective_message
+    return await message.reply_text(prompt or step.prompt, reply_markup=reply_markup)
+
 async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None, user_generation=None):
     msg = update.message; general = not is_cycle(u); ev(cid, "manual", meta="intent_" + intent)
     turn_generation = _user_generation(cid) if user_generation is None else int(user_generation)
@@ -5744,9 +5779,19 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
     if intent == "analysis":
         return await msg.reply_text(cycle_text_analysis(cid),
             reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
+    if intent == "export":
+        return await _start_action(context, update, cid, ACT_EXPORT.name, txt)
+    if intent == "energy":
+        return await _start_action(
+            context, update, cid, ACT_CHECKIN.name, txt,
+            prompt="Как сегодня с энергией — мало, средне или много?",
+        )
     if intent == "time":
-        upsert(cid, state=dialog.begin(ACT_SETTIME.name).state)
-        return await msg.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 08:00.", reply_markup=time_kb())
+        return await _start_action(
+            context, update, cid, ACT_SETTIME.name, txt,
+            prompt="Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 08:00.",
+            reply_markup=time_kb(),
+        )
     if intent == "checkin":
         log_ensure(cid, dtoday().isoformat())
         return await msg.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
@@ -8214,6 +8259,12 @@ async def handle_text(update, context, txt):
     # переспрашивается, а не роняет сценарий молча — ровно то, чем болели
     # ветки ниже. По мере переезда `await_*` этот блок останется единственным.
     step = dialog.feed(state, txt)
+    if step is not None and isinstance(step, dialog.Ask) and match_intent(txt) not in (None, ""):
+        # Пользователь не ответил на вопрос, а сказал новое: «пришли мои данные»
+        # посреди настройки времени. Переспрашивать в такой ситуации значит
+        # съесть команду — выходим из сценария и отдаём фразу дальше.
+        upsert(cid, state=None)
+        step = None
     if step is not None:
         if isinstance(step, dialog.Ask):
             upsert(cid, state=step.state)
