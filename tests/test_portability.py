@@ -90,5 +90,55 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(loaded["cycles"][0]["start_date"], "2026-06-21")
 
 
+class ForeignAdapterTests(unittest.TestCase):
+    """Новый источник — адаптер в общий формат, а не новая ветка импорта."""
+
+    def test_json_export_with_period_start(self):
+        adapted = P.adapt_foreign_cycles(
+            '[{"period_start":"2026-06-21","period_end":"2026-06-26"},'
+            '{"period_start":"2026-05-24"}]'
+        )
+        self.assertEqual(P.load(adapted)["counts"]["cycles"], 2)
+        self.assertEqual(adapted["cycles"][0]["start_date"], "2026-05-24")
+
+    def test_csv_export(self):
+        adapted = P.adapt_foreign_cycles("start_date,note\n2026-04-20,x\n2026-03-22,y\n")
+        self.assertEqual([c["start_date"] for c in adapted["cycles"]],
+                         ["2026-03-22", "2026-04-20"])
+
+    def test_wrapped_in_an_object(self):
+        adapted = P.adapt_foreign_cycles({"cycles": [{"date": "2026-02-20"}]})
+        self.assertEqual(adapted["cycles"], [{"start_date": "2026-02-20"}])
+
+    def test_duplicates_collapse(self):
+        adapted = P.adapt_foreign_cycles(
+            '[{"period_start":"2026-06-21"},{"period_start":"2026-06-21"}]')
+        self.assertEqual(len(adapted["cycles"]), 1)
+
+    def test_file_without_dates_is_refused(self):
+        with self.assertRaisesRegex(P.ExportError, "не нашла"):
+            P.adapt_foreign_cycles('[{"weight":70}]')
+
+    def test_non_iso_dates_are_ignored_not_guessed(self):
+        """Лучше импортировать меньше, чем занести в календарь мусор."""
+        with self.assertRaises(P.ExportError):
+            P.adapt_foreign_cycles('[{"period_start":"21.06.2026"}]')
+
+
+class JournalKeyTests(unittest.TestCase):
+    def test_same_file_twice_gives_the_same_keys(self):
+        row = {"d": "2026-07-01", "ts": "2026-07-01T12:00", "title": "Творог", "kcal": 240}
+        self.assertEqual(P.row_key("meals", row), P.row_key("meals", dict(row)))
+
+    def test_different_records_differ(self):
+        a = {"d": "2026-07-01", "ts": "t", "title": "Творог", "kcal": 240}
+        b = dict(a, title="Гречка")
+        self.assertNotEqual(P.row_key("meals", a), P.row_key("meals", b))
+
+    def test_section_without_a_key_is_a_developer_error(self):
+        with self.assertRaises(P.ExportError):
+            P.row_key("cycles", {"start_date": "2026-06-21"})
+
+
 if __name__ == "__main__":
     unittest.main()

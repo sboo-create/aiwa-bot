@@ -2092,6 +2092,11 @@ def _parse_period_date(text):
     d = parse_date(text)
     return d.isoformat() if d else None
 
+#: Параметры, которые умеет доразобрать модель, когда детерминированный парсер
+#: спасовал. Держим список здесь, а не в dialog: там не должно быть ни модели,
+#: ни сети.
+_ASYNC_RESOLVERS = {}
+
 ACT_PERIOD_DATE = dialog.register(dialog.Action(
     name="period_date",
     title="Дата последних месячных",
@@ -2167,6 +2172,26 @@ ACT_VOICE_MODE = dialog.register(dialog.Action(
         error="Напиши «голосом» или «текстом».",
     ),),
 ))
+
+async def _resolve_period_date(context, cid, text):
+    parsed, reason = await understand_date(context, cid, text)
+    return (parsed.isoformat() if parsed else None), reason
+
+_ASYNC_RESOLVERS[ACT_PERIOD_DATE.name] = {"iso": _resolve_period_date}
+
+ACT_PERIOD_DELETE = dialog.register(dialog.Action(
+    name="period_delete",
+    title="Убрать отметку месячных",
+    description="Убрать ошибочно отмеченные месячные за указанную дату.",
+    params=(dialog.Param(
+        name="iso",
+        prompt="За какую дату убрать отметку? Например 25.05.2026 или «вчера».",
+        parse=_parse_period_date,
+        error="Не разобрала дату. Напиши, например, 25.05.2026 или «вчера».",
+    ),),
+))
+
+_ASYNC_RESOLVERS[ACT_PERIOD_DELETE.name] = {"iso": _resolve_period_date}
 
 def _parse_cycle_len(text):
     m = re.search(r"\d{1,2}", text or "")
@@ -5759,6 +5784,43 @@ def cycle_text_analysis(cid):
     parts.append("\nПодробную выписку для врача можно собрать кнопкой ниже.")
     return "\n".join(parts)
 
+async def understand_date(context, cid, text):
+    """Разобрать дату: сначала детерминированно, потом моделью.
+
+    Быстрый путь бесплатен и точен на «25.05.2026», поэтому он первый. Модель
+    подключается только к тому, что он не взял: «вчера», «Авг 2 2026», «в
+    начале августа». Она же отличает «не помню» от неразборчивого ввода —
+    это разные ситуации, и отвечать на них одинаково нельзя.
+
+    Возвращает (date|None, reason): reason «unknown» — человек не помнит.
+    """
+    fast = parse_date(text or "")
+    if fast:
+        return fast, "ok"
+    usage = []
+    try:
+        verdict = await llm_to_thread(
+            cid, "date_parse", L.understand_date, text, dtoday().isoformat(), usage,
+        )
+    except Exception:
+        log.warning("understand_date: модель не ответила")
+        return None, "other"
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="date_parse", calls=len(usage), usage=usage)
+    iso = (verdict or {}).get("date")
+    if not iso:
+        return None, str((verdict or {}).get("reason") or "other")
+    try:
+        parsed = date.fromisoformat(iso)
+    except ValueError:
+        return None, "other"
+    # Модель не должна уводить в будущее или в позапрошлый год, даже если очень
+    # уверена: границы проверяем сами.
+    today = dtoday()
+    if parsed > today or (today - parsed).days > 400:
+        return None, "other"
+    return parsed, "ok"
+
 async def _start_action(context, update, cid, name, text, prompt=None, reply_markup=None):
     """Начать действие, забрав из фразы то, что в ней уже сказано.
 
@@ -6622,6 +6684,23 @@ def _act_export_data(cid, values):
     return {"ok": True, "text": "Собрала выгрузку: " + portability.summary(document)
                                 + ". Файл придёт следующим сообщением."}
 
+def _act_period_delete(cid, values):
+    """Убрать ошибочную отметку месячных.
+
+    Из чата раньше можно было только поставить отметку: поправить или снять её
+    умел лишь мини-апп. Ошибиться при этом легко — «начались вчера» после
+    случайного «начались сегодня» оставляло лишний цикл в календаре.
+    """
+    if is_male_profile(row(cid)):
+        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    iso = values["iso"]
+    if not period_delete_at(cid, iso):
+        return {"ok": False, "error": "not_found",
+                "note": f"На {date.fromisoformat(iso).strftime('%d.%m.%Y')} отметки месячных нет."}
+    _evict_today_cache(cid)
+    return {"ok": True, "date": iso,
+            "text": f"Убрала отметку месячных на {date.fromisoformat(iso).strftime('%d.%m.%Y')}."}
+
 def _act_voice_mode(cid, values):
     choice = values["choice"]
     upsert(cid, voice_reply=choice)
@@ -6639,6 +6718,7 @@ _ACTION_HANDLERS = {
     ACT_EXPORT.name: _act_export_data,
     ACT_SETTIME.name: _act_settime,
     ACT_PERIOD_DATE.name: _act_period_date,
+    ACT_PERIOD_DELETE.name: _act_period_delete,
     ACT_CYCLE_LEN.name: _act_cycle_len,
 }
 
@@ -7923,14 +8003,27 @@ async def on_export_document(update, context):
     try:
         handle = await context.bot.get_file(doc.file_id)
         raw = bytes(await handle.download_as_bytearray())
+    except Exception:
+        log.exception("import: не смогла скачать файл")
+        return await update.message.reply_text("Не смогла прочитать файл. Пришли его ещё раз.")
+    try:
         parsed = portability.load(raw.decode("utf-8", "replace"))
-    except portability.ExportError as exc:
-        return await update.message.reply_text(f"Не приняла файл: {exc}")
+    except portability.ExportError:
+        # Не наша выгрузка — пробуем как экспорт другого трекера: общий формат
+        # затем и нужен, чтобы новый источник был адаптером, а не веткой.
+        try:
+            adapted = portability.adapt_foreign_cycles(raw.decode("utf-8", "replace"))
+            parsed = portability.load(adapted)
+        except portability.ExportError as exc:
+            return await update.message.reply_text(
+                f"Не приняла файл: {exc}. Жду выгрузку Айвы или экспорт трекера "
+                "цикла с датами начала месячных.")
     except Exception:
         log.exception("import: не смогла прочитать файл")
         return await update.message.reply_text("Не смогла прочитать файл. Пришли выгрузку Айвы в формате JSON.")
 
     generation = _user_generation(cid)
+    imported_added = imported_skipped = 0
     c = db()
     try:
         if not _user_write_allowed(cid, generation, conn=c):
@@ -7945,6 +8038,40 @@ async def on_export_document(update, context):
                        item.get("symptoms") or ""))
         for item in parsed["intimacy"]:
             c.execute("INSERT OR IGNORE INTO intimacy(chat_id,d) VALUES(?,?)", (cid, item.get("d")))
+        # Питание и тренировки — журнал с автоинкрементом, поэтому переносим их
+        # через chat_mutations: ключ считается из содержимого записи, и повторная
+        # загрузка того же файла ничего не задваивает.
+        generation_now = int(user_generation if user_generation is not None
+                             else A2.lifecycle_generation(c, cid))
+        for section, sql, fields in (
+            ("meals",
+             "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass) "
+             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             ("d", "ts", "title", "kcal", "protein", "fat", "carbs", "grams",
+              "items", "source", "slot", "fclass")),
+            ("workouts",
+             "INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note) VALUES(?,?,?,?,?,?,?,?)",
+             ("d", "ts", "type", "items", "duration", "rpe", "note")),
+        ):
+            for item in parsed[section]:
+                key = portability.row_key(section, item)
+                seen = c.execute(
+                    "SELECT 1 FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+                    (cid, key),
+                ).fetchone()
+                if seen:
+                    imported_skipped += 1
+                    continue
+                rid = c.execute(sql, (cid, *[item.get(f) for f in fields])).lastrowid
+                c.execute(
+                    """INSERT INTO chat_mutations
+                       (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (cid, key, generation_now, section, str(rid), "",
+                     json.dumps(item, ensure_ascii=False, sort_keys=True),
+                     datetime.now(TZ).isoformat()),
+                )
+                imported_added += 1
         c.commit()
     except Exception:
         c.rollback()
@@ -7954,13 +8081,13 @@ async def on_export_document(update, context):
         c.close()
 
     counts = parsed["counts"]
-    restored = f"Восстановила: {counts['cycles']} циклов, {counts['logs']} дней самочувствия."
-    skipped = ""
-    if counts["meals"] or counts["workouts"]:
-        skipped = (f"\n\nПитание ({counts['meals']}) и тренировки ({counts['workouts']}) "
-                   "из файла не переносила: их пришлось бы задваивать. Они остались в файле.")
+    restored = (f"Восстановила: {counts['cycles']} циклов, {counts['logs']} дней самочувствия, "
+                f"{imported_added} записей питания и тренировок.")
+    again = (f"\n\n{imported_skipped} записей уже были — повторная загрузка того же файла "
+             "ничего не задваивает.") if imported_skipped else ""
     _evict_today_cache(cid)
-    return await update.message.reply_text(restored + skipped)
+    _evict_week_food_cache(cid)
+    return await update.message.reply_text(restored + again)
 
 async def on_voice(update, context):
     if update.message is None:   # правка сообщения: см. комментарий в on_text
@@ -8182,13 +8309,22 @@ async def handle_text(update, context, txt):
         return await context.bot.send_message(cid, ans)
 
     if state == "await_date":
-        d = parse_date(txt)
+        d, reason = await understand_date(context, cid, txt)
         if not d:
             if is_question_like(txt):
                 _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши дату начала последних месячных, например 25.05.2026. Потом даты можно редактировать в приложении.")
-            return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
+            if reason == "unknown":
+                # «Не помню» — это не ошибка ввода, и повторять тот же вопрос
+                # бессмысленно: даём выйти из тупика приблизительной датой.
+                ev(cid, "manual", meta="onboard_date_unknown")
+                return await update.message.reply_text(
+                    "Ничего страшного, точная дата не нужна. Напиши примерно — «в начале августа», "
+                    "«около двух недель назад» или просто месяц. Потом поправим в приложении.")
+            return await update.message.reply_text(
+                "Не разобрала дату. Можно как удобно: «25.05.2026», «26 мая», «вчера» "
+                "или «недели три назад».")
         upsert(cid, pending_date=d.isoformat(), state="await_len")
         return await update.message.reply_text(
             "Теперь длина цикла — сколько дней от первого дня одних месячных до первого дня следующих. "
@@ -8278,6 +8414,21 @@ async def handle_text(update, context, txt):
     # переспрашивается, а не роняет сценарий молча — ровно то, чем болели
     # ветки ниже. По мере переезда `await_*` этот блок останется единственным.
     step = dialog.feed(state, txt)
+    _parsed = dialog.parse_state(state)
+    if isinstance(step, dialog.Ask) and _parsed:
+        # Детерминированный парсер спасовал — доразбираем моделью тем же
+        # правилом, что и в онбординге. Иначе «вчера» работало бы в одном месте
+        # и упиралось в стену в другом.
+        _resolvers = _ASYNC_RESOLVERS.get(_parsed[0]) or {}
+        _action = dialog.get(_parsed[0])
+        _param = _action.params[_parsed[1]] if _parsed[1] < len(_action.params) else None
+        _resolve = _resolvers.get(_param.name) if _param else None
+        if _resolve and match_intent(txt) in (None, ""):
+            _value, _reason = await _resolve(context, cid, txt)
+            if _value is not None:
+                step = dialog.feed(
+                    dialog._encode(_action.name, _parsed[1], 0, _parsed[3]), str(_value),
+                )
     if step is not None and isinstance(step, dialog.Ask) and match_intent(txt) not in (None, ""):
         # Пользователь не ответил на вопрос, а сказал новое: «пришли мои данные»
         # посреди настройки времени. Переспрашивать в такой ситуации значит
@@ -11605,7 +11756,7 @@ def _agent_tools_spec(mode=None):
     # Пишущие действия берутся из реестра: чат получает ровно то, что умеет
     # приложение, с той же проверкой значений. Отдельного списка больше нет.
     for tool in _registry_chat_tools():
-        if tool["function"]["name"] in {"period_date", "cycle_len"} and mode == "male":
+        if tool["function"]["name"] in {"period_date", "period_delete", "cycle_len"} and mode == "male":
             continue
         tools.append(tool)
     return tools
@@ -15228,7 +15379,7 @@ async def run_all():
     app.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, on_voice))
     # Выгрузка, присланная обратно: тот же формат, что отдаёт экспорт.
     app.add_handler(MessageHandler(
-        filters.Document.FileExtension("json") & filters.ChatType.PRIVATE, on_export_document))
+        (filters.Document.FileExtension("json") | filters.Document.FileExtension("csv")) & filters.ChatType.PRIVATE, on_export_document))
     app.add_handler(MessageHandler(
         (filters.PHOTO | filters.Document.IMAGE) & filters.ChatType.PRIVATE, on_photo))
     app.add_handler(MessageHandler(
