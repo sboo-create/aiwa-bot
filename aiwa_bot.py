@@ -1228,9 +1228,13 @@ def meal_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_has
             except (TypeError, ValueError): saved_data = {}
             result = {"id": prior_id, "created": False, "status": status, "data": saved_data}
             return result if return_status else prior_id
+    # Опечатка в опорном слове стоит блюду картинки и семейного фолбэка:
+    # «таорог» не находит ни творог, ни его каталог. Правим на записи, а не
+    # только при подборе картинки, чтобы в дневнике лежало читаемое название.
+    title = FA.correct_typos(rec["title"])
     mid = c.execute(
         "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (cid, d, datetime.now(TZ).isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
+        (cid, d, datetime.now(TZ).isoformat(), title, int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
          float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
          json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo", slot,
          rec.get("fclass") or None, int(bool(rec.get("slot_guessed"))))).lastrowid
