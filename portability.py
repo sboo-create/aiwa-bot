@@ -153,3 +153,78 @@ def row_key(section: str, row: dict) -> str:
     payload = "|".join(str(row.get(f) or "") for f in fields)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
     return f"import:{section}:{digest}"
+
+
+#: Поля, в которых чужие приложения хранят дату начала месячных. Список
+#: намеренно узкий: угадывать «любую дату в файле» — верный способ занести
+#: в календарь чужие сущности.
+_FOREIGN_START_FIELDS = (
+    "period_start", "start_date", "startdate", "cycle_start", "menstruation_start",
+    "date", "начало", "дата",
+)
+_FOREIGN_END_FIELDS = ("period_end", "end_date", "enddate", "cycle_end", "конец")
+
+
+def adapt_foreign_cycles(raw: object) -> dict:
+    """Перевести выгрузку другого приложения в наш формат.
+
+    Смысл общего формата в том, что новый источник — это адаптер, а не новая
+    ветка импорта. Здесь разобран самый частый случай: список записей с датой
+    начала месячных (так отдают Flo, Clue и большинство трекеров, в JSON или
+    в CSV). Всё, что не похоже на дату начала, не берём: лучше импортировать
+    меньше, чем занести в календарь мусор.
+    """
+    rows: list[dict] = []
+    if isinstance(raw, (str, bytes)):
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        stripped = text.lstrip()
+        if stripped.startswith(("{", "[")):
+            try:
+                raw = json.loads(stripped)
+            except Exception as exc:
+                raise ExportError("не разобрала файл") from exc
+        else:
+            import csv
+            import io as _io
+
+            raw = list(csv.DictReader(_io.StringIO(text)))
+    if isinstance(raw, dict):
+        for key in ("cycles", "periods", "data", "records", "items"):
+            if isinstance(raw.get(key), list):
+                raw = raw[key]
+                break
+    if not isinstance(raw, list):
+        raise ExportError("ожидался список записей")
+
+    def pick(row: dict, names: Iterable[str]) -> str | None:
+        lowered = {str(k).strip().lower(): v for k, v in row.items()}
+        for name in names:
+            value = lowered.get(name)
+            if value is None:
+                continue
+            text = str(value).strip()[:10]
+            if _ISO_DATE.match(text):
+                return text
+        return None
+
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        start = pick(row, _FOREIGN_START_FIELDS)
+        if not start:
+            continue
+        item = {"start_date": start}
+        end = pick(row, _FOREIGN_END_FIELDS)
+        if end:
+            item["end_date"] = end
+        rows.append(item)
+    if not rows:
+        raise ExportError("не нашла в файле дат начала месячных")
+    seen: set[str] = set()
+    unique = []
+    for item in sorted(rows, key=lambda r: r["start_date"]):
+        if item["start_date"] in seen:
+            continue
+        seen.add(item["start_date"])
+        unique.append(item)
+    return {"schema": SCHEMA, "cycles": unique}

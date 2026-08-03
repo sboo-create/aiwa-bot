@@ -8003,9 +8003,21 @@ async def on_export_document(update, context):
     try:
         handle = await context.bot.get_file(doc.file_id)
         raw = bytes(await handle.download_as_bytearray())
+    except Exception:
+        log.exception("import: не смогла скачать файл")
+        return await update.message.reply_text("Не смогла прочитать файл. Пришли его ещё раз.")
+    try:
         parsed = portability.load(raw.decode("utf-8", "replace"))
-    except portability.ExportError as exc:
-        return await update.message.reply_text(f"Не приняла файл: {exc}")
+    except portability.ExportError:
+        # Не наша выгрузка — пробуем как экспорт другого трекера: общий формат
+        # затем и нужен, чтобы новый источник был адаптером, а не веткой.
+        try:
+            adapted = portability.adapt_foreign_cycles(raw.decode("utf-8", "replace"))
+            parsed = portability.load(adapted)
+        except portability.ExportError as exc:
+            return await update.message.reply_text(
+                f"Не приняла файл: {exc}. Жду выгрузку Айвы или экспорт трекера "
+                "цикла с датами начала месячных.")
     except Exception:
         log.exception("import: не смогла прочитать файл")
         return await update.message.reply_text("Не смогла прочитать файл. Пришли выгрузку Айвы в формате JSON.")
@@ -15367,7 +15379,7 @@ async def run_all():
     app.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, on_voice))
     # Выгрузка, присланная обратно: тот же формат, что отдаёт экспорт.
     app.add_handler(MessageHandler(
-        filters.Document.FileExtension("json") & filters.ChatType.PRIVATE, on_export_document))
+        (filters.Document.FileExtension("json") | filters.Document.FileExtension("csv")) & filters.ChatType.PRIVATE, on_export_document))
     app.add_handler(MessageHandler(
         (filters.PHOTO | filters.Document.IMAGE) & filters.ChatType.PRIVATE, on_photo))
     app.add_handler(MessageHandler(
