@@ -8,7 +8,7 @@
 # но раздаются и нужны index.html — их сохраняем.
 set -euo pipefail
 cd "$(dirname "$0")/../frontend"
-REV="${AIWA_UI_REV:-r27}"
+REV="${AIWA_UI_REV:-r30}"
 RUNNER=$(command -v bun || command -v npm)
 "$RUNNER" install
 "$RUNNER" run build:deslop
@@ -31,6 +31,14 @@ DEST=../webapp2/assets/deslop
 rm -f "$DEST"/deslop-main-*.js "$DEST"/AiwaWebUiChart-*.js
 cp -R assets/deslop/. "$DEST"/
 
-echo "OK: $DEST обновлён (cache rev $REV)"
+# Артефакт и index.html обязаны сходиться: расхождение = белый экран у всех,
+# кто уже открывал приложение (immutable-кэш).
+BUNDLE=$(basename "$(ls "$DEST"/deslop-main-*.js)")
+INDEX=../webapp2/index.html
+grep -q "$BUNDLE?v=$REV" "$DEST/main.js" || { echo "ОШИБКА: main.js не ссылается на $BUNDLE?v=$REV" >&2; exit 1; }
+grep -q "main.js?v=$REV" "$INDEX" || { echo "ОШИБКА: index.html не обновлён на ?v=$REV (сейчас: $(grep -oE 'main\.js\?v=r[0-9]+' "$INDEX"))" >&2; exit 1; }
+grep -q "main.css?v=$REV" "$INDEX" || { echo "ОШИБКА: index.html: main.css не на ?v=$REV" >&2; exit 1; }
+
+echo "OK: $DEST обновлён (cache rev $REV, $BUNDLE)"
 ls -1 "$DEST" | sed 's/^/  /'
 echo "Проверь, что ?v=$REV стоит у main.js/main.css в webapp2/index.html"
