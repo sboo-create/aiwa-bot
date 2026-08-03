@@ -10787,11 +10787,24 @@ def _offer_food_asset_candidates(records):
         _FOOD_ASSET_SEEN.pop(key, None)
     offered = 0
     for record in records or []:
-        if not isinstance(record, dict) or record.get("asset_state") != "missing":
+        if not isinstance(record, dict):
             continue
-        food_id = str(record.get("canonical_id") or "")
+        # Догенерация запускалась только когда картинки нет вовсе, и брала
+        # КАТАЛОЖНОЕ название. Поэтому «Запеченная треска с гречкой» навсегда
+        # оставалась «Треской на пару»: приблизительное совпадение считалось
+        # готовым и чинить его было нечем. Теперь приблизительное тоже встаёт в
+        # очередь, и генерим мы то, что человек написал, а не то, что подобрали.
+        quality = str(record.get("match_quality") or "")
+        if record.get("asset_state") != "missing" and quality != "approximate":
+            continue
+        requested = record.get("requested_label")
+        food_id = str(
+            FA.canonical_id(requested) if requested
+            else (record.get("canonical_id") or "")
+        )
         label = FA.reviewed_generation_label(
-            record.get("canonical_label") or record.get("dish") or record.get("title")
+            requested or record.get("canonical_label")
+            or record.get("dish") or record.get("title")
         )
         key = (food_id, FA.STYLE_VERSION)
         if (

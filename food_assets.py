@@ -21,7 +21,7 @@ import requests
 
 
 STYLE_VERSION = "food-v1"
-GENERATED_PROMPT_VERSION = "food-photo-v4-white"
+GENERATED_PROMPT_VERSION = "food-photo-v5-recognizable"
 # Заглушки — рендеры в манере каталога на белом фоне: приложение кладёт их на
 # свою подложку через mix-blend-mode: darken, и контурная svg-иконка выбивалась
 # из ряда 3D-тарелок. Старые svg остаются на диске: на них ещё ссылаются
@@ -338,6 +338,27 @@ def brand_category(label: object) -> str | None:
     found = brand_categories(label)
     return found[0] if found else None
 
+#: Насколько картинка соответствует именно этому блюду. Раньше все совпадения
+#: выглядели одинаково «ready», и приблизительное было неотличимо от точного:
+#: «Запеченная треска с гречкой» молча получала «Треску на пару» — белый кусок,
+#: похожий на масло, — и это состояние держалось вечно, потому что догенерация
+#: запускалась только когда картинки нет вовсе.
+MATCH_QUALITY = {
+    "catalog_exact": "exact",
+    "catalog_alias": "exact",
+    "catalog_canonical": "exact",
+    "generated": "exact",
+    "catalog_subset": "close",
+    "catalog_family": "approximate",
+    "catalog_brand": "approximate",
+    "category": "none",
+}
+
+
+def match_quality(source: object) -> str:
+    return MATCH_QUALITY.get(str(source or ""), "none")
+
+
 class FoodAssetResolver:
     """Immutable manifest index plus a tiny locked generated-asset overlay."""
 
@@ -412,18 +433,34 @@ class FoodAssetResolver:
                     break
         return frozenset(out)
 
-    def _subset_match(self, query_tokens: frozenset[str]) -> tuple[str, str] | None:
+    def _subset_match(
+        self, query_tokens: frozenset[str], order: tuple[str, ...] = (),
+    ) -> tuple[str, str] | None:
+        """Подпись, все слова которой есть в названии.
+
+        Побеждает не самая длинная, а самая ранняя по порядку слов: «Вареники с
+        вишней, сливочное масло» — это вареники, а не масло, хотя «сливочное
+        масло» длиннее. Голова названия стоит первой, и уступать её гарниру
+        нельзя. Длина решает только при равном старте: «Блины с творогом»
+        точнее, чем просто «Блины».
+        """
         if not query_tokens:
             return None
-        best_size = 0
+        # Первое вхождение слова, а не последнее: голова названия стоит слева.
+        position: dict[str, int] = {}
+        for index, token in enumerate(order):
+            position.setdefault(token, index)
+        best_key: tuple[int, int] | None = None
         winners: list[str] = []
         for label, label_tokens in self._tokens.items():
             if not label_tokens or not label_tokens <= query_tokens:
                 continue
-            size = len(label_tokens)
-            if size > best_size:
-                best_size, winners = size, [label]
-            elif size == best_size:
+            start = min((position.get(t, len(order)) for t in label_tokens),
+                        default=len(order))
+            key = (start, -len(label_tokens))
+            if best_key is None or key < best_key:
+                best_key, winners = key, [label]
+            elif key == best_key:
                 winners.append(label)
         # Ничья — отказ. «Омлет с сыром и грибами» подходит и «Омлету с сыром»,
         # и «Омлету с грибами»; выбрать любую значит показать блюдо, которого
@@ -467,7 +504,14 @@ class FoodAssetResolver:
         # нет ни одного, поэтому подмена блюда невозможна. Самая длинная
         # подходящая подпись выигрывает, иначе «Салат Цезарь» проиграл бы
         # «Салату». Замер на реальных записях прода: покрытие 43% → 74%.
-        subset = self._subset_match(query_tokens)
+        # Порядок слов исходного названия нужен, чтобы отличить голову блюда
+        # от гарнира: множество токенов его не хранит.
+        order = tuple(
+            _TOKEN_ALIASES.get(word, word)
+            for word in normalize_label(label).split()
+            if word not in _STOP_WORDS and not word.isdigit()
+        )
+        subset = self._subset_match(query_tokens, order)
         if subset:
             result = (subset[0], subset[1], "catalog_subset")
             with self._match_cache_lock:
@@ -541,6 +585,8 @@ class FoodAssetResolver:
                 "image_url": url,
                 "image_source": source,
                 "asset_state": "ready",
+                "match_quality": match_quality(source),
+                "requested_label": title,
                 "style_version": STYLE_VERSION,
             }
 
@@ -553,6 +599,8 @@ class FoodAssetResolver:
                 "image_url": generated,
                 "image_source": "generated",
                 "asset_state": "ready",
+                "match_quality": "exact",
+                "requested_label": title,
                 "style_version": STYLE_VERSION,
             }
         if match:
@@ -563,6 +611,8 @@ class FoodAssetResolver:
                 "image_url": url,
                 "image_source": source,
                 "asset_state": "ready",
+                "match_quality": match_quality(source),
+                "requested_label": title,
                 "style_version": STYLE_VERSION,
             }
 
@@ -581,6 +631,8 @@ class FoodAssetResolver:
             "image_url": DRINK_PLACEHOLDER if is_drink else MEAL_PLACEHOLDER,
             "image_source": "category",
             "asset_state": "missing",
+            "match_quality": "none",
+            "requested_label": title,
             "style_version": STYLE_VERSION,
         }
 
@@ -819,14 +871,25 @@ def _validate_generated_image(
         "(bulgur versus couscous, one white fish versus another), that is NOT "
         "absent — leave it out of the list. Reject substitutions caused by "
         "similar-sounding words (for example fish versus carrots), non-food "
-        "objects, visible text/logos or people. Return only JSON: "
-        '{"matches":true,"confidence":0.0,"absent":[],"reason":"short reason"}. '
+        "objects, visible text/logos or people. Отдельно оцени узнаваемость: "
+        "картинка живёт превью 88 на 88 точек рядом с названием, и блюдо должно "
+        "читаться с одного взгляда. Ровный однотонный кусок без текстуры, "
+        "среза и деталей — это не еда, а форма: «recognizable» тогда false, "
+        "даже если продукт формально верный. Return only JSON: "
+        '{"matches":true,"confidence":0.0,"absent":[],"recognizable":true,"reason":"short reason"}. '
         "Original Russian label: " + json.dumps(label, ensure_ascii=False)
         + ". Literal English target: " + json.dumps(description),
         image=image,
     )
     missing = data.get("absent")
     matches = data.get("matches") is True
+    # Правильное, но неузнаваемое — тоже брак. «Треска на пару» прошла старый
+    # гейт: это действительно треска на пару, но на превью её путают с куском
+    # масла, и пользователь справедливо спрашивает, при чём тут его блюдо.
+    if data.get("recognizable") is False:
+        raise FoodImageValidationError(
+            "food_image_not_recognizable", missing=("узнаваемый вид блюда",),
+        )
     if isinstance(missing, list) and any(str(item).strip() for item in missing):
         absent = [str(item) for item in missing if str(item).strip()]
         gap = re.sub(
