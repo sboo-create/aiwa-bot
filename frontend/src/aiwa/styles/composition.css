@@ -1409,15 +1409,15 @@ body.apple .aiwa-button-spinner > svg path {
   border-radius: 50%;
 }
 
-/* Anchored exactly like the TabBar pill: 16px in from the side (the pill's own
-   left inset once .aiwa-nav-tabbar-layer has re-anchored it) and
-   var(--bottom-clearance) off the bottom with NO extra env(safe-area-inset-bottom)
-   — the pill adds none either, so adding one here floats the button ~34px above
-   the dock on a real device. Same reasoning as .aiwa-nav-mascot. */
+/* 16px in from the side, like the TabBar pill's own left inset once
+   .aiwa-nav-tabbar-layer has re-anchored it. The safe-area inset IS added here:
+   the calendar page covers the dock (checked on staging — the pill stays in the
+   DOM but paints under the panel), so there is no dock to line up with and the
+   button only has to clear the home indicator. Same reasoning as .aiwa-mark-bar. */
 .aiwa-calendar-fab {
   position: absolute;
   right: 16px;
-  bottom: var(--bottom-clearance, 21px);
+  bottom: calc(var(--bottom-clearance, 21px) + env(safe-area-inset-bottom, 0px));
   z-index: 3;
 }
 
@@ -1433,7 +1433,7 @@ body.apple .aiwa-button-spinner > svg path {
   right: 16px;
   /* Same anchor as the FAB it replaces, so entering marking mode does not shift
      the corner it grew out of. */
-  bottom: var(--bottom-clearance, 21px);
+  bottom: calc(var(--bottom-clearance, 21px) + env(safe-area-inset-bottom, 0px));
   display: flex;
   padding: 12px;
   box-sizing: border-box;
@@ -1448,7 +1448,7 @@ body.apple .aiwa-button-spinner > svg path {
    read --bottom-clearance first, so only the fallback differs. */
 body.material .aiwa-calendar-fab,
 body.material .aiwa-mark-bar {
-  bottom: var(--bottom-clearance, 16px);
+  bottom: calc(var(--bottom-clearance, 16px) + env(safe-area-inset-bottom, 0px));
 }
 
 /* Idle chips default to the card surface, which is the bar's own colour here —

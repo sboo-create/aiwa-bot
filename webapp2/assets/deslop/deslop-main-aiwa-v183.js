@@ -21560,7 +21560,7 @@ function f7({ label: n, value: t, ok: i }) {
 function d7({ metrics: n, title: t = "Статистика" }) {
   return n?.length ? /* @__PURE__ */ h.jsx(gt.Item, { header: t, children: n.map((i) => /* @__PURE__ */ h.jsx(f7, { ...i }, i.label)) }) : null;
 }
-const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r31").then((n) => ({
+const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r32").then((n) => ({
   default: n.AiwaWebUiChart
 })));
 function m7() {
