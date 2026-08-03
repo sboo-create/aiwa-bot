@@ -45,6 +45,10 @@ import cycle as C
 import llm as L
 import analytics_v2 as A2
 import food_assets as FA
+# Реестр действий и общий сбор параметров. Зависимость строго односторонняя:
+# dialog ничего не знает про aiwa_bot, поэтому истории с двойной загрузкой
+# модуля под `python aiwa_bot.py` тут возникнуть не может.
+import dialog
 
 class KBS:
     PRIMARY = "primary"
@@ -2021,6 +2025,20 @@ def parse_time(t):
         if 0 <= h < 24 and 0 <= m < 60: return f"{h:02d}:{m:02d}"
     except Exception: pass
     return None
+
+# Первое действие в реестре. Дальше сюда же переезжают остальные ветки
+# `await_*`: сбор параметров у них общий, поэтому и ветка неудачи одна.
+ACT_SETTIME = dialog.register(dialog.Action(
+    name="settime",
+    title="Время сводки",
+    description="Во сколько присылать ежедневную сводку.",
+    params=(dialog.Param(
+        name="hhmm",
+        prompt="Во сколько присылать сводку (МСК)? Например 08:00.",
+        parse=parse_time,
+        error="Нужно время по Москве, например 08:00.",
+    ),),
+))
 
 def calc_calories(cm, kg, age, act, male=False):
     # Миффлин-Сан Жеор: −161 для женщин, +5 для мужчин.
@@ -5579,7 +5597,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         return await msg.reply_text(cycle_text_analysis(cid),
             reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
     if intent == "time":
-        upsert(cid, state="await_time")
+        upsert(cid, state=dialog.begin(ACT_SETTIME.name).state)
         return await msg.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 08:00.", reply_markup=time_kb())
     if intent == "checkin":
         log_ensure(cid, dtoday().isoformat())
@@ -6278,6 +6296,35 @@ def set_daily_time(app, cid, hhmm):
         state=None,
     )
     schedule_daily(app, cid, hhmm)
+
+def _dialog_hint(state):
+    """Текущий вопрос действия из реестра — чтобы вернуться к нему после ответа."""
+    parsed = dialog.parse_state(state)
+    if not parsed:
+        return None
+    name, index, _, _ = parsed
+    action = dialog.get(name)
+    if not action or index >= len(action.params):
+        return None
+    return action.params[index].prompt
+
+async def _apply_action(context, update, cid, done):
+    """Единственное место, где действие реестра встречается с эффектом.
+
+    Сбор параметров и проверка ввода уже позади — сюда приходит готовый
+    словарь значений. Новое действие добавляется одной веткой здесь и одним
+    объявлением в реестре, а не тремя реализациями на трёх поверхностях.
+    """
+    if done.action == ACT_SETTIME.name:
+        hhmm = done.values["hhmm"]
+        set_daily_time(context.application, cid, hhmm)
+        return await update.message.reply_text(schedule_text(cid, hhmm))
+    # Действие зарегистрировано, но обработчика нет — это ошибка сборки, а не
+    # пользователя: не молчим ни ему, ни в лог.
+    log.error("действие без обработчика: %s", done.action)
+    return await update.message.reply_text(
+        "Не смогла выполнить действие. Напиши ещё раз, пожалуйста."
+    )
 
 def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=False, enforce_spacing=False,
                               mutation_key=None, args_hash=None):
@@ -7133,7 +7180,7 @@ async def set_time_cmd(update, context):
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
     hhmm = parse_time(context.args[0]) if context.args else None
     if not hhmm:
-        upsert(cid, state="await_time")
+        upsert(cid, state=dialog.begin(ACT_SETTIME.name).state)
         return await update.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
     set_daily_time(context.application, cid, hhmm)
     await update.message.reply_text(schedule_text(cid, hhmm))
@@ -7669,12 +7716,15 @@ async def handle_text(update, context, txt):
         "await_cycles": "Пришли даты начала месячных, по одной на строке. Можно добавить последние несколько циклов.",
         "await_symptom_custom": "Напиши симптом коротко, например «тошнота», «ломота», «боль в груди».",
     }
-    if state in VALUE_STATES and is_question_like(txt):
+    # Подсказка «на чём мы остановились» для действий реестра берётся из него
+    # же — заводить её второй раз в таблице выше не нужно.
+    value_hint = VALUE_STATES.get(state) or _dialog_hint(state)
+    if value_hint and is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
         _, _qst = status_of(cid)
         a = await think_llm(context, cid, L.answer_question, _qst, txt, llm_profile_of(u), None)
         await reply_long(update.message, L.split_followups(a)[0])
-        return await update.message.reply_text("А теперь вернёмся к настройке. " + VALUE_STATES[state])
+        return await update.message.reply_text("А теперь вернёмся к настройке. " + value_hint)
 
     if is_partner(cid) and not is_onboarded(u):
         wid = woman_of_partner(cid); wu = row(wid); _, wst = status_of(wid)
@@ -7787,13 +7837,21 @@ async def handle_text(update, context, txt):
         sel = set((log_get(cid, today_s) or {}).get("symptoms", []))
         return await update.message.reply_text(f"Записала: {symptom_label(code)}. Можно добавить ещё или нажать Готово.", reply_markup=sym_kb(sel))
 
-    if state == "await_time":
-        hhmm = parse_time(txt)
-        if hhmm:
-            set_daily_time(context.application, cid, hhmm)
-            return await update.message.reply_text(schedule_text(cid, hhmm))
+    # Действия из реестра. Ветка неудачи здесь одна на всех: непонятный ввод
+    # переспрашивается, а не роняет сценарий молча — ровно то, чем болели
+    # ветки ниже. По мере переезда `await_*` этот блок останется единственным.
+    step = dialog.feed(state, txt)
+    if step is not None:
+        if isinstance(step, dialog.Ask):
+            upsert(cid, state=step.state)
+            return await update.message.reply_text(step.prompt)
+        if isinstance(step, dialog.Cancelled):
+            upsert(cid, state=None)
+            return await update.message.reply_text(step.message)
         upsert(cid, state=None)
-    elif state == "await_period_date":
+        return await _apply_action(context, update, cid, step)
+
+    if state == "await_period_date":
         d = parse_date(txt)
         if d:
             mark_period(context, cid, d.isoformat())
@@ -8095,7 +8153,7 @@ async def on_cb(update, context):
         await q.message.reply_text("Отметила начало месячных сегодня. Вот свежая сводка:")
         await push_summary(context, cid)
     elif data == "set:time":
-        upsert(cid, state="await_time")
+        upsert(cid, state=dialog.begin(ACT_SETTIME.name).state)
         await q.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
     elif data == "toggle:summary":
         if not is_onboarded(u):
