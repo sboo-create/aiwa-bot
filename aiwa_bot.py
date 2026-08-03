@@ -9653,8 +9653,8 @@ def _save_profile_atomic(cid, generation, body, cm, kg, age):
         values.append(cid)
         # Every identifier above is a fixed literal selected by this function.
         c.execute(
-            "UPDATE users SET " + ",".join(sets) + " WHERE chat_id=?", values
-        )  # nosec B608
+            "UPDATE users SET " + ",".join(sets) + " WHERE chat_id=?", values  # nosec B608
+        )
         saved = c.execute(
             """SELECT mode,last_period,cycle_len,height,weight,age,activity,
                       diet,diet_note,kcal_goal,send_time
