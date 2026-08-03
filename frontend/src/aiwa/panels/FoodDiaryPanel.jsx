@@ -15,7 +15,7 @@ export function FoodDiaryPanel({ isOpen, onClose, diary, onAdd, onEdit, onDelete
   const target = diary?.target || {};
 
   return (
-    <AiwaModalView isOpen={isOpen} onClose={onClose}>
+    <AiwaModalView isOpen={isOpen} onClose={onClose} aria-label="Дневник питания">
       <SectionList className="aiwa-tma-blocks">
         <SectionList.Item>
           <AiwaCell tappable={false}>
@@ -45,6 +45,8 @@ export function FoodDiaryPanel({ isOpen, onClose, diary, onAdd, onEdit, onDelete
                   title={meal.title}
                   description={`${Math.round(meal.kcal || 0)} ккал`}
                   onClick={() => onEdit(meal)}
+                  separateAction
+                  actionLabel={`Изменить ${meal.title}, ${Math.round(meal.kcal || 0)} ккал`}
                   trailing={(
                     <Tappable
                       as="button"
@@ -65,14 +67,16 @@ export function FoodDiaryPanel({ isOpen, onClose, diary, onAdd, onEdit, onDelete
           );
         })}
 
-        <SectionList.Item>
-          <AiwaCell tappable={false}>
-            <div className="aiwa-cell-actions">
-              {canAdd ? <RegularButton variant="filled" label="Добавить приём" isFill {...actionProps("Добавить приём", onAdd)} /> : null}
-              <RegularButton variant="filled" label="Совет по дневнику" isFill {...actionProps("Совет по дневнику", onReco)} />
-            </div>
-          </AiwaCell>
-        </SectionList.Item>
+        {canAdd || onReco ? (
+          <SectionList.Item>
+            <AiwaCell tappable={false}>
+              <div className="aiwa-cell-actions">
+                {canAdd ? <RegularButton variant="filled" label="Добавить приём" isFill {...actionProps("Добавить приём", onAdd)} /> : null}
+                {onReco ? <RegularButton variant="filled" label="Совет по дневнику" isFill {...actionProps("Совет по дневнику", onReco)} /> : null}
+              </div>
+            </AiwaCell>
+          </SectionList.Item>
+        ) : null}
       </SectionList>
     </AiwaModalView>
   );

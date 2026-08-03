@@ -3,7 +3,7 @@
 The local Storybook is the visual and behavioral source of truth:
 
 ```bash
-npm run storybook
+bun run storybook
 ```
 
 Open [Colors](http://127.0.0.1:5173/storybook/#/ui-kit/colors) or
@@ -40,13 +40,14 @@ wouter router; `SplitView` is an iPad layout; `StoryCard` is a trading card.
 
 ## Approved AIWA components
 
-- Core: `AiwaCell`, `PaperRow`, `AiwaModalView`, `AiwaPanelHeader`
-- Cycle: `Week`, `DateCell`, `MetricCell`, `StatusIcon`
+- Core: `AiwaButton`, `AiwaCell`, `PaperRow`, `ProfileAvatar`, `AiwaModalView`,
+  `AiwaPanelHeader`, `ScreenDayHeader`
+- Cycle: `Week`, `DayOverview`, `DayWheel`, `DateCell`, `MetricCell`, `StatusIcon`
 - AI: `AiwaInsightCard`, `AiwaCardHeading`, `AiwaSequence`
 - Forms: `Field`, `ChoicePills`, `AiwaChip`, `JournalGroup`, `JournalToggle`,
   `JournalChoiceGroup`, `JournalSymptomGroup`, `JournalCustomSymptom`,
   `FoodEntryForm`
-- Food: `MacroCard`, `CalorieGauge`
+- Food: `MacroCard`, `CalorieGauge`, `RecipePanel`
 - Data visualization: `AiwaWebUiChart`, `ChartSection`
 - Loading: `ScreenLoading`
 - Feedback: `Snackbar` (нотификации/тосты; императивно — `showToast`),
@@ -58,9 +59,9 @@ wouter router; `SplitView` is an iPad layout; `StoryCard` is a trading card.
   `DelaySection`, `StatsSection`, `ChartSection`, `HistorySection` —
   [Sections](http://127.0.0.1:5173/storybook/#/compositions/sections)
 - Panels (full-screen pages over the app): `JournalPanel`, `CalendarPanel`,
-  `CalendarDayLogPanel`, `AddFoodPanel`, `FoodDiaryPanel`, `WorkoutPanel`,
-  `WorkoutVariantsPanel`, `WorkoutHistoryPanel`, `TrainingProfilePanel`,
-  `ProfilePanel` —
+  `CalendarDayLogPanel`, `AddFoodPanel`, `FoodDiaryPanel`, `RecipePanel`,
+  `WorkoutPanel`, `WorkoutVariantsPanel`, `WorkoutHistoryPanel`,
+  `TrainingProfilePanel`, `ProfilePanel` —
   [Panels](http://127.0.0.1:5173/storybook/#/compositions/panels)
 
 A panel is dismissed with Telegram's native BackButton, which does not exist in
@@ -76,7 +77,7 @@ with the value each token resolves to in the current theme, is on
 - Ink: `--aiwa-ink`, `--aiwa-ink-secondary`, `--aiwa-ink-muted`,
   `--aiwa-ink-subtle`; on the accent — `--aiwa-on-accent`
 - Surfaces: `--aiwa-screen-bg`, `--aiwa-surface`, `--aiwa-control-bg`,
-  `--aiwa-fill-secondary`, `--aiwa-separator`
+  `--aiwa-fill-secondary`, `--aiwa-media-bg`, `--aiwa-separator`
 - Status: `--aiwa-success`, `--aiwa-warning` (never the brand accent — orange
   means «месячные»)
 - Cycle phases: `--aiwa-phase-menstrual|follicular|ovulation|luteal`
@@ -85,7 +86,7 @@ with the value each token resolves to in the current theme, is on
 
 Each level is a Deslop role underneath, so the whole scale flips with the kit's
 own light/dark pair. A literal hex anywhere but `theme.css` fails
-`npm run check:ui`.
+`bun run check:ui`.
 
 ## Rules
 
@@ -103,6 +104,8 @@ own light/dark pair. A literal hex anywhere but `theme.css` fails
   rows are the same chip with `isFill` (see `JournalToggle`).
 - Charts use `AiwaWebUiChart` and its semantic series tokens; do not embed new
   hand-written SVG charts.
-- `npm run verify` is required for every UI change. It also validates the
+- `bun run verify` is required for a production-ready UI change. It also validates the
   Paper/Figma registry and component ownership.
+- Phase 2 screen/state changes additionally run `bun run check:phase2`; the
+  Panels story carries real past-day and Recipe loading/loaded/error scenarios.
 - Direct user instructions may override these rules for that request only.

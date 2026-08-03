@@ -24,7 +24,7 @@ surface and raw `ModalView` stays behind that wrapper.
 
 ## Code → Paper/Figma
 
-1. Run `npm run storybook`.
+1. Run `bun run storybook`.
 2. Export the relevant Storybook component states before exporting product
    screens.
 3. Keep the component names exactly as registered, for example `AIWA/Cell`,
@@ -52,7 +52,7 @@ Then:
 3. Add every meaningful state to Storybook: default, pressed/selected,
    disabled, loading, empty, error, and long content where applicable.
 4. Search all usages of the changed export with `rg`.
-5. Run `npm run verify`.
+5. Run `bun run verify`.
 6. Review the affected Storybook page and all screens that use the component.
 
 ## Handoff format
@@ -81,5 +81,5 @@ registered component or explicitly approved as a screen exception.
    `src/aiwa/design-system/registry.json`.
 5. Only then use it in a screen, section, or panel.
 
-`npm run check:design-system` enforces the registry, exports, Storybook routes,
+`bun run check:design-system` enforces the registry, exports, Storybook routes,
 and the single-owner rule for cells.

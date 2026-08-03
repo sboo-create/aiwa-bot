@@ -367,13 +367,15 @@ def _history_facts(source_mode: str) -> dict[str, Any]:
     """
     source_clause = (" AND " + IS_OBSERVED_SQL) if source_mode == "observed" else ""
     with DB_LOCK:
+        # ACTIVE_NAME_SQL/source_clause — константы модуля с ?-плейсхолдерами,
+        # значения уходят параметрами; пользовательских данных в тексте нет.
         first_last = _db.execute(
-            "SELECT device_id, MIN(ts), MAX(ts) FROM events WHERE "
+            "SELECT device_id, MIN(ts), MAX(ts) FROM events WHERE "  # nosec B608
             + ACTIVE_NAME_SQL + source_clause + " GROUP BY device_id",
             INACTIVE_RAW_NAMES,
         ).fetchall()
         total, observed_events, min_ts, observed_start, latest_observed_ts = _db.execute(
-            "SELECT COUNT(*), COALESCE(SUM(is_observed),0), MIN(ts),"
+            "SELECT COUNT(*), COALESCE(SUM(is_observed),0), MIN(ts),"  # nosec B608
             " MIN(CASE WHEN is_observed THEN ts END), MAX(CASE WHEN is_observed THEN ts END)"
             " FROM (SELECT ts, (" + IS_OBSERVED_SQL + ") AS is_observed FROM events)"
         ).fetchone()
@@ -398,8 +400,9 @@ def _rolling_active_counts(period_starts: dict[str, float], until: float,
     """
     source_clause = (" AND " + IS_OBSERVED_SQL) if source_mode == "observed" else ""
     with DB_LOCK:
+        # см. выше: склеиваются только константные фрагменты
         dau, wau, mau = _db.execute(
-            "SELECT COUNT(DISTINCT CASE WHEN ts >= ? THEN device_id END),"
+            "SELECT COUNT(DISTINCT CASE WHEN ts >= ? THEN device_id END),"  # nosec B608
             "       COUNT(DISTINCT CASE WHEN ts >= ? THEN device_id END),"
             "       COUNT(DISTINCT device_id)"
             " FROM events WHERE ts >= ? AND ts <= ? AND " + ACTIVE_NAME_SQL + source_clause,
@@ -1659,8 +1662,10 @@ def _canonical_cards(now: float, retention: dict | None = None) -> list[dict]:
             if names:
                 # Сессия начинается, когда предыдущее человеческое событие
                 # того же актора старше SESSION_GAP_SECONDS (или его не было).
+                # window/human — локальные константы с ?-плейсхолдерами по
+                # длине HUMAN_EVENT_NAMES; сами имена идут параметрами.
                 gap_sessions = _db.execute(
-                    "SELECT COUNT(*) FROM (SELECT ts - LAG(ts) OVER"
+                    "SELECT COUNT(*) FROM (SELECT ts - LAG(ts) OVER"  # nosec B608
                     " (PARTITION BY device_id ORDER BY ts) AS delta"
                     + window + human + ") WHERE delta IS NULL OR delta > ?",
                     (since, *names, SESSION_GAP_SECONDS)).fetchone()[0]

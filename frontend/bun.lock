@@ -7,6 +7,7 @@
       "dependencies": {
         "@deslop/tma": "file:vendor/deslop-tma",
         "@deslop/web-ui": "file:vendor/deslop-web-ui",
+        "calligraph": "^1.4.1",
         "react": "19.2.7",
         "react-dom": "19.2.7",
         "recharts": "^3.8.0",

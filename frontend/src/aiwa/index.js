@@ -50,7 +50,7 @@ export { Wheel } from "./lib/tma.js";
 export { useAppearance, useColorScheme, useSkin, useSnackbar } from "./lib/tma.js";
 
 // Lib
-export { call, read, apiCall, showToast, trackFlow, actionProps, closeMiniApp, openBotChat } from "./lib/api.js";
+export { call, read, apiCall, acknowledgedHostWrite, showToast, withHostToastsMuted, trackFlow, actionProps, closeMiniApp, openBotChat } from "./lib/api.js";
 export {
   AIWA_SEQUENCE_FRAMES,
   AIWA_CARD_SEQUENCE_FRAMES,
@@ -62,15 +62,20 @@ export {
 export * from "./lib/constants.js";
 export * from "./lib/icons.js";
 export { dateCellClassName } from "./lib/dateCellClassName.js";
+export { dayStrip, dayTitle, getSelectedDay, selectDay, todayIso, useSelectedDay } from "./lib/selectedDay.js";
 
 // Primitives / building blocks
 export { AiwaSequence } from "./components/AiwaSequence.jsx";
 export { AiwaWebUiChart } from "./components/AiwaWebUiChart.jsx";
 export { DateCell } from "./components/DateCell.jsx";
 export { Week } from "./components/Week.jsx";
+export { DayWheel } from "./components/DayWheel.jsx";
+export { DayOverview } from "./components/DayOverview.jsx";
+export { ScreenDayHeader } from "./components/ScreenDayHeader.jsx";
 export { StatusIcon } from "./components/StatusIcon.jsx";
 export { MetricCell } from "./components/MetricCell.jsx";
 export { AiwaChip } from "./components/AiwaChip.jsx";
+export { AiwaButton } from "./components/AiwaButton.jsx";
 export { AiwaFab } from "./components/AiwaFab.jsx";
 export { CalendarMarkBar } from "./components/CalendarMarkBar.jsx";
 export { JournalToggle } from "./components/JournalToggle.jsx";
@@ -89,6 +94,8 @@ export { AiwaModalView } from "./components/AiwaModalView.jsx";
 export { AiwaPanelHeader } from "./components/AiwaPanelHeader.jsx";
 export { AiwaInsightCard } from "./components/AiwaInsightCard.jsx";
 export { PaperRow } from "./components/PaperRow.jsx";
+export { ProfileAvatar } from "./components/ProfileAvatar.jsx";
+export { profileName } from "./components/ProfileAvatar.jsx";
 export { FoodEntryForm } from "./components/FoodEntryForm.jsx";
 export { MacroCard } from "./components/MacroCard.jsx";
 export { CalorieGauge } from "./components/CalorieGauge.jsx";
@@ -108,6 +115,7 @@ export { CalendarDayLogPanel } from "./panels/CalendarDayLogPanel.jsx";
 export { HomePanels } from "./panels/HomePanels.jsx";
 export { AddFoodPanel } from "./panels/AddFoodPanel.jsx";
 export { FoodDiaryPanel } from "./panels/FoodDiaryPanel.jsx";
+export { RecipePanel } from "./panels/RecipePanel.jsx";
 export { WorkoutPanel } from "./panels/WorkoutPanel.jsx";
 export { WorkoutVariantsPanel } from "./panels/WorkoutVariantsPanel.jsx";
 export { TrainingProfilePanel } from "./panels/TrainingProfilePanel.jsx";

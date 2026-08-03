@@ -15,6 +15,7 @@ export function JournalToggle({ label, active, onChange, variant = "default" }) 
       label={label}
       active={active}
       isFill
+      surface="canvas"
       aria-label={`${label}: ${active ? "да" : "нет"}`}
       onClick={() => onChange(!active)}
       end={(

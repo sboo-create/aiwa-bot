@@ -1,10 +1,15 @@
 import { Tappable, Text } from "../lib/tma";
 
-export function ChoicePills({ label, options, value, onChange }) {
+/**
+ * Single-choice pills. The container surface is borderless; `surface="canvas"`
+ * reserves an accent edge for the selected pill when the group sits directly
+ * on the gray application background.
+ */
+export function ChoicePills({ label, options, value, onChange, surface = "container" }) {
   return (
     <div className="aiwa-form-group">
       {label ? <Text className="aiwa-form-label" variant="body" weight="semibold">{label}</Text> : null}
-      <div className="aiwa-choice-pills" role="group" aria-label={label}>
+      <div className={`aiwa-choice-pills${surface === "canvas" ? " is-on-canvas" : ""}`} role="group" aria-label={label}>
         {options.map((option) => {
           const item = typeof option === "string" ? { value: option, label: option } : option;
           return (

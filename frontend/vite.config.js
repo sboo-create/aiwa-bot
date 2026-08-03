@@ -4,11 +4,14 @@ import svgr from "vite-plugin-svgr";
 import path from "node:path";
 
 // Версия UI в именах чанков; поднимается при выкате нового фронта.
-const UI_VERSION = process.env.AIWA_UI_VERSION || "aiwa-v179";
+const UI_VERSION = process.env.AIWA_UI_VERSION || "aiwa-v182";
 
 export default defineConfig({
   plugins: [react(), svgr()],
   resolve: {
+    // Vendored source packages can otherwise resolve their own React/Recharts
+    // copies, splitting hook dispatchers and chart context across runtimes.
+    dedupe: ["react", "react-dom", "react/jsx-runtime", "recharts"],
     alias: {
       "@": path.resolve(__dirname, "vendor/deslop-web-ui/src"),
     },

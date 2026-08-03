@@ -1,4 +1,5 @@
-import { RegularButton, SectionList, Text } from "../lib/tma";
+import { SectionList, Text } from "../lib/tma";
+import { AiwaButton } from "./AiwaButton";
 import { AiwaCardHeading } from "./AiwaCardHeading";
 import { AiwaCell } from "./AiwaCell";
 
@@ -27,9 +28,8 @@ export function AiwaInsightCard({
             </Text>
           ) : null}
           {onDiscuss ? (
-            <RegularButton
-              className="aiwa-btn-secondary"
-              variant="filled"
+            <AiwaButton
+              variant="secondary"
               label="Обсудить с Айвой"
               isFill
               onClick={onDiscuss}

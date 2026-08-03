@@ -9,13 +9,16 @@ import { RegularButton, Tappable } from "../lib/tma";
  * `gray` (idle) → --tertiary-fill-background, `tinted` (selected) →
  * --secondary-button-color. `.aiwa-chip` in composition.css remaps those two
  * vars to the AIWA control surface and to ink-on-white for the selected state;
- * the accent is reserved for the panel's primary Save button.
+ * the accent is reserved for the panel's primary Save button. `surface="canvas"`
+ * adds the selected-state edge needed when the pill sits directly on the gray
+ * app canvas; the default container surface stays borderless.
  */
 export function AiwaChip({
   label,
   active = false,
   onClick,
   isFill = false,
+  surface = "container",
   end = null,
   className = "",
   ...rest
@@ -34,7 +37,7 @@ export function AiwaChip({
       as="button"
       type="button"
       mode="opacity"
-      className={`aiwa-chip${isFill ? " is-fill" : ""}${className ? ` ${className}` : ""}`}
+      className={`aiwa-chip${surface === "canvas" ? " is-on-canvas" : ""}${isFill ? " is-fill" : ""}${className ? ` ${className}` : ""}`}
       aria-pressed={active}
       onClick={onClick}
       {...rest}

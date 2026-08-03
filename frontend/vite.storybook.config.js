@@ -6,6 +6,8 @@ import path from "node:path";
 export default defineConfig({
   plugins: [react(), svgr()],
   resolve: {
+    // Keep Storybook on the same single-runtime contract as the product build.
+    dedupe: ["react", "react-dom", "react/jsx-runtime", "recharts"],
     alias: {
       "@": path.resolve(__dirname, "vendor/deslop-web-ui/src"),
     },

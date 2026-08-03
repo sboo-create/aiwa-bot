@@ -36,6 +36,12 @@ WRAPPER = ROOT / "webapp2" / "assets" / "deslop" / "main.js"
 CHART_BUNDLE = _deslop_chart(ROOT / "webapp2" / "assets" / "deslop")
 V163_CSS = ROOT / "webapp2" / "assets" / "deslop" / "aiwa-v163.css"
 INDEX = ROOT / "webapp2" / "index.html"
+PROFILE_PANEL = ROOT / "frontend" / "src" / "aiwa" / "panels" / "ProfilePanel.jsx"
+DATES_SOURCE = ROOT / "frontend" / "src" / "aiwa" / "lib" / "dates.js"
+PROFILE_AVATAR = ROOT / "frontend" / "src" / "aiwa" / "components" / "ProfileAvatar.jsx"
+SCREEN_DAY_HEADER = ROOT / "frontend" / "src" / "aiwa" / "components" / "ScreenDayHeader.jsx"
+FOOD_SCREEN = ROOT / "frontend" / "src" / "aiwa" / "screens" / "FoodScreen.jsx"
+ACTIVITY_SCREEN = ROOT / "frontend" / "src" / "aiwa" / "screens" / "ActivityScreen.jsx"
 
 
 class FakeJsonRequest:
@@ -234,23 +240,30 @@ class MaleWebappStaticContractTests(unittest.TestCase):
     def test_male_webapp_keeps_home_and_hides_cycle_editor(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
         index = INDEX.read_text(encoding="utf-8")
+        profile_panel = PROFILE_PANEL.read_text(encoding="utf-8")
 
         self.assertNotIn('filter((f) => f.id !== "today")', bundle)
         # поле длины цикла есть, но показывается только в цикличном режиме
         self.assertIn('"Длина цикла"', bundle)
-        self.assertIn('mode === "cycle"', bundle)
+        self.assertIn('const isCycleMode = currentMode === "cycle";', profile_panel)
+        self.assertIn('const isMaleMode = currentMode === "male";', profile_panel)
+        self.assertIn('{isCycleMode ? (', profile_panel)
         self.assertIn("cycle_len", bundle)
         self.assertNotIn("мужской режим: без главной", index)
         self.assertIn(
-            'title: r.mode === "male" ? "Выписка по самочувствию" : "Выписка для врача"',
-            bundle,
+            'title={isMaleMode ? "Выписка по самочувствию" : "Выписка для врача"}',
+            profile_panel,
         )
         self.assertIn(
-            'description: r.mode === "male" ? "рост · вес · возраст" : "рост · вес · возраст · цикл"',
-            bundle,
+            'description={isCycleMode ? "рост · вес · возраст · цикл" : "рост · вес · возраст"}',
+            profile_panel,
         )
         self.assertIn(
-            'r.mode === "male" ? "Динамика энергии и дневник самочувствия придут PDF-файлом в чат бота."',
+            '? "Динамика энергии и дневник самочувствия придут PDF-файлом в чат бота."',
+            profile_panel,
+        )
+        self.assertIn(
+            '"Динамика энергии и дневник самочувствия придут PDF-файлом в чат бота."',
             bundle,
         )
 
@@ -272,10 +285,12 @@ class MaleWebappStaticContractTests(unittest.TestCase):
     def test_webapp_uses_server_moscow_day_instead_of_utc_day(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
         index = INDEX.read_text(encoding="utf-8")
+        dates_source = DATES_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("Europe/Moscow", bundle)
-        self.assertIn("Europe/Moscow", bundle)
-        self.assertNotIn("toISOString().slice(0, 10)", bundle)
+        self.assertIn('timeZone: "Europe/Moscow"', dates_source)
+        self.assertIn(".formatToParts(new Date())", dates_source)
+        self.assertNotIn("toISOString().slice(0, 10)", dates_source)
         self.assertIn("applyCanonicalToday()", index)
         self.assertIn("installDayRollover()", index)
         self.assertIn('moscowDateIso()!==D.today', index)
@@ -330,15 +345,15 @@ class MaleWebappStaticContractTests(unittest.TestCase):
 
     def test_food_and_training_use_telegram_photo_avatar(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
+        profile_avatar = PROFILE_AVATAR.read_text(encoding="utf-8")
+        screen_day_header = SCREEN_DAY_HEADER.read_text(encoding="utf-8")
+        food_screen = FOOD_SCREEN.read_text(encoding="utf-8")
+        activity_screen = ACTIVITY_SCREEN.read_text(encoding="utf-8")
 
         # общий ProfileAvatar на «Питании» и «Нагрузке»: инициал + фото Telegram
         self.assertGreaterEqual(bundle.count('className: "aiwa-avatar-photo"'), 1)
-        self.assertGreaterEqual(bundle.count('"aiwa-avatar-initial aiwa-screen-profile"'), 2)
-        self.assertNotIn(
-            'children: (c?.name || "•").trim()[0]?.toUpperCase() || "•"',
-            bundle,
-        )
-        self.assertNotIn(
-            'children: (r?.name || "•").trim()[0]?.toUpperCase() || "•"',
-            bundle,
-        )
+        self.assertIn("tgUser?.photo_url", profile_avatar)
+        self.assertIn('className="aiwa-avatar-photo"', profile_avatar)
+        self.assertIn("<ProfileAvatar />", screen_day_header)
+        self.assertIn("<ScreenDayHeader", food_screen)
+        self.assertIn("<ScreenDayHeader", activity_screen)
