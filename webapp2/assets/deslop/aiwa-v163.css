@@ -32,8 +32,13 @@
   min-width: 0;
 }
 
+/* Маскот центрируем по таб-бару. Сам бар стоит на bottom: var(--bottom-clearance)
+   и safe-area не учитывает: apple- и material-правила перебивают базовый
+   padding-bottom: env(safe-area-inset-bottom) шорткатом padding. Лишний терм
+   env() у маскота поднимал его над баром на устройствах с home indicator —
+   отсюда «иногда вылезает наверх». Смещение = (высота бара 65 − 72) / 2. */
 .aiwa-nav-mascot {
-  bottom: calc(var(--bottom-clearance, 18px) + env(safe-area-inset-bottom, 0px));
+  bottom: calc(var(--bottom-clearance, 21px) - 3.5px);
   width: 72px;
   height: 72px;
   overflow: visible !important;
@@ -42,6 +47,11 @@
   -webkit-mask: none !important;
   border-radius: 0;
   transform-origin: center;
+}
+
+/* У material-варианта бара свой отступ снизу. */
+body.material .aiwa-nav-mascot {
+  bottom: calc(var(--bottom-clearance, 16px) - 3.5px);
 }
 
 .aiwa-nav-mascot .aiwa-sequence {
@@ -55,6 +65,81 @@
   border-radius: 0;
 }
 
+/* Ячейки сводим к текущему эталону deslop.
+
+   Шеврон: бандл рисует его в боксе 7x12, тогда как маска — SVG 24x24 с
+   no-repeat center, то есть от иконки видно только центральный обрезок.
+   Эталон даёт иконке весь бокс 24x24. Цвет уже совпадает (--border-color
+   резолвится в rgba(17,17,17,.3)). */
+[class*="_chevron_"] {
+  width: 24px;
+  height: 24px;
+}
+
+/* Разделители: в бандле их гасит правило
+   [data-aiwa-cell="true"] > [class*="_body_"] { border-bottom: 0 !important }
+   — строки в CellStack шли сплошным блоком. Возвращаем штатный механизм
+   deslop: толщину держит --cell-separator-height (0.33px, как в эталоне),
+   а последней ячейке стека она и так обнуляется отдельным правилом. */
+[data-aiwa-cell="true"] > [class*="_body_"],
+[data-aiwa-cell="true"] > [class*="_end_"] {
+  border-bottom: var(--cell-separator-height)
+    solid var(--tg-theme-section-separator-color) !important;
+}
+
+/* У шторки профиля свои боковые 20px, а вложенный .aiwa-tma-blocks добавляет
+   ещё 16px — карточки уезжали на 36px вместо общих по приложению 16px.
+   Вытягиваем список на всю ширину шторки, инсет остаётся за ним самим: тем же
+   приёмом в main.css решён этот случай для .aiwa-paper-screen. */
+.aiwa-sheet-scroll > .aiwa-tma-blocks {
+  width: calc(100% + 40px) !important;
+  margin-left: -20px !important;
+}
+
+/* Аватар над списком настроек. */
+.aiwa-profile-avatar {
+  display: flex;
+  justify-content: center;
+}
+
+.aiwa-profile-avatar .aiwa-avatar-initial {
+  width: 60px;
+  height: 60px;
+  font-size: 26px;
+}
+
+/* Нижние тосты ложились ровно на таб-бар: библиотека рассчитывает, что оба
+   отступа задаёт --bottom-clearance, но в приложении его никто не выставляет,
+   поэтому бар берёт свой дефолт 21px, а хост тостов — свои 12px. Поднимаем
+   тосты над баром: его клиренс плюс высота 65px плюс зазор. */
+[class*="_host_bottom_cnxqv"] {
+  bottom: calc(var(--bottom-clearance, 21px) + 65px + var(--ui-space-12, 12px));
+}
+
+body.material [class*="_host_bottom_cnxqv"] {
+  bottom: calc(var(--bottom-clearance, 16px) + 65px + var(--ui-space-12, 12px));
+}
+
+/* Значение справа в ячейке «Режим»: подпись и шеврон в одну строку. */
+.aiwa-mode-value {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-4, 4px);
+}
+
+.aiwa-mode-value > [class*="_text_"] {
+  color: var(--aiwa-ink-subtle, rgba(17, 17, 17, 0.4));
+  white-space: nowrap;
+}
+
+/* Белые блоки ячеек: бандл добавляет им padding-block: 8px, из-за чего первая
+   и последняя строки стоят ниже и выше, чем в эталоне. У CellStack в deslop
+   контейнер без внутренних отступов — высоту задаёт сама ячейка. */
+.aiwa-tma-blocks > section > div > div:last-child,
+body.material .aiwa-tma-blocks > section > div > div:last-child {
+  padding-block: 0;
+}
+
 .aiwa-insight-content .aiwa-paper-ai-heading .aiwa-sequence img,
 .aiwa-nav-mascot .aiwa-sequence img {
   display: block !important;
@@ -65,4 +150,15 @@
   clip-path: none !important;
   mask: none !important;
   -webkit-mask: none !important;
+}
+
+/* Иконка статуса в тосте. Библиотека заливает currentColor все пути
+   (.icon svg path { fill: currentcolor }), рассчитывая на одноцветный глиф
+   Material Symbols. У наших примитивов иначе: круг — заливка, а галочка,
+   восклицательный знак и «i» вырезаны из него вторым путём штрихом. При
+   сплошной заливке знак пропадал, и от тоста оставался белый кружок.
+   Возвращаем вырез: второй путь не заливаем и красим цветом фона тоста. */
+[class*="_icon_"] svg path + path {
+  fill: none !important;
+  stroke: var(--toast-background, rgba(45, 45, 45, 0.92)) !important;
 }
