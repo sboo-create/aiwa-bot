@@ -2057,6 +2057,25 @@ def parse_time(t):
 
 # Первое действие в реестре. Дальше сюда же переезжают остальные ветки
 # `await_*`: сбор параметров у них общий, поэтому и ветка неудачи одна.
+def _parse_time_phrase(text):
+    """Достать время из живой фразы, а не только из «08:00».
+
+    «Поставь сводку на 9:15» приходит целой репликой — и голосом почти всегда
+    так. Сначала ищем время внутри текста, потом отдаём строку обычному
+    parse_time: короткий ответ «8» на прямой вопрос он разберёт сам.
+    """
+    raw = " ".join(str(text or "").split())
+    m = re.search(r"\b([01]?\d|2[0-3])[:.\s]([0-5]\d)\b", raw)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    m = re.search(r"\b([01]?\d|2[0-3])\s*(?:час\w*|утра|вечера|дня)\b", raw.lower())
+    if m:
+        hour = int(m.group(1))
+        if "вечера" in raw.lower() and hour < 12:
+            hour += 12
+        return f"{hour:02d}:00"
+    return parse_time(raw)
+
 ACT_SETTIME = dialog.register(dialog.Action(
     name="settime",
     title="Время сводки",
@@ -2064,7 +2083,7 @@ ACT_SETTIME = dialog.register(dialog.Action(
     params=(dialog.Param(
         name="hhmm",
         prompt="Во сколько присылать сводку (МСК)? Например 08:00.",
-        parse=parse_time,
+        parse=_parse_time_phrase,
         error="Нужно время по Москве, например 08:00.",
     ),),
 ))
