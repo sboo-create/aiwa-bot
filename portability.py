@@ -132,3 +132,24 @@ def summary(document: dict) -> str:
         if count:
             parts.append(f"{count} {title}")
     return ", ".join(parts) if parts else "записей пока нет"
+
+
+def row_key(section: str, row: dict) -> str:
+    """Устойчивый ключ записи журнала для импорта без дублей.
+
+    У питания и тренировок первичный ключ — автоинкремент, поэтому повторный
+    импорт того же файла добавлял бы их заново. Ключ считаем из содержимого:
+    день, отметка времени и название. Файл, загруженный дважды, даёт те же
+    ключи, и вторая загрузка ничего не добавляет.
+    """
+    import hashlib
+
+    fields = {
+        "meals": ("d", "ts", "title", "kcal"),
+        "workouts": ("d", "ts", "type", "duration"),
+    }.get(section)
+    if not fields:
+        raise ExportError(f"для раздела {section} ключ не определён")
+    payload = "|".join(str(row.get(f) or "") for f in fields)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+    return f"import:{section}:{digest}"

@@ -2179,6 +2179,20 @@ async def _resolve_period_date(context, cid, text):
 
 _ASYNC_RESOLVERS[ACT_PERIOD_DATE.name] = {"iso": _resolve_period_date}
 
+ACT_PERIOD_DELETE = dialog.register(dialog.Action(
+    name="period_delete",
+    title="Убрать отметку месячных",
+    description="Убрать ошибочно отмеченные месячные за указанную дату.",
+    params=(dialog.Param(
+        name="iso",
+        prompt="За какую дату убрать отметку? Например 25.05.2026 или «вчера».",
+        parse=_parse_period_date,
+        error="Не разобрала дату. Напиши, например, 25.05.2026 или «вчера».",
+    ),),
+))
+
+_ASYNC_RESOLVERS[ACT_PERIOD_DELETE.name] = {"iso": _resolve_period_date}
+
 def _parse_cycle_len(text):
     m = re.search(r"\d{1,2}", text or "")
     if not m:
@@ -6670,6 +6684,23 @@ def _act_export_data(cid, values):
     return {"ok": True, "text": "Собрала выгрузку: " + portability.summary(document)
                                 + ". Файл придёт следующим сообщением."}
 
+def _act_period_delete(cid, values):
+    """Убрать ошибочную отметку месячных.
+
+    Из чата раньше можно было только поставить отметку: поправить или снять её
+    умел лишь мини-апп. Ошибиться при этом легко — «начались вчера» после
+    случайного «начались сегодня» оставляло лишний цикл в календаре.
+    """
+    if is_male_profile(row(cid)):
+        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    iso = values["iso"]
+    if not period_delete_at(cid, iso):
+        return {"ok": False, "error": "not_found",
+                "note": f"На {date.fromisoformat(iso).strftime('%d.%m.%Y')} отметки месячных нет."}
+    _evict_today_cache(cid)
+    return {"ok": True, "date": iso,
+            "text": f"Убрала отметку месячных на {date.fromisoformat(iso).strftime('%d.%m.%Y')}."}
+
 def _act_voice_mode(cid, values):
     choice = values["choice"]
     upsert(cid, voice_reply=choice)
@@ -6687,6 +6718,7 @@ _ACTION_HANDLERS = {
     ACT_EXPORT.name: _act_export_data,
     ACT_SETTIME.name: _act_settime,
     ACT_PERIOD_DATE.name: _act_period_date,
+    ACT_PERIOD_DELETE.name: _act_period_delete,
     ACT_CYCLE_LEN.name: _act_cycle_len,
 }
 
@@ -7979,6 +8011,7 @@ async def on_export_document(update, context):
         return await update.message.reply_text("Не смогла прочитать файл. Пришли выгрузку Айвы в формате JSON.")
 
     generation = _user_generation(cid)
+    imported_added = imported_skipped = 0
     c = db()
     try:
         if not _user_write_allowed(cid, generation, conn=c):
@@ -7993,6 +8026,40 @@ async def on_export_document(update, context):
                        item.get("symptoms") or ""))
         for item in parsed["intimacy"]:
             c.execute("INSERT OR IGNORE INTO intimacy(chat_id,d) VALUES(?,?)", (cid, item.get("d")))
+        # Питание и тренировки — журнал с автоинкрементом, поэтому переносим их
+        # через chat_mutations: ключ считается из содержимого записи, и повторная
+        # загрузка того же файла ничего не задваивает.
+        generation_now = int(user_generation if user_generation is not None
+                             else A2.lifecycle_generation(c, cid))
+        for section, sql, fields in (
+            ("meals",
+             "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass) "
+             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             ("d", "ts", "title", "kcal", "protein", "fat", "carbs", "grams",
+              "items", "source", "slot", "fclass")),
+            ("workouts",
+             "INSERT INTO workouts(chat_id,d,ts,type,items,duration,rpe,note) VALUES(?,?,?,?,?,?,?,?)",
+             ("d", "ts", "type", "items", "duration", "rpe", "note")),
+        ):
+            for item in parsed[section]:
+                key = portability.row_key(section, item)
+                seen = c.execute(
+                    "SELECT 1 FROM chat_mutations WHERE chat_id=? AND mutation_key=?",
+                    (cid, key),
+                ).fetchone()
+                if seen:
+                    imported_skipped += 1
+                    continue
+                rid = c.execute(sql, (cid, *[item.get(f) for f in fields])).lastrowid
+                c.execute(
+                    """INSERT INTO chat_mutations
+                       (chat_id,mutation_key,generation,kind,record_id,args_hash,result_json,created_at)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (cid, key, generation_now, section, str(rid), "",
+                     json.dumps(item, ensure_ascii=False, sort_keys=True),
+                     datetime.now(TZ).isoformat()),
+                )
+                imported_added += 1
         c.commit()
     except Exception:
         c.rollback()
@@ -8002,13 +8069,13 @@ async def on_export_document(update, context):
         c.close()
 
     counts = parsed["counts"]
-    restored = f"Восстановила: {counts['cycles']} циклов, {counts['logs']} дней самочувствия."
-    skipped = ""
-    if counts["meals"] or counts["workouts"]:
-        skipped = (f"\n\nПитание ({counts['meals']}) и тренировки ({counts['workouts']}) "
-                   "из файла не переносила: их пришлось бы задваивать. Они остались в файле.")
+    restored = (f"Восстановила: {counts['cycles']} циклов, {counts['logs']} дней самочувствия, "
+                f"{imported_added} записей питания и тренировок.")
+    again = (f"\n\n{imported_skipped} записей уже были — повторная загрузка того же файла "
+             "ничего не задваивает.") if imported_skipped else ""
     _evict_today_cache(cid)
-    return await update.message.reply_text(restored + skipped)
+    _evict_week_food_cache(cid)
+    return await update.message.reply_text(restored + again)
 
 async def on_voice(update, context):
     if update.message is None:   # правка сообщения: см. комментарий в on_text
@@ -11677,7 +11744,7 @@ def _agent_tools_spec(mode=None):
     # Пишущие действия берутся из реестра: чат получает ровно то, что умеет
     # приложение, с той же проверкой значений. Отдельного списка больше нет.
     for tool in _registry_chat_tools():
-        if tool["function"]["name"] in {"period_date", "cycle_len"} and mode == "male":
+        if tool["function"]["name"] in {"period_date", "period_delete", "cycle_len"} and mode == "male":
             continue
         tools.append(tool)
     return tools

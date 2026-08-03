@@ -2237,6 +2237,17 @@ def week_food_review(days_text, profile_line, usage=None):
             "tips": [str(x) for x in (data.get("tips") or [])][:3]}
 
 
+def _recipe_kcal_off(value, target, tolerance=0.15):
+    """Расходится ли калорийность рецепта с запланированной больше допуска."""
+    digits = re.sub(r"\D", "", str(value or ""))[:4]
+    if not digits:
+        return False        # модель не назвала число — это не повод перегенерить
+    got = int(digits)
+    if not got:
+        return False
+    return abs(got - int(target)) > int(target) * tolerance
+
+
 def recipe(dish, usage=None, target_kcal=None):
     """Короткий домашний рецепт блюда для карточки в мини-аппе.
 
@@ -2266,7 +2277,13 @@ def recipe(dish, usage=None, target_kcal=None):
                 data = json.loads(out[out.find("{"):out.rfind("}") + 1])
             except Exception:
                 data = {}
-        if isinstance(data, dict) and data.get("steps"): break
+        if isinstance(data, dict) and data.get("steps"):
+            # Просьбы в промпте мало: модель регулярно считает порцию по-своему,
+            # и карточка снова начнёт спорить сама с собой. Проверяем числом.
+            if target_kcal and _recipe_kcal_off(data.get("kcal"), target_kcal):
+                data = {}
+                continue
+            break
     if not isinstance(data, dict) or not data.get("steps"):
         raise ValueError(f"recipe: плохой ответ модели: {str(out)[:120]}")
     macros = data.get("macros") if isinstance(data.get("macros"), dict) else {}
