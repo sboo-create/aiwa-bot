@@ -24,7 +24,7 @@ export function RecipePanel({ isOpen, meal, image, slotLabel = "", onClose, onAd
     setRecipe(null);
     setFailed(false);
     let alive = true;
-    apiCall("/api/recipe", { dish })
+    apiCall("/api/recipe", { dish, kcal: meal?.kcal })
       .then((result) => {
         if (!alive) return;
         if (result?.steps?.length) setRecipe(result);
@@ -39,8 +39,15 @@ export function RecipePanel({ isOpen, meal, image, slotLabel = "", onClose, onAd
   const macros = recipe?.macros || {};
   const macroLine = [macros.protein && `Б ${macros.protein}`, macros.fat && `Ж ${macros.fat}`, macros.carbs && `У ${macros.carbs}`]
     .filter(Boolean).join(" · ");
-  const nutritionLine = [recipe?.kcal || meal?.kcal, macroLine].filter(Boolean).join(" · ");
-  const metaLine = [slotLabel, calorieLabel(meal?.kcal || recipe?.kcal), recipe?.time].filter(Boolean).join(" · ");
+  /* Одно число на карточку. Раньше шапка и питательность брали калорийность из
+     разных источников с обратным приоритетом: в шапке — план меню, в
+     питательности — рецепт. Когда рецепт считал порцию по-своему, карточка
+     спорила сама с собой: «650 калорий» сверху и «380 ккал на порцию» ниже.
+     Показываем числа рецепта — они описывают тот список продуктов, который тут
+     же напечатан, — а план остаётся запасным вариантом, пока рецепт не приехал. */
+  const kcalLine = recipe?.kcal || meal?.kcal;
+  const nutritionLine = [kcalLine, macroLine].filter(Boolean).join(" · ");
+  const metaLine = [slotLabel, calorieLabel(kcalLine), recipe?.time].filter(Boolean).join(" · ");
 
   return (
     <AiwaModalView isOpen={isOpen} onClose={onClose} aria-label={dish ? `Рецепт: ${dish}` : "Рецепт"}>

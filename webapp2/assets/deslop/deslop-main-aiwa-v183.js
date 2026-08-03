@@ -21560,7 +21560,7 @@ function f7({ label: n, value: t, ok: i }) {
 function d7({ metrics: n, title: t = "Статистика" }) {
   return n?.length ? /* @__PURE__ */ h.jsx(gt.Item, { header: t, children: n.map((i) => /* @__PURE__ */ h.jsx(f7, { ...i }, i.label)) }) : null;
 }
-const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r40").then((n) => ({
+const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r41").then((n) => ({
   default: n.AiwaWebUiChart
 })));
 function m7() {
@@ -23815,20 +23815,20 @@ function DR({ isOpen: n, meal: t, image: i, slotLabel: l = "", onClose: o, onAdd
   C.useEffect(() => {
     if (!n || !v) return;
     p(null), g(!1);
-    let x = !0;
-    return Pt("/api/recipe", { dish: v }).then((A) => {
-      x && (A?.steps?.length ? p(A) : g(!0));
-    }).catch(() => x && g(!0)), () => {
-      x = !1;
+    let A = !0;
+    return Pt("/api/recipe", { dish: v, kcal: t?.kcal }).then((_) => {
+      A && (_?.steps?.length ? p(_) : g(!0));
+    }).catch(() => A && g(!0)), () => {
+      A = !1;
     };
   }, [n, v]);
-  const b = d?.macros || {}, j = [b.protein && `Б ${b.protein}`, b.fat && `Ж ${b.fat}`, b.carbs && `У ${b.carbs}`].filter(Boolean).join(" · "), w = [d?.kcal || t?.kcal, j].filter(Boolean).join(" · "), T = [l, RR(t?.kcal || d?.kcal), d?.time].filter(Boolean).join(" · ");
+  const b = d?.macros || {}, j = [b.protein && `Б ${b.protein}`, b.fat && `Ж ${b.fat}`, b.carbs && `У ${b.carbs}`].filter(Boolean).join(" · "), w = d?.kcal || t?.kcal, T = [w, j].filter(Boolean).join(" · "), x = [l, RR(w), d?.time].filter(Boolean).join(" · ");
   return /* @__PURE__ */ h.jsx(Un, { isOpen: n, onClose: o, "aria-label": v ? `Рецепт: ${v}` : "Рецепт", children: /* @__PURE__ */ h.jsxs("div", { className: "aiwa-sheet-scroll aiwa-recipe-page", children: [
     /* @__PURE__ */ h.jsxs("header", { className: "aiwa-recipe-hero", children: [
       i ? /* @__PURE__ */ h.jsx("span", { className: "aiwa-recipe-image", children: /* @__PURE__ */ h.jsx("img", { src: i, alt: v }) }) : null,
       /* @__PURE__ */ h.jsxs("div", { className: "aiwa-recipe-heading", children: [
         /* @__PURE__ */ h.jsx(ht, { as: "h1", variant: "body", weight: "semibold", children: v }),
-        T || t?.note ? /* @__PURE__ */ h.jsx(ht, { as: "p", variant: "subheadline2", weight: "regular", children: T || t?.note }) : null
+        x || t?.note ? /* @__PURE__ */ h.jsx(ht, { as: "p", variant: "subheadline2", weight: "regular", children: x || t?.note }) : null
       ] })
     ] }),
     /* @__PURE__ */ h.jsxs("main", { className: "aiwa-recipe-content", "aria-live": "polite", children: [
@@ -23842,16 +23842,16 @@ function DR({ isOpen: n, meal: t, image: i, slotLabel: l = "", onClose: o, onAdd
       ] }) : null,
       d ? /* @__PURE__ */ h.jsxs("section", { className: "aiwa-recipe-section", children: [
         /* @__PURE__ */ h.jsx(ht, { as: "h2", variant: "body", weight: "semibold", children: "Питательность" }),
-        /* @__PURE__ */ h.jsx(ht, { as: "p", variant: "body", weight: "regular", children: w || "—" }),
+        /* @__PURE__ */ h.jsx(ht, { as: "p", variant: "body", weight: "regular", children: T || "—" }),
         d.micros?.length ? /* @__PURE__ */ h.jsx(ht, { as: "p", variant: "body", weight: "regular", children: d.micros.join("; ") }) : null
       ] }) : null,
       d?.ingredients?.length ? /* @__PURE__ */ h.jsxs("section", { className: "aiwa-recipe-section", children: [
         /* @__PURE__ */ h.jsx(ht, { as: "h2", variant: "body", weight: "semibold", children: "Ингредиенты" }),
-        /* @__PURE__ */ h.jsx("ul", { className: "aiwa-recipe-list", children: d.ingredients.map((x) => /* @__PURE__ */ h.jsx("li", { children: /* @__PURE__ */ h.jsx(ht, { variant: "body", weight: "regular", children: x }) }, x)) })
+        /* @__PURE__ */ h.jsx("ul", { className: "aiwa-recipe-list", children: d.ingredients.map((A) => /* @__PURE__ */ h.jsx("li", { children: /* @__PURE__ */ h.jsx(ht, { variant: "body", weight: "regular", children: A }) }, A)) })
       ] }) : null,
       d?.steps?.length ? /* @__PURE__ */ h.jsxs("section", { className: "aiwa-recipe-section", children: [
         /* @__PURE__ */ h.jsx(ht, { as: "h2", variant: "body", weight: "semibold", children: "Приготовление" }),
-        /* @__PURE__ */ h.jsx("ol", { className: "aiwa-recipe-list", children: d.steps.map((x, A) => /* @__PURE__ */ h.jsx("li", { value: A + 1, children: /* @__PURE__ */ h.jsx(ht, { variant: "body", weight: "regular", children: x }) }, x)) })
+        /* @__PURE__ */ h.jsx("ol", { className: "aiwa-recipe-list", children: d.steps.map((A, _) => /* @__PURE__ */ h.jsx("li", { value: _ + 1, children: /* @__PURE__ */ h.jsx(ht, { variant: "body", weight: "regular", children: A }) }, A)) })
       ] }) : null
     ] }),
     /* @__PURE__ */ h.jsx("div", { className: "aiwa-recipe-action", children: /* @__PURE__ */ h.jsx(

@@ -511,7 +511,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 
 /* The main screen is styled by the exact Deslop package and src/deslop-main.css. */
 </style>
-<link rel="stylesheet" href="/assets/deslop/main.css?v=r40">
+<link rel="stylesheet" href="/assets/deslop/main.css?v=r41">
 </head>
 <body class="apple">
 <div id="app" data-component="Page">
@@ -526,7 +526,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 <div id="hub" class="hubsheet hidden"></div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="cmic" aria-label="Голосом">🎤</button><button id="csend" aria-label="Отправить">→</button></div>
 <div id="tabs" aria-label="Разделы приложения"></div><input type="file" id="foodfile" accept="image/*" style="display:none">
-<script type="module" src="/assets/deslop/main.js?v=r40"></script>
+<script type="module" src="/assets/deslop/main.js?v=r41"></script>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp;
 const LOCAL_HOST=/^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/;
@@ -941,7 +941,10 @@ function renderPaperHome(el){
     if(runningDay){payload.heroValue=runningDay+"-й день";payload.countdown=String(runningDay);payload.countdownLabel="месячных";}
     if(TODAY_NOTE&&!delayed)payload.aiText=TODAY_NOTE;
   }
-  el.className='paper-home';
+  /* Рендер не решает, что видно: классом hidden владеет навигация.
+     Сплошное присваивание className стирало его, и перемотка календаря
+     на «Питании» открывала главный экран поверх, а таб оставался на месте. */
+  el.className=el.classList.contains('hidden')?'paper-home hidden':'paper-home';
   var homeRoot=el.querySelector('#deslop-home-root');
   if(!homeRoot){
     el.innerHTML="<div id='deslop-home-root'></div>";
@@ -1383,7 +1386,7 @@ async function addReco(btn,i){
 }
 async function renderFood(){
   var el=document.getElementById('scr-food');if(loadedFood)return;
-  if(window.AiwaDeslop){el.className='paper-screen';window.AiwaDeslop.renderFood(el,{mode:D&&D.mode||"cycle"});loadedFood=true;return;}
+  if(window.AiwaDeslop){el.className=el.classList.contains('hidden')?'paper-screen hidden':'paper-screen';window.AiwaDeslop.renderFood(el,{mode:D&&D.mode||"cycle"});loadedFood=true;return;}
   el.innerHTML="<div class='h'>Питание</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва собирает меню")+"</div><div class='card'><div class='skel' style='width:52%;height:20px'></div><div class='skel' style='width:90%;margin-top:12px'></div><div class='skel' style='width:74%;margin-top:8px'></div></div>";
   var r=await api('/api/section',{kind:'food'});
   if(!(r&&r.menu&&r.menu.meals)){r=(!INIT||r&&r.error==='net')?{menu:DEMO_MENU,kcal:1850,text:DEMO_FOODT}:{text:(r&&r.text)||"Выбираем простую еду с белком в каждом приёме и нормальной сытостью."};}
@@ -1545,7 +1548,7 @@ function foodDeletePending(id){var key='aiwa:food-delete:'+id,requestId='';try{r
 async function delMeal(id){var pending=foodDeletePending(id),r=await api('/api/diary_del',{id:id,request_id:pending.request_id});if(_applyDiary(r)){try{sessionStorage.removeItem(pending.key);}catch(error){}haptic('selection');}}
 async function diaryReco(){var box=document.getElementById('diarreco');if(box)box.innerHTML=thinkHTML('Айва смотрит дневник');var r=await api('/api/diary_reco',{});if(box)box.textContent=(r&&r.text)||'Не получилось, попробуй позже.';}
 (function(){var f=document.getElementById('foodfile');if(f)f.addEventListener('change',onFoodFile);})();
-async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;if(window.AiwaDeslop){el.className='paper-screen';window.AiwaDeslop.renderActivity(el,{mode:D&&D.mode||"cycle"});loadedTrain=true;return;}var isMale=!!(D&&D.mode==="male");el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Безопаснее опираться на сон, энергию, боль и общее состояние.",hormones:["Главные ориентиры: энергия, боль, сон и восстановление.","Повышай интенсивность постепенно и оставляй время на восстановление.","При сильной боли, слабости или головокружении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли и рывков"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости или боли",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость или головокружение",recovery:"вода, белок после нагрузки, сон и спокойная заминка",suggestions:["Мало сил сегодня?","Что после нагрузки?","Можно при боли?"]};}
+async function renderTrain(){var el=document.getElementById('scr-train');if(loadedTrain)return;if(window.AiwaDeslop){el.className=el.classList.contains('hidden')?'paper-screen hidden':'paper-screen';window.AiwaDeslop.renderActivity(el,{mode:D&&D.mode||"cycle"});loadedTrain=true;return;}var isMale=!!(D&&D.mode==="male");el.innerHTML="<div class='h'>Нагрузка</div><div style='padding:4px 2px 14px'>"+thinkHTML("Айва подбирает нагрузку")+"</div><div class='card'><div class='skel' style='width:50%;height:20px'></div><div class='skel' style='width:88%;margin-top:12px'></div><div class='skel' style='width:72%;margin-top:8px'></div></div>";var r=await api('/api/section',{kind:'training'});var p=r&&r.training;if(!p){p={level:"По самочувствию",duration:"20-40 мин",summary:"Выбирай нагрузку, после которой станет легче, а не хуже.",phase:"",day:"",cycle_len:"",why:(r&&r.text)||"Безопаснее опираться на сон, энергию, боль и общее состояние.",hormones:["Главные ориентиры: энергия, боль, сон и восстановление.","Повышай интенсивность постепенно и оставляй время на восстановление.","При сильной боли, слабости или головокружении нагрузку лучше обсудить с врачом."],options:[{name:"Ходьба",benefit:"мягко поддерживает энергию, сон и настроение без перегруза нервной системы",how:"20-40 мин в ровном темпе, без цели ускоряться"},{name:"Растяжка или йога",benefit:"снимает напряжение в спине и шее, если тело зажато или мало сил",how:"10-20 мин, медленно, без боли и рывков"},{name:"Лёгкая силовая",benefit:"поддерживает мышцы и тонус, если нет слабости или боли",how:"25-35 мин, лёгкий вес, запас 2-3 повтора, паузы не пропускать"}],avoid:"тренировки через боль, сильную слабость или головокружение",recovery:"вода, белок после нагрузки, сон и спокойная заминка",suggestions:["Мало сил сегодня?","Что после нагрузки?","Можно при боли?"]};}
   var html="<div class='h'>Нагрузка</div>";
   html+="<div class='ayva'><div class='ayva-top'><span class='blossom' id='trainBlossom'></span><div style='flex:1'><div class='ayva-lab'>Айва · сегодня</div><div style='font-family:var(--serif);font-size:24px;line-height:1.05'>"+esc(p.level)+"</div><div class='pmeta'>"+esc(p.duration)+(p.day?(" · день "+esc(p.day)+" из "+esc(p.cycle_len)):"")+"</div><div class='ayva-txt' style='margin-top:9px'>"+esc(p.summary||"")+"</div>"+(p.why?("<div class='ayva-txt' style='margin-top:8px'>"+esc(p.why)+"</div>"):"")+"</div></div></div>";
   html+="<div id='trLog'></div>";

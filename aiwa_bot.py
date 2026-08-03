@@ -9194,14 +9194,22 @@ async def _api_recipe(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     dish = str(body.get("dish") or "").strip()[:80]
     if not dish: return _cors(web.json_response({"error": "no dish"}, status=400))
-    ck = (dish.lower(), dtoday().isoformat(), "v2")
+    # Рецепт считается под запланированный размер приёма: иначе модель выбирает
+    # порцию сама, и карточка показывает два разных числа для одного блюда.
+    try:
+        target_kcal = int(re.sub(r"\D", "", str(body.get("kcal") or ""))[:4] or 0) or None
+    except Exception:
+        target_kcal = None
+    if target_kcal and not 100 <= target_kcal <= 2000:
+        target_kcal = None
+    ck = (dish.lower(), dtoday().isoformat(), f"v3:{target_kcal or 0}")
     hit = _RECIPE_CACHE.get(ck) or dc_get(cid, "recipe", dish.lower())
     if hit:
         _RECIPE_CACHE[ck] = hit
         return _cors(web.json_response(hit))
     try:
         usage = []
-        rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage)
+        rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage, target_kcal)
         if usage: ev(cid, "tokens", sum(usage), meta="recipe", calls=len(usage), usage=usage)
         if len(_RECIPE_CACHE) > 300: _RECIPE_CACHE.clear()
         _RECIPE_CACHE[ck] = rec
