@@ -8,7 +8,10 @@
  * - SplitView — iPad two-pane layout, out of scope for the mini app
  * - StoryCard — trading-specific domain card
  * - Cells — alias of Cell
- * - AppearanceProvider / DeviceProvider / MotionProvider — already composed by TMAProvider
+ * - AppearanceProvider / DeviceProvider — already composed by TMAProvider
+ *
+ * MotionProvider is also exported for the isolated toast root, which needs
+ * LazyMotion without running appearance/device effects against document.body.
  */
 export {
   Badge,
@@ -28,6 +31,7 @@ export {
   Markdown,
   ModalView,
   Morph,
+  MotionProvider,
   MultilineButton,
   Page,
   PanelHeader,

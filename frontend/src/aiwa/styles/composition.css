@@ -342,6 +342,20 @@ body.home-active .bar {
   fill: var(--aiwa-warning);
 }
 
+.aiwa-status.is-pending {
+  color: var(--ui-text-disabled, var(--aiwa-ink-muted));
+}
+
+/* Keep the visual status slot compact while exposing a 44px tooltip target. */
+.aiwa-metric-status-hit {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  margin: -6px;
+  place-items: center;
+  touch-action: manipulation;
+}
+
 .aiwa-area-chart-state {
   display: grid;
   min-height: 232px;
@@ -482,6 +496,7 @@ body.home-active .bar {
   box-sizing: border-box;
   align-items: center;
   justify-content: center;
+  border: 0;
   border-radius: 999px;
   box-shadow: none;
 }
@@ -493,6 +508,15 @@ body.home-active .bar {
 .aiwa-chip[aria-pressed="true"] {
   --ui-text-primary: var(--aiwa-accent);
   --tma-text-primary: var(--aiwa-accent);
+}
+
+/* Canvas chips reserve their selected edge so toggling never changes geometry. */
+.aiwa-chip.is-on-canvas > :first-child {
+  border: 0.5px solid transparent;
+}
+
+.aiwa-chip.is-on-canvas[aria-pressed="true"] > :first-child {
+  border-color: currentcolor;
 }
 
 .aiwa-chip:focus-visible {
@@ -884,28 +908,28 @@ body.redesign-active .bar {
 }
 
 .aiwa-paper-screen {
+  --aiwa-paper-inline: 20px;
   width: 100%;
   min-height: calc(100dvh - var(--safe-top, 56px));
-  padding: 32px 20px 156px;
+  padding: 32px var(--aiwa-paper-inline) 156px;
   box-sizing: border-box;
   background: var(--aiwa-screen-bg);
 }
 
-/* Bottom spacing synced to Home: the shared .aiwa-tma-blocks nav-clearance padding
-   is the only trailing space, so drop the screen's extra bottom padding. */
+/* The shared day header owns the opening rhythm; the section list owns the
+   trailing navigation clearance. */
 .aiwa-food-screen,
 .aiwa-activity-screen {
+  padding-top: 0;
   padding-bottom: 0;
 }
 
-.aiwa-screen-title {
-  display: block;
-  margin: 0;
-  color: var(--aiwa-ink) !important;
-  font-family: var(--ui-font-interface) !important;
-  font-size: 32px !important;
-  font-weight: 600 !important;
-  line-height: 40px !important;
+/* Match Home: the shared full-width header and overview step out of the screen
+   inset, while records below keep their own 16px section inset. */
+.aiwa-paper-screen > .aiwa-panel-header,
+.aiwa-paper-screen > .aiwa-overview {
+  width: calc(100% + var(--aiwa-paper-inline) + var(--aiwa-paper-inline));
+  margin-left: calc(-1 * var(--aiwa-paper-inline));
 }
 
 /* ── Скелетоны экранов ──────────────────────────────────────────────────────
@@ -1032,10 +1056,6 @@ body.redesign-active .bar {
   margin-top: 0 !important;
 }
 
-.aiwa-paper-screen.aiwa-food-screen > .aiwa-tma-blocks {
-  margin-top: 39px !important;
-}
-
 .aiwa-macro-card {
   display: flex;
   min-height: 102px;
@@ -1057,7 +1077,9 @@ body.redesign-active .bar {
   white-space: nowrap;
 }
 
-.aiwa-macro-card [data-variant="body"] span {
+/* Calligraph renders each animated glyph in a span, so only the actual target
+   suffix receives the smaller secondary treatment. */
+.aiwa-macro-card .aiwa-macro-target {
   color: var(--aiwa-ink-subtle);
   font-size: 13px;
   font-weight: 400;
@@ -1132,30 +1154,107 @@ body.redesign-active .bar {
   line-height: 20px !important;
 }
 
-/* Secondary button state: muted surface fill, dark text (see Paper "secondary button"). */
-.aiwa-btn-secondary {
+/* Product secondary buttons share geometry but use the surface appropriate to
+   their context. The legacy class stays until existing insight call sites move
+   to AiwaButton. */
+.aiwa-btn-secondary,
+[data-aiwa-button-variant="secondary"],
+[data-aiwa-button-variant="secondaryCanvas"] {
   display: flex !important;
   width: 100% !important;
   min-height: 48px !important;
   padding: 14px 16px !important;
   border: 0 !important;
   border-radius: 25px !important;
-  background: var(--aiwa-fill-secondary) !important;
   box-shadow: none !important;
   align-items: center !important;
   justify-content: center !important;
 }
 
-.aiwa-btn-secondary [class*="_glassBorder_"] {
+.aiwa-btn-secondary,
+[data-aiwa-button-variant="secondary"] {
+  background: var(--aiwa-fill-secondary) !important;
+}
+
+[data-aiwa-button-variant="secondaryCanvas"] {
+  background: var(--aiwa-surface) !important;
+}
+
+.aiwa-btn-secondary [class*="_glassBorder_"],
+[data-aiwa-button-variant="secondary"] [class*="_glassBorder_"],
+[data-aiwa-button-variant="secondaryCanvas"] [class*="_glassBorder_"] {
   display: none !important;
 }
 
-.aiwa-btn-secondary [data-variant="body"] {
+.aiwa-btn-secondary [data-variant="body"],
+[data-aiwa-button-variant="secondary"] [data-variant="body"],
+[data-aiwa-button-variant="secondaryCanvas"] [data-variant="body"] {
   color: var(--aiwa-ink-secondary) !important;
   font-family: "SB Sans Interface", var(--ui-font-interface) !important;
   font-size: 16px !important;
   font-weight: 400 !important;
   line-height: 20px !important;
+}
+
+[data-aiwa-button-variant="secondaryCanvas"] [data-variant="body"] {
+  color: var(--aiwa-ink) !important;
+}
+
+[data-aiwa-button-variant][disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Loading keeps button geometry and colour intact, replacing only its label. */
+[data-aiwa-button-variant][data-loading="true"] {
+  opacity: 1;
+  cursor: wait;
+}
+
+.aiwa-button-spinner {
+  display: inline-flex;
+  width: var(--ui-space-20, 20px);
+  height: var(--ui-space-20, 20px);
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+
+.aiwa-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.aiwa-button-spinner > svg {
+  display: block;
+  width: var(--ui-space-20, 20px) !important;
+  height: var(--ui-space-20, 20px) !important;
+  color: inherit !important;
+  animation-timing-function: linear !important;
+  will-change: transform;
+}
+
+body.apple .aiwa-button-spinner > svg path {
+  fill: currentColor !important;
+}
+
+/* Deslop fills every Snackbar path with currentColor. AIWA's status glyphs
+   use their second path and alert/info circle as cut-outs in the light disc. */
+.aiwa-toast-icon path + path {
+  fill: none !important;
+  stroke: var(--toast-background, var(--aiwa-ink-secondary)) !important;
+}
+
+.aiwa-toast-icon circle {
+  fill: var(--toast-background, var(--aiwa-ink-secondary)) !important;
 }
 
 /* Calendar app bar: legend on the left, «Готово» on the right while marking. */
@@ -1447,16 +1546,26 @@ body.material .aiwa-mark-bar {
   line-height: 22px !important;
 }
 
-/* PaperRow media variant — 46px thumbnail on the left (see Paper "Рекомендации"). */
+/* Paper's Extended slot is 68px around a 56px image, leaving a 12px text gap. */
+[data-aiwa-row-variant="extended"] > [class*="_start_"] {
+  width: 68px;
+  flex: 0 0 68px;
+  align-self: flex-start;
+  padding: 16px 10px 16px 0 !important;
+  box-sizing: border-box;
+}
+
 .aiwa-cell-thumb {
   display: flex;
-  width: 46px;
-  height: 46px;
-  flex: 0 0 46px;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border-radius: 12px;
+  isolation: isolate;
+  border-radius: 16px;
+  background: var(--aiwa-media-bg);
 }
 
 /* Пустой слот превью, пока Айва разбирает фото: спиннер из TMA на том же
@@ -1476,10 +1585,36 @@ body.material .aiwa-mark-bar {
   object-fit: cover;
 }
 
-/* Activity header repeats Home: week strip → hero count → CTA. The screen already
-   pads 20px on the sides, so the shared overview preset only keeps its vertical rhythm. */
-.aiwa-activity-screen > .aiwa-overview {
-  padding: 32px 0;
+/* A meal row has two sibling actions (edit and delete), never a button inside
+   another button. The main action inherits the Cell body geometry. */
+.aiwa-row-main-action {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  flex-direction: column;
+  justify-content: center;
+  text-align: left;
+  cursor: pointer;
+}
+
+.aiwa-row-main-title,
+.aiwa-row-main-description {
+  display: block;
+}
+
+.aiwa-row-main-description {
+  color: var(--aiwa-ink-muted);
+}
+
+.aiwa-row-main-action:focus-visible {
+  outline: 2px solid var(--aiwa-accent);
+  outline-offset: -2px;
 }
 
 /* The CTA (or stack of them) a card ends with, inside a non-tappable AiwaCell.
@@ -1569,6 +1704,15 @@ body.material .aiwa-mark-bar {
 .aiwa-choice-pill.is-active {
   background: color-mix(in srgb, var(--aiwa-accent) 12%, transparent);
   color: var(--aiwa-accent);
+}
+
+/* Choice groups placed directly on canvas use the same stable selected edge. */
+.aiwa-choice-pills.is-on-canvas .aiwa-choice-pill {
+  border: 0.5px solid transparent;
+}
+
+.aiwa-choice-pills.is-on-canvas .aiwa-choice-pill.is-active {
+  border-color: currentcolor;
 }
 
 .aiwa-field {
@@ -1707,10 +1851,68 @@ body.material .aiwa-mark-bar {
 .aiwa-preg-fruit img { border-radius: 14px; }
 .aiwa-week-review-cta { padding: 10px 12px 12px; }
 
-/* Группы мышц в силовой и карточка разбора после сохранения. */
-.aiwa-exercise-group [data-variant="caption1"] {
-  color: var(--aiwa-accent, #e8792e);
+/* Workout exercise editor stays a native grouped Cell list inside the sheet. */
+.aiwa-workout-exercises {
+  width: 100%;
+  --aiwa-control-bg: var(--aiwa-screen-bg);
+  --tg-theme-secondary-bg-color: transparent;
+  --tg-theme-section-bg-color: var(--aiwa-surface);
 }
+
+.aiwa-workout-exercises > section {
+  width: 100%;
+  padding: 0 !important;
+  padding-bottom: 0 !important;
+  gap: 0 !important;
+  background: transparent !important;
+}
+
+.aiwa-workout-exercises > section > section > div > :first-child:not(:last-child) {
+  min-height: 20px;
+  padding: 0 0 10px !important;
+  color: var(--aiwa-ink) !important;
+  background: transparent !important;
+}
+
+.aiwa-workout-exercises > section > section > div > :first-child:not(:last-child) [data-variant="body"] {
+  color: var(--aiwa-ink) !important;
+  font-family: var(--ui-font-interface) !important;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+  line-height: 20px !important;
+}
+
+.aiwa-workout-exercises .aiwa-exercise-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.aiwa-workout-exercises [data-aiwa-cell="true"] {
+  width: 100%;
+  box-sizing: border-box;
+  color: inherit;
+  text-align: left;
+}
+
+[data-aiwa-exercise-group="true"] [data-variant="caption1"] {
+  color: var(--aiwa-accent);
+}
+
+.aiwa-exercise-add-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: var(--aiwa-ink-muted);
+}
+
+.aiwa-exercise-add-icon svg,
+.aiwa-check svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
 .aiwa-workout-review {
   display: flex;
   flex-direction: column;
@@ -1783,12 +1985,24 @@ body.material .aiwa-mark-bar {
   font-weight: 600;
 }
 
+button.aiwa-avatar-initial {
+  padding: 0;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+button.aiwa-avatar-initial:focus-visible {
+  outline: 2px solid var(--aiwa-accent);
+  outline-offset: 3px;
+}
+
 /* Детали силового упражнения: вес, подходы, повторы в одну строку. */
 .aiwa-exercise-nums {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 8px;
-  padding: 0 0 10px;
+  padding: 0 16px 10px;
   border-bottom: 1px solid var(--aiwa-separator);
 }
 .aiwa-exercise-nums input {
@@ -1797,23 +2011,33 @@ body.material .aiwa-mark-bar {
   padding: 8px 10px;
   border: 0;
   border-radius: 10px;
-  background: var(--aiwa-secondary-fill, rgba(0, 0, 0, 0.05));
+  background: var(--aiwa-fill-secondary);
   font: inherit;
   font-size: 15px;
   text-align: center;
 }
 
-.aiwa-exercise-row {
-  display: flex;
-  min-height: 52px;
-  padding: 10px 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border: 0;
-  border-bottom: 1px solid var(--aiwa-separator);
-  background: transparent;
-  color: var(--aiwa-ink-secondary);
+[data-aiwa-exercise-custom="true"] [data-variant="caption1"] {
+  color: var(--aiwa-ink-muted);
+  font-family: var(--ui-font-interface) !important;
+  text-transform: none !important;
+}
+
+[data-aiwa-exercise-custom="true"] {
+  padding-left: 16px !important;
+}
+
+[data-aiwa-exercise-custom="true"] > [class*="_body_"] {
+  padding-right: 16px !important;
+  padding-bottom: 16px !important;
+}
+
+[data-aiwa-exercise-custom="true"] input {
+  min-height: 48px;
+  padding: 12px 16px;
+  border-radius: 999px;
+  background: var(--aiwa-control-bg);
+  box-sizing: border-box;
 }
 
 #scr-chat.paper-chat:not(.hidden) {
@@ -1988,7 +2212,7 @@ body:has(#scr-chat.paper-chat:not(.hidden)) #tabs {
 
 @media (max-width: 370px) {
   .aiwa-paper-screen {
-    padding-inline: 16px;
+    --aiwa-paper-inline: 16px;
   }
 
   .aiwa-food-gauge {
@@ -2215,8 +2439,86 @@ body.material .aiwa-tma-blocks [class*="_card_"] {
   opacity: 0.4;
 }
 
+/* The ruler is turned by a swipe anywhere in its block. pan-y preserves normal
+   page scrolling while the horizontal gesture moves the drum. */
+.aiwa-overview .aiwa-day-overview {
+  display: flex;
+  width: 100%;
+  padding: 8px 0 24px;
+  flex-direction: column;
+  align-items: center;
+  box-sizing: border-box;
+  touch-action: pan-y;
+}
+
+.aiwa-overview:has(> .aiwa-day-overview) {
+  padding-top: 0;
+}
+
+.aiwa-day-overview + [class*="_button_"],
+.aiwa-day-overview + .aiwa-screen-cta,
+.aiwa-day-overview + .aiwa-skeleton-cta {
+  margin-top: 0 !important;
+}
+
+/* The Deslop Wheel keeps its behavior; product tokens dress it as AIWA's quiet
+   date ruler. */
+.aiwa-overview .aiwa-day-wheel {
+  --wheel-height: 54px;
+  --tick-mark-height: 8px;
+}
+
+/* Standalone DayWheel still needs a pointer lifecycle guard. `display: contents`
+   gives its fallback drag-area a DOM event boundary without another surface. */
+.aiwa-day-wheel-area {
+  display: contents;
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_wheelContainer_"]::before {
+  background: linear-gradient(to right, var(--aiwa-screen-bg), transparent);
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_wheelContainer_"]::after {
+  background: linear-gradient(to left, var(--aiwa-screen-bg), transparent);
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_centerIndicator_"] {
+  background: var(--aiwa-surface);
+  box-shadow: var(--aiwa-shadow-raised);
+}
+
+.aiwa-overview .aiwa-day-wheel[data-indicator="label"] [class*="_centerIndicator_"] {
+  top: auto;
+  bottom: calc(var(--ui-space-16) + var(--tick-mark-height));
+  height: calc(var(--ui-subtitle-line-height) + var(--ui-space-8));
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_tickNumber_"] {
+  color: var(--aiwa-ink);
+  font-family: var(--ui-font-interface);
+}
+
+.aiwa-overview .aiwa-day-wheel [class*="_tickMark_"] {
+  height: var(--tick-mark-height);
+  background: var(--aiwa-ink-muted);
+  opacity: 0.5;
+}
+
 .aiwa-countdown {
   margin-top: 49px;
+}
+
+.aiwa-overview .aiwa-day-wheel + .aiwa-countdown {
+  margin-top: 33px;
+}
+
+.aiwa-day-hero {
+  width: 100%;
+  transition: opacity 0.2s ease;
+}
+
+.aiwa-day-hero[data-loading="true"] {
+  opacity: 0.5;
 }
 
 /* Shared section rhythm. The header stays outside the white Deslop container. */
@@ -2231,9 +2533,9 @@ body.material .aiwa-tma-blocks [class*="_card_"] {
 }
 
 .aiwa-paper-screen > .aiwa-tma-blocks {
-  width: calc(100% + 40px) !important;
-  margin-top: 8px !important;
-  margin-left: -20px !important;
+  width: calc(100% + var(--aiwa-paper-inline) + var(--aiwa-paper-inline)) !important;
+  margin-top: 0 !important;
+  margin-left: calc(-1 * var(--aiwa-paper-inline)) !important;
 }
 
 .aiwa-tma-blocks > section > div {
@@ -2268,7 +2570,7 @@ body.material .aiwa-tma-blocks [class*="_card_"] {
 
 .aiwa-tma-blocks > section > div > div:last-child,
 body.material .aiwa-tma-blocks > section > div > div:last-child {
-  padding-block: 8px;
+  padding-block: 0;
   overflow: hidden !important;
   border-radius: 26px !important;
   --aiwa-control-bg: var(--aiwa-screen-bg);
@@ -2277,7 +2579,7 @@ body.material .aiwa-tma-blocks > section > div > div:last-child {
 
 .aiwa-tma-blocks > section > div > div:last-child > :is(div, button, a):not([data-aiwa-insight-cell="true"]):has(> [class*="_body_"]) {
   width: 100% !important;
-  min-height: 59px !important;
+  min-height: var(--aiwa-cell-min-height, 59px) !important;
   padding-left: 16px !important;
   box-sizing: border-box;
   appearance: none;
@@ -2288,6 +2590,14 @@ body.material .aiwa-tma-blocks > section > div > div:last-child {
   text-align: left;
 }
 
+.aiwa-tma-blocks > section > div > div:last-child > [data-aiwa-row-variant="extended"] {
+  --aiwa-cell-min-height: 88px;
+}
+
+.aiwa-tma-blocks > section > div > div:last-child > [data-aiwa-row-variant="compact"] {
+  --aiwa-cell-min-height: 52px;
+}
+
 .aiwa-tma-blocks > section > div > div:last-child > :is(div, button, a):not([data-aiwa-insight-cell="true"]):has(> [class*="_body_"]) > [class*="_body_"] {
   min-height: 0 !important;
   padding: 10px 16px 9px 0 !important;
@@ -2295,6 +2605,12 @@ body.material .aiwa-tma-blocks > section > div > div:last-child {
 
 .aiwa-tma-blocks > section > div > div:last-child > :is(div, button, a):not([data-aiwa-insight-cell="true"]):has(> [class*="_body_"]) > [class*="_end_"] {
   padding-right: 16px !important;
+}
+
+.aiwa-activity-preferences,
+.aiwa-page-action {
+  display: flex;
+  width: 100%;
 }
 
 .aiwa-tma-blocks [data-variant="body"] {
@@ -2413,7 +2729,7 @@ body.material .aiwa-tma-blocks > section > div > div:last-child {
 .aiwa-insight-content {
   display: flex;
   width: 100%;
-  padding: 16px;
+  padding: 8px 12px 12px;
   flex-direction: column;
   gap: 4px;
   box-sizing: border-box;
@@ -2454,7 +2770,7 @@ body.material .aiwa-tma-blocks > section > div > div:last-child {
 
 .aiwa-insight-detail {
   margin-top: 8px;
-  color: var(--aiwa-ink-muted) !important;
+  color: var(--aiwa-ink) !important;
   font-family: "SB Sans Display", var(--ui-font-interface) !important;
   font-size: 15px !important;
   font-weight: 400 !important;
@@ -2462,7 +2778,7 @@ body.material .aiwa-tma-blocks > section > div > div:last-child {
 }
 
 .aiwa-insight-content > [class*="_button_"],
-.aiwa-insight-content > .aiwa-btn-secondary {
+.aiwa-insight-content > [data-aiwa-button-variant] {
   margin-top: 12px;
 }
 
@@ -2580,4 +2896,176 @@ body.material .aiwa-nav-tabbar-layer > * {
   display: block;
   width: 24px;
   height: 24px;
+}
+
+/* Profile settings use full-width grouped records inside the sheet. */
+.aiwa-sheet-scroll > .aiwa-tma-blocks {
+  width: calc(100% + 40px) !important;
+  margin-left: -20px !important;
+}
+
+.aiwa-sheet-scroll > .aiwa-settings-page {
+  padding-top: var(--ui-space-24) !important;
+  padding-bottom: 0 !important;
+}
+
+.aiwa-settings-form {
+  display: flex;
+  padding: var(--ui-space-16);
+  flex-direction: column;
+  gap: var(--ui-space-16);
+  --aiwa-control-bg: var(--aiwa-screen-bg);
+}
+
+.aiwa-settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.aiwa-settings-check {
+  display: flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  color: var(--aiwa-accent);
+}
+
+.aiwa-settings-check svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.aiwa-settings-check svg path {
+  fill: none;
+  stroke: currentcolor;
+}
+
+.aiwa-tma-blocks.aiwa-settings-page > section > div + div > div:last-child {
+  padding: 0 !important;
+  overflow: visible !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.aiwa-profile-avatar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ui-space-8, 8px);
+}
+
+.aiwa-profile-avatar .aiwa-avatar-initial {
+  width: 60px;
+  height: 60px;
+  font-size: 26px;
+}
+
+.aiwa-profile-avatar [data-variant="body"] {
+  color: var(--aiwa-ink);
+  text-align: center;
+}
+
+.aiwa-mode-value {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-4, 4px);
+}
+
+.aiwa-mode-value > [class*="_text_"] {
+  color: var(--aiwa-ink-subtle);
+  white-space: nowrap;
+}
+
+/* Recipe content stays semantic and flat on the canvas. */
+.aiwa-recipe-page {
+  gap: var(--ui-space-24, 24px);
+}
+
+.aiwa-recipe-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ui-space-8, 8px);
+  text-align: center;
+}
+
+.aiwa-recipe-image {
+  display: block;
+  width: 120px;
+  height: 120px;
+  overflow: hidden;
+  isolation: isolate;
+  border-radius: 30%;
+  background: var(--aiwa-media-bg);
+}
+
+.aiwa-recipe-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.aiwa-recipe-heading,
+.aiwa-recipe-content,
+.aiwa-recipe-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.aiwa-recipe-heading {
+  align-items: center;
+  gap: var(--ui-space-2, 2px);
+}
+
+.aiwa-recipe-heading [data-variant="body"] {
+  color: var(--aiwa-ink);
+}
+
+.aiwa-recipe-heading [data-variant="subheadline2"] {
+  color: var(--aiwa-ink-muted);
+}
+
+.aiwa-recipe-content {
+  margin-top: var(--ui-space-24, 24px);
+  gap: var(--ui-space-24, 24px);
+  color: var(--aiwa-ink);
+}
+
+.aiwa-recipe-section {
+  gap: var(--ui-space-8, 8px);
+}
+
+.aiwa-recipe-list {
+  display: grid;
+  margin: 0;
+  padding-left: var(--ui-space-20, 20px);
+  gap: var(--ui-space-8, 8px);
+  list-style-position: outside;
+}
+
+ul.aiwa-recipe-list { list-style-type: disc; }
+ol.aiwa-recipe-list { list-style-type: decimal; }
+
+.aiwa-recipe-list li {
+  padding-left: var(--ui-space-4, 4px);
+}
+
+.aiwa-recipe-list li::marker {
+  color: var(--aiwa-ink-muted);
+}
+
+.aiwa-recipe-status {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: var(--ui-space-8, 8px);
+  color: var(--aiwa-ink-muted);
+}
+
+.aiwa-recipe-action {
+  display: flex;
+  width: 100%;
 }

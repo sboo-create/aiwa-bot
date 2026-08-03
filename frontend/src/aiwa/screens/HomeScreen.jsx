@@ -1,8 +1,8 @@
-import { TMAProvider, Page, ImageAvatar, RegularButton, SectionList, Text } from "../lib/tma";
-import { CalendarIcon, PlusIcon } from "../lib/icons";
-import { call, actionProps } from "../lib/api";
-import { AiwaPanelHeader } from "../components/AiwaPanelHeader";
-import { Week } from "../components/Week";
+import { TMAProvider, Page, RegularButton, SectionList } from "../lib/tma";
+import { PlusIcon } from "../lib/icons";
+import { call, read, actionProps } from "../lib/api";
+import { selectDay } from "../lib/selectedDay";
+import { ScreenDayHeader } from "../components/ScreenDayHeader";
 import { TodaySection } from "../sections/TodaySection";
 import { AiSection } from "../sections/AiSection";
 import { DelaySection } from "../sections/DelaySection";
@@ -12,19 +12,17 @@ import { HistorySection } from "../sections/HistorySection";
 import { SymptomHistorySection } from "../sections/SymptomHistorySection";
 import { PregnancyProgress } from "../sections/PregnancyProgress";
 import { HomePanels } from "../panels/HomePanels";
-import { ProfileAvatar } from "../components/ProfileAvatar";
 import { ProfilePanel } from "../panels/ProfilePanel";
 
 /**
  * Home:
- * - HEADER (paper): PanelHeader + week + countdown + journal CTA
+ * - HEADER (paper): shared day ruler + countdown + journal CTA
  * - BLOCKS (TMA white cards): AI, delay, stats, chart, history
  */
-/**
- * Аватар пользователя: фото из Telegram, если клиент его отдал, иначе круг
- * с первой буквой имени — дизайнерская фотография-заглушка на проде выглядела
- * как чужой профиль.
- */
+const readDayHero = (iso) => {
+  const patch = read("homeSelectedDayPatch", iso);
+  return patch ? { value: patch.heroValue, label: patch.countdownLabel } : null;
+};
 
 export function HomeScreen(props) {
   return (
@@ -32,34 +30,24 @@ export function HomeScreen(props) {
       <Page mode="secondary">
         <div className="aiwa-deslop-home">
           {/* ── HEADER only ── */}
-          <AiwaPanelHeader
+          <ScreenDayHeader
             title={props.dateText}
-            left={<ProfileAvatar />}
-            onLeft={() => window.AiwaDeslop?.openProfile?.()}
-            leftAriaLabel="Открыть профиль"
-            right={<CalendarIcon />}
-            onRight={() => call("openHomePanel", "calendar")}
-            rightAriaLabel="Открыть календарь"
+            days={props.week}
+            selectedIso={props.selectedIso}
+            heroValue={props.heroValue || `${props.countdown} дней`}
+            heroLabel={props.countdownLabel}
+            onSelect={props.onSelectDay ?? ((day) => selectDay(day.iso))}
+            previewDay={props.previewDay ?? readDayHero}
+            onProfile={() => window.AiwaDeslop?.openProfile?.()}
+            onCalendar={() => call("openHomePanel", "calendar")}
+            action={(
+              <RegularButton
+                variant="filled"
+                label={<span className="aiwa-btn-icon-label"><PlusIcon /> Занести в журнал</span>}
+                {...actionProps("Занести в журнал", () => call("openHomePanel", "journal"))}
+              />
+            )}
           />
-
-          <div className="aiwa-overview">
-            <Week
-              days={props.week}
-              selectedIso={props.selectedIso}
-              onSelect={props.onSelectDay ?? ((day) => call("aiwaSelectDay", day.iso))}
-            />
-            <div className="aiwa-countdown">
-              <Text variant="title1" weight="semibold">
-                {props.heroValue || `${props.countdown} дней`}
-              </Text>
-              <Text variant="body" weight="regular">{props.countdownLabel}</Text>
-            </div>
-            <RegularButton
-              variant="filled"
-              label={<span className="aiwa-btn-icon-label"><PlusIcon /> Занести в журнал</span>}
-              {...actionProps("Занести в журнал", () => call("openHomePanel", "journal"))}
-            />
-          </div>
 
           {/* ── All content cards: white TMA sections ── */}
           <SectionList className="aiwa-tma-blocks">

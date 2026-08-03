@@ -4,6 +4,15 @@
   "designTool": "Paper/Figma",
   "components": [
     {
+      "id": "button",
+      "designName": "AIWA/Action/Button",
+      "export": "AiwaButton",
+      "source": "src/aiwa/components/AiwaButton.jsx",
+      "story": "/showcase/button",
+      "layer": "primitive",
+      "variants": ["Primary", "Secondary", "Secondary Canvas", "Outlined", "Disabled", "Loading"]
+    },
+    {
       "id": "cell",
       "designName": "AIWA/Cell",
       "export": "AiwaCell",
@@ -41,7 +50,16 @@
       "export": "PaperRow",
       "source": "src/aiwa/components/PaperRow.jsx",
       "story": "/showcase/cell",
-      "layer": "pattern"
+      "layer": "pattern",
+      "variants": ["Default", "Extended", "Loading"]
+    },
+    {
+      "id": "profile-avatar",
+      "designName": "AIWA/Profile/Avatar",
+      "export": "ProfileAvatar",
+      "source": "src/aiwa/components/ProfileAvatar.jsx",
+      "story": "/showcase/avatar",
+      "layer": "primitive"
     },
     {
       "id": "panel-header",
@@ -100,12 +118,37 @@
       "layer": "composition"
     },
     {
+      "id": "screen-day-header",
+      "designName": "AIWA/Screen/Day header",
+      "export": "ScreenDayHeader",
+      "source": "src/aiwa/components/ScreenDayHeader.jsx",
+      "story": "/compositions/main",
+      "layer": "composition"
+    },
+    {
+      "id": "day-overview",
+      "designName": "AIWA/Day/Overview",
+      "export": "DayOverview",
+      "source": "src/aiwa/components/DayOverview.jsx",
+      "story": "/aiwa/day-selector",
+      "layer": "composition"
+    },
+    {
+      "id": "day-wheel",
+      "designName": "AIWA/Day/Wheel",
+      "export": "DayWheel",
+      "source": "src/aiwa/components/DayWheel.jsx",
+      "story": "/aiwa/day-selector",
+      "layer": "pattern"
+    },
+    {
       "id": "metric-cell",
       "designName": "AIWA/Cell/Metric",
       "export": "MetricCell",
       "source": "src/aiwa/components/MetricCell.jsx",
       "story": "/showcase/cell",
-      "layer": "pattern"
+      "layer": "pattern",
+      "variants": ["Normal", "Alert", "Pending"]
     },
     {
       "id": "field",
@@ -121,7 +164,8 @@
       "export": "ChoicePills",
       "source": "src/aiwa/components/ChoicePills.jsx",
       "story": "/aiwa/formControls",
-      "layer": "pattern"
+      "layer": "pattern",
+      "variants": ["Container", "Canvas"]
     },
     {
       "id": "chip",
@@ -129,7 +173,8 @@
       "export": "AiwaChip",
       "source": "src/aiwa/components/AiwaChip.jsx",
       "story": "/aiwa/journalControls",
-      "layer": "primitive"
+      "layer": "primitive",
+      "variants": ["Container", "Canvas"]
     },
     {
       "id": "journal-group",
@@ -217,7 +262,8 @@
       "export": "StatusIcon",
       "source": "src/aiwa/components/StatusIcon.jsx",
       "story": "/aiwa/week",
-      "layer": "primitive"
+      "layer": "primitive",
+      "variants": ["Normal", "Alert", "Pending"]
     },
     {
       "id": "calorie-gauge",
@@ -306,6 +352,15 @@
       "source": "src/aiwa/panels/FoodDiaryPanel.jsx",
       "story": "/compositions/panels",
       "layer": "composition"
+    },
+    {
+      "id": "panel-recipe",
+      "designName": "AIWA/Panel/Recipe",
+      "export": "RecipePanel",
+      "source": "src/aiwa/panels/RecipePanel.jsx",
+      "story": "/compositions/panels",
+      "layer": "composition",
+      "variants": ["Loading", "Loaded", "Error"]
     },
     {
       "id": "panel-workout",

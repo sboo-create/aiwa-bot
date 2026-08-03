@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Text, RegularButton, Spinner } from "../lib/tma";
+import { Text, Spinner } from "../lib/tma";
 import { AiwaModalView } from "../components/AiwaModalView";
+import { AiwaButton } from "../components/AiwaButton";
 import { ChoicePills } from "../components/ChoicePills";
 import { FoodEntryForm } from "../components/FoodEntryForm";
 import { Field } from "../components/Field";
@@ -19,13 +20,13 @@ export function AddFoodPanel({ isOpen, onClose, onSaved, editingMeal = null }) {
   }, [editingMeal, isOpen]);
 
   const addText = async () => {
-    if (!textValue.trim()) return;
+    if (busy || !textValue.trim()) return;
     setBusy(true);
     try {
       const result = await apiCall("/api/food_text", { text: textValue.trim() });
       if (!result?.ok) throw new Error(result?.message || "Не получилось разобрать приём");
       showToast(`Добавлено · ${result.rec?.kcal || 0} ккал`, { type: "success" });
-      await onSaved();
+      await onSaved({ type: "receipt", result });
       onClose();
     } catch (error) {
       showToast(error.message || "Не получилось добавить", { type: "error" });
@@ -35,13 +36,14 @@ export function AddFoodPanel({ isOpen, onClose, onSaved, editingMeal = null }) {
   };
 
   const upload = async (file) => {
-    if (!file) return;
+    if (busy || !file) return;
     setBusy(true);
     try {
       const fn = window.aiwaUploadFoodPhoto;
       if (typeof fn !== "function") throw new Error("Загрузка фото недоступна");
-      await fn(file);
-      await onSaved();
+      const result = await fn(file);
+      await onSaved(result && typeof result === "object" ? { type: "receipt", result } : null);
+      showToast("Приём добавлен", { type: "success" });
       onClose();
     } catch (error) {
       showToast(error.message || "Не получилось разобрать фото", { type: "error" });
@@ -51,14 +53,15 @@ export function AddFoodPanel({ isOpen, onClose, onSaved, editingMeal = null }) {
   };
 
   return (
-    <AiwaModalView isOpen={isOpen} onClose={onClose}>
+    <AiwaModalView isOpen={isOpen} onClose={onClose} aria-label={editingMeal ? "Изменить приём пищи" : "Добавить приём пищи"}>
       <div>
         <div className="aiwa-sheet-scroll aiwa-form-stack">
           {editingMeal ? (
-            <FoodEntryForm meal={editingMeal} onSaved={onSaved} onClose={onClose} />
+            <FoodEntryForm meal={editingMeal} onSaved={onSaved} onClose={onClose} choiceSurface="canvas" />
           ) : (
             <>
               <ChoicePills
+                surface="canvas"
                 options={[
                   { value: "photo", label: "Фото" },
                   { value: "text", label: "Текст" },
@@ -86,16 +89,16 @@ export function AddFoodPanel({ isOpen, onClose, onSaved, editingMeal = null }) {
                     placeholder="Например: 200 г творога и банан"
                     multiline
                   />
-                  <RegularButton
-                    variant="filled"
-                    label={busy ? "Считаю…" : "Добавить приём"}
+                  <AiwaButton
+                    label="Добавить приём"
+                    loading={busy}
                     isFill
-                    disabled={busy || !textValue.trim()}
+                    disabled={!textValue.trim()}
                     {...actionProps("Добавить приём", addText)}
                   />
                 </div>
               ) : null}
-              {method === "manual" ? <FoodEntryForm meal={null} onSaved={onSaved} onClose={onClose} /> : null}
+              {method === "manual" ? <FoodEntryForm meal={null} onSaved={onSaved} onClose={onClose} choiceSurface="canvas" /> : null}
             </>
           )}
         </div>

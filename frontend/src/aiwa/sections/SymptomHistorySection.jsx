@@ -1,8 +1,14 @@
 import { useEffect, useState } from "react";
-import { RegularButton, SectionList } from "../lib/tma";
+import { SectionList } from "../lib/tma";
+import { AiwaButton } from "../components/AiwaButton";
 import { AiwaCell } from "../components/AiwaCell";
 import { JOURNAL_SYMPTOM_GROUPS } from "../lib/constants";
 import { apiCall, actionProps, showToast, aiwaConfirmReportDelivered } from "../lib/api";
+import {
+  isReportRequestInFlight,
+  requestReportOnce,
+  subscribeToReportRequest,
+} from "../lib/reportRequest";
 
 const SYMPTOM_LABEL = Object.fromEntries(
   JOURNAL_SYMPTOM_GROUPS.flatMap(([, options]) => options),
@@ -40,7 +46,7 @@ const dayName = (iso) => {
 export function SymptomHistorySection() {
   const [items, setItems] = useState(null);
   const [expanded, setExpanded] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(isReportRequestInFlight);
 
   useEffect(() => {
     apiCall("/api/log_history", {})
@@ -48,53 +54,47 @@ export function SymptomHistorySection() {
       .catch(() => setItems([]));
   }, []);
 
+  useEffect(() => subscribeToReportRequest(setBusy), []);
+
   const requestReport = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const result = await apiCall("/api/report", { period: "all" }).catch(() => null);
-      if (result?.ok && result?.delivered) aiwaConfirmReportDelivered();
-      else showToast(result?.text || "Выписка временно недоступна", { type: "error" });
-    } finally {
-      setBusy(false);
-    }
+    const { owner, promise } = requestReportOnce("all");
+    if (!owner) return;
+    const result = await promise.catch(() => null);
+    if (result?.ok && result?.delivered) aiwaConfirmReportDelivered();
+    else showToast(result?.text || "Выписка временно недоступна", { type: "error" });
   };
 
-  if (!items) return null;
+  if (!items?.length) return null;
   const shown = expanded ? items : items.slice(0, 3);
 
   return (
-    <SectionList.Item header="Журнал симптомов">
-      {shown.length ? shown.map((item) => (
-        <AiwaCell tappable={false} key={item.d}>
-          <AiwaCell.Text title={dayName(item.d)} description={describe(item)} />
-        </AiwaCell>
-      )) : (
-        <AiwaCell tappable={false}>
-          <AiwaCell.Text title="Записей пока нет" description="Отмечай самочувствие в журнале — здесь появится история." />
-        </AiwaCell>
-      )}
-      {items.length > 3 ? (
-        <AiwaCell
-          as="button"
-          type="button"
-          onClick={() => setExpanded((value) => !value)}
-          end={<AiwaCell.Part type="Chevron" />}
-        >
-          <AiwaCell.Text type="Accent" title={expanded ? "Свернуть" : "Показать все"} />
-        </AiwaCell>
-      ) : null}
-      <AiwaCell tappable={false}>
-        <div className="aiwa-cell-actions">
-          <RegularButton
-            variant="filled"
-            label={busy ? "Собираю…" : "Сформировать выписку"}
-            isFill
-            disabled={busy}
-            {...actionProps("Сформировать выписку", requestReport)}
-          />
-        </div>
-      </AiwaCell>
-    </SectionList.Item>
+    <>
+      <SectionList.Item header="Журнал симптомов">
+        {shown.map((item) => (
+          <AiwaCell tappable={false} key={item.d}>
+            <AiwaCell.Text title={dayName(item.d)} description={describe(item)} />
+          </AiwaCell>
+        ))}
+        {items.length > 3 ? (
+          <AiwaCell
+            as="button"
+            type="button"
+            data-aiwa-row-variant="compact"
+            onClick={() => setExpanded((value) => !value)}
+          >
+            <AiwaCell.Text type="Accent" title={expanded ? "Свернуть" : "Показать все"} />
+          </AiwaCell>
+        ) : null}
+      </SectionList.Item>
+      <div className="aiwa-page-action">
+        <AiwaButton
+          variant="secondaryCanvas"
+          label="Сформировать выписку"
+          loading={busy}
+          isFill
+          {...actionProps("Сформировать выписку", requestReport)}
+        />
+      </div>
+    </>
   );
 }

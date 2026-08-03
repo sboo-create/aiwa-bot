@@ -1316,10 +1316,10 @@ const hr = (n) => /* @__PURE__ */ ae.createElement("svg", { width: 24, height: 2
   let T;
   return e[26] !== m || e[27] !== o || e[28] !== g || e[29] !== N || e[30] !== C || e[31] !== y || e[32] !== S ? (T = /* @__PURE__ */ j(ie.div, {
     ref: C,
-    className: y,
     ...S,
     ...m,
     ...o,
+    className: o.className ? `${y} ${o.className}` : y,
     children: [g, N]
   }), e[26] = m, e[27] = o, e[28] = g, e[29] = N, e[30] = C, e[31] = y, e[32] = S, e[33] = T) : T = e[33], T;
 }, It = "_button_p0j3d_1", Ro = "_filled_p0j3d_17", Wo = "_tinted_p0j3d_22", Fo = "_plain_p0j3d_27", Ko = "_gray_p0j3d_32", Do = "_disabled_p0j3d_37", Mt = "_skeleton_p0j3d_42", Cr = {
@@ -7138,37 +7138,39 @@ function Gd(n, e) {
 const Vd = (n) => {
   const e = I(16), {
     value: t,
-    index: o,
-    x: i,
-    radius: r,
-    onSelect: l
+    label: o,
+    index: i,
+    x: r,
+    radius: l,
+    onSelect: c
   } = n;
-  let c;
-  e[0] !== o || e[1] !== r ? (c = (m) => oi(o * Ue + m, r, "horizontal"), e[0] = o, e[1] = r, e[2] = c) : c = e[2];
-  const a = yt(i, c), s = yt(a, Zd);
-  let u;
-  e[3] !== a || e[4] !== s ? (u = {
-    transform: a,
-    visibility: s
-  }, e[3] = a, e[4] = s, e[5] = u) : u = e[5];
+  let a;
+  e[0] !== i || e[1] !== l ? (a = (m) => oi(i * Ue + m, l, "horizontal"), e[0] = i, e[1] = l, e[2] = a) : a = e[2];
+  const s = yt(r, a), u = yt(s, Zd);
   let f;
-  e[6] !== l || e[7] !== t ? (f = () => l(t), e[6] = l, e[7] = t, e[8] = f) : f = e[8];
+  e[3] !== s || e[4] !== u ? (f = {
+    transform: s,
+    visibility: u
+  }, e[3] = s, e[4] = u, e[5] = f) : f = e[5];
   let d;
-  e[9] !== t ? (d = /* @__PURE__ */ b("span", {
-    className: kd,
-    children: t
-  }), e[9] = t, e[10] = d) : d = e[10];
-  let h;
-  e[11] === /* @__PURE__ */ Symbol.for("react.memo_cache_sentinel") ? (h = /* @__PURE__ */ b("span", {
-    className: qd
-  }), e[11] = h) : h = e[11];
+  e[6] !== c || e[7] !== t ? (d = () => c(t), e[6] = c, e[7] = t, e[8] = d) : d = e[8];
+  const h = o ?? t;
   let A;
-  return e[12] !== u || e[13] !== f || e[14] !== d ? (A = /* @__PURE__ */ j(ie.div, {
+  e[9] !== h ? (A = /* @__PURE__ */ b("span", {
+    className: kd,
+    children: h
+  }), e[9] = h, e[10] = A) : A = e[10];
+  let m;
+  e[11] === /* @__PURE__ */ Symbol.for("react.memo_cache_sentinel") ? (m = /* @__PURE__ */ b("span", {
+    className: qd
+  }), e[11] = m) : m = e[11];
+  let p;
+  return e[12] !== f || e[13] !== d || e[14] !== A ? (p = /* @__PURE__ */ j(ie.div, {
     className: Md,
-    style: u,
-    onClick: f,
-    children: [d, h]
-  }), e[12] = u, e[13] = f, e[14] = d, e[15] = A) : A = e[15], A;
+    style: f,
+    onClick: d,
+    children: [A, m]
+  }), e[12] = f, e[13] = d, e[14] = A, e[15] = p) : p = e[15], p;
 };
 function Zd(n) {
   return n ? "visible" : "hidden";
@@ -7176,27 +7178,24 @@ function Zd(n) {
 const zd = /* @__PURE__ */ b("div", {
   className: Dd
 }), Jd = 5, Pu = (n) => {
-  const e = I(81), {
-    value: t,
-    defaultValue: o,
-    onChange: i,
-    max: r,
-    prefix: l,
-    suffix: c,
-    disabled: a,
-    enableHaptic: s,
-    className: u
-  } = n, f = o === void 0 ? 1 : o, d = r === void 0 ? 40 : r, h = l === void 0 ? "" : l, A = c === void 0 ? "×" : c, m = a === void 0 ? !1 : a, p = s === void 0 ? !0 : s, v = X(null), C = X(!1), [y, S] = ee(250);
-  let g;
-  e[0] !== f || e[1] !== m || e[2] !== p || e[3] !== d || e[4] !== i || e[5] !== t ? (g = {
-    value: t,
-    defaultValue: f,
-    onChange: i,
-    max: d,
-    disabled: m,
-    enableHaptic: p
-  }, e[0] = f, e[1] = m, e[2] = p, e[3] = d, e[4] = i, e[5] = t, e[6] = g) : g = e[6];
   const {
+    value: t,
+    defaultValue: o = 1,
+    onChange: i,
+    max: r = 40,
+    prefix: l = "",
+    suffix: c = "×",
+    disabled: a = !1,
+    enableHaptic: s = !0,
+    className: u,
+    formatTick: f,
+    showValue: d = !0,
+    showLimits: h = !0,
+    indicator: A = "track",
+    ariaLabel: m = "Value selector",
+    ariaValueText: Kt,
+    dragAreaRef: p
+  } = n, v = X(null), C = X(!1), [y, S] = ee(250), g = yi(), {
     currentValue: N,
     x: T,
     handleDrag: L,
@@ -7205,9 +7204,15 @@ const zd = /* @__PURE__ */ b("div", {
     dragConstraints: W,
     ticks: R,
     min: E
-  } = Od(g);
-  let k, M;
-  e[7] === /* @__PURE__ */ Symbol.for("react.memo_cache_sentinel") ? (k = () => {
+  } = Od({
+    value: t,
+    defaultValue: o,
+    onChange: i,
+    max: r,
+    disabled: a,
+    enableHaptic: s
+  });
+  Ne(() => {
     const de = v.current;
     if (!de)
       return;
@@ -7217,136 +7222,104 @@ const zd = /* @__PURE__ */ b("div", {
     be();
     const Te = new ResizeObserver(be);
     return Te.observe(de), () => Te.disconnect();
-  }, M = [], e[7] = k, e[8] = M) : (k = e[7], M = e[8]), Ne(k, M);
-  let q;
-  e[9] !== U || e[10] !== m ? (q = (de) => {
-    m || C.current || U(de);
-  }, e[9] = U, e[10] = m, e[11] = q) : q = e[11];
-  const O = q;
-  let V;
-  e[12] !== U || e[13] !== N || e[14] !== m || e[15] !== d || e[16] !== E ? (V = (de) => {
-    if (m)
+  }, []);
+  H(() => {
+    const de = p?.current;
+    if (!de || a)
       return;
-    const Te = {
+    const be = (Te) => g.start(Te);
+    return de.addEventListener("pointerdown", be), () => de.removeEventListener("pointerdown", be);
+  }, [p, g, a]);
+  const k = (de) => {
+    a || C.current || U(de);
+  }, M = (de) => {
+    if (a)
+      return;
+    const be = {
       ArrowLeft: () => U(Math.max(E, N - 1)),
       ArrowDown: () => U(Math.max(E, N - 1)),
-      ArrowRight: () => U(Math.min(d, N + 1)),
-      ArrowUp: () => U(Math.min(d, N + 1)),
+      ArrowRight: () => U(Math.min(r, N + 1)),
+      ArrowUp: () => U(Math.min(r, N + 1)),
       Home: () => U(E),
-      End: () => U(d)
+      End: () => U(r)
     }[de.key];
-    Te && (de.preventDefault(), Te());
-  }, e[12] = U, e[13] = N, e[14] = m, e[15] = d, e[16] = E, e[17] = V) : V = e[17];
-  const Y = V, w = u ? `${Zn} ${u}` : Zn, K = m || void 0;
-  let F;
-  e[18] !== U || e[19] !== E ? (F = () => U(E), e[18] = U, e[19] = E, e[20] = F) : F = e[20];
-  let B;
-  e[21] !== m ? (B = m ? void 0 : {
-    scale: 0.95
-  }, e[21] = m, e[22] = B) : B = e[22];
-  let D;
-  e[23] !== m || e[24] !== F || e[25] !== B ? (D = /* @__PURE__ */ b(ie.button, {
-    className: zn,
-    onClick: F,
-    disabled: m,
-    whileTap: B,
-    children: "Min"
-  }), e[23] = m, e[24] = F, e[25] = B, e[26] = D) : D = e[26];
-  let P;
-  e[27] !== U || e[28] !== d ? (P = () => U(d), e[27] = U, e[28] = d, e[29] = P) : P = e[29];
-  let G;
-  e[30] !== m ? (G = m ? void 0 : {
-    scale: 0.95
-  }, e[30] = m, e[31] = G) : G = e[31];
-  let Z;
-  e[32] !== m || e[33] !== P || e[34] !== G ? (Z = /* @__PURE__ */ b(ie.button, {
-    className: zn,
-    onClick: P,
-    disabled: m,
-    whileTap: G,
-    children: "Max"
-  }), e[32] = m, e[33] = P, e[34] = G, e[35] = Z) : Z = e[35];
-  let J;
-  e[36] !== D || e[37] !== Z ? (J = /* @__PURE__ */ j("div", {
+    be && (de.preventDefault(), be());
+  }, q = u ? `${Zn} ${u}` : Zn, O = a || void 0, V = h ? /* @__PURE__ */ j("div", {
     className: Fd,
-    children: [D, Z]
-  }), e[36] = D, e[37] = Z, e[38] = J) : J = e[38];
-  let _;
-  e[39] === /* @__PURE__ */ Symbol.for("react.memo_cache_sentinel") ? (_ = {
-    color: "inherit",
-    fontSize: "inherit"
-  }, e[39] = _) : _ = e[39];
-  let z;
-  e[40] !== N ? (z = /* @__PURE__ */ b(to, {
-    variant: "number",
-    animation: "snappy",
-    style: _,
-    children: N
-  }), e[40] = N, e[41] = z) : z = e[41];
-  let $;
-  e[42] !== h || e[43] !== A || e[44] !== z ? ($ = /* @__PURE__ */ j("div", {
+    children: [/* @__PURE__ */ b(ie.button, {
+      className: zn,
+      onClick: () => U(E),
+      disabled: a,
+      whileTap: a ? void 0 : {
+        scale: 0.95
+      },
+      children: "Min"
+    }), /* @__PURE__ */ b(ie.button, {
+      className: zn,
+      onClick: () => U(r),
+      disabled: a,
+      whileTap: a ? void 0 : {
+        scale: 0.95
+      },
+      children: "Max"
+    })]
+  }) : null, Y = d ? /* @__PURE__ */ j("div", {
     className: Bd,
-    children: [h, z, A]
-  }), e[42] = h, e[43] = A, e[44] = z, e[45] = $) : $ = e[45];
-  const Q = m || void 0, se = m ? -1 : 0;
-  let re;
-  e[46] !== T ? (re = {
+    children: [l, /* @__PURE__ */ b(to, {
+      variant: "number",
+      animation: "snappy",
+      style: {
+        color: "inherit",
+        fontSize: "inherit"
+      },
+      children: N
+    }), c]
+  }) : null, F = a || void 0, B = a ? -1 : 0, D = {
     x: T
-  }, e[46] = T, e[47] = re) : re = e[47];
-  const me = m ? !1 : "x";
-  let Ve;
-  e[48] === /* @__PURE__ */ Symbol.for("react.memo_cache_sentinel") ? (Ve = () => {
+  }, P = a ? !1 : "x", G = !p, Z = () => {
     C.current = !1;
-  }, e[48] = Ve) : Ve = e[48];
-  let Re;
-  e[49] !== L ? (Re = (de, be) => {
+  }, J = (de, be) => {
     Math.abs(be.offset.x) > Jd && (C.current = !0), L();
-  }, e[49] = L, e[50] = Re) : Re = e[50];
-  let We;
-  if (e[51] !== O || e[52] !== y || e[53] !== R || e[54] !== T) {
-    let de;
-    e[56] !== O || e[57] !== y || e[58] !== T ? (de = (be, Te) => /* @__PURE__ */ b(Vd, {
-      value: be,
-      index: Te,
-      x: T,
-      radius: y,
-      onSelect: O
-    }, be), e[56] = O, e[57] = y, e[58] = T, e[59] = de) : de = e[59], We = R.map(de), e[51] = O, e[52] = y, e[53] = R, e[54] = T, e[55] = We;
-  } else
-    We = e[55];
-  let Fe;
-  e[60] !== W || e[61] !== x || e[62] !== re || e[63] !== me || e[64] !== Re || e[65] !== We ? (Fe = /* @__PURE__ */ b(ie.div, {
+  }, _ = R.map((de, be) => /* @__PURE__ */ b(Vd, {
+    value: de,
+    label: f ? f(de) : de,
+    index: be,
+    x: T,
+    radius: y,
+    onSelect: k
+  }, de)), z = /* @__PURE__ */ b(ie.div, {
     className: Id,
-    style: re,
-    drag: me,
+    style: D,
+    drag: P,
+    dragControls: g,
+    dragListener: G,
     dragConstraints: W,
     dragElastic: 0.1,
     dragMomentum: !1,
-    onPointerDown: Ve,
-    onDrag: Re,
+    onPointerDown: Z,
+    onDrag: J,
     onDragEnd: x,
-    children: We
-  }), e[60] = W, e[61] = x, e[62] = re, e[63] = me, e[64] = Re, e[65] = We, e[66] = Fe) : Fe = e[66];
-  let Ke;
-  e[67] !== N || e[68] !== Y || e[69] !== d || e[70] !== E || e[71] !== Q || e[72] !== se || e[73] !== Fe ? (Ke = /* @__PURE__ */ j("div", {
+    children: _
+  }), $ = /* @__PURE__ */ j("div", {
     ref: v,
     className: Kd,
     role: "slider",
-    "aria-label": "Value selector",
+    "aria-label": m,
     "aria-valuemin": E,
-    "aria-valuemax": d,
+    "aria-valuemax": r,
     "aria-valuenow": N,
-    "aria-disabled": Q,
-    tabIndex: se,
-    onKeyDown: Y,
-    children: [zd, Fe]
-  }), e[67] = N, e[68] = Y, e[69] = d, e[70] = E, e[71] = Q, e[72] = se, e[73] = Fe, e[74] = Ke) : Ke = e[74];
-  let Ze;
-  return e[75] !== w || e[76] !== K || e[77] !== J || e[78] !== $ || e[79] !== Ke ? (Ze = /* @__PURE__ */ j("div", {
-    className: w,
-    "data-disabled": K,
-    children: [J, $, Ke]
-  }), e[75] = w, e[76] = K, e[77] = J, e[78] = $, e[79] = Ke, e[80] = Ze) : Ze = e[80], Ze;
+    "aria-valuetext": Kt,
+    "aria-disabled": F,
+    tabIndex: B,
+    onKeyDown: M,
+    children: [zd, z]
+  });
+  return /* @__PURE__ */ j("div", {
+    className: q,
+    "data-disabled": O,
+    "data-indicator": A,
+    children: [V, Y, $]
+  });
 }, Yu = (n) => {
   const e = I(2), {
     children: t

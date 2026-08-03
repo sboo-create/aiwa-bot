@@ -27,8 +27,9 @@ export function HistorySection({
         <AiwaCell
           as="button"
           type="button"
+          data-aiwa-row-variant="compact"
+          aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
-          end={<AiwaCell.Part type="Chevron" />}
         >
           <AiwaCell.Text type="Accent" title={expanded ? "Свернуть" : "Показать все"} />
         </AiwaCell>

@@ -10,6 +10,8 @@ import { InfoIcon, PlusIcon } from "../lib/icons";
 import { CALENDAR_LEGEND, CALENDAR_MARK_MODES, calendarMarkOptions } from "../lib/constants";
 import { useBackButton } from "../lib/backButton";
 import { nativeMenuSupported, read } from "../lib/api";
+import { aiwaTodayIso } from "../lib/dates";
+import { isCalendarDaySelectable } from "../lib/calendarDay";
 
 /**
  * Calendar opens as a full-screen page (a plain fixed layer portaled to body),
@@ -40,9 +42,10 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
   // and marking a period is five taps in a row. One call at a time.
   const queue = useRef(Promise.resolve());
   const inflight = useRef(0);
+  const pageRef = useRef(null);
   // Год истории и восемь месяцев вперёд; открывается на текущем месяце.
   const months = Array.from({ length: 20 }, (_, index) => read("getAiwaCalendarMonth", index - 12)).filter(Boolean);
-  const canEditPeriods = mode !== "preg" && mode !== "meno" && mode !== "male";
+  const canEditPeriods = !["preg", "meno", "male", "none"].includes(mode);
   const markOptions = calendarMarkOptions(canEditPeriods ? ["period", "symptoms", "intimacy"] : ["symptoms", "intimacy"]);
   const activeMark = CALENDAR_MARK_MODES[markMode] || CALENDAR_MARK_MODES.symptoms;
 
@@ -65,6 +68,9 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
 
   const markMenuItems = markOptions.map((option) => ({
     label: option.label,
+    // Selecting a mode replaces the FAB trigger. ActionMenu must not restore
+    // focus to that unmounted node; the marking state owns the live target.
+    restoreFocus: false,
     onSelect: () => startMarking(option.value),
   }));
 
@@ -90,6 +96,11 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
     setMarkMode(canEditPeriods ? "period" : "symptoms");
   }, [isOpen, canEditPeriods]);
 
+  useEffect(() => {
+    if (!isOpen || !marking) return;
+    pageRef.current?.querySelector(".aiwa-calendar-done")?.focus({ preventScroll: true });
+  }, [isOpen, marking]);
+
   const isChecked = (day) => {
     const optimistic = pending[`${markMode}:${day.iso}`];
     return typeof optimistic === "boolean" ? optimistic : Boolean(activeMark.checked(day));
@@ -107,16 +118,18 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
     });
   };
 
-  const todayIso = (() => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-  })();
+  // Calendar boundaries follow the same Moscow civil day as the host and the
+  // shared day strip. A device-local midnight must not unlock tomorrow early.
+  const todayIso = aiwaTodayIso();
 
   const handleSelect = (day, monthName) => {
+    // Future and host-disabled cells are read-only in every branch: day log,
+    // symptoms, period and intimacy. Phase 3 will mirror this at the bridge.
+    if (!isCalendarDaySelectable(day, todayIso)) return;
     if (!marking) {
       // Вне режима отметок тап по прошедшему дню открывает его журнал —
       // симптомы и самочувствие смотрятся прямо из календаря.
-      if (day.iso && day.iso <= todayIso) setDayLog({ iso: day.iso, label: `${day.date} ${monthName}` });
+      setDayLog({ iso: day.iso, label: `${day.date} ${monthName}` });
       return;
     }
     if (markMode === "symptoms") {
@@ -131,6 +144,7 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
 
   return createPortal(
     <div
+      ref={pageRef}
       className="aiwa-calendar-page"
       data-aiwa-calendar-modal="true"
       data-marking={marking ? "true" : undefined}
@@ -208,9 +222,9 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
                       : (
                         <DateCell
                           day={day}
-                          interactive={marking || Boolean(day.iso && day.iso <= todayIso)}
-                          marking={marking}
-                          checked={marking && isChecked(day)}
+                          interactive={isCalendarDaySelectable(day, todayIso)}
+                          marking={marking && isCalendarDaySelectable(day, todayIso)}
+                          checked={marking && isCalendarDaySelectable(day, todayIso) && isChecked(day)}
                           markVariant={markMode === "intimacy" ? "heart" : "radio"}
                           monthLabel={month.label}
                           onSelect={(selected) => handleSelect(selected, month.name || month.label)}

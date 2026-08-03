@@ -2,7 +2,7 @@ import { toast } from "./toast.jsx";
 
 export const call = (name, ...args) => {
   const fn = window[name];
-  if (typeof fn === "function") fn(...args);
+  return typeof fn === "function" ? fn(...args) : undefined;
 };
 
 export const read = (name, ...args) => {
@@ -18,6 +18,71 @@ export const apiCall = (path, body = {}) => {
 };
 
 export const showToast = (message, options = {}) => toast(message, options);
+
+/**
+ * Journal writes must be acknowledged by the host before React confirms or
+ * closes a draft. Undefined and legacy boolean results are deliberately treated
+ * as unconfirmed instead of turning a network failure into success UI.
+ */
+export const acknowledgedHostWrite = async (name, ...args) => {
+  const result = await read(name, ...args);
+  if (result && typeof result === "object" && result.ok === true) return result;
+  const detail = result && typeof result === "object"
+    ? result.message || result.text || result.error?.message
+    : "";
+  throw new Error(detail || "Не удалось подтвердить сохранение. Попробуй ещё раз.");
+};
+
+const MUTED_HOST_CONFIRMATIONS = new Set([
+  "Сохранено",
+  "Месячные отмечены на сегодня",
+  "Сегодня убрано из месячных",
+]);
+let hostToastMuteDepth = 0;
+let mutedHostToast = null;
+let originalHostToast = null;
+let previousQuietToast;
+
+/**
+ * Keep a multi-field React save to one confirmation without hiding host errors.
+ *
+ * The current host forwards its journal messages through `window.aiwaToast` but
+ * does not yet read `__aiwaQuietToast`. While the batch is active, this narrow
+ * adapter drops only its known success confirmations and delegates every other
+ * message. The flag remains for a future host-side silent contract.
+ */
+export const withHostToastsMuted = async (run) => {
+  if (typeof window === "undefined") return run();
+  if (hostToastMuteDepth === 0) {
+    originalHostToast = typeof window.aiwaToast === "function" ? window.aiwaToast : null;
+    previousQuietToast = window.__aiwaQuietToast;
+    window.__aiwaQuietToast = true;
+    if (originalHostToast) {
+      mutedHostToast = (message, ...args) => {
+        const title = typeof message === "string" ? message : message?.title;
+        if (MUTED_HOST_CONFIRMATIONS.has(String(title || ""))) return null;
+        return originalHostToast(message, ...args);
+      };
+      window.aiwaToast = mutedHostToast;
+    }
+  }
+  hostToastMuteDepth += 1;
+  try {
+    return await run();
+  } finally {
+    hostToastMuteDepth -= 1;
+    if (hostToastMuteDepth === 0) {
+      if (mutedHostToast && window.aiwaToast === mutedHostToast) {
+        window.aiwaToast = originalHostToast;
+      }
+      if (previousQuietToast === undefined) delete window.__aiwaQuietToast;
+      else window.__aiwaQuietToast = previousQuietToast;
+      mutedHostToast = null;
+      originalHostToast = null;
+      previousQuietToast = undefined;
+    }
+  }
+};
 
 // «1 110 ккал»: ru-RU разделяет тысячи неразрывным пробелом.
 export const fmtKcal = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} ккал`;

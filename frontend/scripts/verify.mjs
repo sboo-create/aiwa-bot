@@ -40,7 +40,9 @@ const iconScanSource = [
     .map((path) => readFileSync(path, "utf8")),
 ].join("\n");
 const compositionCss = read("src/aiwa/styles/composition.css");
-const html = read("aiwa_webapp.html");
+// The canonical redesigned host shell lives beside frontend/, not in a copied
+// frontend build artifact. Reading it in place keeps verification read-only.
+const html = read("../webapp2/index.html");
 const packageJson = JSON.parse(read("package.json"));
 const failures = [];
 
@@ -102,10 +104,10 @@ step("AIWA: embedded application syntax", () => {
   }
 });
 
-step("AIWA: exact Deslop package provenance", () => {
+step("AIWA: Deslop provenance and reviewed local patches", () => {
   const expected = {
-    "vendor/deslop-tma/dist/index.js": "783a01476aede667b2d60944980b8ee8ee79c830816d80a67091b23a611776cb",
-    "vendor/deslop-tma/dist/styles.css": "5663328afc927155d486083a4d205988a88fc6e0e245ecec4f084c280557de00",
+    "vendor/deslop-tma/dist/index.js": "40355df5c73ba60c2e65a1333fe0c150858df3d347f45e39e9e7c400c119ffb5",
+    "vendor/deslop-tma/dist/styles.css": "9cd1d35ef506c83b7edce9757b3866c2955d916f97b6ed474110de35a638b296",
   };
   for (const [path, hash] of Object.entries(expected)) {
     if (!existsSync(resolve(root, path))) failures.push(`Missing vendored Deslop file: ${path}`);
@@ -113,7 +115,9 @@ step("AIWA: exact Deslop package provenance", () => {
   }
   requireText("Deslop origin", read("vendor/deslop-tma/ORIGIN.md"), [
     "13b33b82c814d41f83ef224a49f012c81ca5f6c4",
-    "byte-for-byte unchanged",
+    "AIWA Wheel API patch",
+    "design-fixes@e57e84f",
+    "RegularButton.className",
   ]);
   if (packageJson.dependencies?.["@deslop/tma"] !== "file:vendor/deslop-tma") {
     failures.push("@deslop/tma must resolve from the vendored repository build");
@@ -184,18 +188,15 @@ step("AIWA: browser integration keeps current product logic", () => {
     "window.AiwaDeslop?.openProfile?.()",
     "call(\"openHomePanel\", \"calendar\")",
     "call(\"openHomePanel\", \"journal\")",
-    // The journal defers these to «Сохранить», so they go through read(), which
-    // returns the host promise — see "the journal saves on its primary button".
-    "read(\"setCheckin\"",
-    "read(\"toggleSym\"",
-    "read(\"toggleTodayPeriod\")",
-    "read(\"toggleTodayIntimacy\")",
+    // The journal defers one absolute snapshot to «Сохранить» and requires an
+    // explicit host acknowledgement before React confirms or closes the draft.
+    "acknowledgedHostWrite(\"aiwaSaveJournal\"",
     "data-aiwa-log-modal=\"true\"",
     "data-aiwa-calendar-modal=\"true\"",
     "function DateCell",
     "aiwa-calendar-months",
     "variant=\"period\"",
-    "call(\"go\", \"chat\")",
+    "onClick={() => openBotChat()}",
   ]);
 });
 
@@ -221,34 +222,37 @@ step("AIWA: selected period cell matches Paper", () => {
 // Journal edits are a local draft; only «Сохранить» writes them back.
 step("AIWA: the journal saves on its primary button", () => {
   requireText("journal header", reactSource, [
-    "<AiwaPanelHeader size=\"large\" title=\"Занести в журнал\" />",
+    "title={isPastDay ?",
+    "dayIso + \"T00:00:00\"",
+    ": \"Занести в журнал\"}",
   ]);
   requireText("journal save button", reactSource, [
     "className=\"aiwa-log-footer\"",
-    "variant=\"filled\"",
+    "<AiwaButton",
+    "loading={busy}",
     "{...actionProps(\"Сохранить\", save)}",
   ]);
-  requireText("journal deferred writes", reactSource, [
-    "await read(\"toggleTodayPeriod\")",
-    "await read(\"setCheckin\", \"energy\", energy)",
-    "await read(\"toggleSym\", code)",
-    "await read(\"toggleTodayIntimacy\")",
-    "await read(\"addCustomSym\", extra)",
-    "await read(\"setDayCheckin\", iso, \"energy\", energy)",
-    "await read(\"toggleDaySym\", iso, code)",
-    "await read(\"markPA\", iso)",
-    "await read(\"addDayCustomSym\", iso, extra)",
+  requireText("journal atomic write", reactSource, [
+    "buildJournalSavePayload({",
+    "date: currentDay.current",
+    "const targetIso = currentIso.current",
+    "date: targetIso",
+    "await acknowledgedHostWrite(\"aiwaSaveJournal\", operation.payload)",
+    "(frozenPayload) => acknowledgedHostWrite(\"aiwaSaveJournal\", frozenPayload)",
+    "result.ok === true",
   ]);
   requireText("journal footer styling", compositionCss, [".aiwa-log-footer {"]);
 });
 
-step("AIWA: journal refresh preserves the mounted bottom sheet", () => {
+step("AIWA: canonical refresh preserves the mounted screen", () => {
   requireText("stable home root", html, [
     "var homeRoot=el.querySelector('#deslop-home-root')",
     "window.AiwaDeslop.renderHome(homeRoot,payload)",
     "var keepsPaperHome=!!window.AiwaDeslop",
     "if(!keepsPaperHome&&window.AiwaDeslop)window.AiwaDeslop.unmountHome()",
-    "if(ACTIVE_SCREEN!==\"today\")go(\"today\")",
+    "var d=await api(\"/api/data\",{name:NAME})",
+    "renderCurrentDataScreen(ACTIVE_SCREEN)",
+    "return{data:D,revision:SETTINGS_DATA_REVISION}",
   ]);
 });
 
@@ -262,7 +266,8 @@ step("AIWA: Paper calendar uses one synchronized day model", () => {
   requireText("calendar composition", reactSource, [
     "function DateCell",
     "days={props.week}",
-    "read(\"getAiwaCalendarMonth\", offset)",
+    "Array.from({ length: 20 }",
+    "read(\"getAiwaCalendarMonth\", index - 12)",
     "is-actual-period",
     "is-predicted-period",
   ]);
@@ -276,11 +281,14 @@ step("AIWA: Paper calendar uses one synchronized day model", () => {
   ]);
 });
 
-step("AIWA: the week strip picks the day Home shows", () => {
+step("AIWA: the shared day ruler picks the day Home shows", () => {
   requireText("picker composition", reactSource, [
+    "function ScreenDayHeader",
     "selectedIso={props.selectedIso}",
-    "call(\"aiwaSelectDay\", day.iso)",
+    "selectDay(day.iso)",
+    "ariaValueText={dayTitle(previewDay?.iso)}",
     "checkin={props.dayCheckin ?? props.checkin}",
+    "dayIso={props.selectedIso}",
     "aria-pressed",
   ]);
   requireText("selected day payload", html, [
@@ -290,6 +298,8 @@ step("AIWA: the week strip picks the day Home shows", () => {
     "if(!delayed&&!SELECTED_DAY)api('/api/today'",
   ]);
   requireText("selected day styling", compositionCss, [
+    ".aiwa-overview .aiwa-day-wheel",
+    ".aiwa-day-wheel[data-indicator=\"label\"]",
     ".aiwa-week .aiwa-date-cell.is-overview.is-selected",
     ".aiwa-week[data-selection=\"true\"]",
   ]);
@@ -347,7 +357,10 @@ step("AIWA: production bundle", () => {
   }
   if (existsSync(cssPath)) {
     const css = readFileSync(cssPath, "utf8");
-    if (statSync(cssPath).size < 500_000) failures.push("Deslop CSS bundle is unexpectedly small");
+    // The canonical minified v181 bundle on main is ~263 KB. Keep enough
+    // headroom for deterministic minifier changes while still catching an
+    // empty, truncated, or token-only stylesheet.
+    if (statSync(cssPath).size < 250_000) failures.push("Deslop CSS bundle is unexpectedly small");
     requireText("production CSS", css, ["--ui-font-interface", "--ui-action-primary-background", "@font-face"]);
   }
 });

@@ -1,7 +1,9 @@
 import HomeIcon from "../../../vendor/deslop-primitives/icons/home.svg?react";
 import CalendarIcon from "../../../vendor/deslop-primitives/icons/calendar.svg?react";
 import CheckIcon from "../../../vendor/deslop-primitives/icons/circle-check.svg?react";
+import SelectionCheckIcon from "../../../vendor/deslop-primitives/icons/check.svg?react";
 import AlertIcon from "../../../vendor/deslop-primitives/icons/circle-alert.svg?react";
+import ClockIcon from "../../../vendor/deslop-primitives/icons/clock.svg?react";
 import ChatIcon from "../../../vendor/deslop-primitives/icons/chat-heart.svg?react";
 import HeartIcon from "../../../vendor/deslop-primitives/icons/heart.svg?react";
 import FoodIcon from "../../../vendor/deslop-primitives/icons/cup.svg?react";
@@ -26,7 +28,9 @@ export {
   HomeIcon,
   CalendarIcon,
   CheckIcon,
+  SelectionCheckIcon,
   AlertIcon,
+  ClockIcon,
   ChatIcon,
   HeartIcon,
   FoodIcon,
