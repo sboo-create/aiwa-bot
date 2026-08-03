@@ -684,10 +684,13 @@ class PostReleaseSystemicTests(unittest.TestCase):
             try:
                 response = await client.get("/assets/food/manifest.json")
                 manifest = await response.json()
-                image = await client.get(
-                    "/assets/food/catalog-v2/"
-                    "445a7df943bbd2442c7f5d72d01c9461816376395ae7b345d36e901e4d9a4401.webp"
+                # Путь берём из самого манифеста: захардкоженный хеш ломается
+                # при каждой перегенерации каталога и проверяет её факт, а не
+                # то, что статика отдаётся апстримом.
+                sample = next(
+                    url for url in manifest.values() if "/catalog-v2/" in url
                 )
+                image = await client.get(sample)
                 await image.read()
                 return (
                     response.status,
@@ -713,7 +716,9 @@ class PostReleaseSystemicTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
-        self.assertEqual(len(manifest), 612)
+        # Каталог перегенерён целиком: один набор вместо двух, не прошедшие
+        # гейт блюда убраны и показывают заглушку.
+        self.assertEqual(len(manifest), 601)
         self.assertTrue(any("/catalog-v2/" in url for url in manifest.values()))
         self.assertEqual(image_status, 200)
         self.assertEqual(image_type, "image/webp")
