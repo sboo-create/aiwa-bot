@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import food_assets
 import sport_assets
@@ -114,7 +114,11 @@ class StaticCatalogReleaseTests(unittest.TestCase):
 class SportAssetTests(unittest.TestCase):
     def test_generated_sport_is_immutable_validated_webp(self):
         raw = io.BytesIO()
-        Image.new("RGB", (640, 640), "orange").save(raw, "PNG")
+        # White field with the subject inside it: catalog art must arrive
+        # without its own backdrop, so a flat-orange frame is now rejected.
+        fixture = Image.new("RGB", (640, 640), "white")
+        ImageDraw.Draw(fixture).ellipse((160, 160, 480, 480), fill="orange")
+        fixture.save(raw, "PNG")
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
             os.environ,
             {
