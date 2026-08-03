@@ -45,6 +45,7 @@ import cycle as C
 import llm as L
 import analytics_v2 as A2
 import food_assets as FA
+import portability
 # Реестр действий и общий сбор параметров. Зависимость строго односторонняя:
 # dialog ничего не знает про aiwa_bot, поэтому истории с двойной загрузкой
 # модуля под `python aiwa_bot.py` тут возникнуть не может.
@@ -2082,6 +2083,50 @@ ACT_PERIOD_DATE = dialog.register(dialog.Action(
         parse=_parse_period_date,
         error="Не разобрала дату. Нужен формат ДД.ММ.ГГГГ, например 25.05.2026.",
     ),),
+))
+
+def _parse_energy(text):
+    low = " ".join(str(text or "").split()).lower()
+    words = {"мало": 1, "низк": 1, "плохо": 1, "устал": 1, "сред": 2, "норм": 2,
+             "нормаль": 2, "обычн": 2, "много": 3, "отлич": 3, "бодр": 3, "хорош": 3}
+    for stem, value in words.items():
+        if stem in low:
+            return value
+    m = re.search(r"\b([1-3])\b", low)
+    return int(m.group(1)) if m else None
+
+ACT_CHECKIN = dialog.register(dialog.Action(
+    name="checkin",
+    title="Чек-ин самочувствия",
+    description="Отметить уровень энергии на сегодня.",
+    params=(dialog.Param(
+        name="energy",
+        prompt="Как сегодня с энергией — мало, средне или много?",
+        parse=_parse_energy,
+        error="Скажи «мало», «средне» или «много».",
+    ),),
+))
+
+def _parse_meal_hint(text):
+    hint = " ".join(str(text or "").split())
+    return hint[:80] if len(hint) >= 2 else None
+
+ACT_MEAL_DELETE = dialog.register(dialog.Action(
+    name="meal_delete",
+    title="Удалить приём пищи",
+    description="Удалить запись о приёме пищи за сегодня по её названию.",
+    params=(dialog.Param(
+        name="title",
+        prompt="Какой приём удалить? Напиши название так, как оно записано.",
+        parse=_parse_meal_hint,
+        error="Напиши название приёма, например «творог».",
+    ),),
+))
+
+ACT_EXPORT = dialog.register(dialog.Action(
+    name="export_data",
+    title="Выгрузка данных",
+    description="Прислать файлом все записи пользователя: цикл, питание, тренировки, самочувствие.",
 ))
 
 def _parse_voice_choice(text):
@@ -6425,6 +6470,94 @@ def _act_cycle_len(cid, values):
 # Один обработчик на действие — им пользуются и меню, и чат. Пока их два, но
 # именно это и разъезжалось: возможность жила на одной поверхности и не
 # существовала на другой.
+def _act_checkin(cid, values):
+    day = dtoday().isoformat()
+    if not log_set(cid, day, energy=int(values["energy"])):
+        return {"ok": False, "error": "not_saved"}
+    _evict_today_cache(cid)
+    words = {1: "мало", 2: "средне", 3: "много"}
+    return {"ok": True, "date": day, "energy": int(values["energy"]),
+            "text": f"Отметила энергию на сегодня: {words[int(values['energy'])]}."}
+
+def _act_meal_delete(cid, values):
+    """Удаление приёма из чата.
+
+    Мини-апп это умеет через /api/diary_del, а чат — нет: возможность жила на
+    одной поверхности. Здесь тот же удаляющий путь, только запись ищется по
+    названию, потому что в разговоре пользователь идентификатором не оперирует.
+    """
+    hint = FA.correct_typos(values["title"]).casefold()
+    day = dtoday().isoformat()
+    c = db()
+    try:
+        rows = c.execute(
+            "SELECT id,title FROM meals WHERE chat_id=? AND d=? ORDER BY id DESC",
+            (cid, day),
+        ).fetchall()
+    finally:
+        c.close()
+    hits = [r for r in rows if hint in str(r[1] or "").casefold()]
+    if not hits:
+        return {"ok": False, "error": "not_found",
+                "note": f"За сегодня не нашла приём «{values['title']}»."}
+    if len(hits) > 1:
+        names = ", ".join(f"«{r[1]}»" for r in hits[:4])
+        return {"ok": False, "error": "ambiguous",
+                "note": f"Под это описание подходит несколько записей: {names}. Уточни название."}
+    meal_id, title = hits[0][0], hits[0][1]
+    mutation, error, _status = _delete_diary_meal_atomic(
+        cid, meal_id, None, _user_generation(cid), _diary_target_snapshot(cid),
+    )
+    if error:
+        return {"ok": False, "error": "not_deleted", "note": "Не получилось удалить запись."}
+    _evict_week_food_cache(cid)
+    return {"ok": True, "title": title, "text": f"Удалила «{title}» из сегодняшнего дневника."}
+
+def _export_document(cid):
+    """Собрать выгрузку. SQL живёт здесь, формат — в portability."""
+    c = db()
+    try:
+        def rows(sql, fields):
+            return [dict(zip(fields, r)) for r in c.execute(sql, (cid,)).fetchall()]
+        sections = {
+            "cycles": rows("SELECT start_date,end_date FROM cycles WHERE chat_id=? ORDER BY start_date",
+                           ("start_date", "end_date")),
+            "meals": rows("SELECT d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass "
+                          "FROM meals WHERE chat_id=? ORDER BY d,ts",
+                          ("d", "ts", "title", "kcal", "protein", "fat", "carbs", "grams",
+                           "items", "source", "slot", "fclass")),
+            "workouts": rows("SELECT d,ts,type,items,duration,rpe,note FROM workouts WHERE chat_id=? ORDER BY d,ts",
+                             ("d", "ts", "type", "items", "duration", "rpe", "note")),
+            "logs": rows("SELECT log_date,energy,mood,symptoms FROM logs WHERE chat_id=? ORDER BY log_date",
+                         ("log_date", "energy", "mood", "symptoms")),
+            "intimacy": rows("SELECT d FROM intimacy WHERE chat_id=? ORDER BY d", ("d",)),
+            "memory": rows("SELECT mkey,mval,updated FROM memory WHERE chat_id=? ORDER BY mkey",
+                           ("mkey", "mval", "updated")),
+        }
+    finally:
+        c.close()
+    return portability.dump(row(cid) or {}, sections,
+                            exported_at=datetime.now(TZ).isoformat(timespec="seconds"))
+
+async def _send_export_job(context):
+    cid = context.job.chat_id
+    document = context.job.data["document"]
+    payload = portability.to_json(document).encode("utf-8")
+    bio = io.BytesIO(payload); bio.name = "aiwa-export.json"
+    await context.bot.send_document(
+        cid, document=bio, filename="aiwa-export.json",
+        caption="Твои записи одним файлом. Его же можно прислать обратно, чтобы восстановить историю.",
+    )
+
+def _act_export_data(cid, values):
+    document = _export_document(cid)
+    BOT_APP.job_queue.run_once(
+        _send_export_job, 0, chat_id=cid, name=f"export:{cid}:{secrets.token_hex(4)}",
+        data={"document": document},
+    )
+    return {"ok": True, "text": "Собрала выгрузку: " + portability.summary(document)
+                                + ". Файл придёт следующим сообщением."}
+
 def _act_voice_mode(cid, values):
     choice = values["choice"]
     upsert(cid, voice_reply=choice)
@@ -6437,6 +6570,9 @@ def _act_voice_mode(cid, values):
 
 _ACTION_HANDLERS = {
     ACT_VOICE_MODE.name: _act_voice_mode,
+    ACT_CHECKIN.name: _act_checkin,
+    ACT_MEAL_DELETE.name: _act_meal_delete,
+    ACT_EXPORT.name: _act_export_data,
     ACT_SETTIME.name: _act_settime,
     ACT_PERIOD_DATE.name: _act_period_date,
     ACT_CYCLE_LEN.name: _act_cycle_len,
@@ -7701,6 +7837,66 @@ async def on_text(update, context):
         ev(cid, "error", meta=type(e).__name__)
         await update.message.reply_text(
             "Я вижу сообщение, но сейчас не смогла собрать ответ. Попробуй ещё раз через минуту.")
+
+async def on_export_document(update, context):
+    """Приём файла выгрузки обратно.
+
+    Восстанавливаем только разделы с естественным ключом — циклы, дни
+    самочувствия и отметки близости: у них первичный ключ (chat_id, дата),
+    поэтому повторный импорт того же файла ничего не задваивает. Питание и
+    тренировки — журнал с автоинкрементом, их слияние без ключа идемпотентности
+    плодило бы дубли, поэтому в этой версии они не переносятся, и об этом
+    честно сказано пользователю.
+    """
+    if update.message is None:
+        return
+    cid = update.effective_chat.id
+    doc = update.message.document
+    if not doc or not str(doc.file_name or "").lower().endswith(".json"):
+        return
+    if (doc.file_size or 0) > 8 * 1024 * 1024:
+        return await update.message.reply_text("Файл слишком большой — жду выгрузку Айвы до 8 МБ.")
+    try:
+        handle = await context.bot.get_file(doc.file_id)
+        raw = bytes(await handle.download_as_bytearray())
+        parsed = portability.load(raw.decode("utf-8", "replace"))
+    except portability.ExportError as exc:
+        return await update.message.reply_text(f"Не приняла файл: {exc}")
+    except Exception:
+        log.exception("import: не смогла прочитать файл")
+        return await update.message.reply_text("Не смогла прочитать файл. Пришли выгрузку Айвы в формате JSON.")
+
+    generation = _user_generation(cid)
+    c = db()
+    try:
+        if not _user_write_allowed(cid, generation, conn=c):
+            return await update.message.reply_text("Профиль изменился, попробуй ещё раз.")
+        c.execute("BEGIN IMMEDIATE")
+        for item in parsed["cycles"]:
+            c.execute("INSERT OR REPLACE INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?)",
+                      (cid, item.get("start_date"), item.get("end_date")))
+        for item in parsed["logs"]:
+            c.execute("INSERT OR REPLACE INTO logs(chat_id,log_date,energy,mood,symptoms) VALUES(?,?,?,?,?)",
+                      (cid, item.get("log_date"), item.get("energy"), item.get("mood"),
+                       item.get("symptoms") or ""))
+        for item in parsed["intimacy"]:
+            c.execute("INSERT OR IGNORE INTO intimacy(chat_id,d) VALUES(?,?)", (cid, item.get("d")))
+        c.commit()
+    except Exception:
+        c.rollback()
+        log.exception("import: не смогла применить выгрузку")
+        return await update.message.reply_text("Не получилось применить выгрузку. Ничего не изменила.")
+    finally:
+        c.close()
+
+    counts = parsed["counts"]
+    restored = f"Восстановила: {counts['cycles']} циклов, {counts['logs']} дней самочувствия."
+    skipped = ""
+    if counts["meals"] or counts["workouts"]:
+        skipped = (f"\n\nПитание ({counts['meals']}) и тренировки ({counts['workouts']}) "
+                   "из файла не переносила: их пришлось бы задваивать. Они остались в файле.")
+    _evict_today_cache(cid)
+    return await update.message.reply_text(restored + skipped)
 
 async def on_voice(update, context):
     if update.message is None:   # правка сообщения: см. комментарий в on_text
@@ -14952,6 +15148,9 @@ async def run_all():
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, on_voice))
+    # Выгрузка, присланная обратно: тот же формат, что отдаёт экспорт.
+    app.add_handler(MessageHandler(
+        filters.Document.FileExtension("json") & filters.ChatType.PRIVATE, on_export_document))
     app.add_handler(MessageHandler(
         (filters.PHOTO | filters.Document.IMAGE) & filters.ChatType.PRIVATE, on_photo))
     app.add_handler(MessageHandler(
