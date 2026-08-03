@@ -2193,6 +2193,36 @@ ACT_PERIOD_DELETE = dialog.register(dialog.Action(
 
 _ASYNC_RESOLVERS[ACT_PERIOD_DELETE.name] = {"iso": _resolve_period_date}
 
+def _parse_move_target(text):
+    """Дата, НА которую переносим.
+
+    «Перенеси с 18-го на 20-е» содержит две даты, и нужная — последняя: так
+    устроена фраза. Поэтому берём именно её, а не первую попавшуюся.
+    """
+    raw = " ".join(str(text or "").split())
+    found = []
+    for m in re.finditer(r"\d{1,2}[.\-/ ]\d{1,2}(?:[.\-/ ]\d{2,4})?|\d{1,2}\s*[а-яё]{3,}\w*", raw, re.I):
+        parsed = parse_date(m.group(0))
+        if parsed:
+            found.append(parsed)
+    if found:
+        return found[-1].isoformat()
+    return _parse_period_date(raw)
+
+ACT_PERIOD_MOVE = dialog.register(dialog.Action(
+    name="period_move",
+    title="Перенести отметку месячных",
+    description="Перенести последнюю отметку начала месячных на другую дату.",
+    params=(dialog.Param(
+        name="iso",
+        prompt="На какую дату перенести? Например 20.07.2026 или «на вчера».",
+        parse=_parse_move_target,
+        error="Не разобрала дату. Напиши, например, 20.07.2026 или «вчера».",
+    ),),
+))
+
+_ASYNC_RESOLVERS[ACT_PERIOD_MOVE.name] = {"iso": _resolve_period_date}
+
 def _parse_cycle_len(text):
     m = re.search(r"\d{1,2}", text or "")
     if not m:
@@ -2629,6 +2659,13 @@ def match_intent(t):
         )
     )
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
+    # Перенос отметки месячных. Идёт перед общим «месячные», иначе фраза
+    # «перенеси месячные на 20-е» прочитается как новая отметка и создаст
+    # второй цикл вместо правки существующего.
+    if re.search(r"(перенес\w*|перестав\w*|сдвин\w*|поправ\w*|исправ\w*|не\s+\d)"
+                 r"[^.]{0,30}(месячн\w*|цикл\w*|отметк\w*)", t) \
+            or re.search(r"(месячн\w*|отметк\w*)[^.]{0,20}(перенес\w*|перестав\w*|сдвин\w*|поправ\w*)", t):
+        return "period_move"
     # Выгрузка данных. Без явного интента фраза «пришли мои данные» уходила в
     # справку о приватности: та отвечает на «какие данные вы храните», а тут
     # человек просит сами записи.
@@ -5860,6 +5897,11 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
     if intent == "analysis":
         return await msg.reply_text(cycle_text_analysis(cid),
             reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
+    if intent == "period_move":
+        return await _start_action(
+            context, update, cid, ACT_PERIOD_MOVE.name, txt,
+            prompt="На какую дату перенести отметку? Например 20.07.2026 или «на вчера».",
+        )
     if intent == "export":
         return await _start_action(context, update, cid, ACT_EXPORT.name, txt)
     if intent == "energy":
@@ -6701,6 +6743,36 @@ def _act_period_delete(cid, values):
     return {"ok": True, "date": iso,
             "text": f"Убрала отметку месячных на {date.fromisoformat(iso).strftime('%d.%m.%Y')}."}
 
+def _act_period_move(cid, values):
+    """Перенести последнюю отметку месячных на другую дату.
+
+    Снять и поставить заново из чата уже можно, но это две операции подряд, и
+    между ними календарь остаётся без цикла. Одной фразой — и honest: если
+    переносить нечего, так и говорим, а не создаём отметку молча.
+    """
+    if is_male_profile(row(cid)):
+        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    iso = values["iso"]
+    periods = periods_of(cid)
+    if not periods:
+        return {"ok": False, "error": "nothing_to_move",
+                "note": "Отметок месячных пока нет — переносить нечего."}
+    latest = max(periods, key=lambda p: p["start"])["start"]
+    if latest == iso:
+        return {"ok": True, "date": iso,
+                "text": f"Отметка уже стоит на {date.fromisoformat(iso).strftime('%d.%m.%Y')}."}
+    if not period_delete_at(cid, latest):
+        return {"ok": False, "error": "not_moved", "note": "Не получилось перенести отметку."}
+    if not db_mark_period(cid, iso):
+        # Возвращаем как было: пользователь просил перенос, а не удаление.
+        db_mark_period(cid, latest)
+        return {"ok": False, "error": "not_moved", "note": "Не получилось перенести отметку."}
+    schedule_daily(BOT_APP, cid, (row(cid) or {}).get("send_time") or "08:00")
+    _evict_today_cache(cid)
+    return {"ok": True, "date": iso, "from": latest,
+            "text": (f"Перенесла начало месячных с {date.fromisoformat(latest).strftime('%d.%m.%Y')} "
+                     f"на {date.fromisoformat(iso).strftime('%d.%m.%Y')}.")}
+
 def _act_voice_mode(cid, values):
     choice = values["choice"]
     upsert(cid, voice_reply=choice)
@@ -6719,6 +6791,7 @@ _ACTION_HANDLERS = {
     ACT_SETTIME.name: _act_settime,
     ACT_PERIOD_DATE.name: _act_period_date,
     ACT_PERIOD_DELETE.name: _act_period_delete,
+    ACT_PERIOD_MOVE.name: _act_period_move,
     ACT_CYCLE_LEN.name: _act_cycle_len,
 }
 
@@ -11756,7 +11829,7 @@ def _agent_tools_spec(mode=None):
     # Пишущие действия берутся из реестра: чат получает ровно то, что умеет
     # приложение, с той же проверкой значений. Отдельного списка больше нет.
     for tool in _registry_chat_tools():
-        if tool["function"]["name"] in {"period_date", "period_delete", "cycle_len"} and mode == "male":
+        if tool["function"]["name"] in {"period_date", "period_delete", "period_move", "cycle_len"} and mode == "male":
             continue
         tools.append(tool)
     return tools
