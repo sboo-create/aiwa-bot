@@ -82,7 +82,10 @@ class StaticCatalogReleaseTests(unittest.TestCase):
     def test_all_catalog_v2_assets_are_content_addressed_bounded_webp(self):
         root = Path(__file__).resolve().parents[1] / "webapp2"
         hashes: set[str] = set()
-        expected = {"food": 507, "train": 216}
+        # Каталог перегенерён целиком на gpt-image: фотографический стиль на белом
+        # фоне, один набор вместо двух. Не прошедшие гейт блюда остались без
+        # картинки — у них честная заглушка вместо чужой манеры.
+        expected = {"food": 601, "train": 234}
 
         for kind, expected_count in expected.items():
             manifest = json.loads(
