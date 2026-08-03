@@ -21560,7 +21560,7 @@ function f7({ label: n, value: t, ok: i }) {
 function d7({ metrics: n, title: t = "Статистика" }) {
   return n?.length ? /* @__PURE__ */ h.jsx(gt.Item, { header: t, children: n.map((i) => /* @__PURE__ */ h.jsx(f7, { ...i }, i.label)) }) : null;
 }
-const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r37").then((n) => ({
+const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r38").then((n) => ({
   default: n.AiwaWebUiChart
 })));
 function m7() {
@@ -23404,35 +23404,43 @@ function cR({ kind: n }) {
 }
 function V3({ title: n, variant: t = "food" }) {
   const { hero: i, sections: l } = X2[t] || X2.food;
-  return /* @__PURE__ */ h.jsx(ei, { children: /* @__PURE__ */ h.jsx(ti, { mode: "secondary", children: /* @__PURE__ */ h.jsxs("div", { className: `aiwa-paper-screen aiwa-screen-skeleton aiwa-${t}-screen`, children: [
-    /* @__PURE__ */ h.jsx(ht, { className: "aiwa-screen-title", variant: "title1", weight: "semibold", children: n }),
-    /* @__PURE__ */ h.jsxs(NS, { active: !0, children: [
-      /* @__PURE__ */ h.jsx(cR, { kind: i }),
-      /* @__PURE__ */ h.jsx("div", { className: "aiwa-screen-cta", children: /* @__PURE__ */ h.jsx(Us, { className: "aiwa-skeleton-cta" }) }),
-      /* @__PURE__ */ h.jsxs(gt, { className: "aiwa-tma-blocks", children: [
-        /* @__PURE__ */ h.jsx(gt.Item, { className: "aiwa-insight-section", children: /* @__PURE__ */ h.jsx(Tt, { tappable: !1, children: /* @__PURE__ */ h.jsxs("div", { className: "aiwa-insight-content", children: [
-          /* @__PURE__ */ h.jsx($i, { active: !0, width: 30 }),
-          /* @__PURE__ */ h.jsx($i, { active: !0, width: 26 }),
-          /* @__PURE__ */ h.jsx(Us, { className: "aiwa-skeleton-insight-cta" })
-        ] }) }) }),
-        l.map((o) => /* @__PURE__ */ h.jsx(gt.Item, { header: o.header, children: Wh(o.rows).map((c) => /* @__PURE__ */ h.jsx(
-          Tt,
-          {
-            tappable: !1,
-            start: o.media ? /* @__PURE__ */ h.jsx(Us, { className: "aiwa-skeleton-thumb" }) : void 0,
-            children: /* @__PURE__ */ h.jsx(
-              Tt.Text,
+  return /* @__PURE__ */ h.jsx(ei, { children: /* @__PURE__ */ h.jsx(ti, { mode: "secondary", children: /* @__PURE__ */ h.jsxs(
+    "div",
+    {
+      className: `aiwa-paper-screen aiwa-screen-skeleton aiwa-${t}-screen`,
+      role: "status",
+      "aria-label": "Айва загружается",
+      children: [
+        /* @__PURE__ */ h.jsx(ht, { className: "aiwa-screen-title", variant: "title1", weight: "semibold", children: n }),
+        /* @__PURE__ */ h.jsxs(NS, { active: !0, children: [
+          /* @__PURE__ */ h.jsx(cR, { kind: i }),
+          /* @__PURE__ */ h.jsx("div", { className: "aiwa-screen-cta", children: /* @__PURE__ */ h.jsx(Us, { className: "aiwa-skeleton-cta" }) }),
+          /* @__PURE__ */ h.jsxs(gt, { className: "aiwa-tma-blocks", children: [
+            /* @__PURE__ */ h.jsx(gt.Item, { className: "aiwa-insight-section", children: /* @__PURE__ */ h.jsx(Tt, { tappable: !1, children: /* @__PURE__ */ h.jsxs("div", { className: "aiwa-insight-content", children: [
+              /* @__PURE__ */ h.jsx($i, { active: !0, width: 30 }),
+              /* @__PURE__ */ h.jsx($i, { active: !0, width: 26 }),
+              /* @__PURE__ */ h.jsx(Us, { className: "aiwa-skeleton-insight-cta" })
+            ] }) }) }),
+            l.map((o) => /* @__PURE__ */ h.jsx(gt.Item, { header: o.header, children: Wh(o.rows).map((c) => /* @__PURE__ */ h.jsx(
+              Tt,
               {
-                title: /* @__PURE__ */ h.jsx($i, { active: !0, width: 13 }),
-                description: /* @__PURE__ */ h.jsx($i, { active: !0, width: 22 })
-              }
-            )
-          },
-          c
-        )) }, o.header))
-      ] })
-    ] })
-  ] }) }) });
+                tappable: !1,
+                start: o.media ? /* @__PURE__ */ h.jsx(Us, { className: "aiwa-skeleton-thumb" }) : void 0,
+                children: /* @__PURE__ */ h.jsx(
+                  Tt.Text,
+                  {
+                    title: /* @__PURE__ */ h.jsx($i, { active: !0, width: 13 }),
+                    description: /* @__PURE__ */ h.jsx($i, { active: !0, width: 22 })
+                  }
+                )
+              },
+              c
+            )) }, o.header))
+          ] })
+        ] })
+      ]
+    }
+  ) }) });
 }
 function ih({ label: n, value: t, target: i, macro: l, color: o }) {
   const c = i ? Math.min(100, Math.round(Number(t || 0) / Number(i) * 100)) : 0, u = o || (l ? `var(--aiwa-macro-${l})` : "var(--aiwa-accent)");
