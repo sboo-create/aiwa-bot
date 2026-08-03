@@ -14,6 +14,7 @@ import math
 import os
 import re
 import threading
+from typing import Iterable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -246,7 +247,10 @@ def _validate_generated_image(
 
 
 def _image_request(
-    label: str, description: str | None = None, attempt: int = 1,
+    label: str,
+    description: str | None = None,
+    attempt: int = 1,
+    missing: Iterable[str] = (),
 ) -> bytes:
     endpoint = _provider_value(
         "AIWA_SPORT_IMAGE_API_URL", "AIWA_FOOD_IMAGE_API_URL"
@@ -274,6 +278,17 @@ def _image_request(
         "specific activity unmistakable."
         if int(attempt or 1) > 1 else ""
     )
+    absent = [
+        re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9 ,_-]", "", str(item)).strip()[:40]
+        for item in missing
+        if str(item).strip()
+    ]
+    if absent:
+        retry_note += (
+            " The previous attempt did not show: "
+            + ", ".join(item for item in absent if item)
+            + ". Render each of those clearly."
+        )
     prompt = (
         "Single friendly sport icon for a wellness training diary. Show exactly "
         f"this activity: {literal}. Original Russian label: {label}. One full-"
@@ -325,13 +340,15 @@ def _image_request(
     return raw
 
 
-def generate_and_store(label: object, attempt: int = 1) -> dict[str, object]:
+def generate_and_store(
+    label: object, attempt: int = 1, missing: Iterable[str] = (),
+) -> dict[str, object]:
     reviewed = reviewed_generation_label(label)
     if not reviewed:
         raise ValueError("sport_image_label_rejected")
     description = _literal_sport_description(reviewed)
     webp = food_assets._safe_webp(
-        _image_request(reviewed, description, attempt)
+        _image_request(reviewed, description, attempt, missing)
     )
     validation_score = _validate_generated_image(
         reviewed, description, webp

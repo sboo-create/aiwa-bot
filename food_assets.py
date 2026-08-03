@@ -461,6 +461,12 @@ def reviewed_generation_label(value: object) -> str | None:
 class FoodImageValidationError(ValueError):
     """A technically valid image does not visibly represent the requested food."""
 
+    def __init__(self, *args: object, missing: Iterable[str] = ()):
+        super().__init__(*args)
+        #: Components the gate could not identify — fed back into the retry so
+        #: the next attempt is told what to fix instead of guessing.
+        self.missing = tuple(str(item) for item in missing if str(item).strip())
+
 
 def _json_object(value: object) -> dict:
     text = str(value or "").strip()
@@ -590,12 +596,13 @@ def _validate_generated_image(
     missing = data.get("missing")
     matches = data.get("matches") is True
     if isinstance(missing, list) and any(str(item).strip() for item in missing):
+        absent = [str(item) for item in missing if str(item).strip()]
         gap = re.sub(
-            r"[^a-zA-Zа-яА-ЯёЁ0-9 ,_-]",
-            "",
-            ", ".join(str(item) for item in missing),
+            r"[^a-zA-Zа-яА-ЯёЁ0-9 ,_-]", "", ", ".join(absent),
         )[:48]
-        raise FoodImageValidationError(f"food_image_missing_components:{gap}")
+        raise FoodImageValidationError(
+            f"food_image_missing_components:{gap}", missing=absent,
+        )
     confidence = data.get("confidence")
     if (
         not isinstance(confidence, (int, float))
@@ -620,7 +627,10 @@ def _validate_generated_image(
 
 
 def _image_request(
-    label: str, description: str | None = None, attempt: int = 1,
+    label: str,
+    description: str | None = None,
+    attempt: int = 1,
+    missing: Iterable[str] = (),
 ) -> bytes:
     endpoint = os.environ.get("AIWA_FOOD_IMAGE_API_URL", "").strip()
     api_key = os.environ.get("AIWA_FOOD_IMAGE_API_KEY", "").strip()
@@ -642,6 +652,19 @@ def _image_request(
         "and avoid metaphor or word association."
         if int(attempt or 1) > 1 else ""
     )
+    absent = [
+        re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9 ,_-]", "", str(item)).strip()[:40]
+        for item in missing
+        if str(item).strip()
+    ]
+    if absent:
+        # Blind retries repeated the same omission; naming what the gate could
+        # not find is what actually moves composite dishes past it.
+        retry_note += (
+            " The previous attempt did not show: "
+            + ", ".join(item for item in absent if item)
+            + ". Render each of those unmistakably, as its own visible portion."
+        )
     prompt = (
         "Single appetizing food icon for a wellness diary. Show exactly this "
         f"dish: {literal}. Original Russian label: {label}. Every component "
@@ -716,13 +739,15 @@ def _safe_webp(raw: bytes) -> bytes:
     return result
 
 
-def generate_and_store(label: object, attempt: int = 1) -> dict[str, object]:
+def generate_and_store(
+    label: object, attempt: int = 1, missing: Iterable[str] = (),
+) -> dict[str, object]:
     """Generate one immutable asset. Intended only for a bounded worker."""
     reviewed = reviewed_generation_label(label)
     if not reviewed:
         raise ValueError("food_image_label_rejected")
     description = _literal_food_description(reviewed)
-    webp = _safe_webp(_image_request(reviewed, description, attempt))
+    webp = _safe_webp(_image_request(reviewed, description, attempt, missing))
     validation_score = _validate_generated_image(reviewed, description, webp)
     content_hash = hashlib.sha256(webp).hexdigest()
     directory = generated_asset_dir()

@@ -107,10 +107,11 @@ def _generate_one(
     assets = _module(kind)
     started = time.perf_counter()
     errors = []
+    missing: tuple[str, ...] = ()
     for attempt in range(1, max_attempts + 1):
         try:
             result = assets.generate_and_store(
-                row["label"], attempt=attempt
+                row["label"], attempt=attempt, missing=missing
             )
             return {
                 **row,
@@ -121,6 +122,9 @@ def _generate_one(
                 "elapsed_s": round(time.perf_counter() - started, 3),
             }
         except Exception as exc:
+            # Carry the unidentified components into the next attempt: a blind
+            # retry tends to repeat the same omission on composite dishes.
+            missing = tuple(getattr(exc, "missing", ()) or ())
             errors.append(
                 f"{type(exc).__name__}:{str(exc)[:120]}"
             )
