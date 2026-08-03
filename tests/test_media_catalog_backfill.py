@@ -85,7 +85,7 @@ class StaticCatalogReleaseTests(unittest.TestCase):
         # Каталог перегенерён целиком на gpt-image: фотографический стиль на белом
         # фоне, один набор вместо двух. Не прошедшие гейт блюда остались без
         # картинки — у них честная заглушка вместо чужой манеры.
-        expected = {"food": 601, "train": 234}
+        expected = {"food": 844, "train": 349}
 
         for kind, expected_count in expected.items():
             manifest = json.loads(

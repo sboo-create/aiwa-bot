@@ -718,7 +718,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertEqual(content_type, "application/json")
         # Каталог перегенерён целиком: один набор вместо двух, не прошедшие
         # гейт блюда убраны и показывают заглушку.
-        self.assertEqual(len(manifest), 601)
+        self.assertEqual(len(manifest), 844)
         self.assertTrue(any("/catalog-v2/" in url for url in manifest.values()))
         self.assertEqual(image_status, 200)
         self.assertEqual(image_type, "image/webp")

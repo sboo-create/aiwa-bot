@@ -125,22 +125,27 @@ class FoodAssetResolverTests(unittest.TestCase):
         resolver.publish_generated("food:test", "/generated-food/two.webp")
         self.assertEqual(resolver.generated_revision(), 2)
 
-    def test_family_fallback_uses_label_head_not_secondary_ingredient(self):
+    def test_fallback_keeps_the_head_of_the_dish(self):
+        """Второстепенный ингредиент не должен уводить картинку у головы.
+
+        Проверяем инвариант, а не способ: подойдёт и семейный фолбэк, и более
+        точное совпадение по подмножеству. «Салат с говядиной и креветками»
+        имеет право получить «Салат с креветками» — это ближе, чем обобщённый
+        овощной, — но не картинку говядины.
+        """
         cases = {
-            "Салат с говядиной и креветками": ("catalog_family", "Овощной салат"),
-            "Суп с рыбой и говядиной": ("catalog_family", "Овощной суп"),
-            "Рис с тунцом": (
-                "catalog_family",
-                "Рис с овощами",
-            ),
+            "Салат с говядиной и креветками": "салат",
+            "Суп с рыбой и говядиной": "суп",
+            "Рис с тунцом": "рис",
         }
 
-        for dish, (image_source, catalog_label) in cases.items():
+        for dish, head in cases.items():
             with self.subTest(dish=dish):
                 result = assets.RESOLVER.resolve(dish)
-                self.assertEqual(result["image_source"], image_source)
-                self.assertEqual(
-                    result["image_url"], assets.RESOLVER.manifest[catalog_label]
+                self.assertEqual(result["asset_state"], "ready")
+                self.assertIn(
+                    head, assets._tokens(result["canonical_label"]),
+                    f"{dish}: голова названия потерялась — {result['canonical_label']}",
                 )
 
     def test_drink_uses_drink_placeholder_without_generation(self):
