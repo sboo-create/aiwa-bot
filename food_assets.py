@@ -21,7 +21,7 @@ import requests
 
 
 STYLE_VERSION = "food-v1"
-GENERATED_PROMPT_VERSION = "food-icon-v2-validated"
+GENERATED_PROMPT_VERSION = "food-icon-v3-components"
 MEAL_PLACEHOLDER = "/assets/food/meal-placeholder.svg"
 DRINK_PLACEHOLDER = "/assets/food/drink-cup.svg?v=1"
 _MANIFEST_PATH = Path(__file__).resolve().parent / "webapp2/assets/food/manifest.json"
@@ -546,13 +546,18 @@ def _literal_food_description(label: str) -> str:
         "Translate the following short Russian food diary label into a literal, "
         "concise English visual description for an image model. Preserve the "
         "exact main ingredient or animal species, cooking method and dish form. "
-        "Do not add ingredients and do not infer health context. Return only "
+        "Name EVERY component the label mentions — protein, grain or side, "
+        "vegetable, sauce — and give each one a short visual cue that tells it "
+        "apart from lookalike foods: grain size and shape, cut, colour, texture "
+        "(for example bulgur as coarse irregular cracked wheat versus couscous "
+        "as tiny round pale granules). Do not add components the label does not "
+        "mention and do not drop any. Do not infer health context. Return only "
         'JSON: {"description":"..."}. Label: '
         + json.dumps(label, ensure_ascii=False)
     )
     description = " ".join(str(data.get("description") or "").split())
     if (
-        not 3 <= len(description) <= 180
+        not 3 <= len(description) <= 400
         or re.search(
             r"\b(?:http|prompt|instruction|token|password)\b",
             description,
@@ -570,16 +575,27 @@ def _validate_generated_image(
         return 1.0
     data = _validation_chat(
         "Act as a strict food-image quality gate. Compare the image with the "
-        "target dish. The main named ingredient/category and preparation form "
-        "must be visibly correct; garnish may differ. Reject substitutions "
-        "caused by similar-sounding words (for example fish versus carrots), "
-        "non-food objects, visible text/logos or people. Return only JSON: "
-        '{"matches":true,"confidence":0.0,"reason":"short reason"}. '
+        "target dish. EVERY component named in the label must be individually "
+        "identifiable on the plate with the right preparation form — a missing "
+        "component, a merged blob, or a lookalike stand-in (couscous shown for "
+        "bulgur, pork for turkey) is a rejection, not an acceptable garnish "
+        "difference. Reject substitutions caused by similar-sounding words (for "
+        "example fish versus carrots), non-food objects, visible text/logos or "
+        "people. List every component you could not identify. Return only JSON: "
+        '{"matches":true,"confidence":0.0,"missing":[],"reason":"short reason"}. '
         "Original Russian label: " + json.dumps(label, ensure_ascii=False)
         + ". Literal English target: " + json.dumps(description),
         image=image,
     )
+    missing = data.get("missing")
     matches = data.get("matches") is True
+    if isinstance(missing, list) and any(str(item).strip() for item in missing):
+        gap = re.sub(
+            r"[^a-zA-Zа-яА-ЯёЁ0-9 ,_-]",
+            "",
+            ", ".join(str(item) for item in missing),
+        )[:48]
+        raise FoodImageValidationError(f"food_image_missing_components:{gap}")
     confidence = data.get("confidence")
     if (
         not isinstance(confidence, (int, float))
@@ -628,11 +644,13 @@ def _image_request(
     )
     prompt = (
         "Single appetizing food icon for a wellness diary. Show exactly this "
-        f"dish: {literal}. Original Russian label: {label}. The main ingredient "
-        "and cooking form must be visually recognizable. Centered plate, simple "
-        "warm 3D illustration, neutral light background, no people, no text, "
-        "no logo, square composition. Do not replace an ingredient with a "
-        "similar-sounding object." + retry_note
+        f"dish: {literal}. Original Russian label: {label}. Every component "
+        "listed must be separately visible and identifiable on the plate — do "
+        "not merge them into one blob and do not omit any; keep grains, cuts "
+        "and textures distinct enough to tell lookalike foods apart. Centered "
+        "plate, simple warm 3D illustration, neutral light background, no "
+        "people, no text, no logo, square composition. Do not replace an "
+        "ingredient with a similar-sounding object." + retry_note
     )
     size = os.environ.get("AIWA_FOOD_IMAGE_SIZE", "512x512").strip()
     if not re.fullmatch(r"(?:512|1024)x(?:512|1024)", size):
