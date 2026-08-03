@@ -634,3 +634,44 @@ class FoodSectionLoadContracts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BakedBackgroundGateTests(unittest.TestCase):
+    """Artwork must arrive without its own backdrop — see _reject_baked_background."""
+
+    @staticmethod
+    def _webp(colour):
+        image = Image.new("RGB", (64, 64), colour)
+        raw = io.BytesIO()
+        image.save(raw, "WEBP")
+        return raw.getvalue()
+
+    def test_white_background_passes(self):
+        assets._reject_baked_background(self._webp((254, 255, 254)))
+
+    def test_catalog_v2_beige_is_rejected(self):
+        with self.assertRaisesRegex(
+            assets.FoodImageValidationError, "background_not_white"
+        ):
+            assets._reject_baked_background(self._webp((228, 216, 209)))
+
+    def test_rejection_feeds_the_retry(self):
+        try:
+            assets._reject_baked_background(self._webp((228, 216, 209)))
+        except assets.FoodImageValidationError as error:
+            self.assertIn("plain white background", error.missing)
+        else:
+            self.fail("beige background must be rejected")
+
+    def test_padding_canvas_is_pure_white(self):
+        source = Image.new("RGB", (200, 400), (10, 10, 10))
+        raw = io.BytesIO()
+        source.save(raw, "PNG")
+        result = assets._safe_webp(raw.getvalue())
+        with Image.open(io.BytesIO(result)) as padded:
+            padded.load()
+            corner = padded.convert("RGB").getpixel((2, 2))
+        self.assertTrue(
+            all(channel >= 250 for channel in corner),
+            f"padding must not tint the icon, got {corner}",
+        )

@@ -350,6 +350,9 @@ def generate_and_store(
     webp = food_assets._safe_webp(
         _image_request(reviewed, description, attempt, missing)
     )
+    # Sport tiles composite over the same backdrop as food, so a baked
+    # background breaks them identically.
+    food_assets._reject_baked_background(webp)
     validation_score = _validate_generated_image(
         reviewed, description, webp
     )
