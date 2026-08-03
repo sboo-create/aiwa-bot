@@ -2044,6 +2044,41 @@ ACT_SETTIME = dialog.register(dialog.Action(
     ),),
 ))
 
+def _parse_period_date(text):
+    d = parse_date(text)
+    return d.isoformat() if d else None
+
+ACT_PERIOD_DATE = dialog.register(dialog.Action(
+    name="period_date",
+    title="Дата последних месячных",
+    description="Отметить начало последних месячных.",
+    params=(dialog.Param(
+        name="iso",
+        prompt="Напиши дату начала последних месячных, например 25.05.2026.",
+        parse=_parse_period_date,
+        error="Не разобрала дату. Нужен формат ДД.ММ.ГГГГ, например 25.05.2026.",
+    ),),
+))
+
+def _parse_cycle_len(text):
+    m = re.search(r"\d{1,2}", text or "")
+    if not m:
+        return None
+    value = int(m.group())
+    return value if 15 <= value <= 60 else None
+
+ACT_CYCLE_LEN = dialog.register(dialog.Action(
+    name="cycle_len",
+    title="Длина цикла",
+    description="Средняя длина цикла в днях.",
+    params=(dialog.Param(
+        name="days",
+        prompt="Какая средняя длина цикла? Напиши число, например 28.",
+        parse=_parse_cycle_len,
+        error="Нужно число от 15 до 60.",
+    ),),
+))
+
 def calc_calories(cm, kg, age, act, male=False):
     # Миффлин-Сан Жеор: −161 для женщин, +5 для мужчин.
     bmr = 10 * kg + 6.25 * cm - 5 * age + (5 if male else -161)
@@ -5639,7 +5674,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             upsert(cid, cycle_len=int(mnum.group(1)), state=None)
             await msg.reply_text(f"Записала длину цикла: {mnum.group(1)} дн.")
             return await push_summary(context, cid)
-        upsert(cid, state="await_cycle_len")
+        upsert(cid, state=dialog.begin(ACT_CYCLE_LEN.name).state)
         return await msg.reply_text("Какая у тебя средняя длина цикла в днях? Обычно 21-35. Напиши число, например 28.")
     if intent == "unlink":
         return await msg.reply_text("Чтобы отключить партнёра, введи команду /unlink")
@@ -5815,7 +5850,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         if st["status"] != "normal": return await send_delay(context, cid, st)
         return await send_infographic(context.bot, cid)
     if intent == "period":
-        upsert(cid, state="await_period_date")
+        upsert(cid, state=dialog.begin(ACT_PERIOD_DATE.name).state)
         return await msg.reply_text("Напиши дату начала последних месячных, например 25.05.2026, или нажми кнопку. Потом даты можно редактировать в приложении.", reply_markup=PERIOD_KB)
 
 async def push_summary(context, cid, with_image=True, campaign=None):
@@ -6326,6 +6361,18 @@ async def _apply_action(context, update, cid, done):
         hhmm = done.values["hhmm"]
         set_daily_time(context.application, cid, hhmm)
         return await update.message.reply_text(schedule_text(cid, hhmm))
+    if done.action == ACT_PERIOD_DATE.name:
+        iso = done.values["iso"]
+        mark_period(context, cid, iso)
+        await update.message.reply_text(
+            f"Отметила начало месячных: {date.fromisoformat(iso).strftime('%d.%m.%Y')}. Вот свежая сводка:"
+        )
+        return await push_summary(context, cid)
+    if done.action == ACT_CYCLE_LEN.name:
+        days = int(done.values["days"])
+        upsert(cid, cycle_len=days)
+        await update.message.reply_text(f"Записала длину цикла: {days} дн.")
+        return await push_summary(context, cid)
     # Действие зарегистрировано, но обработчика нет — это ошибка сборки, а не
     # пользователя: не молчим ни ему, ни в лог.
     log.error("действие без обработчика: %s", done.action)
@@ -7180,7 +7227,7 @@ async def period_cmd(update, context):
             mark_period(context, cid, d.isoformat())
             await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
             return await push_summary(context, cid)
-    upsert(cid, state="await_period_date")
+    upsert(cid, state=dialog.begin(ACT_PERIOD_DATE.name).state)
     await update.message.reply_text("Напиши дату начала последних месячных, например 25.05.2026, или нажми кнопку. Потом даты можно редактировать в приложении.", reply_markup=PERIOD_KB)
 async def set_time_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
@@ -7671,11 +7718,15 @@ async def handle_text(update, context, txt):
         return await update.message.reply_text(
             f"Я тут. Напиши вопрос или открой меню, и я помогу с {topics}."
         )
-    if is_male_profile(u) and state in {
-        "await_period_date", "await_cycle_len", "await_cycles",
-    }:
+    # Циклические сценарии не для мужского профиля. Состояние может быть и
+    # легаси-строкой, и токеном реестра — разбираем оба.
+    _act = dialog.parse_state(state)
+    _cycle_state = state in {"await_cycles"} or (
+        _act is not None and _act[0] in {ACT_PERIOD_DATE.name, ACT_CYCLE_LEN.name}
+    )
+    if is_male_profile(u) and _cycle_state:
         upsert(cid, state=None, pending_date=None)
-        ev(cid, "male_mode_block", meta="stale_state_" + state)
+        ev(cid, "male_mode_block", meta="stale_state_" + str(state)[:24])
         return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
 
     if state == "await_food_text":
@@ -7714,9 +7765,7 @@ async def handle_text(update, context, txt):
     VALUE_STATES = {
         "await_date": "Напиши дату начала последних месячных, например 25.05.2026 или 26 мая 2026. Потом даты можно редактировать в приложении.",
         "await_len": "Напиши среднюю длину цикла числом. Это дни от первого дня одних месячных до первого дня следующих. Обычно 21-35, если не знаешь, можно 28.",
-        "await_cycle_len": "Какая средняя длина цикла? Это дни от первого дня одних месячных до первого дня следующих. Напиши число, например 28.",
         "await_preg_date": "Напиши дату начала последних месячных, например 25.05.2026. Если знаешь ПДР, напиши дату и добавь слово ПДР.",
-        "await_period_date": "Напиши дату начала последних месячных, например 25.05.2026 или 26 мая 2026. Потом даты можно редактировать в приложении.",
         "await_time": "Во сколько присылать сводку? Напиши время по Москве, например 08:00.",
         "await_profile": "Напиши рост, вес и возраст через пробел. Например 168 60 30. Можно написать «Пропустить».",
         "await_profile_edit": "Напиши рост, вес и возраст через пробел. Например 168 60 30.",
@@ -7858,14 +7907,7 @@ async def handle_text(update, context, txt):
         upsert(cid, state=None)
         return await _apply_action(context, update, cid, step)
 
-    if state == "await_period_date":
-        d = parse_date(txt)
-        if d:
-            mark_period(context, cid, d.isoformat())
-            await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
-            return await push_summary(context, cid)
-        upsert(cid, state=None)
-    elif state == "await_preg_date":
+    if state == "await_preg_date":
         mdt = _DATE_RE.search(txt); d = parse_date(mdt.group(0)) if mdt else None
         if not d:
             return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026. Если знаешь ПДР, напиши дату и добавь слово ПДР.")
@@ -7876,14 +7918,6 @@ async def handle_text(update, context, txt):
         return await update.message.reply_text(
             f"Записала. Срок: {stp['week']} нед {stp['day']} дн, ПДР примерно {date.fromisoformat(stp['due']).strftime('%d.%m.%Y')}.\n\n"
             "Осталось пару данных для рекомендаций: рост (см), вес (кг), возраст. Например 168 60 30.", reply_markup=SKIP_KB)
-    elif state == "await_cycle_len":
-        mnum = re.search(r"\d{1,2}", txt)
-        if mnum and 15 <= int(mnum.group()) <= 60:
-            upsert(cid, cycle_len=int(mnum.group()), state=None)
-            await update.message.reply_text(f"Записала длину цикла: {mnum.group()} дн.")
-            return await push_summary(context, cid)
-        upsert(cid, state=None)
-        return await update.message.reply_text("Нужно число от 15 до 60. Открой «Длина цикла» в Меню и попробуй ещё раз.")
     elif state == "await_cycles":
         ranges = parse_cycle_ranges(txt)
         if not ranges:
@@ -8150,10 +8184,10 @@ async def on_cb(update, context):
     elif data == "addcycles":
         await addcycles_entry(context, cid, q.message)
     elif data == "cyclelen":
-        upsert(cid, state="await_cycle_len")
+        upsert(cid, state=dialog.begin(ACT_CYCLE_LEN.name).state)
         await q.message.reply_text("Какая у тебя средняя длина цикла в днях? Обычно 21-35. Напиши число, например 28.")
     elif data == "period":
-        upsert(cid, state="await_period_date")
+        upsert(cid, state=dialog.begin(ACT_PERIOD_DATE.name).state)
         await q.message.reply_text("Напиши дату начала последних месячных, например 25.05.2026, или нажми кнопку. Потом даты можно редактировать в приложении.", reply_markup=PERIOD_KB)
     elif data == "period_today":
         mark_period(context, cid, today_s)
