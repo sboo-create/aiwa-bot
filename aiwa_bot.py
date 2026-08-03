@@ -2092,6 +2092,11 @@ def _parse_period_date(text):
     d = parse_date(text)
     return d.isoformat() if d else None
 
+#: Параметры, которые умеет доразобрать модель, когда детерминированный парсер
+#: спасовал. Держим список здесь, а не в dialog: там не должно быть ни модели,
+#: ни сети.
+_ASYNC_RESOLVERS = {}
+
 ACT_PERIOD_DATE = dialog.register(dialog.Action(
     name="period_date",
     title="Дата последних месячных",
@@ -2167,6 +2172,12 @@ ACT_VOICE_MODE = dialog.register(dialog.Action(
         error="Напиши «голосом» или «текстом».",
     ),),
 ))
+
+async def _resolve_period_date(context, cid, text):
+    parsed, reason = await understand_date(context, cid, text)
+    return (parsed.isoformat() if parsed else None), reason
+
+_ASYNC_RESOLVERS[ACT_PERIOD_DATE.name] = {"iso": _resolve_period_date}
 
 def _parse_cycle_len(text):
     m = re.search(r"\d{1,2}", text or "")
@@ -5759,6 +5770,43 @@ def cycle_text_analysis(cid):
     parts.append("\nПодробную выписку для врача можно собрать кнопкой ниже.")
     return "\n".join(parts)
 
+async def understand_date(context, cid, text):
+    """Разобрать дату: сначала детерминированно, потом моделью.
+
+    Быстрый путь бесплатен и точен на «25.05.2026», поэтому он первый. Модель
+    подключается только к тому, что он не взял: «вчера», «Авг 2 2026», «в
+    начале августа». Она же отличает «не помню» от неразборчивого ввода —
+    это разные ситуации, и отвечать на них одинаково нельзя.
+
+    Возвращает (date|None, reason): reason «unknown» — человек не помнит.
+    """
+    fast = parse_date(text or "")
+    if fast:
+        return fast, "ok"
+    usage = []
+    try:
+        verdict = await llm_to_thread(
+            cid, "date_parse", L.understand_date, text, dtoday().isoformat(), usage,
+        )
+    except Exception:
+        log.warning("understand_date: модель не ответила")
+        return None, "other"
+    if usage:
+        ev(cid, "tokens", sum(usage), meta="date_parse", calls=len(usage), usage=usage)
+    iso = (verdict or {}).get("date")
+    if not iso:
+        return None, str((verdict or {}).get("reason") or "other")
+    try:
+        parsed = date.fromisoformat(iso)
+    except ValueError:
+        return None, "other"
+    # Модель не должна уводить в будущее или в позапрошлый год, даже если очень
+    # уверена: границы проверяем сами.
+    today = dtoday()
+    if parsed > today or (today - parsed).days > 400:
+        return None, "other"
+    return parsed, "ok"
+
 async def _start_action(context, update, cid, name, text, prompt=None, reply_markup=None):
     """Начать действие, забрав из фразы то, что в ней уже сказано.
 
@@ -8182,13 +8230,22 @@ async def handle_text(update, context, txt):
         return await context.bot.send_message(cid, ans)
 
     if state == "await_date":
-        d = parse_date(txt)
+        d, reason = await understand_date(context, cid, txt)
         if not d:
             if is_question_like(txt):
                 _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши дату начала последних месячных, например 25.05.2026. Потом даты можно редактировать в приложении.")
-            return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026, или нажми кнопку выше.")
+            if reason == "unknown":
+                # «Не помню» — это не ошибка ввода, и повторять тот же вопрос
+                # бессмысленно: даём выйти из тупика приблизительной датой.
+                ev(cid, "manual", meta="onboard_date_unknown")
+                return await update.message.reply_text(
+                    "Ничего страшного, точная дата не нужна. Напиши примерно — «в начале августа», "
+                    "«около двух недель назад» или просто месяц. Потом поправим в приложении.")
+            return await update.message.reply_text(
+                "Не разобрала дату. Можно как удобно: «25.05.2026», «26 мая», «вчера» "
+                "или «недели три назад».")
         upsert(cid, pending_date=d.isoformat(), state="await_len")
         return await update.message.reply_text(
             "Теперь длина цикла — сколько дней от первого дня одних месячных до первого дня следующих. "
@@ -8278,6 +8335,21 @@ async def handle_text(update, context, txt):
     # переспрашивается, а не роняет сценарий молча — ровно то, чем болели
     # ветки ниже. По мере переезда `await_*` этот блок останется единственным.
     step = dialog.feed(state, txt)
+    _parsed = dialog.parse_state(state)
+    if isinstance(step, dialog.Ask) and _parsed:
+        # Детерминированный парсер спасовал — доразбираем моделью тем же
+        # правилом, что и в онбординге. Иначе «вчера» работало бы в одном месте
+        # и упиралось в стену в другом.
+        _resolvers = _ASYNC_RESOLVERS.get(_parsed[0]) or {}
+        _action = dialog.get(_parsed[0])
+        _param = _action.params[_parsed[1]] if _parsed[1] < len(_action.params) else None
+        _resolve = _resolvers.get(_param.name) if _param else None
+        if _resolve and match_intent(txt) in (None, ""):
+            _value, _reason = await _resolve(context, cid, txt)
+            if _value is not None:
+                step = dialog.feed(
+                    dialog._encode(_action.name, _parsed[1], 0, _parsed[3]), str(_value),
+                )
     if step is not None and isinstance(step, dialog.Ask) and match_intent(txt) not in (None, ""):
         # Пользователь не ответил на вопрос, а сказал новое: «пришли мои данные»
         # посреди настройки времени. Переспрашивать в такой ситуации значит

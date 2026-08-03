@@ -3336,3 +3336,45 @@ def transcribe(audio_bytes, filename="voice.ogg", info=None):
     _capture_media(used or "none", model, t0, "success" if txt else "error", "stt",
                    {"audio_bytes": len(audio_bytes or b""), "format": ext})
     return txt
+
+
+def understand_date(text, today_iso, usage=None):
+    """Понять дату, сказанную по-человечески.
+
+    Детерминированный разбор в aiwa_bot остаётся первым: он быстрый, бесплатный
+    и точный на «25.05.2026». Сюда попадает то, что он не взял, — «вчера»,
+    «Авг 2 2026», «в начале августа», «недели три назад». Раньше всё это
+    получало один и тот же отказ, и человек упирался в стену.
+
+    Возвращает {"date": "ГГГГ-ММ-ДД"} либо {"date": None, "reason": ...}.
+    reason == "unknown" — человек прямо сказал, что не помнит: это не ошибка
+    ввода, и переспрашивать тем же вопросом бессмысленно.
+    """
+    said = " ".join(str(text or "").split())[:200]
+    if not said:
+        return {"date": None, "reason": "empty"}
+    prompt = (
+        "Пользователь отвечает на вопрос «когда начались последние месячные». "
+        f"Сегодня {today_iso}. Преобразуй его ответ в календарную дату.\n"
+        "Правила: дата не может быть в будущем и не раньше чем за 400 дней до сегодня. "
+        "Относительные выражения («вчера», «позавчера», «неделю назад», «в начале августа») "
+        "считай от сегодняшней даты. Если названы только день и месяц без года — бери "
+        "ближайший прошедший такой день. Если человек говорит, что не помнит или не знает, "
+        "верни reason «unknown» и date null. Если это вообще не про дату — reason «other». "
+        "НИЧЕГО не выдумывай: сомневаешься — null.\n"
+        'Ответь строго JSON: {"date":"ГГГГ-ММ-ДД"|null,"reason":"ok"|"unknown"|"other"}\n'
+        f"Ответ пользователя: «{said}»"
+    )
+    out = _call(
+        [{"role": "system", "content": "Ты разбираешь даты. Отвечай строго JSON."},
+         {"role": "user", "content": prompt}],
+        max_tokens=120, temperature=0, usage=usage,
+    )
+    try:
+        data = json.loads(out[out.find("{"):out.rfind("}") + 1])
+    except Exception:
+        return {"date": None, "reason": "other"}
+    iso = str(data.get("date") or "")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso):
+        return {"date": None, "reason": str(data.get("reason") or "other")[:16]}
+    return {"date": iso, "reason": "ok"}
