@@ -21560,7 +21560,7 @@ function f7({ label: n, value: t, ok: i }) {
 function d7({ metrics: n, title: t = "Статистика" }) {
   return n?.length ? /* @__PURE__ */ h.jsx(gt.Item, { header: t, children: n.map((i) => /* @__PURE__ */ h.jsx(f7, { ...i }, i.label)) }) : null;
 }
-const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r38").then((n) => ({
+const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r39").then((n) => ({
   default: n.AiwaWebUiChart
 })));
 function m7() {
@@ -23913,7 +23913,7 @@ function H3(n, t) {
     };
   }, t), [i, c, u, LR(n)];
 }
-const W2 = ["foodSection", "diary"], q3 = "/assets/food/meal-placeholder.svg", Kc = (n) => String(n || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim(), tb = "?v=2", eb = (n, t) => {
+const W2 = ["foodSection", "diary"], q3 = "/assets/food/meal-placeholder.webp", Kc = (n) => String(n || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim(), tb = "?v=2", eb = (n, t) => {
   const i = Kc(t);
   if (!n || !i) return null;
   const l = n[String(t || "").trim()];
@@ -23926,7 +23926,7 @@ const W2 = ["foodSection", "diary"], q3 = "/assets/food/meal-placeholder.svg", K
     n?.title,
     ...Array.isArray(n?.items) ? n.items.map((l) => l?.name) : []
   ].filter(Boolean).join(" "));
-  return Kc(n?.fclass) === "напиток" || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(t) ? "/assets/food/drink-cup.svg?v=1" : q3;
+  return Kc(n?.fclass) === "напиток" || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(t) ? "/assets/food/drink-placeholder.webp" : q3;
 }, hc = (n, t) => Object.prototype.hasOwnProperty.call(n, t), BR = (n) => (n || []).reduce((t, i) => ({
   kcal: t.kcal + Number(i?.kcal || 0),
   protein: t.protein + Number(i?.protein || 0),

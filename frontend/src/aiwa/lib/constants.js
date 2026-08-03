@@ -43,7 +43,7 @@ export const JOURNAL_MOOD_OPTIONS = [[1, "Плохое"], [2, "Нормальн�
 
 // Новые залогированные блюда пока без своей 3d-иконки — до генерации показываем
 // общую заглушку; у блюд из assets/food/manifest.json остаются их картинки.
-export const MEAL_IMAGE = "/assets/food/meal-placeholder.svg";
+export const MEAL_IMAGE = "/assets/food/meal-placeholder.webp";
 
 export const FOOD_SLOTS = [
   { value: "breakfast", label: "Завтрак" },

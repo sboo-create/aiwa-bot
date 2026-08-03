@@ -22,8 +22,12 @@ import requests
 
 STYLE_VERSION = "food-v1"
 GENERATED_PROMPT_VERSION = "food-icon-v3-components"
-MEAL_PLACEHOLDER = "/assets/food/meal-placeholder.svg"
-DRINK_PLACEHOLDER = "/assets/food/drink-cup.svg?v=1"
+# Заглушки — рендеры в манере каталога на белом фоне: приложение кладёт их на
+# свою подложку через mix-blend-mode: darken, и контурная svg-иконка выбивалась
+# из ряда 3D-тарелок. Старые svg остаются на диске: на них ещё ссылаются
+# бандлы, закэшированные у клиентов.
+MEAL_PLACEHOLDER = "/assets/food/meal-placeholder.webp"
+DRINK_PLACEHOLDER = "/assets/food/drink-placeholder.webp"
 _MANIFEST_PATH = Path(__file__).resolve().parent / "webapp2/assets/food/manifest.json"
 _WORD_RE = re.compile(r"[a-zа-яё0-9]+", re.IGNORECASE)
 _STOP_WORDS = {
