@@ -21,7 +21,7 @@ import requests
 
 
 STYLE_VERSION = "food-v1"
-GENERATED_PROMPT_VERSION = "food-icon-v3-components"
+GENERATED_PROMPT_VERSION = "food-photo-v4-white"
 # Заглушки — рендеры в манере каталога на белом фоне: приложение кладёт их на
 # свою подложку через mix-blend-mode: darken, и контурная svg-иконка выбивалась
 # из ряда 3D-тарелок. Старые svg остаются на диске: на них ещё ссылаются
@@ -760,9 +760,11 @@ def _image_request(
         f"dish: {literal}. Original Russian label: {label}. Every component "
         "listed must be separately visible and identifiable on the plate — do "
         "not merge them into one blob and do not omit any; keep grains, cuts "
-        "and textures distinct enough to tell lookalike foods apart. Centered "
-        "plate, simple warm 3D illustration, no people, no text, no logo, "
-        "square composition. The background must be plain pure white (#FFFFFF) "
+        "and textures distinct enough to tell lookalike foods apart. Appetizing "
+        "food photograph: three-quarter overhead view, soft diffused studio "
+        "light, gentle natural shadow under the plate, shallow depth of field, "
+        "crisp texture detail, centered square composition, no people, no text, "
+        "no logo. The background must be plain pure white (#FFFFFF) "
         "with no tint, gradient, shadow wash, table or surface behind the "
         "plate — the app composites the icon over its own backdrop and a baked "
         "background shows up as a grey tile. Do not replace an ingredient with "
