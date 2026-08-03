@@ -852,7 +852,13 @@ body.material .aiwa-nav-tabbar-layer > * {
 .aiwa-nav-mascot {
   position: absolute;
   right: 12px;
-  bottom: calc(var(--bottom-clearance, 21px) + env(safe-area-inset-bottom, 0px));
+  /* Тот же клиренс, что у таб-бара, и без собственного env(): бар safe-area не
+     учитывает, потому что apple/material-правила перебивают базовый
+     padding-bottom шорткатом padding (проверено на живой странице:
+     computed padding-bottom = --ui-space-4, а не инсет). Лишний терм поднимал
+     маскота над баром на устройствах с home indicator. Полпикселя — центровка
+     по высоте бара (65px против 64px у маскота). */
+  bottom: calc(var(--bottom-clearance, 21px) + 0.5px);
   z-index: 41;
   display: flex;
   width: 64px;
@@ -1409,11 +1415,12 @@ body.apple .aiwa-button-spinner > svg path {
   border-radius: 50%;
 }
 
-/* Anchored exactly like the TabBar pill: 16px in from the side (the pill's own
-   left inset once .aiwa-nav-tabbar-layer has re-anchored it) and
+/* 16px in from the side, like the TabBar pill's own left inset once
+   .aiwa-nav-tabbar-layer has re-anchored it. The safe-area inset IS added here:
    var(--bottom-clearance) off the bottom with NO extra env(safe-area-inset-bottom)
-   — the pill adds none either, so adding one here floats the button ~34px above
-   the dock on a real device. Same reasoning as .aiwa-nav-mascot. */
+   — the bar does not take the inset either (apple/material rules override the
+   base padding-bottom with the padding shorthand), so adding one here floats
+   the button above the dock on a real device. Same reasoning as .aiwa-nav-mascot. */
 .aiwa-calendar-fab {
   position: absolute;
   right: 16px;
@@ -2803,28 +2810,15 @@ body.material .aiwa-nav-tabbar-layer > * {
   margin-right: 0 !important;
 }
 
+/* Только горизонтальный перенос: плашка здесь переякорена в 262px по центру,
+   поэтому маскот встаёт справа от неё. Вертикаль, размер и точка вращения
+   намеренно НЕ переопределяются — этот блок раньше сбрасывал bottom на 18px и
+   ставил transform-origin в угол, отчего габарит маскота (75px против 65px у
+   бара) вылезал на 9px над плашкой. Именно это и выглядело как «солнышко
+   поднялось выше других кнопок». Базовое правило центрует его по бару. */
 .aiwa-nav-mascot {
   right: auto;
-  /* Match the TabBar pill's bottom anchor exactly (var(--bottom-clearance)).
-   * The pill has no extra env(safe-area-inset-bottom), so the mascot must not
-   * add one either — otherwise on a real device (env ≈ 34px) it floats above
-   * the tabs. Fallback 18px keeps the current preview alignment. */
-  bottom: var(--bottom-clearance, 18px);
   left: calc(50% + 101px);
-  width: 67px;
-  height: 66px;
-  transform: rotate(-7.81deg);
-  transform-origin: 0 0;
-}
-
-.aiwa-nav-mascot:active {
-  transform: rotate(-7.81deg) scale(0.96);
-}
-
-.aiwa-nav-mascot .aiwa-sequence {
-  width: 67px;
-  height: 66px;
-  flex-basis: 67px;
 }
 
 /* ── Action menu (local fork of Deslop TMA DropdownMenu) ────────────────── */

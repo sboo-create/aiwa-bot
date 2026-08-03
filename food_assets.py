@@ -21,7 +21,7 @@ import requests
 
 
 STYLE_VERSION = "food-v1"
-GENERATED_PROMPT_VERSION = "food-icon-v2-validated"
+GENERATED_PROMPT_VERSION = "food-icon-v3-components"
 MEAL_PLACEHOLDER = "/assets/food/meal-placeholder.svg"
 DRINK_PLACEHOLDER = "/assets/food/drink-cup.svg?v=1"
 _MANIFEST_PATH = Path(__file__).resolve().parent / "webapp2/assets/food/manifest.json"
@@ -461,6 +461,12 @@ def reviewed_generation_label(value: object) -> str | None:
 class FoodImageValidationError(ValueError):
     """A technically valid image does not visibly represent the requested food."""
 
+    def __init__(self, *args: object, missing: Iterable[str] = ()):
+        super().__init__(*args)
+        #: Components the gate could not identify — fed back into the retry so
+        #: the next attempt is told what to fix instead of guessing.
+        self.missing = tuple(str(item) for item in missing if str(item).strip())
+
 
 def _json_object(value: object) -> dict:
     text = str(value or "").strip()
@@ -546,13 +552,18 @@ def _literal_food_description(label: str) -> str:
         "Translate the following short Russian food diary label into a literal, "
         "concise English visual description for an image model. Preserve the "
         "exact main ingredient or animal species, cooking method and dish form. "
-        "Do not add ingredients and do not infer health context. Return only "
+        "Name EVERY component the label mentions — protein, grain or side, "
+        "vegetable, sauce — and give each one a short visual cue that tells it "
+        "apart from lookalike foods: grain size and shape, cut, colour, texture "
+        "(for example bulgur as coarse irregular cracked wheat versus couscous "
+        "as tiny round pale granules). Do not add components the label does not "
+        "mention and do not drop any. Do not infer health context. Return only "
         'JSON: {"description":"..."}. Label: '
         + json.dumps(label, ensure_ascii=False)
     )
     description = " ".join(str(data.get("description") or "").split())
     if (
-        not 3 <= len(description) <= 180
+        not 3 <= len(description) <= 400
         or re.search(
             r"\b(?:http|prompt|instruction|token|password)\b",
             description,
@@ -570,16 +581,31 @@ def _validate_generated_image(
         return 1.0
     data = _validation_chat(
         "Act as a strict food-image quality gate. Compare the image with the "
-        "target dish. The main named ingredient/category and preparation form "
-        "must be visibly correct; garnish may differ. Reject substitutions "
-        "caused by similar-sounding words (for example fish versus carrots), "
-        "non-food objects, visible text/logos or people. Return only JSON: "
-        '{"matches":true,"confidence":0.0,"reason":"short reason"}. '
+        "target dish. Every component named in the label must have its own "
+        "visible portion on the plate — a component that is absent, replaced by "
+        "a different food, or merged into an unidentifiable blob is a rejection, "
+        "not an acceptable garnish difference. In \"absent\" list ONLY components "
+        "you cannot find at all or that are clearly a different food. If a "
+        "plausible portion is there but you cannot confirm the exact variety "
+        "(bulgur versus couscous, one white fish versus another), that is NOT "
+        "absent — leave it out of the list. Reject substitutions caused by "
+        "similar-sounding words (for example fish versus carrots), non-food "
+        "objects, visible text/logos or people. Return only JSON: "
+        '{"matches":true,"confidence":0.0,"absent":[],"reason":"short reason"}. '
         "Original Russian label: " + json.dumps(label, ensure_ascii=False)
         + ". Literal English target: " + json.dumps(description),
         image=image,
     )
+    missing = data.get("absent")
     matches = data.get("matches") is True
+    if isinstance(missing, list) and any(str(item).strip() for item in missing):
+        absent = [str(item) for item in missing if str(item).strip()]
+        gap = re.sub(
+            r"[^a-zA-Zа-яА-ЯёЁ0-9 ,_-]", "", ", ".join(absent),
+        )[:48]
+        raise FoodImageValidationError(
+            f"food_image_missing_components:{gap}", missing=absent,
+        )
     confidence = data.get("confidence")
     if (
         not isinstance(confidence, (int, float))
@@ -604,7 +630,10 @@ def _validate_generated_image(
 
 
 def _image_request(
-    label: str, description: str | None = None, attempt: int = 1,
+    label: str,
+    description: str | None = None,
+    attempt: int = 1,
+    missing: Iterable[str] = (),
 ) -> bytes:
     endpoint = os.environ.get("AIWA_FOOD_IMAGE_API_URL", "").strip()
     api_key = os.environ.get("AIWA_FOOD_IMAGE_API_KEY", "").strip()
@@ -626,13 +655,31 @@ def _image_request(
         "and avoid metaphor or word association."
         if int(attempt or 1) > 1 else ""
     )
+    absent = [
+        re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9 ,_-]", "", str(item)).strip()[:40]
+        for item in missing
+        if str(item).strip()
+    ]
+    if absent:
+        # Blind retries repeated the same omission; naming what the gate could
+        # not find is what actually moves composite dishes past it.
+        retry_note += (
+            " The previous attempt did not show: "
+            + ", ".join(item for item in absent if item)
+            + ". Render each of those unmistakably, as its own visible portion."
+        )
     prompt = (
         "Single appetizing food icon for a wellness diary. Show exactly this "
-        f"dish: {literal}. Original Russian label: {label}. The main ingredient "
-        "and cooking form must be visually recognizable. Centered plate, simple "
-        "warm 3D illustration, neutral light background, no people, no text, "
-        "no logo, square composition. Do not replace an ingredient with a "
-        "similar-sounding object." + retry_note
+        f"dish: {literal}. Original Russian label: {label}. Every component "
+        "listed must be separately visible and identifiable on the plate — do "
+        "not merge them into one blob and do not omit any; keep grains, cuts "
+        "and textures distinct enough to tell lookalike foods apart. Centered "
+        "plate, simple warm 3D illustration, no people, no text, no logo, "
+        "square composition. The background must be plain pure white (#FFFFFF) "
+        "with no tint, gradient, shadow wash, table or surface behind the "
+        "plate — the app composites the icon over its own backdrop and a baked "
+        "background shows up as a grey tile. Do not replace an ingredient with "
+        "a similar-sounding object." + retry_note
     )
     size = os.environ.get("AIWA_FOOD_IMAGE_SIZE", "512x512").strip()
     if not re.fullmatch(r"(?:512|1024)x(?:512|1024)", size):
@@ -682,7 +729,10 @@ def _safe_webp(raw: bytes) -> bytes:
             raise ValueError("food_image_pixels")
         image = source.convert("RGBA")
         image.thumbnail((512, 512), Image.Resampling.LANCZOS)
-        canvas = Image.new("RGBA", (512, 512), (255, 250, 246, 255))
+        # Pure white, not a warm off-white: the Mini App paints its own
+        # backdrop and composites the icon with mix-blend-mode: darken, so any
+        # tint in the padding survives the blend as a visible tile.
+        canvas = Image.new("RGBA", (512, 512), (255, 255, 255, 255))
         x = (512 - image.width) // 2
         y = (512 - image.height) // 2
         canvas.alpha_composite(image, (x, y))
@@ -698,13 +748,56 @@ def _safe_webp(raw: bytes) -> bytes:
     return result
 
 
-def generate_and_store(label: object, attempt: int = 1) -> dict[str, object]:
+def _reject_baked_background(webp: bytes) -> float:
+    """Fail artwork that carries its own backdrop.
+
+    The Mini App draws the tile background itself (``--aiwa-media-bg``) and
+    composites the icon with ``mix-blend-mode: darken``. White pixels vanish
+    into that backdrop, which is what makes the icons look cut out; anything
+    darker survives and reads as a grey box around the food. The catalog-v2
+    batch was generated on a beige plate and broke exactly this way, so the
+    check is mechanical rather than left to the model.
+    """
+    from PIL import Image
+
+    with Image.open(io.BytesIO(webp)) as source:
+        source.load()
+        image = source.convert("RGB")
+    width, height = image.size
+    pixels = image.load()
+    step = max(1, width // 64)
+    border = []
+    for x in range(0, width, step):
+        border.append(pixels[x, 0])
+        border.append(pixels[x, height - 1])
+    for y in range(0, height, step):
+        border.append(pixels[0, y])
+        border.append(pixels[width - 1, y])
+    # Median, not minimum: a dish may legitimately touch the frame edge, and a
+    # single dark pixel there must not reject an otherwise clean icon.
+    levels = sorted(sum(pixel) / 3 for pixel in border)
+    median = levels[len(levels) // 2]
+    threshold = max(200.0, min(254.0, float(os.environ.get(
+        "AIWA_FOOD_IMAGE_BACKGROUND_MIN", "245"
+    ))))
+    if median < threshold:
+        raise FoodImageValidationError(
+            f"food_image_background_not_white:{median:.0f}",
+            missing=("plain white background",),
+        )
+    return median
+
+
+def generate_and_store(
+    label: object, attempt: int = 1, missing: Iterable[str] = (),
+) -> dict[str, object]:
     """Generate one immutable asset. Intended only for a bounded worker."""
     reviewed = reviewed_generation_label(label)
     if not reviewed:
         raise ValueError("food_image_label_rejected")
     description = _literal_food_description(reviewed)
-    webp = _safe_webp(_image_request(reviewed, description, attempt))
+    webp = _safe_webp(_image_request(reviewed, description, attempt, missing))
+    _reject_baked_background(webp)
     validation_score = _validate_generated_image(reviewed, description, webp)
     content_hash = hashlib.sha256(webp).hexdigest()
     directory = generated_asset_dir()

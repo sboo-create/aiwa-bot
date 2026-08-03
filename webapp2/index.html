@@ -511,8 +511,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 
 /* The main screen is styled by the exact Deslop package and src/deslop-main.css. */
 </style>
-<link rel="stylesheet" href="/assets/deslop/main.css?v=r30">
-<link rel="stylesheet" href="/assets/deslop/aiwa-v163.css">
+<link rel="stylesheet" href="/assets/deslop/main.css?v=r38">
 </head>
 <body class="apple">
 <div id="app" data-component="Page">
@@ -527,7 +526,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 <div id="hub" class="hubsheet hidden"></div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="cmic" aria-label="Голосом">🎤</button><button id="csend" aria-label="Отправить">→</button></div>
 <div id="tabs" aria-label="Разделы приложения"></div><input type="file" id="foodfile" accept="image/*" style="display:none">
-<script type="module" src="/assets/deslop/main.js?v=r30"></script>
+<script type="module" src="/assets/deslop/main.js?v=r38"></script>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp;
 const LOCAL_HOST=/^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/;
@@ -565,7 +564,7 @@ lut:{food:"магний + стабильный сахар",move:"умеренн�
 };
 const CHIPS={men:["Что есть при месячных?","Можно тренироваться?"],fol:["Какая тренировка лучше?","Что есть сейчас?"],ovu:["Можно интенсивнее?","Что есть в овуляцию?"],lut:["Что съесть вечером?","Как пережить ПМС?"]};
 const SYMS=[["cramps","Спазмы"],["head","Голова"],["bloat","Вздутие"],["sweet","Тянет на сладкое"],["anx","Тревожно"],["tired","Усталость"]];
-const SYMGROUPS=[["Боль",[["cramps","Спазмы"],["head","Голова"],["breast","Грудь"],["back","Поясница"]]],["Настроение",[["anx","Тревожно"],["irrit","Раздражительность"],["low","Апатия"]]],["Тело",[["tired","Усталость"],["bloat","Вздутие"],["sweet","Тянет на сладкое"],["swell","Отёки"]]],["Кожа и сон",[["skin","Высыпания"],["insomnia","Плохой сон"]]]];
+const SYMGROUPS=[["Боль",[["cramps","Спазмы"],["head","Голова"],["breast","Грудь"],["back","Поясница"]]],["Эмоции",[["anx","Тревожно"],["irrit","Раздражительность"],["low","Апатия"]]],["Тело",[["tired","Усталость"],["bloat","Вздутие"],["sweet","Тянет на сладкое"],["swell","Отёки"]]],["Кожа и сон",[["skin","Высыпания"],["insomnia","Плохой сон"]]]];
 const MENO_SYMS=[["meno_hot","Приливы"],["meno_night","Ночная потливость"],["meno_sleep","Плохой сон"],["meno_mood","Тревожность"],["meno_dry","Сухость"],["meno_heart","Сердцебиение"],["meno_joint","Суставы"],["meno_brain","Туман"],["meno_weight","Вес"]];
 const PREG_SYMS=[["preg_nausea","Тошнота"],["preg_heartburn","Изжога"],["preg_swelling","Отёки"],["preg_back","Боль в спине"],["preg_move","Шевеления"],["preg_tired","Усталость"],["preg_sleep","Плохой сон"],["preg_cramp","Тянет живот"]];
 const MENO_FACTS=[

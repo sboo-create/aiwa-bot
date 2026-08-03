@@ -243,8 +243,10 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertIn("/api/diary", bundle)
         self.assertIn("/api/diary", bundle)
         self.assertIn('"/api/diary"', bundle)
-        # правки в прошлом дне перечитывают именно этот день, а не «сегодня»
-        self.assertIn("В этот день записей нет", bundle)
+        # правки в прошлом дне перечитывают именно этот день, а не «сегодня».
+        # Раньше признаком служила заглушка «В этот день записей нет», но пустой
+        # дневник больше не рисует секцию вовсе — берём заголовок прошлого дня.
+        self.assertIn("Приёмы за ", bundle)
         
         
         self.assertIn('"diary"', bundle)

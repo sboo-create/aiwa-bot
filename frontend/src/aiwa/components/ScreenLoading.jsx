@@ -55,7 +55,13 @@ export function ScreenLoading({ title, variant = "food" }) {
   return (
     <TMAProvider>
       <Page mode="secondary">
-        <div className={`aiwa-paper-screen aiwa-screen-skeleton aiwa-${variant}-screen`}>
+        {/* Скринридеру скелетон читается как пустая страница — озвучиваем
+            ожидание. Перенос из ветки design-fixes. */}
+        <div
+          className={`aiwa-paper-screen aiwa-screen-skeleton aiwa-${variant}-screen`}
+          role="status"
+          aria-label="Айва загружается"
+        >
           {/* Заголовок известен сразу — мигать ему незачем. */}
           <Text className="aiwa-screen-title" variant="title1" weight="semibold">{title}</Text>
           <Skeleton active>

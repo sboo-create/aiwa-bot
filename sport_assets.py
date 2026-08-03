@@ -14,6 +14,7 @@ import math
 import os
 import re
 import threading
+from typing import Iterable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -210,8 +211,11 @@ def _validate_generated_image(
         return 1.0
     data = _validation_chat(
         "Act as a strict sport-icon quality gate. Compare the image with the "
-        "target activity. The exact sport, essential equipment and environment "
-        "must be recognizable. Reject a related-but-different sport, unsafe or "
+        "target activity. The exact sport, the essential equipment and the "
+        "movement must be recognizable. The icon is cut out on a plain white "
+        "field on purpose — a missing gym, court or scenery is NOT a defect "
+        "and must not be a reason to reject. Reject a related-but-different "
+        "sport, unsafe or "
         "anatomically impossible posture, injury, visible text/logo, celebrity "
         "likeness, nudity or a close-up identifiable face. Return only JSON: "
         '{"matches":true,"confidence":0.0,"reason":"short reason"}. '
@@ -246,7 +250,10 @@ def _validate_generated_image(
 
 
 def _image_request(
-    label: str, description: str | None = None, attempt: int = 1,
+    label: str,
+    description: str | None = None,
+    attempt: int = 1,
+    missing: Iterable[str] = (),
 ) -> bytes:
     endpoint = _provider_value(
         "AIWA_SPORT_IMAGE_API_URL", "AIWA_FOOD_IMAGE_API_URL"
@@ -274,13 +281,27 @@ def _image_request(
         "specific activity unmistakable."
         if int(attempt or 1) > 1 else ""
     )
+    absent = [
+        re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9 ,_-]", "", str(item)).strip()[:40]
+        for item in missing
+        if str(item).strip()
+    ]
+    if absent:
+        retry_note += (
+            " The previous attempt did not show: "
+            + ", ".join(item for item in absent if item)
+            + ". Render each of those clearly."
+        )
     prompt = (
         "Single friendly sport icon for a wellness training diary. Show exactly "
         f"this activity: {literal}. Original Russian label: {label}. One full-"
         "body adult athlete or a small non-identifiable pair/team, with correct "
-        "equipment and movement. Simple warm 3D illustration, neutral light "
-        "background, centered square composition, no close-up face, no text, "
-        "no logo, no brand, no injury." + retry_note
+        "equipment and movement. Simple warm 3D illustration, centered square "
+        "composition, no close-up face, no text, no logo, no brand, no injury. "
+        "The background must be plain pure white (#FFFFFF) with no tint, "
+        "gradient, floor, court or scenery behind the athlete — the app composites "
+        "the icon over its own backdrop and a baked background shows up as a "
+        "grey tile." + retry_note
     )
     size = _provider_value(
         "AIWA_SPORT_IMAGE_SIZE", "AIWA_FOOD_IMAGE_SIZE"
@@ -325,14 +346,19 @@ def _image_request(
     return raw
 
 
-def generate_and_store(label: object, attempt: int = 1) -> dict[str, object]:
+def generate_and_store(
+    label: object, attempt: int = 1, missing: Iterable[str] = (),
+) -> dict[str, object]:
     reviewed = reviewed_generation_label(label)
     if not reviewed:
         raise ValueError("sport_image_label_rejected")
     description = _literal_sport_description(reviewed)
     webp = food_assets._safe_webp(
-        _image_request(reviewed, description, attempt)
+        _image_request(reviewed, description, attempt, missing)
     )
+    # Sport tiles composite over the same backdrop as food, so a baked
+    # background breaks them identically.
+    food_assets._reject_baked_background(webp)
     validation_score = _validate_generated_image(
         reviewed, description, webp
     )

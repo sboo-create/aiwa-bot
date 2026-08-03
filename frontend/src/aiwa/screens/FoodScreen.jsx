@@ -487,6 +487,10 @@ export function FoodScreen({ mode, revision = 0 }) {
   const historyTitle = viewingPast ? `Приёмы за ${dayTitle(selectedIso)}` : "Прошедшие приёмы";
   const historyLoading = uploading || (viewingPast && selectedEntry.status === "loading");
   const historyError = viewingPast && selectedEntry.status === "error";
+  /* Пустой дневник не показывает секцию вовсе — ни заголовка, ни кнопки
+     недельного разбора: заголовок над пустотой читался как сломанный блок.
+     Ошибку показываем, иначе повторить загрузку будет нечем. */
+  const showHistory = shownMeals.length > 0 || historyLoading || historyError;
 
   const retrySelectedDiary = () => requestDayDiary(selectedIso, { force: true });
 
@@ -672,6 +676,7 @@ export function FoodScreen({ mode, revision = 0 }) {
               </SectionList.Item>
             ) : null}
 
+            {showHistory ? (
             <SectionList.Item header={historyTitle}>
               {uploading ? (
                 <PaperRow loading title="Разбираю фото…" description="Айва считает КБЖУ" />
@@ -686,7 +691,9 @@ export function FoodScreen({ mode, revision = 0 }) {
                   onClick={retrySelectedDiary}
                 />
               ) : null}
-              {shownMeals.length ? shownMeals.map((meal) => (
+              {/* Пустой дневник не заполняем строкой-заглушкой: она читалась как
+                  сломанный блок, а добавить приём можно кнопкой выше. */}
+              {shownMeals.map((meal) => (
                 <PaperRow
                   key={meal.id}
                   image={meal.image_url || dishImageFrom(foodIcons, meal.title) || foodFallbackImage(meal) || MEAL_IMAGE}
@@ -694,13 +701,7 @@ export function FoodScreen({ mode, revision = 0 }) {
                   description={`${fmtKcal(meal.kcal)} · Б${Math.round(meal.protein || 0)} · Ж${Math.round(meal.fat || 0)} · У${Math.round(meal.carbs || 0)}`}
                   onClick={() => setPanel("diary")}
                 />
-              )) : (historyLoading || historyError) ? null : (
-                <PaperRow
-                  title={viewingPast ? "В этот день записей нет" : "Дневник пока пуст"}
-                  description={viewingPast ? "Дневник за этот день пуст." : "Добавь первый приём — фото, текстом или вручную."}
-                  onClick={viewingPast ? undefined : () => setPanel("diary")}
-                />
-              )}
+              ))}
               {weekReview ? (
                 <>
                   <AiwaInsightCard message={weekReview.summary} />
@@ -731,6 +732,7 @@ export function FoodScreen({ mode, revision = 0 }) {
                 />
               </div>
             </SectionList.Item>
+            ) : null}
           </SectionList>
 
           <ProfilePanel isOpen={profileOpen} onClose={() => setProfileOpen(false)} />
