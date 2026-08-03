@@ -45,6 +45,11 @@ import cycle as C
 import llm as L
 import analytics_v2 as A2
 import food_assets as FA
+import portability
+# Реестр действий и общий сбор параметров. Зависимость строго односторонняя:
+# dialog ничего не знает про aiwa_bot, поэтому истории с двойной загрузкой
+# модуля под `python aiwa_bot.py` тут возникнуть не может.
+import dialog
 
 class KBS:
     PRIMARY = "primary"
@@ -630,7 +635,10 @@ def _migrate_db_on_connection(c):
                 "last_phase_notified TEXT", "last_reactivation TEXT",
                 "proactive_enabled INTEGER DEFAULT 1",
                 "daily_summary_enabled INTEGER DEFAULT 1", "tg_first_name TEXT",
-                "push_suppressed_at TEXT", "push_suppression_reason TEXT"):
+                "push_suppressed_at TEXT", "push_suppression_reason TEXT",
+                # Отвечать ли голосом. Единственная возможность из списка багов,
+                # которой не было ни на одной поверхности.
+                "voice_reply TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     # v177 introduced the marker without a durable migration marker. Production
@@ -732,7 +740,7 @@ def row(cid):
 _USER_UPDATE_COLUMNS = frozenset({"activity", "age", "cycle_len", "diet", "diet_note", "height", "kcal_goal",
     "last_period", "last_phase_notified", "last_reactivation", "mode", "partner_code", "pending_date",
     "period_end", "period_len", "proactive_enabled", "daily_summary_enabled", "push_suppressed_at",
-    "push_suppression_reason", "send_time", "state", "tg_first_name", "train_profile", "weight"})
+    "push_suppression_reason", "send_time", "state", "tg_first_name", "train_profile", "voice_reply", "weight"})
 def upsert(cid, *, user_generation=None, **kw):
     unknown = set(kw) - _USER_UPDATE_COLUMNS
     if unknown:
@@ -1224,9 +1232,13 @@ def meal_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_has
             except (TypeError, ValueError): saved_data = {}
             result = {"id": prior_id, "created": False, "status": status, "data": saved_data}
             return result if return_status else prior_id
+    # Опечатка в опорном слове стоит блюду картинки и семейного фолбэка:
+    # «таорог» не находит ни творог, ни его каталог. Правим на записи, а не
+    # только при подборе картинки, чтобы в дневнике лежало читаемое название.
+    title = FA.correct_typos(rec["title"])
     mid = c.execute(
         "INSERT INTO meals(chat_id,d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass,slot_guessed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (cid, d, datetime.now(TZ).isoformat(), rec["title"], int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
+        (cid, d, datetime.now(TZ).isoformat(), title, int(rec["kcal"]), float(rec["protein"]), float(rec["fat"]),
          float(rec["carbs"]), (int(rec["grams"]) if rec.get("grams") else None),
          json.dumps(rec.get("items") or [], ensure_ascii=False), rec.get("source") or "photo", slot,
          rec.get("fclass") or None, int(bool(rec.get("slot_guessed"))))).lastrowid
@@ -1929,6 +1941,27 @@ def partner_of(woman_id):
 def woman_of_partner(pid):
     c = db(); r = c.execute("SELECT woman_id FROM partners WHERE partner_id=?", (pid,)).fetchone(); c.close(); return r[0] if r else None
 def is_partner(cid): return woman_of_partner(cid) is not None
+
+# Вопрос адресован партнёрше, а не себе: «как ей помочь», «что у неё сегодня».
+_ABOUT_HER_RE = re.compile(
+    r"\b(её|ее|ей|неё|нее|она|ней|жен[аеуы]|девушк\w+|партнёрш\w+|партнерш\w+|супруг[аеиу])\b",
+    re.IGNORECASE,
+)
+
+def partner_question(cid, text):
+    """Роль партнёра — это связь, а не отсутствие собственного профиля.
+
+    Раньше партнёрский ответ выдавался по условию «связан И сам не прошёл
+    онбординг»: стоило партнёру завести собственный профиль в Айве, и он
+    переставал получать ответы про партнёршу — проваливался в обычную ветку.
+    Теперь связь проверяется отдельно от своих данных: если профиля нет,
+    партнёрский режим включён всегда, если есть — когда спрашивают про неё.
+    """
+    if not is_partner(cid):
+        return False
+    if not is_onboarded(row(cid)):
+        return True
+    return bool(_ABOUT_HER_RE.search(str(text or "")))
 def cycles_of(cid, since_iso=None):
     c = db()
     if since_iso:
@@ -2021,6 +2054,138 @@ def parse_time(t):
         if 0 <= h < 24 and 0 <= m < 60: return f"{h:02d}:{m:02d}"
     except Exception: pass
     return None
+
+# Первое действие в реестре. Дальше сюда же переезжают остальные ветки
+# `await_*`: сбор параметров у них общий, поэтому и ветка неудачи одна.
+def _parse_time_phrase(text):
+    """Достать время из живой фразы, а не только из «08:00».
+
+    «Поставь сводку на 9:15» приходит целой репликой — и голосом почти всегда
+    так. Сначала ищем время внутри текста, потом отдаём строку обычному
+    parse_time: короткий ответ «8» на прямой вопрос он разберёт сам.
+    """
+    raw = " ".join(str(text or "").split())
+    m = re.search(r"\b([01]?\d|2[0-3])[:.\s]([0-5]\d)\b", raw)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    m = re.search(r"\b([01]?\d|2[0-3])\s*(?:час\w*|утра|вечера|дня)\b", raw.lower())
+    if m:
+        hour = int(m.group(1))
+        if "вечера" in raw.lower() and hour < 12:
+            hour += 12
+        return f"{hour:02d}:00"
+    return parse_time(raw)
+
+ACT_SETTIME = dialog.register(dialog.Action(
+    name="settime",
+    title="Время сводки",
+    description="Во сколько присылать ежедневную сводку.",
+    params=(dialog.Param(
+        name="hhmm",
+        prompt="Во сколько присылать сводку (МСК)? Например 08:00.",
+        parse=_parse_time_phrase,
+        error="Нужно время по Москве, например 08:00.",
+    ),),
+))
+
+def _parse_period_date(text):
+    d = parse_date(text)
+    return d.isoformat() if d else None
+
+ACT_PERIOD_DATE = dialog.register(dialog.Action(
+    name="period_date",
+    title="Дата последних месячных",
+    description="Отметить начало последних месячных.",
+    params=(dialog.Param(
+        name="iso",
+        prompt="Напиши дату начала последних месячных, например 25.05.2026.",
+        parse=_parse_period_date,
+        error="Не разобрала дату. Нужен формат ДД.ММ.ГГГГ, например 25.05.2026.",
+    ),),
+))
+
+def _parse_energy(text):
+    low = " ".join(str(text or "").split()).lower()
+    words = {"мало": 1, "низк": 1, "плохо": 1, "устал": 1, "сред": 2, "норм": 2,
+             "нормаль": 2, "обычн": 2, "много": 3, "отлич": 3, "бодр": 3, "хорош": 3}
+    for stem, value in words.items():
+        if stem in low:
+            return value
+    m = re.search(r"\b([1-3])\b", low)
+    return int(m.group(1)) if m else None
+
+ACT_CHECKIN = dialog.register(dialog.Action(
+    name="checkin",
+    title="Чек-ин самочувствия",
+    description="Отметить уровень энергии на сегодня.",
+    params=(dialog.Param(
+        name="energy",
+        prompt="Как сегодня с энергией — мало, средне или много?",
+        parse=_parse_energy,
+        error="Скажи «мало», «средне» или «много».",
+    ),),
+))
+
+def _parse_meal_hint(text):
+    hint = " ".join(str(text or "").split())
+    return hint[:80] if len(hint) >= 2 else None
+
+ACT_MEAL_DELETE = dialog.register(dialog.Action(
+    name="meal_delete",
+    title="Удалить приём пищи",
+    description="Удалить запись о приёме пищи за сегодня по её названию.",
+    params=(dialog.Param(
+        name="title",
+        prompt="Какой приём удалить? Напиши название так, как оно записано.",
+        parse=_parse_meal_hint,
+        error="Напиши название приёма, например «творог».",
+    ),),
+))
+
+ACT_EXPORT = dialog.register(dialog.Action(
+    name="export_data",
+    title="Выгрузка данных",
+    description="Прислать файлом все записи пользователя: цикл, питание, тренировки, самочувствие.",
+))
+
+def _parse_voice_choice(text):
+    low = " ".join(str(text or "").split()).lower()
+    if re.search(r"\b(голос\w*|говор\w+|озвуч\w+|аудио|voice)\b", low):
+        return "voice"
+    if re.search(r"\b(текст\w*|письм\w+|молч\w+|без голоса|text)\b", low):
+        return "text"
+    return None
+
+ACT_VOICE_MODE = dialog.register(dialog.Action(
+    name="voice_mode",
+    title="Ответы голосом",
+    description="Отвечать голосом или текстом на голосовые сообщения.",
+    params=(dialog.Param(
+        name="choice",
+        prompt="Как отвечать на голосовые — голосом или текстом?",
+        parse=_parse_voice_choice,
+        error="Напиши «голосом» или «текстом».",
+    ),),
+))
+
+def _parse_cycle_len(text):
+    m = re.search(r"\d{1,2}", text or "")
+    if not m:
+        return None
+    value = int(m.group())
+    return value if 15 <= value <= 60 else None
+
+ACT_CYCLE_LEN = dialog.register(dialog.Action(
+    name="cycle_len",
+    title="Длина цикла",
+    description="Средняя длина цикла в днях.",
+    params=(dialog.Param(
+        name="days",
+        prompt="Какая средняя длина цикла? Напиши число, например 28.",
+        parse=_parse_cycle_len,
+        error="Нужно число от 15 до 60.",
+    ),),
+))
 
 def calc_calories(cm, kg, age, act, male=False):
     # Миффлин-Сан Жеор: −161 для женщин, +5 для мужчин.
@@ -2439,6 +2604,17 @@ def match_intent(t):
         )
     )
     if re.search(r"(помен|измен|задать|настро|переключ|во ?сколько|поставь).{0,24}(время|рассылк|сводк|присыл)", t) or re.search(r"\bвремя\b\s*(рассылк|сводк|присыл)", t): return "time"
+    # Выгрузка данных. Без явного интента фраза «пришли мои данные» уходила в
+    # справку о приватности: та отвечает на «какие данные вы храните», а тут
+    # человек просит сами записи.
+    if re.search(r"(пришл\w*|отправ\w*|скач\w*|выгруз\w*|экспорт\w*|дай|отдай)\w*[^.]{0,24}"
+                 r"(мои\s+данн\w*|мои\s+запис\w*|все\s+данн\w*|выгрузк\w*|бэкап|архив)", t) \
+            or re.search(r"\b(экспорт|выгрузк\w*)\s+(данн\w*|запис\w*)", t): return "export"
+    # Чек-ин самочувствия утверждением: «сегодня мало энергии» — это отметка,
+    # а не вопрос, и раньше уходило в обычный ответ ИИ.
+    if re.search(r"(сегодня|сейчас|у меня)[^.]{0,24}(мало|низк\w*|нет|много|высок\w*|средн\w*|норм\w*)"
+                 r"[^.]{0,12}(энерги\w*|сил)", t) \
+            or re.search(r"(энерги\w*|сил)[^.]{0,16}(мало|низк\w*|много|высок\w*|средн\w*)", t): return "energy"
     if re.search(r"(добав|ввес|внес|загруз|импорт)\w*.{0,16}(истори\w*\s*цикл|цикл)|истори\w*\s*цикл\w*\s*вручную|(импорт|перенес\w*).{0,12}(flo|фло)", t): return "addcycles"
     if re.search(r"(ввес\w*|поменя\w*|измен\w*|обнов\w*|исправ\w*|задат\w*|укаж\w*|написа\w*|внес\w*|поправ\w*)\s*(свой|свои|мой|мои)?\s*(вес|рост|возраст|данные|параметр)|мой вес|новый вес|неправильн\w*.{0,18}(вес|рост|возраст|данные)", t): return "profile"
     if re.search(r"фаз", t) and re.search(r"(что так|что значит|расскаж|объясн|не понима|не разбира|какие бывают|подробнее|про фаз)", t): return "phases"
@@ -3712,13 +3888,16 @@ ONB_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Женщина", callback_data="onb_female")],
     [InlineKeyboardButton("Мужчина", callback_data="mode:male")],
 ])
+# Беременность — самостоятельное состояние, а не разновидность «нет цикла».
+# Она лежала уровнем ниже, за кнопкой «Нет регулярного цикла», и беременные
+# на первом экране онбординга себя не находили.
 FEMALE_ONB_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
+    [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
     [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
 ])
 NOCYCLE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Нерегулярный цикл", callback_data="mode:irregular")],
-    [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
     [InlineKeyboardButton("Менопауза", callback_data="mode:meno")],
     [InlineKeyboardButton("Сейчас нет месячных", callback_data="mode:none")],
 ])
@@ -5040,10 +5219,27 @@ def _remember_spoken(cid, text):
     if collector is not None and str(text or "").strip():
         collector.append(_voice_plain_text(text))
 
-def _voice_reply_on():
-    # TTS is opt-in until the provider path has proved text/audio parity in
-    # production. STT remains available and still returns the text answer.
+def _voice_reply_default():
+    # Общий рубильник провайдера: пока путь TTS не доказал паритет с текстом,
+    # он выключен по умолчанию. STT это не касается — расшифровка работает
+    # всегда и всё равно возвращает текстовый ответ.
     return os.environ.get("AIWA_VOICE_REPLY", "0") in ("1", "true", "True", "yes", "on")
+
+def _voice_reply_on(cid=None):
+    """Отвечать ли голосом. Выбор пользователя важнее общего умолчания.
+
+    Раньше это был только глобальный флаг: настроить режим под себя было
+    нельзя ни из чата, ни из меню, ни из мини-аппа — единственная возможность
+    из списка багов, которой не существовало нигде. Теперь решение хранится
+    в профиле, а флаг остаётся страховкой на стороне провайдера: выключенный
+    рубильник запрещает голос всем.
+    """
+    if not _voice_reply_default():
+        return False
+    if cid is None:
+        return True
+    choice = str((row(cid) or {}).get("voice_reply") or "").strip().lower()
+    return choice != "text"
 
 def _voice_plain_text(value):
     """Prepare already-sent Telegram text for TTS without speaking HTML markup."""
@@ -5345,7 +5541,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|bot")
     ev(cid, "tokens", sum(usage), meta="answer", calls=len(usage), usage=usage)
-    if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
+    if _VOICE_TURN.pop(cid, False) and _voice_reply_on(cid):
         await _send_voice_reply(context, cid, clean)
 
 async def _send_summary_text(context, cid, clean, kb):
@@ -5563,6 +5759,30 @@ def cycle_text_analysis(cid):
     parts.append("\nПодробную выписку для врача можно собрать кнопкой ниже.")
     return "\n".join(parts)
 
+async def _start_action(context, update, cid, name, text, prompt=None, reply_markup=None):
+    """Начать действие, забрав из фразы то, что в ней уже сказано.
+
+    «Поставь сводку на 9:15» содержит ответ на единственный вопрос действия —
+    переспрашивать в таком случае глупо. Разбираем текст теми же парсерами, и
+    если всё нужное нашлось, сразу выполняем; чего не хватает — спрашиваем.
+    """
+    action = dialog.get(name)
+    known = {}
+    for param in action.params:
+        try:
+            value = param.parse(text or "")
+        except Exception:
+            value = None
+        if value is not None:
+            known[param.name] = value
+    step = dialog.begin(name, known)
+    if isinstance(step, dialog.Done):
+        upsert(cid, state=None)
+        return await _apply_action(context, update, cid, step)
+    upsert(cid, state=step.state)
+    message = getattr(update, "message", None) or update.effective_message
+    return await message.reply_text(prompt or step.prompt, reply_markup=reply_markup)
+
 async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None, user_generation=None):
     msg = update.message; general = not is_cycle(u); ev(cid, "manual", meta="intent_" + intent)
     turn_generation = _user_generation(cid) if user_generation is None else int(user_generation)
@@ -5578,9 +5798,19 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
     if intent == "analysis":
         return await msg.reply_text(cycle_text_analysis(cid),
             reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
+    if intent == "export":
+        return await _start_action(context, update, cid, ACT_EXPORT.name, txt)
+    if intent == "energy":
+        return await _start_action(
+            context, update, cid, ACT_CHECKIN.name, txt,
+            prompt="Как сегодня с энергией — мало, средне или много?",
+        )
     if intent == "time":
-        upsert(cid, state="await_time")
-        return await msg.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 08:00.", reply_markup=time_kb())
+        return await _start_action(
+            context, update, cid, ACT_SETTIME.name, txt,
+            prompt="Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 08:00.",
+            reply_markup=time_kb(),
+        )
     if intent == "checkin":
         log_ensure(cid, dtoday().isoformat())
         return await msg.reply_text("Отметим самочувствие. Какая сегодня энергия?", reply_markup=en_kb("e"))
@@ -5614,7 +5844,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             upsert(cid, cycle_len=int(mnum.group(1)), state=None)
             await msg.reply_text(f"Записала длину цикла: {mnum.group(1)} дн.")
             return await push_summary(context, cid)
-        upsert(cid, state="await_cycle_len")
+        upsert(cid, state=dialog.begin(ACT_CYCLE_LEN.name).state)
         return await msg.reply_text("Какая у тебя средняя длина цикла в днях? Обычно 21-35. Напиши число, например 28.")
     if intent == "unlink":
         return await msg.reply_text("Чтобы отключить партнёра, введи команду /unlink")
@@ -5790,7 +6020,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         if st["status"] != "normal": return await send_delay(context, cid, st)
         return await send_infographic(context.bot, cid)
     if intent == "period":
-        upsert(cid, state="await_period_date")
+        upsert(cid, state=dialog.begin(ACT_PERIOD_DATE.name).state)
         return await msg.reply_text("Напиши дату начала последних месячных, например 25.05.2026, или нажми кнопку. Потом даты можно редактировать в приложении.", reply_markup=PERIOD_KB)
 
 async def push_summary(context, cid, with_image=True, campaign=None):
@@ -6278,6 +6508,198 @@ def set_daily_time(app, cid, hhmm):
         state=None,
     )
     schedule_daily(app, cid, hhmm)
+
+def _act_settime(cid, values):
+    hhmm = values["hhmm"]
+    set_daily_time(BOT_APP, cid, hhmm)
+    return {"ok": True, "time": hhmm, "text": schedule_text(cid, hhmm)}
+
+def _act_period_date(cid, values):
+    if is_male_profile(row(cid)):
+        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    iso = values["iso"]
+    if not db_mark_period(cid, iso):
+        return {"ok": False, "error": "not_saved"}
+    schedule_daily(BOT_APP, cid, (row(cid) or {}).get("send_time") or "08:00")
+    return {"ok": True, "date": iso,
+            "text": f"Отметила начало месячных: {date.fromisoformat(iso).strftime('%d.%m.%Y')}."}
+
+def _act_cycle_len(cid, values):
+    if is_male_profile(row(cid)):
+        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    days = int(values["days"])
+    upsert(cid, cycle_len=days)
+    return {"ok": True, "cycle_len": days, "text": f"Записала длину цикла: {days} дн."}
+
+# Один обработчик на действие — им пользуются и меню, и чат. Пока их два, но
+# именно это и разъезжалось: возможность жила на одной поверхности и не
+# существовала на другой.
+def _act_checkin(cid, values):
+    day = dtoday().isoformat()
+    if not log_set(cid, day, energy=int(values["energy"])):
+        return {"ok": False, "error": "not_saved"}
+    _evict_today_cache(cid)
+    words = {1: "мало", 2: "средне", 3: "много"}
+    return {"ok": True, "date": day, "energy": int(values["energy"]),
+            "text": f"Отметила энергию на сегодня: {words[int(values['energy'])]}."}
+
+def _act_meal_delete(cid, values):
+    """Удаление приёма из чата.
+
+    Мини-апп это умеет через /api/diary_del, а чат — нет: возможность жила на
+    одной поверхности. Здесь тот же удаляющий путь, только запись ищется по
+    названию, потому что в разговоре пользователь идентификатором не оперирует.
+    """
+    hint = FA.correct_typos(values["title"]).casefold()
+    day = dtoday().isoformat()
+    c = db()
+    try:
+        rows = c.execute(
+            "SELECT id,title FROM meals WHERE chat_id=? AND d=? ORDER BY id DESC",
+            (cid, day),
+        ).fetchall()
+    finally:
+        c.close()
+    hits = [r for r in rows if hint in str(r[1] or "").casefold()]
+    if not hits:
+        return {"ok": False, "error": "not_found",
+                "note": f"За сегодня не нашла приём «{values['title']}»."}
+    if len(hits) > 1:
+        names = ", ".join(f"«{r[1]}»" for r in hits[:4])
+        return {"ok": False, "error": "ambiguous",
+                "note": f"Под это описание подходит несколько записей: {names}. Уточни название."}
+    meal_id, title = hits[0][0], hits[0][1]
+    mutation, error, _status = _delete_diary_meal_atomic(
+        cid, meal_id, None, _user_generation(cid), _diary_target_snapshot(cid),
+    )
+    if error:
+        return {"ok": False, "error": "not_deleted", "note": "Не получилось удалить запись."}
+    _evict_week_food_cache(cid)
+    return {"ok": True, "title": title, "text": f"Удалила «{title}» из сегодняшнего дневника."}
+
+def _export_document(cid):
+    """Собрать выгрузку. SQL живёт здесь, формат — в portability."""
+    c = db()
+    try:
+        def rows(sql, fields):
+            return [dict(zip(fields, r)) for r in c.execute(sql, (cid,)).fetchall()]
+        sections = {
+            "cycles": rows("SELECT start_date,end_date FROM cycles WHERE chat_id=? ORDER BY start_date",
+                           ("start_date", "end_date")),
+            "meals": rows("SELECT d,ts,title,kcal,protein,fat,carbs,grams,items,source,slot,fclass "
+                          "FROM meals WHERE chat_id=? ORDER BY d,ts",
+                          ("d", "ts", "title", "kcal", "protein", "fat", "carbs", "grams",
+                           "items", "source", "slot", "fclass")),
+            "workouts": rows("SELECT d,ts,type,items,duration,rpe,note FROM workouts WHERE chat_id=? ORDER BY d,ts",
+                             ("d", "ts", "type", "items", "duration", "rpe", "note")),
+            "logs": rows("SELECT log_date,energy,mood,symptoms FROM logs WHERE chat_id=? ORDER BY log_date",
+                         ("log_date", "energy", "mood", "symptoms")),
+            "intimacy": rows("SELECT d FROM intimacy WHERE chat_id=? ORDER BY d", ("d",)),
+            "memory": rows("SELECT mkey,mval,updated FROM memory WHERE chat_id=? ORDER BY mkey",
+                           ("mkey", "mval", "updated")),
+        }
+    finally:
+        c.close()
+    return portability.dump(row(cid) or {}, sections,
+                            exported_at=datetime.now(TZ).isoformat(timespec="seconds"))
+
+async def _send_export_job(context):
+    cid = context.job.chat_id
+    document = context.job.data["document"]
+    payload = portability.to_json(document).encode("utf-8")
+    bio = io.BytesIO(payload); bio.name = "aiwa-export.json"
+    await context.bot.send_document(
+        cid, document=bio, filename="aiwa-export.json",
+        caption="Твои записи одним файлом. Его же можно прислать обратно, чтобы восстановить историю.",
+    )
+
+def _act_export_data(cid, values):
+    document = _export_document(cid)
+    BOT_APP.job_queue.run_once(
+        _send_export_job, 0, chat_id=cid, name=f"export:{cid}:{secrets.token_hex(4)}",
+        data={"document": document},
+    )
+    return {"ok": True, "text": "Собрала выгрузку: " + portability.summary(document)
+                                + ". Файл придёт следующим сообщением."}
+
+def _act_voice_mode(cid, values):
+    choice = values["choice"]
+    upsert(cid, voice_reply=choice)
+    if choice == "voice" and not _voice_reply_default():
+        return {"ok": True, "voice_reply": choice,
+                "text": "Записала: отвечать голосом. Пока голосовые ответы отключены на стороне сервиса — "
+                        "как включим, заработает без дополнительных настроек."}
+    return {"ok": True, "voice_reply": choice,
+            "text": "Буду отвечать голосом." if choice == "voice" else "Буду отвечать текстом."}
+
+_ACTION_HANDLERS = {
+    ACT_VOICE_MODE.name: _act_voice_mode,
+    ACT_CHECKIN.name: _act_checkin,
+    ACT_MEAL_DELETE.name: _act_meal_delete,
+    ACT_EXPORT.name: _act_export_data,
+    ACT_SETTIME.name: _act_settime,
+    ACT_PERIOD_DATE.name: _act_period_date,
+    ACT_CYCLE_LEN.name: _act_cycle_len,
+}
+
+def _registry_chat_tools():
+    """Спецификация инструментов чата — из реестра, а не отдельным списком."""
+    tools = []
+    for action in dialog.actions("chat"):
+        handler = _ACTION_HANDLERS.get(action.name)
+        if handler is None:
+            continue
+        tools.append({"type": "function", "function": {
+            "name": action.name,
+            "description": (action.description or action.title)
+                           + " Вызывай, только если пользователь прямо просит это изменить.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    param.name: {"type": "string", "description": param.prompt}
+                    for param in action.params
+                },
+                "required": [param.name for param in action.params],
+            },
+        }})
+    return tools
+
+def _dialog_hint(state):
+    """Текущий вопрос действия из реестра — чтобы вернуться к нему после ответа."""
+    parsed = dialog.parse_state(state)
+    if not parsed:
+        return None
+    name, index, _, _ = parsed
+    action = dialog.get(name)
+    if not action or index >= len(action.params):
+        return None
+    return action.params[index].prompt
+
+async def _apply_action(context, update, cid, done):
+    """Единственное место, где действие реестра встречается с эффектом.
+
+    Сбор параметров и проверка ввода уже позади — сюда приходит готовый
+    словарь значений. Новое действие добавляется одной веткой здесь и одним
+    объявлением в реестре, а не тремя реализациями на трёх поверхностях.
+    """
+    handler = _ACTION_HANDLERS.get(done.action)
+    if handler is None:
+        # Действие зарегистрировано, но обработчика нет — это ошибка сборки, а
+        # не пользователя: не молчим ни ему, ни в лог.
+        log.error("действие без обработчика: %s", done.action)
+        return await update.message.reply_text(
+            "Не смогла выполнить действие. Напиши ещё раз, пожалуйста."
+        )
+    result = handler(cid, done.values)
+    if not result.get("ok"):
+        return await update.message.reply_text(
+            result.get("note") or "Не получилось сохранить. Попробуй ещё раз."
+        )
+    await update.message.reply_text(result["text"])
+    # Сводку после изменений цикла показываем сразу — так было и раньше.
+    if done.action in {ACT_PERIOD_DATE.name, ACT_CYCLE_LEN.name}:
+        return await push_summary(context, cid)
+    return None
 
 def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=False, enforce_spacing=False,
                               mutation_key=None, args_hash=None):
@@ -7126,14 +7548,14 @@ async def period_cmd(update, context):
             mark_period(context, cid, d.isoformat())
             await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
             return await push_summary(context, cid)
-    upsert(cid, state="await_period_date")
+    upsert(cid, state=dialog.begin(ACT_PERIOD_DATE.name).state)
     await update.message.reply_text("Напиши дату начала последних месячных, например 25.05.2026, или нажми кнопку. Потом даты можно редактировать в приложении.", reply_markup=PERIOD_KB)
 async def set_time_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
     if not is_onboarded(row(cid)): return await need_onboard(update.message)
     hhmm = parse_time(context.args[0]) if context.args else None
     if not hhmm:
-        upsert(cid, state="await_time")
+        upsert(cid, state=dialog.begin(ACT_SETTIME.name).state)
         return await update.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
     set_daily_time(context.application, cid, hhmm)
     await update.message.reply_text(schedule_text(cid, hhmm))
@@ -7292,7 +7714,7 @@ async def voicetest_cmd(update, context):
            "OAuth URL: " + str(d.get("oauth_url")),
            "модель распознавания: " + str(d["model"]),
            "голос: " + str(d["voice"]), "режим STT: " + str(d["stt_mode"]),
-           "ответ голосом: " + ("включён" if _voice_reply_on() else "ВЫКЛЮЧЕН (AIWA_VOICE_REPLY=0)"),
+           "ответ голосом: " + ("включён" if _voice_reply_default() else "ВЫКЛЮЧЕН (AIWA_VOICE_REPLY=0)"),
            "Groq (запасной): " + ("есть" if d["groq"] else "нет")]
     await update.message.reply_text("\n".join(L_))
     if d.get("tts_bytes"):
@@ -7480,6 +7902,66 @@ async def on_text(update, context):
         await update.message.reply_text(
             "Я вижу сообщение, но сейчас не смогла собрать ответ. Попробуй ещё раз через минуту.")
 
+async def on_export_document(update, context):
+    """Приём файла выгрузки обратно.
+
+    Восстанавливаем только разделы с естественным ключом — циклы, дни
+    самочувствия и отметки близости: у них первичный ключ (chat_id, дата),
+    поэтому повторный импорт того же файла ничего не задваивает. Питание и
+    тренировки — журнал с автоинкрементом, их слияние без ключа идемпотентности
+    плодило бы дубли, поэтому в этой версии они не переносятся, и об этом
+    честно сказано пользователю.
+    """
+    if update.message is None:
+        return
+    cid = update.effective_chat.id
+    doc = update.message.document
+    if not doc or not str(doc.file_name or "").lower().endswith(".json"):
+        return
+    if (doc.file_size or 0) > 8 * 1024 * 1024:
+        return await update.message.reply_text("Файл слишком большой — жду выгрузку Айвы до 8 МБ.")
+    try:
+        handle = await context.bot.get_file(doc.file_id)
+        raw = bytes(await handle.download_as_bytearray())
+        parsed = portability.load(raw.decode("utf-8", "replace"))
+    except portability.ExportError as exc:
+        return await update.message.reply_text(f"Не приняла файл: {exc}")
+    except Exception:
+        log.exception("import: не смогла прочитать файл")
+        return await update.message.reply_text("Не смогла прочитать файл. Пришли выгрузку Айвы в формате JSON.")
+
+    generation = _user_generation(cid)
+    c = db()
+    try:
+        if not _user_write_allowed(cid, generation, conn=c):
+            return await update.message.reply_text("Профиль изменился, попробуй ещё раз.")
+        c.execute("BEGIN IMMEDIATE")
+        for item in parsed["cycles"]:
+            c.execute("INSERT OR REPLACE INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?)",
+                      (cid, item.get("start_date"), item.get("end_date")))
+        for item in parsed["logs"]:
+            c.execute("INSERT OR REPLACE INTO logs(chat_id,log_date,energy,mood,symptoms) VALUES(?,?,?,?,?)",
+                      (cid, item.get("log_date"), item.get("energy"), item.get("mood"),
+                       item.get("symptoms") or ""))
+        for item in parsed["intimacy"]:
+            c.execute("INSERT OR IGNORE INTO intimacy(chat_id,d) VALUES(?,?)", (cid, item.get("d")))
+        c.commit()
+    except Exception:
+        c.rollback()
+        log.exception("import: не смогла применить выгрузку")
+        return await update.message.reply_text("Не получилось применить выгрузку. Ничего не изменила.")
+    finally:
+        c.close()
+
+    counts = parsed["counts"]
+    restored = f"Восстановила: {counts['cycles']} циклов, {counts['logs']} дней самочувствия."
+    skipped = ""
+    if counts["meals"] or counts["workouts"]:
+        skipped = (f"\n\nПитание ({counts['meals']}) и тренировки ({counts['workouts']}) "
+                   "из файла не переносила: их пришлось бы задваивать. Они остались в файле.")
+    _evict_today_cache(cid)
+    return await update.message.reply_text(restored + skipped)
+
 async def on_voice(update, context):
     if update.message is None:   # правка сообщения: см. комментарий в on_text
         return
@@ -7512,7 +7994,7 @@ async def on_voice(update, context):
         await handle_text(voice_update, voice_context, txt)
         # Free-form AI answers speak inside send_answer(). Intent/state branches
         # often reply directly, so duplicate their final visible text here too.
-        if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
+        if _VOICE_TURN.pop(cid, False) and _voice_reply_on(cid):
             spoken = _voice_plain_text(
                 sent_texts[-1] if sent_texts else "Готово. Результат отправила в чат."
             )
@@ -7617,11 +8099,15 @@ async def handle_text(update, context, txt):
         return await update.message.reply_text(
             f"Я тут. Напиши вопрос или открой меню, и я помогу с {topics}."
         )
-    if is_male_profile(u) and state in {
-        "await_period_date", "await_cycle_len", "await_cycles",
-    }:
+    # Циклические сценарии не для мужского профиля. Состояние может быть и
+    # легаси-строкой, и токеном реестра — разбираем оба.
+    _act = dialog.parse_state(state)
+    _cycle_state = state in {"await_cycles"} or (
+        _act is not None and _act[0] in {ACT_PERIOD_DATE.name, ACT_CYCLE_LEN.name}
+    )
+    if is_male_profile(u) and _cycle_state:
         upsert(cid, state=None, pending_date=None)
-        ev(cid, "male_mode_block", meta="stale_state_" + state)
+        ev(cid, "male_mode_block", meta="stale_state_" + str(state)[:24])
         return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
 
     if state == "await_food_text":
@@ -7660,23 +8146,24 @@ async def handle_text(update, context, txt):
     VALUE_STATES = {
         "await_date": "Напиши дату начала последних месячных, например 25.05.2026 или 26 мая 2026. Потом даты можно редактировать в приложении.",
         "await_len": "Напиши среднюю длину цикла числом. Это дни от первого дня одних месячных до первого дня следующих. Обычно 21-35, если не знаешь, можно 28.",
-        "await_cycle_len": "Какая средняя длина цикла? Это дни от первого дня одних месячных до первого дня следующих. Напиши число, например 28.",
         "await_preg_date": "Напиши дату начала последних месячных, например 25.05.2026. Если знаешь ПДР, напиши дату и добавь слово ПДР.",
-        "await_period_date": "Напиши дату начала последних месячных, например 25.05.2026 или 26 мая 2026. Потом даты можно редактировать в приложении.",
         "await_time": "Во сколько присылать сводку? Напиши время по Москве, например 08:00.",
         "await_profile": "Напиши рост, вес и возраст через пробел. Например 168 60 30. Можно написать «Пропустить».",
         "await_profile_edit": "Напиши рост, вес и возраст через пробел. Например 168 60 30.",
         "await_cycles": "Пришли даты начала месячных, по одной на строке. Можно добавить последние несколько циклов.",
         "await_symptom_custom": "Напиши симптом коротко, например «тошнота», «ломота», «боль в груди».",
     }
-    if state in VALUE_STATES and is_question_like(txt):
+    # Подсказка «на чём мы остановились» для действий реестра берётся из него
+    # же — заводить её второй раз в таблице выше не нужно.
+    value_hint = VALUE_STATES.get(state) or _dialog_hint(state)
+    if value_hint and is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
         _, _qst = status_of(cid)
         a = await think_llm(context, cid, L.answer_question, _qst, txt, llm_profile_of(u), None)
         await reply_long(update.message, L.split_followups(a)[0])
-        return await update.message.reply_text("А теперь вернёмся к настройке. " + VALUE_STATES[state])
+        return await update.message.reply_text("А теперь вернёмся к настройке. " + value_hint)
 
-    if is_partner(cid) and not is_onboarded(u):
+    if partner_question(cid, txt):
         wid = woman_of_partner(cid); wu = row(wid); _, wst = status_of(wid)
         mt = match_meta(txt)
         if mt:
@@ -7787,20 +8274,27 @@ async def handle_text(update, context, txt):
         sel = set((log_get(cid, today_s) or {}).get("symptoms", []))
         return await update.message.reply_text(f"Записала: {symptom_label(code)}. Можно добавить ещё или нажать Готово.", reply_markup=sym_kb(sel))
 
-    if state == "await_time":
-        hhmm = parse_time(txt)
-        if hhmm:
-            set_daily_time(context.application, cid, hhmm)
-            return await update.message.reply_text(schedule_text(cid, hhmm))
+    # Действия из реестра. Ветка неудачи здесь одна на всех: непонятный ввод
+    # переспрашивается, а не роняет сценарий молча — ровно то, чем болели
+    # ветки ниже. По мере переезда `await_*` этот блок останется единственным.
+    step = dialog.feed(state, txt)
+    if step is not None and isinstance(step, dialog.Ask) and match_intent(txt) not in (None, ""):
+        # Пользователь не ответил на вопрос, а сказал новое: «пришли мои данные»
+        # посреди настройки времени. Переспрашивать в такой ситуации значит
+        # съесть команду — выходим из сценария и отдаём фразу дальше.
         upsert(cid, state=None)
-    elif state == "await_period_date":
-        d = parse_date(txt)
-        if d:
-            mark_period(context, cid, d.isoformat())
-            await update.message.reply_text(f"Отметила начало месячных: {d.strftime('%d.%m.%Y')}. Вот свежая сводка:")
-            return await push_summary(context, cid)
+        step = None
+    if step is not None:
+        if isinstance(step, dialog.Ask):
+            upsert(cid, state=step.state)
+            return await update.message.reply_text(step.prompt)
+        if isinstance(step, dialog.Cancelled):
+            upsert(cid, state=None)
+            return await update.message.reply_text(step.message)
         upsert(cid, state=None)
-    elif state == "await_preg_date":
+        return await _apply_action(context, update, cid, step)
+
+    if state == "await_preg_date":
         mdt = _DATE_RE.search(txt); d = parse_date(mdt.group(0)) if mdt else None
         if not d:
             return await update.message.reply_text("Не разобрала дату. Напиши дату начала последних месячных в формате ДД.ММ.ГГГГ, например 25.05.2026. Если знаешь ПДР, напиши дату и добавь слово ПДР.")
@@ -7811,14 +8305,6 @@ async def handle_text(update, context, txt):
         return await update.message.reply_text(
             f"Записала. Срок: {stp['week']} нед {stp['day']} дн, ПДР примерно {date.fromisoformat(stp['due']).strftime('%d.%m.%Y')}.\n\n"
             "Осталось пару данных для рекомендаций: рост (см), вес (кг), возраст. Например 168 60 30.", reply_markup=SKIP_KB)
-    elif state == "await_cycle_len":
-        mnum = re.search(r"\d{1,2}", txt)
-        if mnum and 15 <= int(mnum.group()) <= 60:
-            upsert(cid, cycle_len=int(mnum.group()), state=None)
-            await update.message.reply_text(f"Записала длину цикла: {mnum.group()} дн.")
-            return await push_summary(context, cid)
-        upsert(cid, state=None)
-        return await update.message.reply_text("Нужно число от 15 до 60. Открой «Длина цикла» в Меню и попробуй ещё раз.")
     elif state == "await_cycles":
         ranges = parse_cycle_ranges(txt)
         if not ranges:
@@ -8004,7 +8490,7 @@ async def on_cb(update, context):
     if data == "no_cycle":
         return await q.message.reply_text(
             "Выбери, что ближе сейчас — это можно поменять позже.\n\n"
-            "Айва работает и без регулярного цикла: при нерегулярных месячных, беременности и менопаузе.", reply_markup=NOCYCLE_KB)
+            "Айва работает и без регулярного цикла: при нерегулярных месячных и менопаузе.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
         m = data.split(":")[1]; upsert(cid, mode=m)
         _invalidate_mode_dependent_state(cid)
@@ -8085,17 +8571,17 @@ async def on_cb(update, context):
     elif data == "addcycles":
         await addcycles_entry(context, cid, q.message)
     elif data == "cyclelen":
-        upsert(cid, state="await_cycle_len")
+        upsert(cid, state=dialog.begin(ACT_CYCLE_LEN.name).state)
         await q.message.reply_text("Какая у тебя средняя длина цикла в днях? Обычно 21-35. Напиши число, например 28.")
     elif data == "period":
-        upsert(cid, state="await_period_date")
+        upsert(cid, state=dialog.begin(ACT_PERIOD_DATE.name).state)
         await q.message.reply_text("Напиши дату начала последних месячных, например 25.05.2026, или нажми кнопку. Потом даты можно редактировать в приложении.", reply_markup=PERIOD_KB)
     elif data == "period_today":
         mark_period(context, cid, today_s)
         await q.message.reply_text("Отметила начало месячных сегодня. Вот свежая сводка:")
         await push_summary(context, cid)
     elif data == "set:time":
-        upsert(cid, state="await_time")
+        upsert(cid, state=dialog.begin(ACT_SETTIME.name).state)
         await q.message.reply_text("Во сколько присылать сводку (МСК)? Выбери или впиши своё время, например 09:00.", reply_markup=time_kb())
     elif data == "toggle:summary":
         if not is_onboarded(u):
@@ -8708,14 +9194,22 @@ async def _api_recipe(request):
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     dish = str(body.get("dish") or "").strip()[:80]
     if not dish: return _cors(web.json_response({"error": "no dish"}, status=400))
-    ck = (dish.lower(), dtoday().isoformat(), "v2")
+    # Рецепт считается под запланированный размер приёма: иначе модель выбирает
+    # порцию сама, и карточка показывает два разных числа для одного блюда.
+    try:
+        target_kcal = int(re.sub(r"\D", "", str(body.get("kcal") or ""))[:4] or 0) or None
+    except Exception:
+        target_kcal = None
+    if target_kcal and not 100 <= target_kcal <= 2000:
+        target_kcal = None
+    ck = (dish.lower(), dtoday().isoformat(), f"v3:{target_kcal or 0}")
     hit = _RECIPE_CACHE.get(ck) or dc_get(cid, "recipe", dish.lower())
     if hit:
         _RECIPE_CACHE[ck] = hit
         return _cors(web.json_response(hit))
     try:
         usage = []
-        rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage)
+        rec = await llm_to_thread(cid, "recipe", L.recipe, dish, usage, target_kcal)
         if usage: ev(cid, "tokens", sum(usage), meta="recipe", calls=len(usage), usage=usage)
         if len(_RECIPE_CACHE) > 300: _RECIPE_CACHE.clear()
         _RECIPE_CACHE[ck] = rec
@@ -11108,10 +11602,29 @@ def _agent_tools_spec(mode=None):
             "description": "Текущая фаза, день, прогноз следующего начала и задержка. Вызывай только для репродуктивных вопросов.",
             "parameters": {"type": "object", "properties": {}},
         }})
+    # Пишущие действия берутся из реестра: чат получает ровно то, что умеет
+    # приложение, с той же проверкой значений. Отдельного списка больше нет.
+    for tool in _registry_chat_tools():
+        if tool["function"]["name"] in {"period_date", "cycle_len"} and mode == "male":
+            continue
+        tools.append(tool)
     return tools
 
 def _agent_exec(cid, name, args):
     args = args or {}
+    handler = _ACTION_HANDLERS.get(name)
+    if handler is not None:
+        values, bad = dialog.coerce(name, args)
+        if bad is not None:
+            action = dialog.get(name)
+            param = next((p for p in action.params if p.name == bad), None)
+            return {"error": "bad_argument", "argument": bad,
+                    "note": param.error if param else "значение не подходит"}
+        try:
+            return handler(cid, values)
+        except Exception as exc:
+            log.error("действие %s из чата упало: %s", name, exc)
+            return {"error": "failed"}
     try:
         if name == "cycle_status":
             if is_male_profile(row(cid)):
@@ -14713,6 +15226,9 @@ async def run_all():
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, on_voice))
+    # Выгрузка, присланная обратно: тот же формат, что отдаёт экспорт.
+    app.add_handler(MessageHandler(
+        filters.Document.FileExtension("json") & filters.ChatType.PRIVATE, on_export_document))
     app.add_handler(MessageHandler(
         (filters.PHOTO | filters.Document.IMAGE) & filters.ChatType.PRIVATE, on_photo))
     app.add_handler(MessageHandler(

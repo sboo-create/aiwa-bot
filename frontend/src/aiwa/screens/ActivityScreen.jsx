@@ -329,6 +329,12 @@ export function ActivityScreen({ mode, revision = 0 }) {
   const shownWorkouts = viewingPast
     ? (["loaded", "partial", "loading", "retrying"].includes(selectedDay?.status) ? selectedDay.workouts : [])
     : todayWorkouts.slice().reverse();
+  /* Перенос из ветки design-fixes: пустую секцию не показываем вовсе — заголовок
+     над пустотой читался как сломанный блок, ровно как это было с дневником
+     питания. Загрузку и ошибку показываем, иначе повторить будет нечем. */
+  const showWorkoutHistory = viewingPast
+    ? loadingPast || errorPast || shownWorkouts.length > 0
+    : todayWorkouts.length > 0 || weekRows.length > 0;
 
   return (
     <TMAProvider>
@@ -389,6 +395,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
               </SectionList.Item>
             ) : null}
 
+            {showWorkoutHistory ? (
             <SectionList.Item header={dayLabel}>
               {loadingPast ? (
                 <PaperRow loading title="Загружаю…" description="Тренировки за выбранный день" />
@@ -435,6 +442,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
                 />
               )}
             </SectionList.Item>
+            ) : null}
 
             <div className="aiwa-page-action">
               <AiwaButton

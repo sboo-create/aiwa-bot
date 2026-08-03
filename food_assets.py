@@ -21,9 +21,13 @@ import requests
 
 
 STYLE_VERSION = "food-v1"
-GENERATED_PROMPT_VERSION = "food-icon-v3-components"
-MEAL_PLACEHOLDER = "/assets/food/meal-placeholder.svg"
-DRINK_PLACEHOLDER = "/assets/food/drink-cup.svg?v=1"
+GENERATED_PROMPT_VERSION = "food-photo-v4-white"
+# Заглушки — рендеры в манере каталога на белом фоне: приложение кладёт их на
+# свою подложку через mix-blend-mode: darken, и контурная svg-иконка выбивалась
+# из ряда 3D-тарелок. Старые svg остаются на диске: на них ещё ссылаются
+# бандлы, закэшированные у клиентов.
+MEAL_PLACEHOLDER = "/assets/food/meal-placeholder.webp"
+DRINK_PLACEHOLDER = "/assets/food/drink-placeholder.webp"
 _MANIFEST_PATH = Path(__file__).resolve().parent / "webapp2/assets/food/manifest.json"
 _WORD_RE = re.compile(r"[a-zа-яё0-9]+", re.IGNORECASE)
 _STOP_WORDS = {
@@ -143,6 +147,89 @@ def _tokens(value: object) -> frozenset[str]:
         for word in normalize_label(value).split()
         if word not in _STOP_WORDS and not word.isdigit()
     )
+
+
+def _vocabulary(manifest: dict[str, str] | None = None) -> frozenset[str]:
+    """Опорные слова каталога — и только они.
+
+    Первая версия брала словарь из всех названий манифеста плюс морфологические
+    алиасы, и «варенье» тут же исправилось в «вареные»: слово из алиасов, ровно
+    одна правка. Поэтому словарь сузили до слов, которые реально определяют
+    картинку, — головных продуктов из групп якорей и семейных фолбэков. Слова
+    вроде «варенье», «инжирное», «домашний» в него не входят и остаются нетронутыми.
+    """
+    words: set[str] = set()
+    for group in _ANCHOR_GROUPS:
+        words.update(group)
+    for required, _ in _FAMILY_DEFAULTS:
+        words.update(required)
+    return frozenset(w for w in words if len(w) >= 5)
+
+
+def _distance_one(a: str, b: str) -> bool:
+    """Ровно одна правка: замена, вставка, удаление или перестановка соседних."""
+    if a == b:
+        return False
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+        if len(diff) == 1:
+            return True
+        # «таорог» → «творог»: соседние буквы поменялись местами
+        if len(diff) == 2 and diff[1] == diff[0] + 1:
+            i = diff[0]
+            return a[i] == b[i + 1] and a[i + 1] == b[i]
+        return False
+    short, long = (a, b) if la < lb else (b, a)
+    i = j = 0
+    skipped = False
+    while i < len(short) and j < len(long):
+        if short[i] != long[j]:
+            if skipped:
+                return False
+            skipped = True
+            j += 1
+            continue
+        i += 1
+        j += 1
+    return True
+
+
+def correct_typos(label: object, manifest: dict[str, str] | None = None) -> str:
+    """Исправить очевидные опечатки в названии блюда по словарю каталога.
+
+    Зачем. Запись «таорог, варенье инжирное» попадала в дневник как есть: одна
+    переставленная буква — и блюдо не находит ни картинку, ни семейство, а
+    пользователь видит заглушку вместо творога. Модель исправлять такое не
+    должна (ей прямо запрещено достраивать догадками незнакомые слова, иначе
+    она начнёт выдумывать еду), поэтому правка детерминированная и узкая:
+
+    * трогаем только слова, которых в словаре каталога НЕТ — знакомое слово
+      остаётся как есть, «торт» не превращается в «торты»;
+    * только длиной от пяти букв: короткие слова слишком близки друг к другу;
+    * ровно одна правка расстояния, включая перестановку соседних букв;
+    * и только если кандидат ровно один. Два кандидата — оставляем как было,
+      потому что «красиво, но неверно» хуже честной опечатки.
+    """
+    text = str(label or "")
+    if not text.strip():
+        return text
+    vocabulary = _vocabulary(manifest)
+
+    def fix(match: "re.Match[str]") -> str:
+        word = match.group(0)
+        low = word.casefold().replace("ё", "е")
+        if len(low) < 5 or low in vocabulary or low.isdigit():
+            return word
+        hits = [c for c in vocabulary if _distance_one(low, c)]
+        if len(hits) != 1:
+            return word
+        fixed = hits[0]
+        return fixed.capitalize() if word[:1].isupper() else fixed
+
+    return _WORD_RE.sub(fix, text)
 
 
 def canonical_id(value: object) -> str:
@@ -673,9 +760,11 @@ def _image_request(
         f"dish: {literal}. Original Russian label: {label}. Every component "
         "listed must be separately visible and identifiable on the plate — do "
         "not merge them into one blob and do not omit any; keep grains, cuts "
-        "and textures distinct enough to tell lookalike foods apart. Centered "
-        "plate, simple warm 3D illustration, no people, no text, no logo, "
-        "square composition. The background must be plain pure white (#FFFFFF) "
+        "and textures distinct enough to tell lookalike foods apart. Appetizing "
+        "food photograph: three-quarter overhead view, soft diffused studio "
+        "light, gentle natural shadow under the plate, shallow depth of field, "
+        "crisp texture detail, centered square composition, no people, no text, "
+        "no logo. The background must be plain pure white (#FFFFFF) "
         "with no tint, gradient, shadow wash, table or surface behind the "
         "plate — the app composites the icon over its own backdrop and a baked "
         "background shows up as a grey tile. Do not replace an ingredient with "

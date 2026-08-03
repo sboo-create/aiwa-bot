@@ -24,7 +24,7 @@ import food_assets
 
 
 STYLE_VERSION = "sport-v2"
-GENERATED_PROMPT_VERSION = "sport-icon-v1-validated"
+GENERATED_PROMPT_VERSION = "sport-photo-v2-white"
 _WORD_RE = re.compile(r"[a-zа-яё0-9]+", re.IGNORECASE)
 
 
@@ -296,8 +296,9 @@ def _image_request(
         "Single friendly sport icon for a wellness training diary. Show exactly "
         f"this activity: {literal}. Original Russian label: {label}. One full-"
         "body adult athlete or a small non-identifiable pair/team, with correct "
-        "equipment and movement. Simple warm 3D illustration, centered square "
-        "composition, no close-up face, no text, no logo, no brand, no injury. "
+        "equipment and movement. Sport photograph: soft diffused studio light, "
+        "gentle natural shadow, crisp detail, centered square composition, "
+        "no close-up face, no text, no logo, no brand, no injury. "
         "The background must be plain pure white (#FFFFFF) with no tint, "
         "gradient, floor, court or scenery behind the athlete — the app composites "
         "the icon over its own backdrop and a baked background shows up as a "

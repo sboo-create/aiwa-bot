@@ -1,4 +1,6 @@
 import unittest
+
+from PIL import Image
 from pathlib import Path
 
 def _deslop_bundle(directory):
@@ -19,27 +21,31 @@ def _deslop_chart(directory):
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = _deslop_bundle(ROOT / "webapp2/assets/deslop")
 FOOD_SCREEN = ROOT / "frontend/src/aiwa/screens/FoodScreen.jsx"
-PLACEHOLDER = ROOT / "webapp2/assets/food/meal-placeholder.svg"
+PLACEHOLDER = ROOT / "webapp2/assets/food/meal-placeholder.webp"
+DRINK_PLACEHOLDER = ROOT / "webapp2/assets/food/drink-placeholder.webp"
 
 
 class FoodVisualFallbackTests(unittest.TestCase):
     def test_unknown_meal_is_neutral_and_drink_has_its_own_asset(self):
         source = BUNDLE.read_text(encoding="utf-8")
-        self.assertIn('"/assets/food/meal-placeholder.svg"', source)
-        self.assertIn('"/assets/food/meal-placeholder.svg"', source)
+        self.assertIn('"/assets/food/meal-placeholder.webp"', source)
         self.assertIn('"напиток"', source)
-        self.assertIn('"/assets/food/drink-cup.svg?v=1"', source)
-        # серверная картинка -> манифест -> заглушка по типу приёма
+        # заглушка выбирается по типу приёма: кружка для напитков, тарелка иначе
+        self.assertIn('"/assets/food/drink-placeholder.webp"', source)
+        # серверная картинка приоритетнее манифеста и заглушки
         self.assertIn("image_url", source)
-        # заглушка выбирается по типу приёма: стакан для напитков, тарелка иначе
-        self.assertIn('"/assets/food/drink-cup.svg?v=1"', source)
-        # в рекомендациях серверная картинка приоритетнее манифеста и заглушки
-        self.assertIn("image_url", source)
-        self.assertTrue((ROOT / "webapp2/assets/food/drink-cup.svg").is_file())
-        self.assertTrue(PLACEHOLDER.is_file())
-        placeholder = PLACEHOLDER.read_text(encoding="utf-8")
-        self.assertIn("<svg", placeholder)
-        self.assertIn('aria-label="Приём пищи"', placeholder)
+        # Заглушки — такие же рендеры на белом, как каталог: приложение кладёт
+        # их на свою подложку через darken, и контурная svg выбивалась из ряда.
+        for asset in (PLACEHOLDER, DRINK_PLACEHOLDER):
+            self.assertTrue(asset.is_file(), asset)
+            with Image.open(asset) as image:
+                image.load()
+                self.assertEqual(image.format, "WEBP")
+                corner = image.convert("RGB").getpixel((0, 0))
+            self.assertTrue(
+                all(channel >= 245 for channel in corner),
+                f"{asset.name}: фон обязан быть белым, а не {corner}",
+            )
 
     def test_food_refresh_is_server_directed_bounded_and_visibility_aware(self):
         source = FOOD_SCREEN.read_text(encoding="utf-8")

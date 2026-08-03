@@ -117,7 +117,7 @@ import {
   TextIcon,
 } from "../aiwa/lib/icons";
 import profileImage from "../../../assets/paper-profile.jpg";
-import foodImage from "../../../webapp2/assets/food/meal-placeholder.svg";
+import foodImage from "../../../webapp2/assets/food/meal-placeholder.webp";
 import {
   cycleChartData,
   cycleChartSeries,

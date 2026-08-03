@@ -290,3 +290,19 @@ jobs:
       - name: Сборка должна проходить
         run: bun run build:deslop
         working-directory: frontend
+      # webapp2 обязан целиком получаться из исходников. Ловушка, ради которой
+      # это стоит: файл aiwa-v163.css правился руками и подключался ПОСЛЕ
+      # собранного main.css, поэтому молча перебивал всё, что меняли в src, —
+      # правка в исходниках просто не давала эффекта. Теперь расхождение
+      # артефакта с исходниками валит сборку, а не всплывает через неделю.
+      - name: webapp2 должен воспроизводиться из исходников
+        run: |
+          REV=$(grep -oE 'main\.js\?v=r[0-9]+' webapp2/index.html | head -1 | grep -oE 'r[0-9]+')
+          test -n "$REV" || { echo "не нашла cache-ревизию в webapp2/index.html"; exit 1; }
+          AIWA_UI_REV="$REV" scripts/build-frontend >/dev/null
+          if ! git diff --exit-code -- webapp2; then
+            echo
+            echo "webapp2 отличается от того, что собирается из frontend/src."
+            echo "Пересоберите: AIWA_UI_REV=$REV scripts/build-frontend"
+            exit 1
+          fi

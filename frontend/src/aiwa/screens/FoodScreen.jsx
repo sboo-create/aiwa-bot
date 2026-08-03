@@ -37,7 +37,7 @@ import {
 const KEYS = ["foodSection", "diary"];
 
 // Placeholder thumbnail for recommendations until per-dish images ship.
-const RECOMMENDATION_IMAGE = "/assets/food/meal-placeholder.svg";
+const RECOMMENDATION_IMAGE = "/assets/food/meal-placeholder.webp";
 
 // Сгенерированные 3d-иконки блюд. Манифест "название -> файл" пишет
 // scripts/gen_food_icons.py. Названия из дневника и меню свободные, но после
@@ -69,7 +69,7 @@ const foodFallbackImage = (row) => {
   ].filter(Boolean).join(" "));
   const drink = normDish(row?.fclass) === "напиток"
     || /(кофе|чай|какао|вода|сок|напит|латте|капуч|морс|компот)/.test(text);
-  return drink ? "/assets/food/drink-cup.svg?v=1" : RECOMMENDATION_IMAGE;
+  return drink ? "/assets/food/drink-placeholder.webp" : RECOMMENDATION_IMAGE;
 };
 
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
