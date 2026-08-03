@@ -141,6 +141,30 @@ def parse_state(state: object) -> tuple[str, int, int, dict] | None:
     return name, int(index), int(attempts), values
 
 
+def coerce(name: str, raw: dict) -> tuple[dict | None, str | None]:
+    """Привести значения, пришедшие снаружи, теми же парсерами.
+
+    Нужно для чата: модель присылает «в 8 утра» или «28 дней», и проверять это
+    вторым, отдельным кодом — ровно та ошибка, из-за которой поверхности
+    разъехались. Возвращает (значения, None) либо (None, имя_плохого_параметра).
+    """
+    action = _REGISTRY.get(name)
+    if action is None:
+        raise DialogError(f"неизвестное действие: {name!r}")
+    values: dict = {}
+    for param in action.params:
+        if param.name not in (raw or {}):
+            return None, param.name
+        try:
+            value = param.parse(" ".join(str(raw[param.name]).split()))
+        except Exception:
+            value = None
+        if value is None:
+            return None, param.name
+        values[param.name] = value
+    return values, None
+
+
 def begin(name: str, values: dict | None = None) -> Ask | Done:
     """Начать действие. Если все параметры уже известны — сразу Done."""
     action = _REGISTRY.get(name)

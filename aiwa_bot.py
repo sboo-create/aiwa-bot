@@ -6339,6 +6339,59 @@ def set_daily_time(app, cid, hhmm):
     )
     schedule_daily(app, cid, hhmm)
 
+def _act_settime(cid, values):
+    hhmm = values["hhmm"]
+    set_daily_time(BOT_APP, cid, hhmm)
+    return {"ok": True, "time": hhmm, "text": schedule_text(cid, hhmm)}
+
+def _act_period_date(cid, values):
+    if is_male_profile(row(cid)):
+        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    iso = values["iso"]
+    if not db_mark_period(cid, iso):
+        return {"ok": False, "error": "not_saved"}
+    schedule_daily(BOT_APP, cid, (row(cid) or {}).get("send_time") or "08:00")
+    return {"ok": True, "date": iso,
+            "text": f"Отметила начало месячных: {date.fromisoformat(iso).strftime('%d.%m.%Y')}."}
+
+def _act_cycle_len(cid, values):
+    if is_male_profile(row(cid)):
+        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    days = int(values["days"])
+    upsert(cid, cycle_len=days)
+    return {"ok": True, "cycle_len": days, "text": f"Записала длину цикла: {days} дн."}
+
+# Один обработчик на действие — им пользуются и меню, и чат. Пока их два, но
+# именно это и разъезжалось: возможность жила на одной поверхности и не
+# существовала на другой.
+_ACTION_HANDLERS = {
+    ACT_SETTIME.name: _act_settime,
+    ACT_PERIOD_DATE.name: _act_period_date,
+    ACT_CYCLE_LEN.name: _act_cycle_len,
+}
+
+def _registry_chat_tools():
+    """Спецификация инструментов чата — из реестра, а не отдельным списком."""
+    tools = []
+    for action in dialog.actions("chat"):
+        handler = _ACTION_HANDLERS.get(action.name)
+        if handler is None:
+            continue
+        tools.append({"type": "function", "function": {
+            "name": action.name,
+            "description": (action.description or action.title)
+                           + " Вызывай, только если пользователь прямо просит это изменить.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    param.name: {"type": "string", "description": param.prompt}
+                    for param in action.params
+                },
+                "required": [param.name for param in action.params],
+            },
+        }})
+    return tools
+
 def _dialog_hint(state):
     """Текущий вопрос действия из реестра — чтобы вернуться к нему после ответа."""
     parsed = dialog.parse_state(state)
@@ -6357,28 +6410,24 @@ async def _apply_action(context, update, cid, done):
     словарь значений. Новое действие добавляется одной веткой здесь и одним
     объявлением в реестре, а не тремя реализациями на трёх поверхностях.
     """
-    if done.action == ACT_SETTIME.name:
-        hhmm = done.values["hhmm"]
-        set_daily_time(context.application, cid, hhmm)
-        return await update.message.reply_text(schedule_text(cid, hhmm))
-    if done.action == ACT_PERIOD_DATE.name:
-        iso = done.values["iso"]
-        mark_period(context, cid, iso)
-        await update.message.reply_text(
-            f"Отметила начало месячных: {date.fromisoformat(iso).strftime('%d.%m.%Y')}. Вот свежая сводка:"
+    handler = _ACTION_HANDLERS.get(done.action)
+    if handler is None:
+        # Действие зарегистрировано, но обработчика нет — это ошибка сборки, а
+        # не пользователя: не молчим ни ему, ни в лог.
+        log.error("действие без обработчика: %s", done.action)
+        return await update.message.reply_text(
+            "Не смогла выполнить действие. Напиши ещё раз, пожалуйста."
         )
+    result = handler(cid, done.values)
+    if not result.get("ok"):
+        return await update.message.reply_text(
+            result.get("note") or "Не получилось сохранить. Попробуй ещё раз."
+        )
+    await update.message.reply_text(result["text"])
+    # Сводку после изменений цикла показываем сразу — так было и раньше.
+    if done.action in {ACT_PERIOD_DATE.name, ACT_CYCLE_LEN.name}:
         return await push_summary(context, cid)
-    if done.action == ACT_CYCLE_LEN.name:
-        days = int(done.values["days"])
-        upsert(cid, cycle_len=days)
-        await update.message.reply_text(f"Записала длину цикла: {days} дн.")
-        return await push_summary(context, cid)
-    # Действие зарегистрировано, но обработчика нет — это ошибка сборки, а не
-    # пользователя: не молчим ни ему, ни в лог.
-    log.error("действие без обработчика: %s", done.action)
-    return await update.message.reply_text(
-        "Не смогла выполнить действие. Напиши ещё раз, пожалуйста."
-    )
+    return None
 
 def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=False, enforce_spacing=False,
                               mutation_key=None, args_hash=None):
@@ -11207,10 +11256,29 @@ def _agent_tools_spec(mode=None):
             "description": "Текущая фаза, день, прогноз следующего начала и задержка. Вызывай только для репродуктивных вопросов.",
             "parameters": {"type": "object", "properties": {}},
         }})
+    # Пишущие действия берутся из реестра: чат получает ровно то, что умеет
+    # приложение, с той же проверкой значений. Отдельного списка больше нет.
+    for tool in _registry_chat_tools():
+        if tool["function"]["name"] in {"period_date", "cycle_len"} and mode == "male":
+            continue
+        tools.append(tool)
     return tools
 
 def _agent_exec(cid, name, args):
     args = args or {}
+    handler = _ACTION_HANDLERS.get(name)
+    if handler is not None:
+        values, bad = dialog.coerce(name, args)
+        if bad is not None:
+            action = dialog.get(name)
+            param = next((p for p in action.params if p.name == bad), None)
+            return {"error": "bad_argument", "argument": bad,
+                    "note": param.error if param else "значение не подходит"}
+        try:
+            return handler(cid, values)
+        except Exception as exc:
+            log.error("действие %s из чата упало: %s", name, exc)
+            return {"error": "failed"}
     try:
         if name == "cycle_status":
             if is_male_profile(row(cid)):
