@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import types
+import re
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -348,8 +349,10 @@ class MaleWebappStaticContractTests(unittest.TestCase):
         # apple/material-правила перебивают базовый padding-bottom шорткатом
         # padding. Лишний терм поднимал маскота над баром на устройствах с
         # home indicator. Он центруется по бару смещением -3.5px.
-        self.assertNotIn("env(safe-area-inset-bottom", css)
-        self.assertIn("var(--bottom-clearance, 21px) - 3.5px", css)
+        # Комментарии вырезаем: механизм в них разбирается словами.
+        declarations = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        self.assertNotIn("env(safe-area-inset-bottom", declarations)
+        self.assertIn("var(--bottom-clearance, 21px) - 3.5px", declarations)
 
     def test_food_and_training_use_telegram_photo_avatar(self):
         bundle = BUNDLE.read_text(encoding="utf-8")
