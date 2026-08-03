@@ -487,6 +487,10 @@ export function FoodScreen({ mode, revision = 0 }) {
   const historyTitle = viewingPast ? `Приёмы за ${dayTitle(selectedIso)}` : "Прошедшие приёмы";
   const historyLoading = uploading || (viewingPast && selectedEntry.status === "loading");
   const historyError = viewingPast && selectedEntry.status === "error";
+  /* Пустой дневник не показывает секцию вовсе — ни заголовка, ни кнопки
+     недельного разбора: заголовок над пустотой читался как сломанный блок.
+     Ошибку показываем, иначе повторить загрузку будет нечем. */
+  const showHistory = shownMeals.length > 0 || historyLoading || historyError;
 
   const retrySelectedDiary = () => requestDayDiary(selectedIso, { force: true });
 
@@ -672,6 +676,7 @@ export function FoodScreen({ mode, revision = 0 }) {
               </SectionList.Item>
             ) : null}
 
+            {showHistory ? (
             <SectionList.Item header={historyTitle}>
               {uploading ? (
                 <PaperRow loading title="Разбираю фото…" description="Айва считает КБЖУ" />
@@ -727,6 +732,7 @@ export function FoodScreen({ mode, revision = 0 }) {
                 />
               </div>
             </SectionList.Item>
+            ) : null}
           </SectionList>
 
           <ProfilePanel isOpen={profileOpen} onClose={() => setProfileOpen(false)} />
