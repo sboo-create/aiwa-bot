@@ -87,7 +87,15 @@ d = sqlite3.connect(sys.argv[1]); s.backup(d); d.close(); s.close()
     activate "$sha"
     if wait_health "$sha"; then
         log "OK $prev -> $sha"
-        ls -1dt "$ROOT"/releases/*/ 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -rf
+        # Уборка старых релизов не должна валить успешный деплой. Служба пишет
+        # в них __pycache__ от своего пользователя, и rm у деплойщика на них
+        # спотыкается — выкатка при этом уже прошла и health зелёный, а
+        # workflow показывал красное. Красный деплой, который на самом деле
+        # удался, — опасный сигнал: в следующий раз ему не поверят.
+        if ! ls -1dt "$ROOT"/releases/*/ 2>/dev/null | tail -n +$((KEEP + 1)) \
+                | xargs -r rm -rf 2>/dev/null; then
+            log "внимание: старые релизы убрать не удалось, выкатка не затронута"
+        fi
         return 0
     fi
 
