@@ -53,7 +53,16 @@ def _verified_source(
 
 def promote(
     kind: str, manifest_path: Path, dry_run: bool = False,
+    replace: bool = False, drop_missing: bool = False,
 ) -> dict[str, int]:
+    """Перенести проверенный прогон в статический каталог.
+
+    `replace` нужен для полной перегенерации: обычный режим только дополняет
+    каталог и пропускает уже известные блюда, а при смене модели или стиля
+    заменить надо всё. `drop_missing` убирает из манифеста то, что прогон не
+    дал: у такого блюда останется честная заглушка вместо картинки чужой
+    манеры.
+    """
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     expected_schema = f"aiwa-{kind}-backfill-assets-v1"
     if payload.get("schema") != expected_schema:
@@ -94,7 +103,7 @@ def promote(
         ):
             raise ValueError("media_promote_canonical_id")
         normalized_label = assets.normalize_label(label)
-        if normalized_label in existing_labels:
+        if normalized_label in existing_labels and not replace:
             skipped_existing += 1
             continue
         existing_labels.add(normalized_label)
@@ -111,15 +120,23 @@ def promote(
         )
         promoted += 1
 
+    if drop_missing:
+        promoted_labels = {label for _, _, label, _ in planned}
+        dropped_labels = [l for l in catalog if l not in promoted_labels]
+        for label in dropped_labels:
+            del catalog[label]
+    else:
+        dropped_labels = []
     ordered = dict(sorted(catalog.items(), key=lambda item: item[0].casefold()))
     result = {
         "promoted": promoted,
         "skipped_existing": skipped_existing,
         "rejected": rejected,
+        "dropped": len(dropped_labels),
         "catalog_total": len(ordered),
         "dry_run": int(dry_run),
     }
-    if dry_run or promoted == 0:
+    if dry_run or (promoted == 0 and not dropped_labels):
         return result
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -155,9 +172,14 @@ def main() -> int:
     parser.add_argument("--kind", choices=("food", "sport"), required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--replace", action="store_true",
+                        help="заменять уже известные блюда (полная перегенерация)")
+    parser.add_argument("--drop-missing", action="store_true",
+                        help="убрать из каталога то, чего нет в прогоне")
     args = parser.parse_args()
     print(json.dumps(
-        promote(args.kind, args.manifest, args.dry_run),
+        promote(args.kind, args.manifest, args.dry_run,
+                args.replace, args.drop_missing),
         ensure_ascii=False,
     ))
     return 0
