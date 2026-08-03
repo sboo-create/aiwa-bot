@@ -634,7 +634,10 @@ def _migrate_db_on_connection(c):
                 "last_phase_notified TEXT", "last_reactivation TEXT",
                 "proactive_enabled INTEGER DEFAULT 1",
                 "daily_summary_enabled INTEGER DEFAULT 1", "tg_first_name TEXT",
-                "push_suppressed_at TEXT", "push_suppression_reason TEXT"):
+                "push_suppressed_at TEXT", "push_suppression_reason TEXT",
+                # Отвечать ли голосом. Единственная возможность из списка багов,
+                # которой не было ни на одной поверхности.
+                "voice_reply TEXT"):
         try: c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     # v177 introduced the marker without a durable migration marker. Production
@@ -736,7 +739,7 @@ def row(cid):
 _USER_UPDATE_COLUMNS = frozenset({"activity", "age", "cycle_len", "diet", "diet_note", "height", "kcal_goal",
     "last_period", "last_phase_notified", "last_reactivation", "mode", "partner_code", "pending_date",
     "period_end", "period_len", "proactive_enabled", "daily_summary_enabled", "push_suppressed_at",
-    "push_suppression_reason", "send_time", "state", "tg_first_name", "train_profile", "weight"})
+    "push_suppression_reason", "send_time", "state", "tg_first_name", "train_profile", "voice_reply", "weight"})
 def upsert(cid, *, user_generation=None, **kw):
     unknown = set(kw) - _USER_UPDATE_COLUMNS
     if unknown:
@@ -1937,6 +1940,27 @@ def partner_of(woman_id):
 def woman_of_partner(pid):
     c = db(); r = c.execute("SELECT woman_id FROM partners WHERE partner_id=?", (pid,)).fetchone(); c.close(); return r[0] if r else None
 def is_partner(cid): return woman_of_partner(cid) is not None
+
+# Вопрос адресован партнёрше, а не себе: «как ей помочь», «что у неё сегодня».
+_ABOUT_HER_RE = re.compile(
+    r"\b(её|ее|ей|неё|нее|она|ней|жен[аеуы]|девушк\w+|партнёрш\w+|партнерш\w+|супруг[аеиу])\b",
+    re.IGNORECASE,
+)
+
+def partner_question(cid, text):
+    """Роль партнёра — это связь, а не отсутствие собственного профиля.
+
+    Раньше партнёрский ответ выдавался по условию «связан И сам не прошёл
+    онбординг»: стоило партнёру завести собственный профиль в Айве, и он
+    переставал получать ответы про партнёршу — проваливался в обычную ветку.
+    Теперь связь проверяется отдельно от своих данных: если профиля нет,
+    партнёрский режим включён всегда, если есть — когда спрашивают про неё.
+    """
+    if not is_partner(cid):
+        return False
+    if not is_onboarded(row(cid)):
+        return True
+    return bool(_ABOUT_HER_RE.search(str(text or "")))
 def cycles_of(cid, since_iso=None):
     c = db()
     if since_iso:
@@ -2057,6 +2081,26 @@ ACT_PERIOD_DATE = dialog.register(dialog.Action(
         prompt="Напиши дату начала последних месячных, например 25.05.2026.",
         parse=_parse_period_date,
         error="Не разобрала дату. Нужен формат ДД.ММ.ГГГГ, например 25.05.2026.",
+    ),),
+))
+
+def _parse_voice_choice(text):
+    low = " ".join(str(text or "").split()).lower()
+    if re.search(r"\b(голос\w*|говор\w+|озвуч\w+|аудио|voice)\b", low):
+        return "voice"
+    if re.search(r"\b(текст\w*|письм\w+|молч\w+|без голоса|text)\b", low):
+        return "text"
+    return None
+
+ACT_VOICE_MODE = dialog.register(dialog.Action(
+    name="voice_mode",
+    title="Ответы голосом",
+    description="Отвечать голосом или текстом на голосовые сообщения.",
+    params=(dialog.Param(
+        name="choice",
+        prompt="Как отвечать на голосовые — голосом или текстом?",
+        parse=_parse_voice_choice,
+        error="Напиши «голосом» или «текстом».",
     ),),
 ))
 
@@ -5100,10 +5144,27 @@ def _remember_spoken(cid, text):
     if collector is not None and str(text or "").strip():
         collector.append(_voice_plain_text(text))
 
-def _voice_reply_on():
-    # TTS is opt-in until the provider path has proved text/audio parity in
-    # production. STT remains available and still returns the text answer.
+def _voice_reply_default():
+    # Общий рубильник провайдера: пока путь TTS не доказал паритет с текстом,
+    # он выключен по умолчанию. STT это не касается — расшифровка работает
+    # всегда и всё равно возвращает текстовый ответ.
     return os.environ.get("AIWA_VOICE_REPLY", "0") in ("1", "true", "True", "yes", "on")
+
+def _voice_reply_on(cid=None):
+    """Отвечать ли голосом. Выбор пользователя важнее общего умолчания.
+
+    Раньше это был только глобальный флаг: настроить режим под себя было
+    нельзя ни из чата, ни из меню, ни из мини-аппа — единственная возможность
+    из списка багов, которой не существовало нигде. Теперь решение хранится
+    в профиле, а флаг остаётся страховкой на стороне провайдера: выключенный
+    рубильник запрещает голос всем.
+    """
+    if not _voice_reply_default():
+        return False
+    if cid is None:
+        return True
+    choice = str((row(cid) or {}).get("voice_reply") or "").strip().lower()
+    return choice != "text"
 
 def _voice_plain_text(value):
     """Prepare already-sent Telegram text for TTS without speaking HTML markup."""
@@ -5405,7 +5466,7 @@ async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, a
     if level:
         ev(cid, "safety", meta=f"{level}|{answer_id}|bot")
     ev(cid, "tokens", sum(usage), meta="answer", calls=len(usage), usage=usage)
-    if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
+    if _VOICE_TURN.pop(cid, False) and _voice_reply_on(cid):
         await _send_voice_reply(context, cid, clean)
 
 async def _send_summary_text(context, cid, clean, kb):
@@ -6364,7 +6425,18 @@ def _act_cycle_len(cid, values):
 # Один обработчик на действие — им пользуются и меню, и чат. Пока их два, но
 # именно это и разъезжалось: возможность жила на одной поверхности и не
 # существовала на другой.
+def _act_voice_mode(cid, values):
+    choice = values["choice"]
+    upsert(cid, voice_reply=choice)
+    if choice == "voice" and not _voice_reply_default():
+        return {"ok": True, "voice_reply": choice,
+                "text": "Записала: отвечать голосом. Пока голосовые ответы отключены на стороне сервиса — "
+                        "как включим, заработает без дополнительных настроек."}
+    return {"ok": True, "voice_reply": choice,
+            "text": "Буду отвечать голосом." if choice == "voice" else "Буду отвечать текстом."}
+
 _ACTION_HANDLERS = {
+    ACT_VOICE_MODE.name: _act_voice_mode,
     ACT_SETTIME.name: _act_settime,
     ACT_PERIOD_DATE.name: _act_period_date,
     ACT_CYCLE_LEN.name: _act_cycle_len,
@@ -7442,7 +7514,7 @@ async def voicetest_cmd(update, context):
            "OAuth URL: " + str(d.get("oauth_url")),
            "модель распознавания: " + str(d["model"]),
            "голос: " + str(d["voice"]), "режим STT: " + str(d["stt_mode"]),
-           "ответ голосом: " + ("включён" if _voice_reply_on() else "ВЫКЛЮЧЕН (AIWA_VOICE_REPLY=0)"),
+           "ответ голосом: " + ("включён" if _voice_reply_default() else "ВЫКЛЮЧЕН (AIWA_VOICE_REPLY=0)"),
            "Groq (запасной): " + ("есть" if d["groq"] else "нет")]
     await update.message.reply_text("\n".join(L_))
     if d.get("tts_bytes"):
@@ -7662,7 +7734,7 @@ async def on_voice(update, context):
         await handle_text(voice_update, voice_context, txt)
         # Free-form AI answers speak inside send_answer(). Intent/state branches
         # often reply directly, so duplicate their final visible text here too.
-        if _VOICE_TURN.pop(cid, False) and _voice_reply_on():
+        if _VOICE_TURN.pop(cid, False) and _voice_reply_on(cid):
             spoken = _voice_plain_text(
                 sent_texts[-1] if sent_texts else "Готово. Результат отправила в чат."
             )
@@ -7831,7 +7903,7 @@ async def handle_text(update, context, txt):
         await reply_long(update.message, L.split_followups(a)[0])
         return await update.message.reply_text("А теперь вернёмся к настройке. " + value_hint)
 
-    if is_partner(cid) and not is_onboarded(u):
+    if partner_question(cid, txt):
         wid = woman_of_partner(cid); wu = row(wid); _, wst = status_of(wid)
         mt = match_meta(txt)
         if mt:
