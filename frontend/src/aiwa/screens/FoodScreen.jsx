@@ -686,7 +686,9 @@ export function FoodScreen({ mode, revision = 0 }) {
                   onClick={retrySelectedDiary}
                 />
               ) : null}
-              {shownMeals.length ? shownMeals.map((meal) => (
+              {/* Пустой дневник не заполняем строкой-заглушкой: она читалась как
+                  сломанный блок, а добавить приём можно кнопкой выше. */}
+              {shownMeals.map((meal) => (
                 <PaperRow
                   key={meal.id}
                   image={meal.image_url || dishImageFrom(foodIcons, meal.title) || foodFallbackImage(meal) || MEAL_IMAGE}
@@ -694,13 +696,7 @@ export function FoodScreen({ mode, revision = 0 }) {
                   description={`${fmtKcal(meal.kcal)} · Б${Math.round(meal.protein || 0)} · Ж${Math.round(meal.fat || 0)} · У${Math.round(meal.carbs || 0)}`}
                   onClick={() => setPanel("diary")}
                 />
-              )) : (historyLoading || historyError) ? null : (
-                <PaperRow
-                  title={viewingPast ? "В этот день записей нет" : "Дневник пока пуст"}
-                  description={viewingPast ? "Дневник за этот день пуст." : "Добавь первый приём — фото, текстом или вручную."}
-                  onClick={viewingPast ? undefined : () => setPanel("diary")}
-                />
-              )}
+              ))}
               {weekReview ? (
                 <>
                   <AiwaInsightCard message={weekReview.summary} />

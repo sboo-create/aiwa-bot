@@ -2805,11 +2805,13 @@ body.material .aiwa-nav-tabbar-layer > * {
 
 .aiwa-nav-mascot {
   right: auto;
-  /* Match the TabBar pill's bottom anchor exactly (var(--bottom-clearance)).
-   * The pill has no extra env(safe-area-inset-bottom), so the mascot must not
-   * add one either — otherwise on a real device (env ≈ 34px) it floats above
-   * the tabs. Fallback 18px keeps the current preview alignment. */
-  bottom: var(--bottom-clearance, 18px);
+  /* The pill's own bottom sits at var(--bottom-clearance), but @deslop/tma's
+   * base rule adds `padding-bottom: env(safe-area-inset-bottom)` INSIDE it, so
+   * the tab icons ride that inset up while the pill's box does not move. The
+   * mascot must add the same inset or it drops ~34px below the icons on a real
+   * device (measured: -33px at env 34px, -3px at env 0). Fallback 18px keeps
+   * the tuned alignment where there is no inset. */
+  bottom: calc(var(--bottom-clearance, 18px) + env(safe-area-inset-bottom, 0px));
   left: calc(50% + 101px);
   width: 67px;
   height: 66px;

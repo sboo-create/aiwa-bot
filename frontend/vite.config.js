@@ -4,7 +4,7 @@ import svgr from "vite-plugin-svgr";
 import path from "node:path";
 
 // Версия UI в именах чанков; поднимается при выкате нового фронта.
-const UI_VERSION = process.env.AIWA_UI_VERSION || "aiwa-v182";
+const UI_VERSION = process.env.AIWA_UI_VERSION || "aiwa-v183";
 
 export default defineConfig({
   plugins: [react(), svgr()],
