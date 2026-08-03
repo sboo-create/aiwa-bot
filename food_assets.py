@@ -348,6 +348,13 @@ class FoodAssetResolver:
             label: _tokens(label)
             for label in manifest
         }
+        # Словарь слов каталога: по нему приводим множественное число к
+        # единственному. Выписывать формы руками я уже пробовал — «мандарины»
+        # добавил, «нектарины» забыл, и это ровно тот несистемный подход,
+        # из-за которого покрытие и было дырявым.
+        self._vocab = frozenset(
+            word for tokens in self._tokens.values() for word in tokens
+        )
         self._generated: dict[str, str] = {}
         self._generated_revision = 0
         self._generated_lock = threading.Lock()
@@ -379,6 +386,31 @@ class FoodAssetResolver:
     def _generated_url(self, food_id: str) -> str | None:
         with self._generated_lock:
             return self._generated.get(food_id)
+
+    def _singularize(self, tokens: frozenset[str]) -> frozenset[str]:
+        """Привести незнакомые слова к форме, которая есть в каталоге.
+
+        Правило узкое: отбрасываем типовое окончание множественного числа и
+        принимаем результат, только если такое слово в каталоге есть. Слово,
+        которого в каталоге нет, остаётся как было — угадывать не станем.
+        """
+        # Форму ДОБАВЛЯЕМ, а не заменяем: замена один раз уже сломала совпадение,
+        # которое работало раньше. Расширенный набор токенов может только
+        # улучшить подмножество, потерять на нём нечего.
+        out = set(tokens)
+        for token in tokens:
+            if token in self._vocab or len(token) < 5:
+                continue
+            for ending, replacement in (("ы", ""), ("и", ""), ("а", ""),
+                                        ("я", ""), ("ы", "а"), ("и", "а"),
+                                        ("и", "о"), ("ки", "ка")):
+                if not token.endswith(ending):
+                    continue
+                candidate = token[: -len(ending)] + replacement
+                if len(candidate) >= 4 and candidate in self._vocab:
+                    out.add(candidate)
+                    break
+        return frozenset(out)
 
     def _subset_match(self, query_tokens: frozenset[str]) -> tuple[str, str] | None:
         if not query_tokens:
@@ -427,7 +459,7 @@ class FoodAssetResolver:
                 self._match_cache[normalized] = result
             return result
 
-        query_tokens = _tokens(label)
+        query_tokens = self._singularize(_tokens(label))
 
         # Подмножество токенов: все слова каталожной подписи присутствуют в
         # названии. «Блины с творогом и сметаной» ⊇ «Блины», «Латте на кокосовом
