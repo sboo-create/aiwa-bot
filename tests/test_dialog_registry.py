@@ -26,6 +26,10 @@ def _time(text):
 
 class DialogRegistryTests(unittest.TestCase):
     def setUp(self):
+        # Реестр — глобальный, и его наполняет импорт aiwa_bot. Раньше здесь
+        # стояло clear() без восстановления: соседние тесты, которым нужны
+        # настоящие действия, падали в общем прогоне и проходили поодиночке.
+        self._registry_backup = dict(dialog._REGISTRY)
         dialog._REGISTRY.clear()
         dialog.register(dialog.Action(
             name="settime",
@@ -40,6 +44,7 @@ class DialogRegistryTests(unittest.TestCase):
 
     def tearDown(self):
         dialog._REGISTRY.clear()
+        dialog._REGISTRY.update(self._registry_backup)
 
     def test_collects_the_missing_parameter(self):
         step = dialog.begin("settime")

@@ -40,6 +40,10 @@ class RegistryChatToolsTests(unittest.TestCase):
 
 class CoerceTests(unittest.TestCase):
     def setUp(self):
+        # Реестр — глобальный, и его наполняет импорт aiwa_bot. Раньше здесь
+        # стояло clear() без восстановления: соседние тесты, которым нужны
+        # настоящие действия, падали в общем прогоне и проходили поодиночке.
+        self._registry_backup = dict(dialog._REGISTRY)
         dialog._REGISTRY.clear()
         dialog.register(dialog.Action(
             name="settime",
@@ -54,6 +58,7 @@ class CoerceTests(unittest.TestCase):
 
     def tearDown(self):
         dialog._REGISTRY.clear()
+        dialog._REGISTRY.update(self._registry_backup)
 
     def test_valid_argument_is_parsed(self):
         self.assertEqual(dialog.coerce("settime", {"hhmm": " 08:00 "}), ({"hhmm": "08:00"}, None))
