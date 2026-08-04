@@ -11,6 +11,7 @@
 конкретные слова, и границы, которые проверка обязана держать закрытыми.
 """
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -216,6 +217,39 @@ class QuotedPathTests(unittest.TestCase):
             "сегодня не было разминки спины", CONTEXT, enable_v2=True,
         )
         self.assertIsNone(result)
+
+
+
+class CorpusTests(unittest.TestCase):
+    """Корпус формулировок с настоящими ответами роутера.
+
+    Чинить по одному примеру — способ узнать о следующей формулировке от
+    тестировщиков. Здесь записаны ответы боевой модели на два десятка фраз, а
+    проверяется своя половина решения: подтверждение домена. Вызовов модели в
+    CI нет, поэтому корпус можно гонять на каждый коммит.
+    """
+
+    CASES = json.loads(
+        (ROOT / "tests/data/journal_route_corpus.json").read_text(encoding="utf-8")
+    )["cases"]
+    CONTEXT = {"meals": [], "workouts": []}
+
+    def test_every_formulation_lands_where_it_should(self):
+        wrong = []
+        for case in self.CASES:
+            text = case["text"]
+            got = None
+            if bot._semantic_journal_candidate(text, self.CONTEXT, enable_v2=True):
+                got = (bot._normalize_semantic_journal(
+                    case["router"], text, self.CONTEXT, enable_v2=True,
+                ) or {}).get("intent")
+            if got != case["expected"]:
+                wrong.append(f"{text} → {got}, ждали {case['expected']}")
+        self.assertEqual(wrong, [], "\n  " + "\n  ".join(wrong))
+
+    def test_corpus_covers_both_domains_and_both_answers(self):
+        expected = {case["expected"] for case in self.CASES}
+        self.assertEqual(expected, {"logworkout", "logmeal", None})
 
 
 if __name__ == "__main__":

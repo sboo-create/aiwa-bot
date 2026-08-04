@@ -429,6 +429,21 @@ class CatalogResolver:
         self._vocab = frozenset(
             word for tokens in self._tokens.values() for word in tokens
         )
+        # Головные слова подписей: «Тренировка спины» → «тренировка»,
+        # «Велотренажёр» → «велотренажер». Это словарь предметной области,
+        # который ведёт сам каталог: он перегенерируется целиком, и словам,
+        # которыми люди называют активность или блюдо, не нужен отдельный
+        # список, живущий в регулярке.
+        heads = set()
+        for label in manifest:
+            words = [
+                _TOKEN_ALIASES.get(word, word)
+                for word in normalize_label(label).split()
+                if word not in _STOP_WORDS and not word.isdigit()
+            ]
+            if words and len(words[0]) >= 4:
+                heads.add(words[0])
+        self._heads = frozenset(heads)
         self._generated: dict[str, str] = {}
         self._generated_revision = 0
         self._generated_lock = threading.Lock()
@@ -634,6 +649,17 @@ class CatalogResolver:
                 self._match_cache.clear()
             self._match_cache[normalized] = result
         return result
+
+    def mentions(self, text: object) -> bool:
+        """Названо ли в тексте что-то, что каталог знает как отдельную вещь.
+
+        Нужно не для картинки, а для подтверждения домена события: цитата
+        «час крутила велотренажёр» доказывает тренировку тем, что каталог
+        знает «Велотренажёр», а не тем, что кто-то вписал этот глагол в
+        регулярку.
+        """
+        tokens = self._singularize(_tokens(text))
+        return bool(tokens & self._heads)
 
     def resolve(
         self,

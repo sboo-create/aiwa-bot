@@ -1,0 +1,629 @@
+{
+  "note": "Ответы боевого роутера (google/gemini-3.1-flash-lite, v2-промпт с цитатами), снятые с прода 2026-08-04. Проверяем свою половину решения — подтверждение домена — не тратя вызовов модели в CI.",
+  "cases": [
+    {
+      "text": "Я сделал 5 минут приседания с разминкой спины.",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "Я сделал 5 минут приседания с разминкой спины."
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Силовая",
+          "duration_minutes": 5,
+          "rpe": null,
+          "items": [
+            {
+              "name": "приседания",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": ""
+            },
+            {
+              "name": "разминка спины",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": "спина"
+            }
+          ],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "Так, сейчас была разминка спины с приседаниями.",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "сейчас была разминка спины с приседаниями"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Силовая",
+          "duration_minutes": null,
+          "rpe": null,
+          "items": [
+            {
+              "name": "разминка спины",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": "спина"
+            },
+            {
+              "name": "приседания",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": "ноги"
+            }
+          ],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "сделала разминку спины с приседаниями",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "сделала разминку спины с приседаниями"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Силовая",
+          "duration_minutes": null,
+          "rpe": null,
+          "items": [
+            {
+              "name": "разминка спины",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": "спина"
+            },
+            {
+              "name": "приседания",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": "ноги"
+            }
+          ],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "была тренировка ног",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "была тренировка ног"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Силовая",
+          "duration_minutes": null,
+          "rpe": null,
+          "items": [],
+          "note": "ног"
+        }
+      }
+    },
+    {
+      "text": "сегодня была растяжка 20 минут",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "сегодня была растяжка 20 минут"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Растяжка",
+          "duration_minutes": 20,
+          "rpe": null,
+          "items": [],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "утром размялся, потом приседания",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "утром размялся, потом приседания"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Силовая",
+          "duration_minutes": null,
+          "rpe": null,
+          "items": [
+            {
+              "name": "приседания",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": ""
+            }
+          ],
+          "note": "размялся"
+        }
+      }
+    },
+    {
+      "text": "пробежал 5 км",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "пробежал 5 км"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Кардио",
+          "duration_minutes": null,
+          "rpe": null,
+          "items": [],
+          "note": "5 км"
+        }
+      }
+    },
+    {
+      "text": "сходила на йогу",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "сходила на йогу"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Йога",
+          "duration_minutes": null,
+          "rpe": null,
+          "items": [],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "час крутила велотренажёр",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "час крутила велотренажёр"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Кардио",
+          "duration_minutes": 60,
+          "rpe": null,
+          "items": [],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "сделал планку 3 подхода",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "сделал планку 3 подхода"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Силовая",
+          "duration_minutes": null,
+          "rpe": null,
+          "items": [
+            {
+              "name": "планка",
+              "sets": 3,
+              "reps": null,
+              "weight": null,
+              "group": ""
+            }
+          ],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "сегодня был творог и банан",
+      "expected": "logmeal",
+      "router": {
+        "action": "food",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "сегодня был творог и банан"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "творог и банан",
+        "food_record": {
+          "title": "Творог с бананом",
+          "fclass": "смешанное",
+          "items": [
+            {
+              "name": "творог",
+              "grams": 150,
+              "kcal": 150,
+              "protein": 25,
+              "fat": 7,
+              "carbs": 3,
+              "evidence_span": "творог"
+            },
+            {
+              "name": "банан",
+              "grams": 120,
+              "kcal": 107,
+              "protein": 1,
+              "fat": 0,
+              "carbs": 27,
+              "evidence_span": "банан"
+            }
+          ],
+          "unparsed": []
+        },
+        "food_entries": []
+      }
+    },
+    {
+      "text": "на завтрак была овсянка с ягодами",
+      "expected": "logmeal",
+      "router": {
+        "action": "food",
+        "target_id": null,
+        "slot": "breakfast",
+        "evidence_spans": [
+          "на завтрак была овсянка с ягодами"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "овсянка с ягодами",
+        "food_record": {
+          "title": "Овсянка с ягодами",
+          "fclass": "углеводное",
+          "items": [
+            {
+              "name": "овсянка",
+              "grams": 200,
+              "kcal": 170,
+              "protein": 5,
+              "fat": 3,
+              "carbs": 30,
+              "evidence_span": "овсянка"
+            },
+            {
+              "name": "ягоды",
+              "grams": 50,
+              "kcal": 25,
+              "protein": 0,
+              "fat": 0,
+              "carbs": 6,
+              "evidence_span": "ягодами"
+            }
+          ],
+          "unparsed": []
+        },
+        "food_entries": []
+      }
+    },
+    {
+      "text": "съела салат с курицей",
+      "expected": "logmeal",
+      "router": {
+        "action": "food",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "съела салат с курицей"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "салат с курицей",
+        "food_record": {
+          "title": "Салат с курицей",
+          "fclass": "смешанное",
+          "items": [
+            {
+              "name": "салат с курицей",
+              "grams": 250,
+              "kcal": 250,
+              "protein": 20,
+              "fat": 10,
+              "carbs": 15,
+              "evidence_span": "салат с курицей"
+            }
+          ],
+          "unparsed": []
+        },
+        "food_entries": [],
+        "workout": null
+      }
+    },
+    {
+      "text": "выпил протеиновый коктейль",
+      "expected": "logmeal",
+      "router": {
+        "action": "food",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "выпил протеиновый коктейль"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "протеиновый коктейль",
+        "food_record": {
+          "title": "протеиновый коктейль",
+          "fclass": "белковое",
+          "items": [
+            {
+              "name": "протеиновый коктейль",
+              "grams": 300,
+              "kcal": 150,
+              "protein": 25,
+              "fat": 2,
+              "carbs": 8,
+              "evidence_span": "протеиновый коктейль"
+            }
+          ],
+          "unparsed": []
+        },
+        "food_entries": []
+      }
+    },
+    {
+      "text": "не было сегодня тренировки",
+      "expected": null,
+      "router": {
+        "action": "none",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "negative",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": null
+      }
+    },
+    {
+      "text": "завтра планирую приседания",
+      "expected": null,
+      "router": {
+        "action": "none",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [],
+        "subject": "self",
+        "status": "planned",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "other",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": null
+      }
+    },
+    {
+      "text": "у подруги была тренировка ног",
+      "expected": null,
+      "router": {
+        "action": "none",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [],
+        "subject": "other",
+        "status": "unknown",
+        "polarity": "unknown",
+        "certainty": "certain",
+        "primary_purpose": "context",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": null
+      }
+    },
+    {
+      "text": "когда лучше делать приседания?",
+      "expected": null,
+      "router": {
+        "action": "none",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [],
+        "subject": "self",
+        "status": "question",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "advice",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": null
+      }
+    },
+    {
+      "text": "полезны ли приседания при болях в спине?",
+      "expected": null,
+      "router": {
+        "action": "none",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [],
+        "subject": "self",
+        "status": "question",
+        "polarity": "unknown",
+        "certainty": "certain",
+        "primary_purpose": "advice",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": null
+      }
+    },
+    {
+      "text": "хочу начать бегать по утрам",
+      "expected": null,
+      "router": {
+        "action": "none",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [],
+        "subject": "self",
+        "status": "planned",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "other",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": null
+      }
+    }
+  ]
+}

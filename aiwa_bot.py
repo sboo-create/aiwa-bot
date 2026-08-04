@@ -2841,7 +2841,7 @@ _JOURNAL_WORKOUT_COMPLETED_RE = re.compile(
 #: Это грамматика, а не список слов: «была», «сделала», «размялась»,
 #: «поприседала» проходят одинаково, и дописывать сюда ничего не надо.
 _JOURNAL_PAST_ACTION_RE = re.compile(
-    r"\b(?:был[аио]?|[а-яё]{3,}(?:лась|лись|ла|ли|лся))\b", re.I
+    r"\b(?:был[аио]?|[а-яё]{3,}(?:лась|лись|лся|ла|ли|ло|л))\b", re.I
 )
 
 
@@ -2883,6 +2883,21 @@ def _journal_grounded(text, names):
 def _journal_food_grounded(text, payload):
     """То же для еды: «сегодня был творог и банан» — такой же отчёт о событии."""
     return _journal_grounded(text, [str((payload or {}).get("food_text") or "")])
+
+
+def _journal_workout_named(text, payload):
+    """Событие названо: словами модели или словом из каталога тренировок.
+
+    Модель часто приводит активность к типу («Кардио», «Силовая»), которого в
+    тексте нет, — тогда доказательством служит то, что каталог знает названную
+    вещь: «велотренажёр», «тренировка», «разминка». Словарь домена ведёт
+    каталог, а не список в регулярке.
+    """
+    return _journal_workout_grounded(text, payload) or SA.RESOLVER.mentions(text)
+
+
+def _journal_food_named(text, payload):
+    return _journal_food_grounded(text, payload) or FA.RESOLVER.mentions(text)
 
 
 def _journal_workout_grounded(text, payload):
@@ -3332,7 +3347,7 @@ def _semantic_food_evidence_safe(
                 or _JOURNAL_FOOD_COMPLETED_RE.search(span)
                 or (
                     _JOURNAL_PAST_ACTION_RE.search(span)
-                    and _journal_food_grounded(span, payload)
+                    and _journal_food_named(span, payload)
                 )
             )
             and not _JOURNAL_FOOD_NEGATED_RE.search(span)
@@ -3490,7 +3505,7 @@ def _semantic_action_matches_source(
                     # как «съела творог»: событие названо, глагол просто другой.
                     _JOURNAL_PAST_ACTION_RE.search(raw)
                     and not _JOURNAL_FOOD_NEGATED_RE.search(raw)
-                    and _journal_food_grounded(raw, payload)
+                    and _journal_food_named(raw, payload)
                 )
                 or (
                     _journal_has_recent_mutation(context)
@@ -3513,7 +3528,7 @@ def _semantic_action_matches_source(
                     _JOURNAL_WORKOUT_COMPLETED_RE.search(raw)
                     or (
                         _JOURNAL_PAST_ACTION_RE.search(raw)
-                        and _journal_workout_grounded(raw, payload)
+                        and _journal_workout_named(raw, payload)
                     )
                 )
                 and not _JOURNAL_WORKOUT_NEGATED_RE.search(raw)
@@ -3596,7 +3611,7 @@ def _semantic_action_matches_source(
                 _JOURNAL_WORKOUT_COMPLETED_RE.search(evidence)
                 or (
                     _JOURNAL_PAST_ACTION_RE.search(evidence)
-                    and _journal_workout_grounded(evidence, payload)
+                    and _journal_workout_named(evidence, payload)
                 )
             )
             and not _JOURNAL_WORKOUT_NEGATED_RE.search(evidence)
