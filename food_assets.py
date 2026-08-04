@@ -21,7 +21,7 @@ import requests
 
 
 STYLE_VERSION = "food-v1"
-GENERATED_PROMPT_VERSION = "food-photo-v4-white"
+GENERATED_PROMPT_VERSION = "food-photo-v5-recognizable"
 # Заглушки — рендеры в манере каталога на белом фоне: приложение кладёт их на
 # свою подложку через mix-blend-mode: darken, и контурная svg-иконка выбивалась
 # из ряда 3D-тарелок. Старые svg остаются на диске: на них ещё ссылаются
@@ -338,6 +338,55 @@ def brand_category(label: object) -> str | None:
     found = brand_categories(label)
     return found[0] if found else None
 
+#: Насколько картинка соответствует именно этому блюду. Раньше все совпадения
+#: выглядели одинаково «ready», и приблизительное было неотличимо от точного:
+#: «Запеченная треска с гречкой» молча получала «Треску на пару» — белый кусок,
+#: похожий на масло, — и это состояние держалось вечно, потому что догенерация
+#: запускалась только когда картинки нет вовсе.
+MATCH_QUALITY = {
+    "catalog_exact": "exact",
+    "catalog_alias": "exact",
+    "catalog_canonical": "exact",
+    "generated": "exact",
+    "catalog_subset": "close",
+    "catalog_partial": "approximate",
+    "catalog_family": "approximate",
+    "catalog_brand": "approximate",
+    "category": "none",
+}
+
+
+def head_item(items: Iterable[dict] | None) -> str | None:
+    """Главная позиция приёма пищи по данным разбора.
+
+    «Вареники с вишней, сливочное масло» — это вареники, а масло добавка. Раньше
+    голову вычисляли из строки эвристикой порядка слов, и та ошибалась: подпись
+    «Масло сливочное» длиннее, чем «вареники», и выигрывала. Между тем разбор
+    блюда уже вернул позиции с калорийностью — там ответ есть, выводить его
+    заново не нужно. Берём самую калорийную позицию: именно она определяет,
+    что человек ел, а не что добавил.
+    """
+    best: tuple[float, int, str] | None = None
+    for index, item in enumerate(items or ()):
+        if not isinstance(item, dict):
+            continue
+        name = " ".join(str(item.get("name") or "").split())
+        if not name:
+            continue
+        try:
+            kcal = float(item.get("kcal") or 0)
+        except (TypeError, ValueError):
+            kcal = 0.0
+        key = (-kcal, index, name)
+        if best is None or key < best:
+            best = key
+    return best[2] if best else None
+
+
+def match_quality(source: object) -> str:
+    return MATCH_QUALITY.get(str(source or ""), "none")
+
+
 class FoodAssetResolver:
     """Immutable manifest index plus a tiny locked generated-asset overlay."""
 
@@ -412,26 +461,60 @@ class FoodAssetResolver:
                     break
         return frozenset(out)
 
-    def _subset_match(self, query_tokens: frozenset[str]) -> tuple[str, str] | None:
+    def _subset_match(
+        self, query_tokens: frozenset[str],
+    ) -> tuple[str, str, float] | None:
+        """Подпись, все слова которой есть в названии.
+
+        Когда подходят несколько подписей, они бывают двух видов. Вложенные —
+        «Блины» и «Блины с творогом»: тут очевидно точнее длинная. И непересе­
+        кающиеся — «вареники» и «Масло сливочное» для «вареники с вишней,
+        сливочное масло»: тут выбрать значит угадать, какое из двух блюд
+        показать. Раньше я угадывал по длине, потом по порядку слов — обе
+        эвристики ошибались. Настоящая неоднозначность разрешается не здесь:
+        главную позицию знает разбор приёма пищи, а если разбора нет, честнее
+        заглушка и очередь на генерацию, чем чужая картинка.
+        """
         if not query_tokens:
             return None
-        best_size = 0
-        winners: list[str] = []
-        for label, label_tokens in self._tokens.items():
-            if not label_tokens or not label_tokens <= query_tokens:
-                continue
-            size = len(label_tokens)
-            if size > best_size:
-                best_size, winners = size, [label]
-            elif size == best_size:
-                winners.append(label)
-        # Ничья — отказ. «Омлет с сыром и грибами» подходит и «Омлету с сыром»,
-        # и «Омлету с грибами»; выбрать любую значит показать блюдо, которого
-        # человек не ел. Пусть решает семейный фолбэк по голове названия — он
-        # для того и сделан, — а не порядок словаря.
-        if len(winners) != 1:
+        candidates = [
+            (label, tokens) for label, tokens in self._tokens.items()
+            if tokens and tokens <= query_tokens
+        ]
+        if not candidates:
             return None
-        return winners[0], self.manifest[winners[0]]
+        best_label, best_tokens = max(candidates, key=lambda pair: len(pair[1]))
+        for label, tokens in candidates:
+            if not tokens <= best_tokens:
+                return None      # непересекающиеся кандидаты — не гадаем
+        return best_label, self.manifest[best_label], len(best_tokens) / len(query_tokens)
+
+    def _composed_url(self, items: Iterable[dict] | None) -> str | None:
+        names = []
+        for item in items or ():
+            if not isinstance(item, dict):
+                continue
+            name = " ".join(str(item.get("name") or "").split())
+            if name and name not in names:
+                names.append(name)
+        if len(names) < 2:
+            return None
+        paths = []
+        for name in names[:COMPOSITION_LIMIT]:
+            match = self._manifest_match(name)
+            # Точное и близкое клеим, приблизительное — нет. Коллаж из двух
+            # реальных продуктов честнее одного выбранного; коллаж из двух
+            # «похожих на что-то» — уже выдумка.
+            if not match or match_quality(match[2]) not in {"exact", "close"}:
+                return None
+            paths.append(_ROOT / match[1].lstrip("/"))
+        try:
+            tile = compose(paths, composition_dir())
+        except Exception:
+            return None
+        if not tile:
+            return None
+        return f"{composition_public_base()}/{tile.name}"
 
     def _manifest_match(self, label: str) -> tuple[str, str, str] | None:
         normalized = normalize_label(label)
@@ -469,7 +552,13 @@ class FoodAssetResolver:
         # «Салату». Замер на реальных записях прода: покрытие 43% → 74%.
         subset = self._subset_match(query_tokens)
         if subset:
-            result = (subset[0], subset[1], "catalog_subset")
+            # Доля покрытия: сколько из того, что человек написал, реально
+            # изображено. «Блины с творогом» покрывают «блины с творогом и
+            # сметаной» почти целиком — это близко. «Кефир» покрывает «мюсли,
+            # кефир, бутерброд» на треть — формально подмножество, по сути
+            # чужая картинка, и такому место в очереди на догенерацию.
+            source = "catalog_subset" if subset[2] >= 0.5 else "catalog_partial"
+            result = (subset[0], subset[1], source)
             with self._match_cache_lock:
                 self._match_cache[normalized] = result
             return result
@@ -529,7 +618,32 @@ class FoodAssetResolver:
         items: Iterable[dict] | None = None,
     ) -> dict[str, object]:
         title = str(label or "").strip()
-        match = self._manifest_match(title)
+
+        # Приём из нескольких продуктов показываем композицией, а не одним из
+        # них: любой выбор одного — половина правды. Собираем, только если у
+        # каждой позиции есть СВОЯ точная картинка, иначе получится коллаж из
+        # приблизительных, а это хуже честной одной.
+        composed = self._composed_url(items)
+        if composed:
+            return {
+                "canonical_id": canonical_id(title),
+                "canonical_label": title,
+                "image_url": composed,
+                "image_source": "composition",
+                "asset_state": "ready",
+                "match_quality": "exact",
+                "requested_label": title,
+                "style_version": STYLE_VERSION,
+            }
+
+        # Сначала спрашиваем разбор: он знает главную позицию точно. Целая
+        # строка — запасной путь для мест, где разбора нет (меню, чат).
+        head = head_item(items)
+        match = None
+        if head and normalize_label(head) != normalize_label(title):
+            match = self._manifest_match(head)
+        if match is None:
+            match = self._manifest_match(title)
         # Preserve reviewed exact catalog art. For a broader family/canonical
         # fallback, prefer a semantically validated image generated for this
         # exact label when one is available.
@@ -541,6 +655,8 @@ class FoodAssetResolver:
                 "image_url": url,
                 "image_source": source,
                 "asset_state": "ready",
+                "match_quality": match_quality(source),
+                "requested_label": title,
                 "style_version": STYLE_VERSION,
             }
 
@@ -553,6 +669,8 @@ class FoodAssetResolver:
                 "image_url": generated,
                 "image_source": "generated",
                 "asset_state": "ready",
+                "match_quality": "exact",
+                "requested_label": title,
                 "style_version": STYLE_VERSION,
             }
         if match:
@@ -563,6 +681,8 @@ class FoodAssetResolver:
                 "image_url": url,
                 "image_source": source,
                 "asset_state": "ready",
+                "match_quality": match_quality(source),
+                "requested_label": title,
                 "style_version": STYLE_VERSION,
             }
 
@@ -581,11 +701,78 @@ class FoodAssetResolver:
             "image_url": DRINK_PLACEHOLDER if is_drink else MEAL_PLACEHOLDER,
             "image_source": "category",
             "asset_state": "missing",
+            "match_quality": "none",
+            "requested_label": title,
             "style_version": STYLE_VERSION,
         }
 
 
 RESOLVER = FoodAssetResolver.from_default_manifest()
+
+
+
+#: Сколько позиций показываем в композиции. Больше четырёх на превью 88×88
+#: превращается в кашу, и честнее показать три и счётчик, чем шесть точек.
+COMPOSITION_LIMIT = 4
+
+
+def _compose_layout(count: int) -> tuple[tuple[int, int, int, int], ...]:
+    """Раскладка плиток внутри квадрата 512×512 для двух-четырёх позиций."""
+    if count == 2:
+        return ((0, 0, 256, 512), (256, 0, 256, 512))
+    if count == 3:
+        return ((0, 0, 256, 512), (256, 0, 256, 256), (256, 256, 256, 256))
+    return ((0, 0, 256, 256), (256, 0, 256, 256),
+            (0, 256, 256, 256), (256, 256, 256, 256))
+
+
+def compose(paths: "list[Path]", destination: "Path") -> "Path | None":
+    """Собрать одну плитку из картинок нескольких позиций приёма пищи.
+
+    Приём из нескольких продуктов раньше показывал картинку одного из них —
+    выбранного правилом, которое ошибалось, а когда перестало ошибаться, всё
+    равно осталось выбором: «вареники с вишней, сливочное масло» это два
+    продукта, и любой один из них — половина правды.
+
+    Композиция детерминированная и без модели: имя файла считается от состава,
+    поэтому один и тот же набор всегда даёт один и тот же файл, а кэш работает
+    сам собой. Фон белый, как у всех картинок каталога: приложение кладёт
+    плитку на свою подложку через mix-blend-mode: darken.
+    """
+    from PIL import Image
+
+    usable = [p for p in paths if p and Path(p).is_file()][:COMPOSITION_LIMIT]
+    if len(usable) < 2:
+        return None
+    digest = hashlib.sha256(
+        "|".join(sorted(Path(p).name for p in usable)).encode("utf-8")
+    ).hexdigest()
+    target = Path(destination) / f"{digest}.webp"
+    if target.exists():
+        return target
+    canvas = Image.new("RGB", (512, 512), (255, 255, 255))
+    for (x, y, w, h), path in zip(_compose_layout(len(usable)), usable):
+        with Image.open(path) as tile:
+            tile = tile.convert("RGB")
+        tile.thumbnail((w - 8, h - 8), Image.Resampling.LANCZOS)
+        canvas.paste(tile, (x + (w - tile.width) // 2, y + (h - tile.height) // 2))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    canvas.save(temporary, "WEBP", quality=82, method=6)
+    os.replace(temporary, target)
+    return target
+
+_ROOT = Path(__file__).resolve().parent / "webapp2"
+
+
+def composition_dir() -> Path:
+    """Куда кладём собранные плитки. Рядом с генерируемыми картинками."""
+    return generated_asset_dir() / "compositions"
+
+
+def composition_public_base() -> str:
+    return generated_public_base() + "/compositions"
+
 
 
 def decorate(record: dict) -> dict:
@@ -819,14 +1006,25 @@ def _validate_generated_image(
         "(bulgur versus couscous, one white fish versus another), that is NOT "
         "absent — leave it out of the list. Reject substitutions caused by "
         "similar-sounding words (for example fish versus carrots), non-food "
-        "objects, visible text/logos or people. Return only JSON: "
-        '{"matches":true,"confidence":0.0,"absent":[],"reason":"short reason"}. '
+        "objects, visible text/logos or people. Отдельно оцени узнаваемость: "
+        "картинка живёт превью 88 на 88 точек рядом с названием, и блюдо должно "
+        "читаться с одного взгляда. Ровный однотонный кусок без текстуры, "
+        "среза и деталей — это не еда, а форма: «recognizable» тогда false, "
+        "даже если продукт формально верный. Return only JSON: "
+        '{"matches":true,"confidence":0.0,"absent":[],"recognizable":true,"reason":"short reason"}. '
         "Original Russian label: " + json.dumps(label, ensure_ascii=False)
         + ". Literal English target: " + json.dumps(description),
         image=image,
     )
     missing = data.get("absent")
     matches = data.get("matches") is True
+    # Правильное, но неузнаваемое — тоже брак. «Треска на пару» прошла старый
+    # гейт: это действительно треска на пару, но на превью её путают с куском
+    # масла, и пользователь справедливо спрашивает, при чём тут его блюдо.
+    if data.get("recognizable") is False:
+        raise FoodImageValidationError(
+            "food_image_not_recognizable", missing=("узнаваемый вид блюда",),
+        )
     if isinstance(missing, list) and any(str(item).strip() for item in missing):
         absent = [str(item) for item in missing if str(item).strip()]
         gap = re.sub(
