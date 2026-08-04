@@ -1810,7 +1810,9 @@ def cyc_add(cid, d, end=None, user_generation=None):
         c.close(); return False
     c.execute("INSERT OR IGNORE INTO cycles(chat_id,start_date,end_date) VALUES(?,?,?)", (cid, d, end))
     if end: c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end, cid, d))
-    c.commit(); c.close(); return True
+    c.commit(); c.close()
+    _invalidate_cycle_dependent_state(cid)
+    return True
 def cyc_set_end(cid, start_iso, end_iso, user_generation=None):
     c = db()
     if user_generation is not None:
@@ -1818,7 +1820,9 @@ def cyc_set_end(cid, start_iso, end_iso, user_generation=None):
     if not _user_write_allowed(cid, user_generation, conn=c):
         c.close(); return False
     c.execute("UPDATE cycles SET end_date=? WHERE chat_id=? AND start_date=?", (end_iso, cid, start_iso))
-    c.commit(); c.close(); return True
+    c.commit(); c.close()
+    _invalidate_cycle_dependent_state(cid)
+    return True
 def pa_list(cid):
     c = db(); r = c.execute("SELECT d FROM intimacy WHERE chat_id=? ORDER BY d", (cid,)).fetchall(); c.close(); return [x[0] for x in r]
 def pa_toggle(cid, iso):
@@ -2001,6 +2005,7 @@ def period_delete_at(cid, iso):
             start = p["start"]; break
     if not start: return False
     c = db(); c.execute("DELETE FROM cycles WHERE chat_id=? AND start_date=?", (cid, start)); c.commit(); c.close()
+    _invalidate_cycle_dependent_state(cid)
     return True
 def logs_of(cid, since_iso=None):
     c = db()
@@ -3648,7 +3653,7 @@ def _semantic_action_matches_source(
 
 def _normalize_semantic_journal(
     data, source_text="", context=None, enable_v2=False,
-    trusted_food_prompt=False,
+    trusted_food_prompt=False, reasons=None,
 ):
     """Fail-closed валидация решения модели перед любой записью в БД."""
     if not isinstance(data, dict):
@@ -3677,24 +3682,37 @@ def _normalize_semantic_journal(
         if isinstance(confidence_raw, (int, float)) and not isinstance(confidence_raw, bool)
         else -1.0
     )
-    if (
-        action not in action_to_intent
-        or not math.isfinite(confidence)
-        or not 0.85 <= confidence <= 1.0
-        or not _semantic_action_matches_source(
-            action, source_text, context, data, require_evidence=enable_v2,
-            trusted_food_prompt=trusted_food_prompt,
-        )
-        or str(data.get("subject") or "").lower() != "self"
-        or str(data.get("status") or "").lower() != "completed"
-        or str(data.get("polarity") or "").lower() != "positive"
-        or str(data.get("certainty") or "").lower() != "certain"
-        or str(data.get("primary_purpose") or "").lower() not in (
-            {"journal", "repair"}
-            if action in {"move_meal_slot", "append_meal_item"}
-            else {"journal"}
-        )
+    # Проверки по одной и с именем: отказ уверенного разбора надо уметь
+    # прочитать в логах. Раньше это было одно длинное «или», и по факту отказа
+    # нельзя было сказать, какая именно проверка не пропустила запись, — я сам
+    # чинил не ту ветку, потому что причину приходилось угадывать.
+    failed = None
+    if action not in action_to_intent:
+        failed = "action"
+    elif not math.isfinite(confidence) or not 0.85 <= confidence <= 1.0:
+        failed = "confidence"
+    elif str(data.get("subject") or "").lower() != "self":
+        failed = "subject"
+    elif str(data.get("status") or "").lower() != "completed":
+        failed = "status"
+    elif str(data.get("polarity") or "").lower() != "positive":
+        failed = "polarity"
+    elif str(data.get("certainty") or "").lower() != "certain":
+        failed = "certainty"
+    elif str(data.get("primary_purpose") or "").lower() not in (
+        {"journal", "repair"}
+        if action in {"move_meal_slot", "append_meal_item"}
+        else {"journal"}
     ):
+        failed = "purpose"
+    elif not _semantic_action_matches_source(
+        action, source_text, context, data, require_evidence=enable_v2,
+        trusted_food_prompt=trusted_food_prompt,
+    ):
+        failed = "corroboration"
+    if failed:
+        if reasons is not None:
+            reasons.append(failed)
         return None
     out = {"intent": action_to_intent[action], "confidence": confidence}
     if action == "food":
@@ -3968,9 +3986,10 @@ async def resolve_semantic_journal_action(
     if classified is None:
         ev(cid, "journal_route_failed", meta="empty", user_generation=generation)
         return {"intent": "journalunavailable", "reason": "empty"}
+    reasons = []
     plan = _normalize_semantic_journal(
         classified, text, context, enable_v2=v2,
-        trusted_food_prompt=food_prompt_mode,
+        trusted_food_prompt=food_prompt_mode, reasons=reasons,
     )
     if food_prompt_mode and (
         not plan or plan.get("intent") not in {"logmeal", "logmealbatch"}
@@ -3985,6 +4004,14 @@ async def resolve_semantic_journal_action(
         if clarification:
             return {"intent": clarification}
         claimed = str((classified or {}).get("action") or "").strip().lower()
+        if claimed and claimed != "none":
+            # Причину пишем в журнал сервиса: в аналитику уходит только имя
+            # события, а разбираться приходится именно с тем, какая проверка
+            # не пропустила запись.
+            log.info(
+                "journal route refused: cid=%s action=%s reason=%s v2=%s",
+                cid, claimed, (reasons[0] if reasons else "unknown"), v2,
+            )
         if claimed and not completed_signal:
             # Модель разобрала событие, а проверка домена его не подтвердила.
             # Раньше такой отказ не оставлял следа: человек получал обычный
@@ -7008,7 +7035,9 @@ def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=Fals
                 (cid, mutation_key, int(user_generation), "period_start", iso, args_hash or "",
                  json.dumps({"date": iso}), datetime.now(TZ).isoformat()),
             )
-        c.commit(); c.close(); return {"status": "duplicate", "date": iso}
+        c.commit(); c.close()
+        _invalidate_cycle_dependent_state(cid)
+        return {"status": "duplicate", "date": iso}
     if enforce_spacing:
         close = [x for x in starts if 0 < abs((event_date - date.fromisoformat(x)).days) <= 10]
         if close:
@@ -7035,6 +7064,7 @@ def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=Fals
              json.dumps({"date": iso}), datetime.now(TZ).isoformat()),
         )
     c.commit(); c.close()
+    _invalidate_cycle_dependent_state(cid)
     return {"status": "created", "date": iso}
 
 def _save_period_end_atomic(cid, end_iso, user_generation=None, mutation_key=None, args_hash=None):
@@ -7076,6 +7106,7 @@ def _save_period_end_atomic(cid, end_iso, user_generation=None, mutation_key=Non
              json.dumps(result), datetime.now(TZ).isoformat()),
         )
     c.commit(); c.close()
+    _invalidate_cycle_dependent_state(cid)
     return {"status": "saved", "start": start_iso, "end": end_iso, "length": length}
 
 def db_mark_period(cid, iso, user_generation=None):
@@ -9404,6 +9435,26 @@ def _evict_week_food_cache(cid):
         _WEEK_FOOD_CACHE.pop(k, None)
     dc_del(cid, "week_food")
 
+def _invalidate_cycle_dependent_state(cid):
+    """Пересобрать всё, что считается от фазы цикла.
+
+    Репорт: в первый день месячных питание и нагрузка обновились, а карточка
+    на главной осталась с прошлой фазой — «сегодня 39 день». Сброс кэша висел
+    на вызывающих: приложение его звало, чат и реестр действий — нет. Отметку
+    можно поставить с четырёх поверхностей, и помнить про сброс на каждой —
+    ровно тот способ, которым эта карточка и протухла.
+
+    Поэтому инвалидация живёт в самой записи: любой путь, который меняет
+    цикл, проходит через неё.
+    """
+    _evict_today_cache(cid)
+    section_cache_clear(cid)
+    prepared_summary_clear(cid)
+    menu_cache_clear(cid)
+    for key in [key for key in list(_CARD_CACHE) if key and key[0] == cid]:
+        _CARD_CACHE.pop(key, None)
+
+
 def _invalidate_mode_dependent_state(cid):
     """Drop every derived answer that may have been built for another mode."""
     _evict_today_cache(cid)
@@ -10114,7 +10165,6 @@ async def _api_period(request):
         if error:
             return _cors(web.json_response(error, status=status))
     if action == "start":
-        _evict_today_cache(cid)
         db_mark_period(cid, d.isoformat(), user_generation=generation)
         ev(
             cid, "manual", meta="web_period_start",
@@ -10212,14 +10262,13 @@ async def _api_period(request):
             raise
         finally:
             c.close()
-        _evict_today_cache(cid)
+        _invalidate_cycle_dependent_state(cid)
         ev(
             cid, "manual", meta="web_period_replace",
             user_generation=generation,
         )
         return _cors(web.json_response({"ok": True}))
     if action == "delete":
-        _evict_today_cache(cid)
         period_delete_at(cid, d.isoformat())
         cyc = cycles_of(cid)
         upsert(cid, last_period=(max(cyc) if cyc else None))
@@ -10246,7 +10295,6 @@ async def _api_period(request):
                         "Конец периода должен быть в пределах 10 дней от начала.",
                     ), status=400
                 ))
-            _evict_today_cache(cid)
             cyc_set_end(cid, start_iso, d.isoformat())
             if start_iso == u.get("last_period"):
                 upsert(cid, period_end=d.isoformat(), period_len=ln)
