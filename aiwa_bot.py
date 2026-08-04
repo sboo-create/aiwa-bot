@@ -2820,7 +2820,7 @@ _JOURNAL_FOOD_COMPLETED_RE = re.compile(
 _JOURNAL_FOOD_NEGATED_RE = re.compile(
     r"\bне\s+(?:съел\w*|доел\w*|поел\w*|перекусил\w*|ел[аи]?\b|"
     r"кушал\w*|скушал\w*|покушал\w*|пил[аи]?\b|выпил\w*|попил\w*|"
-    r"попробовал\w*|кусал\w*|куснул\w*)\b",
+    r"попробовал\w*|кусал\w*|куснул\w*|был[аио]?)\b",
     re.I,
 )
 _JOURNAL_WORKOUT_COMPLETED_RE = re.compile(
@@ -2837,12 +2837,77 @@ _JOURNAL_WORKOUT_COMPLETED_RE = re.compile(
     r"\b(?:сделал\w*|провел\w*|закончил\w*)\b",
     re.I,
 )
+#: Прошедшее время: форма «быть» или глагол на -ла/-лась/-ли/-лся.
+#: Это грамматика, а не список слов: «была», «сделала», «размялась»,
+#: «поприседала» проходят одинаково, и дописывать сюда ничего не надо.
+_JOURNAL_PAST_ACTION_RE = re.compile(
+    r"\b(?:был[аио]?|[а-яё]{3,}(?:лась|лись|ла|ли|лся))\b", re.I
+)
+
+
+def _journal_grounded_names(payload):
+    """Названия активностей, которые модель утверждает, что увидела."""
+    workout = (payload or {}).get("workout")
+    if not isinstance(workout, dict):
+        return []
+    names = [workout.get("type"), workout.get("note")]
+    for item in (workout.get("items") or []):
+        if isinstance(item, dict):
+            names.append(item.get("name"))
+    return [str(name).strip() for name in names if str(name or "").strip()]
+
+
+def _journal_grounded(text, names):
+    """Хотя бы одно из названий встречается в самом тексте.
+
+    Падежи сравниваем по общей основе: «разминку» и «разминка» — одно слово.
+    """
+    haystack = {
+        word for word in FA.normalize_label(text).split() if len(word) >= 4
+    }
+    if not haystack:
+        return False
+    for name in names:
+        for word in FA.normalize_label(name).split():
+            if len(word) < 4:
+                continue
+            if any(
+                word == known
+                or (min(len(word), len(known)) >= 5 and word[:5] == known[:5])
+                for known in haystack
+            ):
+                return True
+    return False
+
+
+def _journal_food_grounded(text, payload):
+    """То же для еды: «сегодня был творог и банан» — такой же отчёт о событии."""
+    return _journal_grounded(text, [str((payload or {}).get("food_text") or "")])
+
+
+def _journal_workout_grounded(text, payload):
+    """Хотя бы одно название из ответа модели должно быть в самом тексте.
+
+    Домен подтверждался списком глаголов: «была на тренировке» в нём есть,
+    а «сейчас была разминка спины с приседаниями» — нет, и запись молча не
+    появлялась, хотя модель разобрала фразу верно. Список слов такую дыру
+    закрывает ровно до следующей формулировки.
+
+    Проверяем другое и по существу: то, что модель назвала активностью,
+    должно дословно встречаться в тексте человека. Это то же требование, что
+    у evidence-путей, и оно не зависит ни от порядка слов, ни от того, какие
+    глаголы кто-то вспомнил при написании регулярки. Падежи сравниваем по
+    общей основе: «разминку» и «разминка» — одно слово.
+    """
+    return _journal_grounded(text, _journal_grounded_names(payload))
+
+
 _JOURNAL_WORKOUT_NEGATED_RE = re.compile(
     r"\bне\s+(?:(?:сегодня|вчера|позавчера)\s+)?(?:"
     r"потренир\w*|тренировал\w*|занимал\w*|бегал\w*|пробежал\w*|"
     r"ходил\w*|сходил\w*|гулял\w*|плавал\w*|качал\w*|танцевал\w*|"
     r"приседал\w*|поприседал\w*|отжимал\w*|подтягивал\w*|"
-    r"делал\w*|сделал\w*|провел\w*|закончил\w*|был[аи]?"
+    r"делал\w*|сделал\w*|провел\w*|закончил\w*|был[аио]?"
     r")\b",
     re.I,
 )
@@ -3414,6 +3479,13 @@ def _semantic_action_matches_source(
             return bool(
                 _JOURNAL_FOOD_COMPLETED_RE.search(raw)
                 or (
+                    # «Сегодня был творог и банан» — такой же отчёт о съеденном,
+                    # как «съела творог»: событие названо, глагол просто другой.
+                    _JOURNAL_PAST_ACTION_RE.search(raw)
+                    and not _JOURNAL_FOOD_NEGATED_RE.search(raw)
+                    and _journal_food_grounded(raw, payload)
+                )
+                or (
                     _journal_has_recent_mutation(context)
                     and bool((context or {}).get("meals"))
                     and str(
@@ -3430,7 +3502,13 @@ def _semantic_action_matches_source(
                         and _journal_target_day_allowed(context, "meals", target, raw))
         if action == "workout":
             return bool(
-                _JOURNAL_WORKOUT_COMPLETED_RE.search(raw)
+                (
+                    _JOURNAL_WORKOUT_COMPLETED_RE.search(raw)
+                    or (
+                        _JOURNAL_PAST_ACTION_RE.search(raw)
+                        and _journal_workout_grounded(raw, payload)
+                    )
+                )
                 and not _JOURNAL_WORKOUT_NEGATED_RE.search(raw)
             )
         if action == "workout_update":
@@ -3878,6 +3956,13 @@ async def resolve_semantic_journal_action(
         )
         if clarification:
             return {"intent": clarification}
+        claimed = str((classified or {}).get("action") or "").strip().lower()
+        if claimed and not completed_signal:
+            # Модель разобрала событие, а проверка домена его не подтвердила.
+            # Раньше такой отказ не оставлял следа: человек получал обычный
+            # ответ, а мы не знали, что запись не появилась.
+            ev(cid, "journal_route_failed", meta=f"corroboration|{claimed}"[:40],
+               user_generation=generation)
         if completed_signal:
             ev(cid, "journal_route_failed", meta="validation", user_generation=generation)
             return {"intent": "journalunavailable", "reason": "validation"}
