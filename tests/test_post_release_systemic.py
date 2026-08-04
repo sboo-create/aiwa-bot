@@ -448,16 +448,31 @@ class PostReleaseSystemicTests(unittest.TestCase):
             chart_bundle,
         )
 
-    def test_i167_assets_use_isolated_atomic_public_release(self):
-        root = Path(__file__).resolve().parents[1]
-        caddy = (
-            root / "deploy/i167/aiwa-staging.caddy"
-        ).read_text(encoding="utf-8")
+    def test_i167_assets_come_from_the_release_directory(self):
+        """Ассеты обязаны приезжать вместе с релизом, как на проде.
 
-        self.assertIn("handle /assets/*", caddy)
-        self.assertIn("root * /srv/aiwa-staging/public-current", caddy)
-        self.assertIn("file_server", caddy)
-        self.assertNotIn("root * /srv/aiwa-staging/current", caddy)
+        Раньше staging раздавал их из отдельного public-current, который деплой
+        не обновлял: index.html приезжал новый, а картинки и стили оставались
+        старыми, и проверка на staging показывала не то, что выкатывается.
+        """
+        root = Path(__file__).resolve().parents[1]
+        for name, prefix in (
+            ("aiwa-staging.caddy", "/srv/aiwa-staging"),
+            ("aiwa.caddy", "/srv/aiwa"),
+        ):
+            raw = (root / "deploy/i167" / name).read_text(encoding="utf-8")
+            # Комментарии вырезаем: в них история и слова, которых в директивах
+            # быть не должно. Проверять текст файла целиком — ловить сам
+            # рассказ о том, как было раньше.
+            caddy = "\n".join(
+                line for line in raw.splitlines()
+                if not line.strip().startswith("#")
+            )
+            with self.subTest(config=name):
+                self.assertIn("handle /assets/*", caddy)
+                self.assertIn(f"root * {prefix}/current/webapp2", caddy)
+                self.assertIn("file_server", caddy)
+                self.assertNotIn("public-current", caddy)
         self.assertEqual(mimetypes.guess_type("catalog.webp")[0], "image/webp")
 
     def test_security_headers_never_relabel_synthesized_webp_responses(self):

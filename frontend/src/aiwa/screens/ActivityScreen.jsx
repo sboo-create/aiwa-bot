@@ -136,7 +136,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
-    fetch("/assets/train/manifest.json?v=2")
+    fetch("/assets/train/manifest.json", { cache: "no-cache" })
       .then((r) => (r.ok ? r.json() : {}))
       .then((icons) => setTrainIcons(icons || {}))
       .catch(() => {});

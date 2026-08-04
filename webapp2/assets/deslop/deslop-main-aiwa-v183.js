@@ -21560,7 +21560,7 @@ function f7({ label: n, value: t, ok: i }) {
 function d7({ metrics: n, title: t = "Статистика" }) {
   return n?.length ? /* @__PURE__ */ h.jsx(gt.Item, { header: t, children: n.map((i) => /* @__PURE__ */ h.jsx(f7, { ...i }, i.label)) }) : null;
 }
-const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r41").then((n) => ({
+const h7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v183.js?v=r42").then((n) => ({
   default: n.AiwaWebUiChart
 })));
 function m7() {
@@ -24048,7 +24048,7 @@ function nb({ mode: n, revision: t = 0 }) {
     const at = ft(ot);
     b !== j && at.includes(b) && mt(b, { force: !0 });
   }, [ot, ft, mt, b, j]), C.useEffect(() => {
-    fetch("/assets/food/manifest.json?v=3").then((at) => at.ok ? at.json() : {}).then((at) => v(at || {})).catch(() => {
+    fetch("/assets/food/manifest.json", { cache: "no-cache" }).then((at) => at.ok ? at.json() : {}).then((at) => v(at || {})).catch(() => {
     });
   }, []), C.useEffect(() => {
     if (!i.diary || !b || b === j) return;
@@ -24715,7 +24715,7 @@ function tD({ mode: n, revision: t = 0 }) {
   C.useEffect(() => (B.current = !0, () => {
     B.current = !1;
   }), []), C.useEffect(() => {
-    fetch("/assets/train/manifest.json?v=2").then((yt) => yt.ok ? yt.json() : {}).then((yt) => T(yt || {})).catch(() => {
+    fetch("/assets/train/manifest.json", { cache: "no-cache" }).then((yt) => yt.ok ? yt.json() : {}).then((yt) => T(yt || {})).catch(() => {
     });
   }, []), C.useEffect(() => {
     if (!i.train || !x || x === A) return;
