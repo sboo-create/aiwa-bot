@@ -307,7 +307,7 @@ export function FoodScreen({ mode, revision = 0 }) {
   }, [canonicalAssetRevision, invalidateDayAssetCache, requestDayDiary, selectedIso, today]);
 
   useEffect(() => {
-    fetch("/assets/food/manifest.json?v=3")
+    fetch("/assets/food/manifest.json", { cache: "no-cache" })
       .then((r) => (r.ok ? r.json() : {}))
       .then((icons) => setFoodIcons(icons || {}))
       .catch(() => {});

@@ -4,6 +4,18 @@
 aiwa-candidate-167.158-160-163-167.sslip.io {
 	encode zstd gzip
 
+	# Манифест «название -> файл» — изменяемые данные, и immutable ему не
+	# место: после замены каталога у клиентов оставался старый манифест,
+	# который ссылался на удалённые файлы, и картинки ломались. Перезагрузка
+	# не помогала — immutable запрещает браузеру переспрашивать.
+	handle /assets/*/manifest.json {
+		root * /srv/aiwa/current/webapp2
+		header Cache-Control "no-cache"
+		file_server
+	}
+
+	# Сами картинки адресуются по содержимому: имя меняется вместе с файлом,
+	# поэтому вечный кэш для них корректен.
 	handle /assets/* {
 		root * /srv/aiwa/current/webapp2
 		header Cache-Control "public, max-age=31536000, immutable"

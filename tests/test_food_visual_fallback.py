@@ -69,3 +69,41 @@ class FoodVisualFallbackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManifestCacheContractTests(unittest.TestCase):
+    """Манифест — изменяемые данные, вечный кэш ему противопоказан.
+
+    Инцидент: каталог заменили, старые файлы удалили, а у клиентов остался
+    immutable-манифест со ссылками на удалённое — картинки побились, и
+    перезагрузка не помогала, потому что immutable запрещает переспрашивать.
+    """
+
+    def test_frontend_revalidates_the_manifest(self):
+        for path in (
+            ROOT / "frontend/src/aiwa/screens/FoodScreen.jsx",
+            ROOT / "frontend/src/aiwa/screens/ActivityScreen.jsx",
+        ):
+            source = path.read_text(encoding="utf-8")
+            with self.subTest(screen=path.name):
+                self.assertIn('manifest.json", { cache: "no-cache" }', source)
+                # Ревизия руками — та же ловушка: её забудут поднять.
+                self.assertNotIn('manifest.json?v=', source)
+
+    def test_server_serves_the_manifest_revalidating(self):
+        for name in ("aiwa.caddy", "aiwa-staging.caddy"):
+            # Комментарии не участвуют: проверяем директивы, а не рассказ.
+            raw = (ROOT / "deploy/i167" / name).read_text(encoding="utf-8")
+            config = "\n".join(
+                line for line in raw.splitlines()
+                if not line.strip().startswith("#")
+            )
+            with self.subTest(config=name):
+                block = config[config.index("/assets/*/manifest.json"):]
+                head = block[: block.index("}")]
+                self.assertIn('Cache-Control "no-cache"', head)
+                self.assertLess(
+                    config.index("/assets/*/manifest.json"),
+                    config.index("handle /assets/* {"),
+                    "правило манифеста обязано стоять раньше общего",
+                )
