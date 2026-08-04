@@ -252,5 +252,47 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(expected, {"logworkout", "logmeal", None})
 
 
+
+class PrefilterTests(unittest.TestCase):
+    """Фильтр решает, звать ли роутер. Он молчит, и это его свойство опаснее.
+
+    «Покрутил велотренажёр минут двадцать» не доходило до модели вовсе: правило
+    формы отчёта знало только женский род. Отказ роутера хотя бы виден в
+    аналитике, а тут не происходило вообще ничего.
+    """
+
+    CONTEXT = {"meals": [], "workouts": []}
+
+    def test_report_is_recognized_in_both_genders(self):
+        for text in (
+            "покрутил велотренажёр минут двадцать",
+            "покрутила велотренажёр минут двадцать",
+            "поделал приседания и разминку спины",
+            "поделала приседания и разминку спины",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(
+                    bot._semantic_journal_candidate(text, self.CONTEXT, enable_v2=True),
+                    text,
+                )
+
+    def test_past_tense_alone_does_not_call_the_model(self):
+        """Новая ветка требует и прошедшего времени, и слова из каталога.
+
+        Иначе фильтр звал бы модель на любую фразу в прошедшем времени —
+        а он стоит на пути каждого сообщения.
+        """
+        for text in (
+            "покрутил головой и пошёл дальше",
+            "привет, как дела",
+            "расскажи про лютеиновую фазу",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(
+                    bot._semantic_journal_candidate(text, self.CONTEXT, enable_v2=True),
+                    text,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

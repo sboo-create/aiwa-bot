@@ -624,6 +624,140 @@
         "food_entries": [],
         "workout": null
       }
+    },
+    {
+      "text": "Подделал несколько минут приседания с разминкой спины.",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "Подделал несколько минут приседания с разминкой спины."
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 0.9,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Силовая",
+          "duration_minutes": null,
+          "rpe": null,
+          "items": [
+            {
+              "name": "приседания",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": ""
+            },
+            {
+              "name": "разминка спины",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": "спина"
+            }
+          ],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "поделал приседания и разминку спины",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "поделал приседания и разминку спины"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Силовая",
+          "duration_minutes": null,
+          "rpe": null,
+          "items": [
+            {
+              "name": "приседания",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": ""
+            },
+            {
+              "name": "разминка спины",
+              "sets": null,
+              "reps": null,
+              "weight": null,
+              "group": "спина"
+            }
+          ],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "покрутил велотренажёр минут двадцать",
+      "expected": "logworkout",
+      "router": {
+        "action": "workout",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [
+          "покрутил велотренажёр минут двадцать"
+        ],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": {
+          "type": "Кардио",
+          "duration_minutes": 20,
+          "rpe": null,
+          "items": [],
+          "note": ""
+        }
+      }
+    },
+    {
+      "text": "потянулся немного после работы",
+      "expected": null,
+      "router": {
+        "action": "none",
+        "target_id": null,
+        "slot": null,
+        "evidence_spans": [],
+        "subject": "self",
+        "status": "completed",
+        "polarity": "positive",
+        "certainty": "certain",
+        "primary_purpose": "journal",
+        "confidence": 1.0,
+        "food_text": "",
+        "food_record": null,
+        "food_entries": [],
+        "workout": null
+      }
     }
   ]
 }

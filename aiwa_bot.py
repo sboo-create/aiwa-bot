@@ -3299,6 +3299,15 @@ def _semantic_journal_candidate(text, context=None, enable_v2=False):
     personal_report_shape = bool(
         re.search(r"^\s*(?:(?:ну|а|кстати|короче)[,\s]+)*(?:я|сегодня|вчера|позавчера)\b", raw, re.I)
         or (len(raw) <= 220 and re.search(r"\b[а-яё-]{3,}(?:ла|лась)\b", raw, re.I))
+        # Форма отчёта: прошедшее время плюс вещь, которую знает каталог.
+        # Правило выше видит только женский род («покрутила»), и «покрутил
+        # велотренажёр минут двадцать» до роутера не доходило вовсе — фильтр
+        # отсекал такие фразы раньше, чем модель успевала их прочитать.
+        or (
+            len(raw) <= 220
+            and _JOURNAL_PAST_ACTION_RE.search(raw)
+            and (SA.RESOLVER.mentions(raw) or FA.RESOLVER.mentions(raw))
+        )
     )
     contextual_followup = bool(
         _journal_has_recent_mutation(context)
