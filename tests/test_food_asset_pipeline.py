@@ -373,7 +373,8 @@ class FoodAssetQueueTests(unittest.TestCase):
             bot._FOOD_ASSET_CANDIDATES = asyncio.Queue(maxsize=4)
             self.assertEqual(bot._offer_food_asset_candidates([record]), 1)
             self.assertEqual(bot._offer_food_asset_candidates([record]), 0)
-            food_id, label = bot._FOOD_ASSET_CANDIDATES.get_nowait()
+            food_id, label, style = bot._FOOD_ASSET_CANDIDATES.get_nowait()
+            self.assertEqual(style, assets.STYLE_VERSION)
             self.assertTrue(bot._enqueue_food_asset_job(food_id, label))
             self.assertFalse(bot._enqueue_food_asset_job(food_id, label))
 
@@ -445,8 +446,9 @@ class FoodAssetQueueTests(unittest.TestCase):
         now = bot.datetime.now(bot.TZ).isoformat()
         conn = sqlite3.connect(bot.DB)
         conn.executemany(
-            "INSERT INTO food_asset_attempts(job_id,started_at) VALUES(?,?)",
-            [(f"prior-{index}", now) for index in range(3)],
+            "INSERT INTO food_asset_attempts(job_id,started_at,style_version)"
+            " VALUES(?,?,?)",
+            [(f"prior-{index}", now, assets.STYLE_VERSION) for index in range(3)],
         )
         conn.commit()
         conn.close()

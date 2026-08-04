@@ -10,3 +10,6 @@ AIWA_посты_и_трекинг.md
 analytics_spec.md
 training_screen_proposal.md
 Обновить GitHub.command
+
+# Локальные артефакты генерации и композиций: содержимое зависит от прогона.
+.runtime/

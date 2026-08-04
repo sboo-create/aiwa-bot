@@ -14,7 +14,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urlsplit
 
 import requests
@@ -387,10 +387,35 @@ def match_quality(source: object) -> str:
     return MATCH_QUALITY.get(str(source or ""), "none")
 
 
-class FoodAssetResolver:
-    """Immutable manifest index plus a tiny locked generated-asset overlay."""
+class CatalogResolver:
+    """Immutable manifest index plus a tiny locked generated-asset overlay.
 
-    def __init__(self, manifest: dict[str, str]):
+    Подбор картинки не знает ничего про еду: приведение словоформ, совпадение
+    по подмножеству токенов, качество совпадения и честная заглушка — правила
+    сопоставления подписи с каталогом, и каталог тут любой. Отличается только
+    обрамление: чем подписываем промах, какой стиль у набора, как считаем
+    идентификатор и собираем ли композицию.
+
+    Разделение появилось не из любви к абстракциям. У тренировок резолвера не
+    было вовсе — подбор жил на фронте отдельным кодом со списком корней,
+    выписанным руками, — и «мягкая разминка для спины» не находила каталожную
+    «Спину», потому что «спины» это не «спина». Всё, что чинилось для еды,
+    обходило тренировки стороной ровно потому, что было заперто в одном классе.
+    """
+
+    def __init__(
+        self,
+        manifest: dict[str, str],
+        *,
+        placeholder: str | None = None,
+        style_version: str = STYLE_VERSION,
+        identity: Callable[[object], str] | None = None,
+        compose: bool = True,
+    ):
+        self.placeholder = placeholder
+        self.style_version = style_version
+        self.identity = identity or canonical_id
+        self.compose_enabled = compose
         self.manifest = dict(manifest)
         self._exact = {normalize_label(label): (label, url) for label, url in manifest.items()}
         self._tokens = {
@@ -411,7 +436,7 @@ class FoodAssetResolver:
         self._match_cache_lock = threading.Lock()
 
     @classmethod
-    def from_default_manifest(cls) -> "FoodAssetResolver":
+    def from_default_manifest(cls) -> "CatalogResolver":
         with _MANIFEST_PATH.open("r", encoding="utf-8") as source:
             return cls(json.load(source))
 
@@ -623,17 +648,17 @@ class FoodAssetResolver:
         # них: любой выбор одного — половина правды. Собираем, только если у
         # каждой позиции есть СВОЯ точная картинка, иначе получится коллаж из
         # приблизительных, а это хуже честной одной.
-        composed = self._composed_url(items)
+        composed = self._composed_url(items) if self.compose_enabled else None
         if composed:
             return {
-                "canonical_id": canonical_id(title),
+                "canonical_id": self.identity(title),
                 "canonical_label": title,
                 "image_url": composed,
                 "image_source": "composition",
                 "asset_state": "ready",
                 "match_quality": "exact",
                 "requested_label": title,
-                "style_version": STYLE_VERSION,
+                "style_version": self.style_version,
             }
 
         # Сначала спрашиваем разбор: он знает главную позицию точно. Целая
@@ -650,17 +675,17 @@ class FoodAssetResolver:
         if match and match[2] in {"catalog_exact", "catalog_alias"}:
             canonical_label, url, source = match
             return {
-                "canonical_id": canonical_id(canonical_label),
+                "canonical_id": self.identity(canonical_label),
                 "canonical_label": canonical_label,
                 "image_url": url,
                 "image_source": source,
                 "asset_state": "ready",
                 "match_quality": match_quality(source),
                 "requested_label": title,
-                "style_version": STYLE_VERSION,
+                "style_version": self.style_version,
             }
 
-        food_id = canonical_id(title)
+        food_id = self.identity(title)
         generated = self._generated_url(food_id)
         if generated:
             return {
@@ -671,19 +696,31 @@ class FoodAssetResolver:
                 "asset_state": "ready",
                 "match_quality": "exact",
                 "requested_label": title,
-                "style_version": STYLE_VERSION,
+                "style_version": self.style_version,
             }
         if match:
             canonical_label, url, source = match
             return {
-                "canonical_id": canonical_id(canonical_label),
+                "canonical_id": self.identity(canonical_label),
                 "canonical_label": canonical_label,
                 "image_url": url,
                 "image_source": source,
                 "asset_state": "ready",
                 "match_quality": match_quality(source),
                 "requested_label": title,
-                "style_version": STYLE_VERSION,
+                "style_version": self.style_version,
+            }
+
+        if self.placeholder:
+            return {
+                "canonical_id": food_id,
+                "canonical_label": title,
+                "image_url": self.placeholder,
+                "image_source": "category",
+                "asset_state": "missing",
+                "match_quality": "none",
+                "requested_label": title,
+                "style_version": self.style_version,
             }
 
         evidence = " ".join(
@@ -703,11 +740,14 @@ class FoodAssetResolver:
             "asset_state": "missing",
             "match_quality": "none",
             "requested_label": title,
-            "style_version": STYLE_VERSION,
+            "style_version": self.style_version,
         }
 
 
-RESOLVER = FoodAssetResolver.from_default_manifest()
+#: Имя, под которым резолвер знали, пока он был только про еду.
+FoodAssetResolver = CatalogResolver
+
+RESOLVER = CatalogResolver.from_default_manifest()
 
 
 

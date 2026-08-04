@@ -82,31 +82,13 @@ export const workoutHeroForDay = ({ iso, today, status, count, weekCount = 0 }) 
   return { value: String(value), label: `${workoutsWord(value)} в этот день` };
 };
 
-// 3d-иконки инвентаря (assets/train): тип или группа → файл из манифеста.
-// Названия вариантов свободные («Лёгкая силовая», «Прогулка в парке»), поэтому
-// точное совпадение дополняем словарём корней.
-const TRAIN_SYNONYMS = [
-  ["силов", "Силовая"], ["ходь", "Ходьба"], ["прогул", "Прогулка"], ["шаг", "Ходьба"],
-  ["бег", "Бег"], ["кардио", "Кардио"], ["велос", "Велотренажёр"], ["велотрен", "Велотренажёр"],
-  ["эллипс", "Эллипс"], ["греб", "Гребля"], ["скакал", "Скакалка"],
-  ["йог", "Йога"], ["растяж", "Растяжка"], ["стретч", "Растяжка"], ["мобил", "Растяжка"], ["пилатес", "Пилатес"],
-  ["плава", "Плавание"], ["бассейн", "Плавание"], ["отдых", "Отдых"], ["восстанов", "Отдых"],
-];
-const trainIcon = (icons, ...keys) => {
-  if (!icons) return null;
-  for (const key of keys) {
-    const hit = icons[String(key || "").trim()];
-    if (hit) return hit + "?v=1";
-  }
-  const text = keys.filter(Boolean).join(" ").toLowerCase();
-  for (const [name, file] of Object.entries(icons)) {
-    if (text.includes(name.toLowerCase())) return file + "?v=1";
-  }
-  for (const [root, name] of TRAIN_SYNONYMS) {
-    if (text.includes(root) && icons[name]) return icons[name] + "?v=1";
-  }
-  return icons["Силовая"] && /трениров/.test(text) ? icons["Силовая"] + "?v=1" : null;
-};
+// Картинку тренировки подбирает сервер и присылает готовый image_url — тем же
+// резолвером, что и для еды. Здесь был свой подбор по манифесту: точное
+// совпадение, вхождение подстроки и список корней, выписанный руками. Он не
+// знал словоформ («мягкая разминка для спины» не находила каталожную «Спину»),
+// а на промахе возвращал null — строка рисовалась вообще без картинки.
+const WORKOUT_PLACEHOLDER = "/assets/train/workout-placeholder.webp";
+const trainIcon = (record) => (record && record.image_url) || WORKOUT_PLACEHOLDER;
 
 /**
  * Activity:
@@ -119,7 +101,6 @@ export function ActivityScreen({ mode, revision = 0 }) {
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [panel, setPanel] = useState("");
   const [suggested, setSuggested] = useState(null);
-  const [trainIcons, setTrainIcons] = useState({});
   const selectedIso = useSelectedDay();
   const today = todayIso();
   const writableDay = isWorkoutDateWritable(selectedIso, today);
@@ -135,13 +116,6 @@ export function ActivityScreen({ mode, revision = 0 }) {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
-  useEffect(() => {
-    fetch("/assets/train/manifest.json", { cache: "no-cache" })
-      .then((r) => (r.ok ? r.json() : {}))
-      .then((icons) => setTrainIcons(icons || {}))
-      .catch(() => {});
-  }, []);
-
   // Дни текущей недели приезжают вместе со счётчиками экрана. Нулевой счётчик
   // уже является загруженным пустым днём; остальные дни запрашиваются один раз
   // и остаются в кэше. Ошибка — отдельное состояние с явным retry.
@@ -383,7 +357,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
                 {options.map((option, index) => (
                   <PaperRow
                     key={option.name || index}
-                    image={trainIcon(trainIcons, option.name)}
+                    image={trainIcon(option)}
                     title={[option.name || `Вариант ${index + 1}`, option.duration].filter(Boolean).join(" · ")}
                     description={[
                       (option.exercises || []).map((e) => [e.name, e.sets && e.reps ? `${e.sets}×${e.reps}` : ""].filter(Boolean).join(" ")).join(", "),
@@ -410,7 +384,7 @@ export function ActivityScreen({ mode, revision = 0 }) {
               {shownWorkouts.length ? shownWorkouts.map((workout) => (
                 <PaperRow
                   key={workout.id}
-                  image={trainIcon(trainIcons, workout.type)}
+                  image={trainIcon(workout)}
                   title={workout.type || "Тренировка"}
                   description={[
                     viewingPast ? "" : "сегодня",
