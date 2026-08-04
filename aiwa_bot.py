@@ -10960,14 +10960,25 @@ def _claim_food_asset_job():
         if not affordable:
             c.commit()
             return None
-        row_ = c.execute(
-            """SELECT job_id,canonical_id,canonical_label,attempts,style_version
-               FROM food_asset_jobs
-               WHERE status='queued' AND available_at<=?
-                 AND style_version IN (%s)
-               ORDER BY created_at LIMIT 1""" % ",".join("?" * len(affordable)),
-            (now.isoformat(), *affordable),
-        ).fetchone()
+        # По одному запросу на каталог, у которого остался бюджет, и самое
+        # старое из них. Список IN пришлось бы собирать конкатенацией — статикой
+        # анализатор такое читает как склейку SQL, и он прав: каталогов два,
+        # экономить тут не на чем.
+        candidates = [
+            row for row in (
+                c.execute(
+                    """SELECT job_id,canonical_id,canonical_label,attempts,
+                              style_version,created_at
+                       FROM food_asset_jobs
+                       WHERE status='queued' AND available_at<=?
+                         AND style_version=?
+                       ORDER BY created_at LIMIT 1""",
+                    (now.isoformat(), style),
+                ).fetchone()
+                for style in affordable
+            ) if row
+        ]
+        row_ = min(candidates, key=lambda row: row[5]) if candidates else None
         if not row_:
             c.commit()
             return None
