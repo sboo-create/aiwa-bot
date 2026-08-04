@@ -473,6 +473,25 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(cached["overview"]["dau"], 1)
         self.assertLess(elapsed, 50)
 
+    def test_ingest_makes_new_events_visible_immediately(self):
+        """Кэш дашборда живёт 15 секунд, и приём событий обязан его сбросить.
+
+        Иначе сразу после приёма дашборд до четверти минуты показывает картину
+        «до» — а именно в этот момент на него и смотрят, когда проверяют, дошло
+        ли событие.
+        """
+        self.add("first", "u1", "app_opened")
+        before, status, _ = self.module._cached_dashboard(1, "mixed")
+        self.assertEqual(status, "miss")
+        self.assertEqual(before["overview"]["dau"], 1)
+
+        self.add("second", "u2", "app_opened")
+        self.module._invalidate_dashboard_cache()
+        after, status, _ = self.module._cached_dashboard(1, "mixed")
+
+        self.assertEqual(status, "miss", "кэш пережил приём событий")
+        self.assertEqual(after["overview"]["dau"], 2)
+
     def test_dashboard_cache_singleflights_same_window(self):
         self.module._DASHBOARD_CACHE.clear()
         gate = threading.Barrier(4)
