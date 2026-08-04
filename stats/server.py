@@ -227,7 +227,7 @@ _db.execute("CREATE INDEX IF NOT EXISTS ix_events_name_ts ON events(name,ts)")
 _db.commit()
 DB_LOCK = threading.RLock()
 CACHE_LOCK = threading.RLock()
-_DASHBOARD_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+_DASHBOARD_CACHE: dict[tuple[int, str], tuple[float, int, dict[str, Any]]] = {}
 _DASHBOARD_KEY_LOCKS: dict[tuple[int, str], threading.Lock] = {}
 DASHBOARD_CACHE_SECONDS = max(1.0, float(os.environ.get("STATS_DASHBOARD_CACHE_SECONDS", "15")))
 
@@ -246,6 +246,26 @@ def _invalidate_dashboard_cache() -> None:
     """
     with CACHE_LOCK:
         _DASHBOARD_CACHE.clear()
+
+
+def _dashboard_cache_lookup(
+    key: tuple[int, str], now_mono: float
+) -> tuple[dict[str, Any] | None, int]:
+    """Read a cache entry atomically with the SQLite connection state.
+
+    Writers commit while holding DB_LOCK and invalidate under CACHE_LOCK. Using
+    the same lock order here prevents a reader from returning an old entry
+    after a write has committed but before its invalidation acquires the cache
+    lock. The monotonic total_changes token also rejects a computation that
+    finishes and stores its pre-write snapshot after that invalidation.
+    """
+    with DB_LOCK:
+        changes = _db.total_changes
+        with CACHE_LOCK:
+            cached = _DASHBOARD_CACHE.get(key)
+            if cached and cached[0] > now_mono and cached[1] == changes:
+                return cached[2], changes
+    return None, changes
 
 
 def _canonical(name: str) -> str:
@@ -1454,27 +1474,29 @@ async def delete_migration_batch(batch_id: str, request: Request) -> JSONRespons
 
 
 def _cached_dashboard(days: float, source: str) -> tuple[dict[str, Any], str, float]:
-    """Keep the live dashboard responsive while bounding staleness to a few seconds."""
+    """Keep the live dashboard responsive without caching across a DB write."""
     key = (max(1, min(int(math.ceil(float(days))), 365)),
            "observed" if str(source).lower() == "observed" else "mixed")
     started = time.monotonic()
-    now_mono = started
+    cached, _ = _dashboard_cache_lookup(key, started)
+    if cached is not None:
+        return cached, "hit", (time.monotonic() - started) * 1000
     with CACHE_LOCK:
-        cached = _DASHBOARD_CACHE.get(key)
-        if cached and cached[0] > now_mono:
-            return cached[1], "hit", (time.monotonic() - started) * 1000
         key_lock = _DASHBOARD_KEY_LOCKS.setdefault(key, threading.Lock())
     # A hub poll and several open dashboards often request the same window at
     # once. Let one request compute it while the others wait for and reuse the
     # result instead of multiplying a full-table aggregation under load.
     with key_lock:
-        with CACHE_LOCK:
-            cached = _DASHBOARD_CACHE.get(key)
-            if cached and cached[0] > time.monotonic():
-                return cached[1], "hit", (time.monotonic() - started) * 1000
+        # Refresh the token after waiting. A writer may have committed while
+        # this request was queued behind another computation for the same key.
+        cached, changes = _dashboard_cache_lookup(key, time.monotonic())
+        if cached is not None:
+            return cached, "hit", (time.monotonic() - started) * 1000
         value = compute_dashboard(key[0], key[1])
         with CACHE_LOCK:
-            _DASHBOARD_CACHE[key] = (time.monotonic() + DASHBOARD_CACHE_SECONDS, value)
+            _DASHBOARD_CACHE[key] = (
+                time.monotonic() + DASHBOARD_CACHE_SECONDS, changes, value
+            )
         return value, "miss", (time.monotonic() - started) * 1000
 
 
