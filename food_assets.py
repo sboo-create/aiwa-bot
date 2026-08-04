@@ -21,7 +21,7 @@ import requests
 
 
 STYLE_VERSION = "food-v1"
-GENERATED_PROMPT_VERSION = "food-photo-v5-recognizable"
+GENERATED_PROMPT_VERSION = "food-photo-v6-texture"
 # Заглушки — рендеры в манере каталога на белом фоне: приложение кладёт их на
 # свою подложку через mix-blend-mode: darken, и контурная svg-иконка выбивалась
 # из ряда 3D-тарелок. Старые svg остаются на диске: на них ещё ссылаются
@@ -1103,8 +1103,13 @@ def _image_request(
         "and textures distinct enough to tell lookalike foods apart. Appetizing "
         "food photograph: three-quarter overhead view, soft diffused studio "
         "light, gentle natural shadow under the plate, shallow depth of field, "
-        "crisp texture detail, centered square composition, no people, no text, "
-        "no logo. The background must be plain pure white (#FFFFFF) "
+        "centered square composition, no people, no text, "
+        "no logo. The dish must read at thumbnail size: show visible texture and "
+        "structure — flakes, cuts, grain, crust, steam or a light glaze — and a "
+        "small serving context such as herbs, a wedge or a garnish beside it. A "
+        "single flat untextured mass is not acceptable: at 88 by 88 pixels it "
+        "stops looking like food. "
+        "The background must be plain pure white (#FFFFFF) "
         "with no tint, gradient, shadow wash, table or surface behind the "
         "plate — the app composites the icon over its own backdrop and a baked "
         "background shows up as a grey tile. Do not replace an ingredient with "
