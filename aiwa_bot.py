@@ -3327,7 +3327,14 @@ def _semantic_food_evidence_safe(
     return bool(
         spans
         and all(
-            (trusted_food_prompt or _JOURNAL_FOOD_COMPLETED_RE.search(span))
+            (
+                trusted_food_prompt
+                or _JOURNAL_FOOD_COMPLETED_RE.search(span)
+                or (
+                    _JOURNAL_PAST_ACTION_RE.search(span)
+                    and _journal_food_grounded(span, payload)
+                )
+            )
             and not _JOURNAL_FOOD_NEGATED_RE.search(span)
             and _semantic_source_subject_safe(span)
             and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(span)
@@ -3585,7 +3592,13 @@ def _semantic_action_matches_source(
         evidence = _semantic_evidence_span(raw, payload)
         return bool(
             evidence
-            and _JOURNAL_WORKOUT_COMPLETED_RE.search(evidence)
+            and (
+                _JOURNAL_WORKOUT_COMPLETED_RE.search(evidence)
+                or (
+                    _JOURNAL_PAST_ACTION_RE.search(evidence)
+                    and _journal_workout_grounded(evidence, payload)
+                )
+            )
             and not _JOURNAL_WORKOUT_NEGATED_RE.search(evidence)
             and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(evidence)
         )

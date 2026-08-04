@@ -137,5 +137,86 @@ class FoodHasTheSameGapTests(unittest.TestCase):
         ))
 
 
+#: Ответ роутера в v2-форме: модель обязана процитировать то, на чём основано
+#: решение, и сервер проверяет цитату на дословность. Это тот путь, по которому
+#: идёт прод; тесты, написанные только под v1, пропустили бы поломку целиком —
+#: что однажды и произошло.
+CONTEXT = {"meals": [], "workouts": []}
+
+
+def quoted_workout(span, **workout):
+    payload = plan(**workout)
+    payload["evidence_spans"] = [span]
+    return payload
+
+
+def quoted_meal(span, food_text, items):
+    return {
+        "action": "food", "target_id": None, "slot": None,
+        "evidence_spans": [span], "subject": "self", "status": "completed",
+        "polarity": "positive", "certainty": "certain",
+        "primary_purpose": "journal", "confidence": 1.0,
+        "food_text": food_text,
+        "food_record": {
+            "title": food_text, "fclass": "смешанное",
+            "items": [
+                {"name": name, "grams": 100, "kcal": 100, "protein": 5,
+                 "fat": 3, "carbs": 10, "evidence_span": name}
+                for name in items
+            ],
+            "unparsed": [],
+        },
+        "food_entries": [],
+    }
+
+
+class QuotedPathTests(unittest.TestCase):
+    """Путь с цитатами — тот, что работает у людей."""
+
+    def test_the_reported_phrase_is_written_down(self):
+        result = bot._normalize_semantic_journal(
+            quoted_workout(
+                "сейчас была разминка спины с приседаниями",
+                items=[{"name": "разминка спины"}, {"name": "приседания"}],
+            ),
+            "Так, сейчас была разминка спины с приседаниями.",
+            CONTEXT, enable_v2=True,
+        )
+        self.assertEqual((result or {}).get("intent"), "logworkout")
+
+    def test_impersonal_food_report_is_written_down(self):
+        result = bot._normalize_semantic_journal(
+            quoted_meal("сегодня был творог и банан", "творог и банан",
+                        ["творог", "банан"]),
+            "сегодня был творог и банан", CONTEXT, enable_v2=True,
+        )
+        self.assertEqual((result or {}).get("intent"), "logmeal")
+
+    def test_quote_must_carry_the_event_itself(self):
+        """Цитата «сегодня» ничего не доказывает, даже если текст про спорт."""
+        result = bot._normalize_semantic_journal(
+            quoted_workout("Так, сейчас", items=[{"name": "приседания"}]),
+            "Так, сейчас была разминка спины с приседаниями.",
+            CONTEXT, enable_v2=True,
+        )
+        self.assertIsNone(result)
+
+    def test_quote_absent_from_the_text_is_refused(self):
+        result = bot._normalize_semantic_journal(
+            quoted_workout("была становая тяга", items=[{"name": "становая тяга"}]),
+            "Так, сейчас была разминка спины с приседаниями.",
+            CONTEXT, enable_v2=True,
+        )
+        self.assertIsNone(result)
+
+    def test_negation_inside_the_quote_is_refused(self):
+        result = bot._normalize_semantic_journal(
+            quoted_workout("не было разминки спины",
+                           items=[{"name": "разминка спины"}]),
+            "сегодня не было разминки спины", CONTEXT, enable_v2=True,
+        )
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
