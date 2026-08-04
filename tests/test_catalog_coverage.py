@@ -11,8 +11,11 @@
 перегенерации вместо просадки покрытия.
 """
 
+import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -121,3 +124,44 @@ class HeadFromParseTests(unittest.TestCase):
     def test_good_coverage_stays_close(self):
         result = FA.RESOLVER.resolve("Блины с творогом и сметаной")
         self.assertEqual(result["match_quality"], "close")
+
+
+class CompositionTests(unittest.TestCase):
+    """Приём из нескольких продуктов показывается композицией, а не одним из них."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.dict(
+            os.environ, {"AIWA_FOOD_ASSET_DIR": self.tmp.name}, clear=False
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_two_products_give_a_composition_not_a_choice(self):
+        result = FA.RESOLVER.resolve(
+            "Творог и банан",
+            items=[{"name": "Творог", "kcal": 200}, {"name": "Банан", "kcal": 90}],
+        )
+        self.assertEqual(result["image_source"], "composition")
+        self.assertEqual(result["asset_state"], "ready")
+
+    def test_same_set_gives_the_same_file(self):
+        """Имя считается от состава, поэтому кэш работает сам собой."""
+        items = [{"name": "Творог", "kcal": 200}, {"name": "Банан", "kcal": 90}]
+        first = FA.RESOLVER.resolve("Творог и банан", items=items)
+        second = FA.RESOLVER.resolve("банан и творог", items=list(reversed(items)))
+        self.assertEqual(first["image_url"], second["image_url"])
+
+    def test_single_product_is_not_composed(self):
+        result = FA.RESOLVER.resolve("Творог", items=[{"name": "Творог", "kcal": 200}])
+        self.assertNotEqual(result["image_source"], "composition")
+
+    def test_approximate_items_are_not_glued_together(self):
+        """Коллаж из «похожих на что-то» — выдумка, а не честная картинка."""
+        result = FA.RESOLVER.resolve(
+            "Вителло тонато и калитка",
+            items=[{"name": "Вителло тонато", "kcal": 300},
+                   {"name": "Калитка с клубникой", "kcal": 200}],
+        )
+        self.assertNotEqual(result["image_source"], "composition")
