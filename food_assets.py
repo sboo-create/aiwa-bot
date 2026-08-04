@@ -349,10 +349,38 @@ MATCH_QUALITY = {
     "catalog_canonical": "exact",
     "generated": "exact",
     "catalog_subset": "close",
+    "catalog_partial": "approximate",
     "catalog_family": "approximate",
     "catalog_brand": "approximate",
     "category": "none",
 }
+
+
+def head_item(items: Iterable[dict] | None) -> str | None:
+    """Главная позиция приёма пищи по данным разбора.
+
+    «Вареники с вишней, сливочное масло» — это вареники, а масло добавка. Раньше
+    голову вычисляли из строки эвристикой порядка слов, и та ошибалась: подпись
+    «Масло сливочное» длиннее, чем «вареники», и выигрывала. Между тем разбор
+    блюда уже вернул позиции с калорийностью — там ответ есть, выводить его
+    заново не нужно. Берём самую калорийную позицию: именно она определяет,
+    что человек ел, а не что добавил.
+    """
+    best: tuple[float, int, str] | None = None
+    for index, item in enumerate(items or ()):
+        if not isinstance(item, dict):
+            continue
+        name = " ".join(str(item.get("name") or "").split())
+        if not name:
+            continue
+        try:
+            kcal = float(item.get("kcal") or 0)
+        except (TypeError, ValueError):
+            kcal = 0.0
+        key = (-kcal, index, name)
+        if best is None or key < best:
+            best = key
+    return best[2] if best else None
 
 
 def match_quality(source: object) -> str:
@@ -434,41 +462,32 @@ class FoodAssetResolver:
         return frozenset(out)
 
     def _subset_match(
-        self, query_tokens: frozenset[str], order: tuple[str, ...] = (),
-    ) -> tuple[str, str] | None:
+        self, query_tokens: frozenset[str],
+    ) -> tuple[str, str, float] | None:
         """Подпись, все слова которой есть в названии.
 
-        Побеждает не самая длинная, а самая ранняя по порядку слов: «Вареники с
-        вишней, сливочное масло» — это вареники, а не масло, хотя «сливочное
-        масло» длиннее. Голова названия стоит первой, и уступать её гарниру
-        нельзя. Длина решает только при равном старте: «Блины с творогом»
-        точнее, чем просто «Блины».
+        Когда подходят несколько подписей, они бывают двух видов. Вложенные —
+        «Блины» и «Блины с творогом»: тут очевидно точнее длинная. И непересе­
+        кающиеся — «вареники» и «Масло сливочное» для «вареники с вишней,
+        сливочное масло»: тут выбрать значит угадать, какое из двух блюд
+        показать. Раньше я угадывал по длине, потом по порядку слов — обе
+        эвристики ошибались. Настоящая неоднозначность разрешается не здесь:
+        главную позицию знает разбор приёма пищи, а если разбора нет, честнее
+        заглушка и очередь на генерацию, чем чужая картинка.
         """
         if not query_tokens:
             return None
-        # Первое вхождение слова, а не последнее: голова названия стоит слева.
-        position: dict[str, int] = {}
-        for index, token in enumerate(order):
-            position.setdefault(token, index)
-        best_key: tuple[int, int] | None = None
-        winners: list[str] = []
-        for label, label_tokens in self._tokens.items():
-            if not label_tokens or not label_tokens <= query_tokens:
-                continue
-            start = min((position.get(t, len(order)) for t in label_tokens),
-                        default=len(order))
-            key = (start, -len(label_tokens))
-            if best_key is None or key < best_key:
-                best_key, winners = key, [label]
-            elif key == best_key:
-                winners.append(label)
-        # Ничья — отказ. «Омлет с сыром и грибами» подходит и «Омлету с сыром»,
-        # и «Омлету с грибами»; выбрать любую значит показать блюдо, которого
-        # человек не ел. Пусть решает семейный фолбэк по голове названия — он
-        # для того и сделан, — а не порядок словаря.
-        if len(winners) != 1:
+        candidates = [
+            (label, tokens) for label, tokens in self._tokens.items()
+            if tokens and tokens <= query_tokens
+        ]
+        if not candidates:
             return None
-        return winners[0], self.manifest[winners[0]]
+        best_label, best_tokens = max(candidates, key=lambda pair: len(pair[1]))
+        for label, tokens in candidates:
+            if not tokens <= best_tokens:
+                return None      # непересекающиеся кандидаты — не гадаем
+        return best_label, self.manifest[best_label], len(best_tokens) / len(query_tokens)
 
     def _manifest_match(self, label: str) -> tuple[str, str, str] | None:
         normalized = normalize_label(label)
@@ -504,16 +523,15 @@ class FoodAssetResolver:
         # нет ни одного, поэтому подмена блюда невозможна. Самая длинная
         # подходящая подпись выигрывает, иначе «Салат Цезарь» проиграл бы
         # «Салату». Замер на реальных записях прода: покрытие 43% → 74%.
-        # Порядок слов исходного названия нужен, чтобы отличить голову блюда
-        # от гарнира: множество токенов его не хранит.
-        order = tuple(
-            _TOKEN_ALIASES.get(word, word)
-            for word in normalize_label(label).split()
-            if word not in _STOP_WORDS and not word.isdigit()
-        )
-        subset = self._subset_match(query_tokens, order)
+        subset = self._subset_match(query_tokens)
         if subset:
-            result = (subset[0], subset[1], "catalog_subset")
+            # Доля покрытия: сколько из того, что человек написал, реально
+            # изображено. «Блины с творогом» покрывают «блины с творогом и
+            # сметаной» почти целиком — это близко. «Кефир» покрывает «мюсли,
+            # кефир, бутерброд» на треть — формально подмножество, по сути
+            # чужая картинка, и такому место в очереди на догенерацию.
+            source = "catalog_subset" if subset[2] >= 0.5 else "catalog_partial"
+            result = (subset[0], subset[1], source)
             with self._match_cache_lock:
                 self._match_cache[normalized] = result
             return result
@@ -573,7 +591,14 @@ class FoodAssetResolver:
         items: Iterable[dict] | None = None,
     ) -> dict[str, object]:
         title = str(label or "").strip()
-        match = self._manifest_match(title)
+        # Сначала спрашиваем разбор: он знает главную позицию точно. Целая
+        # строка — запасной путь для мест, где разбора нет (меню, чат).
+        head = head_item(items)
+        match = None
+        if head and normalize_label(head) != normalize_label(title):
+            match = self._manifest_match(head)
+        if match is None:
+            match = self._manifest_match(title)
         # Preserve reviewed exact catalog art. For a broader family/canonical
         # fallback, prefer a semantically validated image generated for this
         # exact label when one is available.

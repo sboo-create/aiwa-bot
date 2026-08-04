@@ -91,3 +91,33 @@ class CatalogCoverageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeadFromParseTests(unittest.TestCase):
+    """Главную позицию знает разбор приёма пищи, а не порядок слов."""
+
+    def test_side_ingredient_does_not_steal_the_picture(self):
+        """Репорт: «вареники с вишней, сливочное масло» показывали масло."""
+        result = FA.RESOLVER.resolve(
+            "Вареники с вишней, сливочное масло",
+            items=[
+                {"name": "Вареники с вишней", "kcal": 700},
+                {"name": "Сливочное масло", "kcal": 195},
+            ],
+        )
+        self.assertEqual(result["asset_state"], "ready")
+        self.assertIn("вареники", FA.normalize_label(result["canonical_label"]))
+
+    def test_without_a_parse_ambiguity_is_refused_not_guessed(self):
+        """Две непересекающиеся подписи — не гадаем, а показываем заглушку."""
+        result = FA.RESOLVER.resolve("Вареники с вишней, сливочное масло")
+        self.assertEqual(result["asset_state"], "missing")
+
+    def test_thin_coverage_is_marked_for_regeneration(self):
+        """«Кефир» на «мюсли, кефир, бутерброд» — повод сгенерить своё."""
+        result = FA.RESOLVER.resolve("мюсли, кефир, бутерброд")
+        self.assertEqual(result["match_quality"], "approximate")
+
+    def test_good_coverage_stays_close(self):
+        result = FA.RESOLVER.resolve("Блины с творогом и сметаной")
+        self.assertEqual(result["match_quality"], "close")
