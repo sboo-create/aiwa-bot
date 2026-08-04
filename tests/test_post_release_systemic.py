@@ -226,7 +226,9 @@ class PostReleaseSystemicTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('"/api/daily-summary"', bundle)
         self.assertIn('"Силовая", "Кардио", "Пилатес", "Йога"', bundle)
-        self.assertIn('["пилатес", "Пилатес"]', bundle)
+        # Здесь же проверялась строчка словаря корней («пилатес» → «Пилатес»),
+        # по которому клиент подбирал картинку. Словаря больше нет: картинку
+        # подбирает сервер и присылает готовый URL — см. test_workout_assets.
         self.assertTrue(any(
             button.callback_data == "more"
             for row in bot.MENU_KB.inline_keyboard

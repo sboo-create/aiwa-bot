@@ -80,15 +80,21 @@ class ManifestCacheContractTests(unittest.TestCase):
     """
 
     def test_frontend_revalidates_the_manifest(self):
-        for path in (
-            ROOT / "frontend/src/aiwa/screens/FoodScreen.jsx",
-            ROOT / "frontend/src/aiwa/screens/ActivityScreen.jsx",
-        ):
-            source = path.read_text(encoding="utf-8")
-            with self.subTest(screen=path.name):
-                self.assertIn('manifest.json", { cache: "no-cache" }', source)
-                # Ревизия руками — та же ловушка: её забудут поднять.
-                self.assertNotIn('manifest.json?v=', source)
+        """Экран тренировок манифест больше не читает: URL приходит с сервера.
+
+        Это лучший вид защиты от протухшего манифеста — его на клиенте просто
+        нет. Экран питания пока читает, и для него правило в силе.
+        """
+        source = (
+            ROOT / "frontend/src/aiwa/screens/FoodScreen.jsx"
+        ).read_text(encoding="utf-8")
+        self.assertIn('manifest.json", { cache: "no-cache" }', source)
+        # Ревизия руками — та же ловушка: её забудут поднять.
+        self.assertNotIn('manifest.json?v=', source)
+        activity = (
+            ROOT / "frontend/src/aiwa/screens/ActivityScreen.jsx"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("manifest.json", activity)
 
     def test_server_serves_the_manifest_revalidating(self):
         for name in ("aiwa.caddy", "aiwa-staging.caddy"):

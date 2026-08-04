@@ -45,6 +45,7 @@ import cycle as C
 import llm as L
 import analytics_v2 as A2
 import food_assets as FA
+import sport_assets as SA
 import portability
 # Реестр действий и общий сбор параметров. Зависимость строго односторонняя:
 # dialog ничего не знает про aiwa_bot, поэтому истории с двойной загрузкой
@@ -557,7 +558,8 @@ def _migrate_db_on_connection(c):
     c.execute("""CREATE TABLE IF NOT EXISTS food_asset_attempts(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id TEXT NOT NULL,
-        started_at TEXT NOT NULL
+        started_at TEXT NOT NULL,
+        style_version TEXT
     )""")
     _catalog_now = datetime.now(TZ).isoformat()
     for _catalog_label, _catalog_url in FA.RESOLVER.manifest.items():
@@ -614,6 +616,9 @@ def _migrate_db_on_connection(c):
     except sqlite3.OperationalError: pass
     # True only when the slot came from server time rather than user meaning.
     try: c.execute("ALTER TABLE meals ADD COLUMN slot_guessed INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
+    # Попытки, записанные до общей очереди, все были про еду.
+    try: c.execute("ALTER TABLE food_asset_attempts ADD COLUMN style_version TEXT")
     except sqlite3.OperationalError: pass
     for _wcol in ("kcal INTEGER DEFAULT 0", "muscles TEXT"):
         try: c.execute(f"ALTER TABLE workouts ADD COLUMN {_wcol}")
@@ -9061,7 +9066,7 @@ async def on_startup(app):
     _AI_JOB_WAKE.set()
     log.info("durable today workers started: %d", _AI_TODAY_WORKERS)
     loaded_assets = await asyncio.to_thread(_load_generated_food_assets)
-    if FA.generation_enabled():
+    if FA.generation_enabled() or SA.generation_enabled():
         import concurrent.futures
         recovered_assets = await asyncio.to_thread(_recover_food_asset_jobs)
         _FOOD_ASSET_CANDIDATES = asyncio.Queue(maxsize=_FOOD_ASSET_QUEUE_MAX)
@@ -10577,7 +10582,7 @@ def _section_fallback(cid, kind, u, st):
                 plan = L.training_today(
                     None, prof, None, "preg", pregnancy=pregnancy, checkin=checkin
                 )
-        return {"text": plan.get("summary", ""), "training": plan}
+        return {"text": plan.get("summary", ""), "training": SA.decorate_plan(plan)}
 
     target = profile_kcal(prof) if prof else None
     if st is not None:
@@ -10662,6 +10667,12 @@ async def _generate_section(cid, kind, u, st, key):
             if usage:
                 ev(cid, "tokens", sum(usage), meta="training_today",
                    calls=len(usage), usage=usage)
+            # Варианты дня в догенерацию не ставим. Их формулировки придумывает
+            # модель заново на каждый день и каждого человека, так что картинка
+            # под конкретную фразу почти наверняка больше никогда не понадобится.
+            # Генерим только то, что человек реально записал в дневник: такие
+            # названия повторяются.
+            plan = SA.decorate_plan(plan)
             payload = {"text": plan.get("summary", ""), "training": plan}
         if not _user_write_allowed(cid, generation=generation):
             return _section_fallback(cid, kind, u, st)
@@ -10679,7 +10690,13 @@ def _section_with_current_food_assets(payload, kind):
     result = dict(payload or {})
     if kind == "food" and isinstance(result.get("menu"), dict):
         result["menu"] = FA.decorate_menu(result["menu"])
-    result["asset_revision"] = FA.RESOLVER.generated_revision()
+    if kind == "training" and isinstance(result.get("training"), dict):
+        result["training"] = SA.decorate_plan(result["training"])
+    # Ревизия общая на оба каталога: экран обновляет картинки, когда
+    # догенерация принесла новую — неважно, еды или тренировки.
+    result["asset_revision"] = (
+        FA.RESOLVER.generated_revision() + SA.RESOLVER.generated_revision()
+    )
     return result
 
 async def _api_section(request):
@@ -10770,13 +10787,47 @@ _FOOD_ASSET_SEEN_TTL_SECONDS = max(
 _FOOD_ASSET_DAILY_MAX = max(
     1, min(500, int(os.environ.get("AIWA_FOOD_ASSET_DAILY_MAX", "40")))
 )
+# Бюджет считается отдельно по каталогам. Очередь общая и разбирается по
+# времени создания, поэтому один общий лимит означал бы, что каталог с
+# бо́льшим потоком промахов вытесняет второй — и еда осталась бы без
+# догенерации в день, когда много новых тренировок.
+_SPORT_ASSET_DAILY_MAX = max(
+    1, min(500, int(os.environ.get("AIWA_SPORT_ASSET_DAILY_MAX", "20")))
+)
 _FOOD_ASSET_MAX_ATTEMPTS = max(
     1, min(5, int(os.environ.get("AIWA_FOOD_ASSET_MAX_ATTEMPTS", "3")))
 )
 
 
-def _offer_food_asset_candidates(records):
-    if not FA.generation_enabled() or _FOOD_ASSET_CANDIDATES is None:
+#: Догенерация одна на оба каталога. Таблицы всегда были ключом
+#: (canonical_id, style_version), то есть уже различали наборы; на модуль
+#: каталога код просто не смотрел и звал food жёстко. Из-за этого у тренировок
+#: не было ни очереди, ни самолечения — при том что генератор для них есть.
+_ASSET_MODULES = {FA.STYLE_VERSION: FA, SA.STYLE_VERSION: SA}
+#: Приблизительное совпадение у еды — повод сгенерить своё: «Треска на
+#: пару» вместо «запечённой трески с гречкой» — это другое блюдо. У
+#: тренировки приблизительное — та же активность другими словами
+#: («Прогулка» для «Спокойной прогулки 30 минут»), и генерить под каждую
+#: формулировку значит платить за близнецов.
+_ASSET_QUEUE_APPROXIMATE = {FA.STYLE_VERSION: True, SA.STYLE_VERSION: False}
+def _asset_daily_limits():
+    # Читаем лимиты на каждый вызов, а не один раз при импорте: так их видно
+    # менять на ходу и подменять в тестах.
+    return {
+        FA.STYLE_VERSION: _FOOD_ASSET_DAILY_MAX,
+        SA.STYLE_VERSION: _SPORT_ASSET_DAILY_MAX,
+    }
+
+
+def _asset_module(style_version):
+    module = _ASSET_MODULES.get(str(style_version or ""))
+    if module is None:
+        raise ValueError("asset_style_version")
+    return module
+
+
+def _offer_food_asset_candidates(records, assets=FA):
+    if not assets.generation_enabled() or _FOOD_ASSET_CANDIDATES is None:
         return 0
     now = time.monotonic()
     expired = [
@@ -10795,25 +10846,33 @@ def _offer_food_asset_candidates(records):
         # готовым и чинить его было нечем. Теперь приблизительное тоже встаёт в
         # очередь, и генерим мы то, что человек написал, а не то, что подобрали.
         quality = str(record.get("match_quality") or "")
-        if record.get("asset_state") != "missing" and quality != "approximate":
+        approximate_counts = _ASSET_QUEUE_APPROXIMATE.get(
+            assets.STYLE_VERSION, True
+        )
+        if record.get("asset_state") != "missing" and not (
+            approximate_counts and quality == "approximate"
+        ):
             continue
         requested = record.get("requested_label")
         food_id = str(
-            FA.canonical_id(requested) if requested
+            assets.canonical_id(requested) if requested
             else (record.get("canonical_id") or "")
         )
-        label = FA.reviewed_generation_label(
+        label = assets.reviewed_generation_label(
             requested or record.get("canonical_label")
             or record.get("dish") or record.get("title")
+            or record.get("name")
         )
-        key = (food_id, FA.STYLE_VERSION)
+        key = (food_id, assets.STYLE_VERSION)
         if (
             not food_id or not label
             or _FOOD_ASSET_SEEN.get(key, 0) > now
         ):
             continue
         try:
-            _FOOD_ASSET_CANDIDATES.put_nowait((food_id, label))
+            _FOOD_ASSET_CANDIDATES.put_nowait(
+                (food_id, label, assets.STYLE_VERSION)
+            )
             _FOOD_ASSET_SEEN[key] = now + _FOOD_ASSET_SEEN_TTL_SECONDS
             offered += 1
         except asyncio.QueueFull:
@@ -10821,7 +10880,8 @@ def _offer_food_asset_candidates(records):
     return offered
 
 
-def _enqueue_food_asset_job(food_id, label):
+def _enqueue_food_asset_job(food_id, label, style_version=None):
+    style_version = style_version or FA.STYLE_VERSION
     now = datetime.now(TZ).isoformat()
     job_id = secrets.token_hex(12)
     c = db()
@@ -10830,7 +10890,7 @@ def _enqueue_food_asset_job(food_id, label):
         asset = c.execute(
             """SELECT status,retry_after FROM food_assets
                WHERE canonical_id=? AND style_version=?""",
-            (food_id, FA.STYLE_VERSION),
+            (food_id, style_version),
         ).fetchone()
         if asset and asset[0] == "ready":
             c.commit()
@@ -10841,7 +10901,7 @@ def _enqueue_food_asset_job(food_id, label):
         existing_job = c.execute(
             """SELECT job_id,status FROM food_asset_jobs
                WHERE canonical_id=? AND style_version=?""",
-            (food_id, FA.STYLE_VERSION),
+            (food_id, style_version),
         ).fetchone()
         if existing_job and existing_job[1] in {"queued", "running", "completed"}:
             c.commit()
@@ -10860,7 +10920,7 @@ def _enqueue_food_asset_job(food_id, label):
                        job_id,canonical_id,style_version,canonical_label,status,
                        created_at,available_at
                    ) VALUES(?,?,?,?,?,?,?)""",
-                (job_id, food_id, FA.STYLE_VERSION, label, "queued", now, now),
+                (job_id, food_id, style_version, label, "queued", now, now),
             )
         c.execute(
             """INSERT INTO food_assets(
@@ -10872,7 +10932,7 @@ def _enqueue_food_asset_job(food_id, label):
                    status=CASE WHEN food_assets.status='ready'
                                THEN food_assets.status ELSE 'pending' END,
                    updated_at=excluded.updated_at""",
-            (food_id, FA.STYLE_VERSION, label, "pending", "generated", now),
+            (food_id, style_version, label, "pending", "generated", now),
         )
         c.commit()
         return True
@@ -10886,20 +10946,27 @@ def _claim_food_asset_job():
     c = db()
     try:
         c.execute("BEGIN IMMEDIATE")
-        attempts_today = c.execute(
-            """SELECT COUNT(*) FROM food_asset_attempts
-               WHERE started_at>=?""",
-            (day_start,),
-        ).fetchone()[0]
-        if attempts_today >= _FOOD_ASSET_DAILY_MAX:
+        spent = dict(c.execute(
+            """SELECT COALESCE(style_version,?), COUNT(*)
+               FROM food_asset_attempts
+               WHERE started_at>=?
+               GROUP BY 1""",
+            (FA.STYLE_VERSION, day_start),
+        ).fetchall())
+        affordable = [
+            style for style, limit in _asset_daily_limits().items()
+            if int(spent.get(style, 0) or 0) < limit
+        ]
+        if not affordable:
             c.commit()
             return None
         row_ = c.execute(
-            """SELECT job_id,canonical_id,canonical_label,attempts
+            """SELECT job_id,canonical_id,canonical_label,attempts,style_version
                FROM food_asset_jobs
                WHERE status='queued' AND available_at<=?
-               ORDER BY created_at LIMIT 1""",
-            (now.isoformat(),),
+                 AND style_version IN (%s)
+               ORDER BY created_at LIMIT 1""" % ",".join("?" * len(affordable)),
+            (now.isoformat(), *affordable),
         ).fetchone()
         if not row_:
             c.commit()
@@ -10912,14 +10979,15 @@ def _claim_food_asset_job():
         ).rowcount
         if changed:
             c.execute(
-                "INSERT INTO food_asset_attempts(job_id,started_at) VALUES(?,?)",
-                (row_[0], now.isoformat()),
+                "INSERT INTO food_asset_attempts(job_id,started_at,style_version)"
+                " VALUES(?,?,?)",
+                (row_[0], now.isoformat(), row_[4]),
             )
             c.execute(
                 """UPDATE food_assets SET status='generating',updated_at=?
                    WHERE canonical_id=? AND style_version=?
                      AND status!='ready'""",
-                (now.isoformat(), row_[1], FA.STYLE_VERSION),
+                (now.isoformat(), row_[1], row_[4]),
             )
             c.execute(
                 "DELETE FROM food_asset_attempts WHERE started_at<?",
@@ -10933,6 +11001,7 @@ def _claim_food_asset_job():
             "canonical_id": row_[1],
             "canonical_label": row_[2],
             "attempts": int(row_[3] or 0) + 1,
+            "style_version": row_[4],
         }
     finally:
         c.close()
@@ -10940,6 +11009,8 @@ def _claim_food_asset_job():
 
 def _finish_food_asset_job(job, result=None, error=None):
     now = datetime.now(TZ)
+    style_version = job.get("style_version") or style_version
+    assets = _asset_module(style_version)
     c = db()
     try:
         c.execute("BEGIN IMMEDIATE")
@@ -10956,8 +11027,8 @@ def _finish_food_asset_job(job, result=None, error=None):
                    WHERE canonical_id=? AND style_version=?""",
                 (
                     result["image_url"], result["content_hash"],
-                    result.get("prompt_version") or FA.GENERATED_PROMPT_VERSION,
-                    now.isoformat(), job["canonical_id"], FA.STYLE_VERSION,
+                    result.get("prompt_version") or assets.GENERATED_PROMPT_VERSION,
+                    now.isoformat(), job["canonical_id"], style_version,
                 ),
             )
             c.commit()
@@ -10976,7 +11047,7 @@ def _finish_food_asset_job(job, result=None, error=None):
                        updated_at=? WHERE canonical_id=? AND style_version=?""",
                 (
                     error_class, now.isoformat(), job["canonical_id"],
-                    FA.STYLE_VERSION,
+                    style_version,
                 ),
             )
             status = "queued"
@@ -10993,7 +11064,7 @@ def _finish_food_asset_job(job, result=None, error=None):
                    WHERE canonical_id=? AND style_version=?""",
                 (
                     retry_after, error_class, now.isoformat(),
-                    job["canonical_id"], FA.STYLE_VERSION,
+                    job["canonical_id"], style_version,
                 ),
             )
             status = "rejected"
@@ -11007,15 +11078,23 @@ def _load_generated_food_assets():
     c = db()
     try:
         rows = c.execute(
-            """SELECT canonical_id,image_url FROM food_assets
+            """SELECT canonical_id,image_url,style_version FROM food_assets
                WHERE status='ready' AND source='generated'
                      AND image_url IS NOT NULL"""
         ).fetchall()
     finally:
         c.close()
-    for food_id, image_url in rows:
-        FA.RESOLVER.publish_generated(food_id, image_url)
-    return len(rows)
+    published = 0
+    for food_id, image_url, style_version in rows:
+        try:
+            assets = _asset_module(style_version)
+        except ValueError:
+            # Стиль из прошлой версии набора: картинка есть, но каталога
+            # под неё уже нет. Молча пропускаем, а не роняем запуск.
+            continue
+        assets.RESOLVER.publish_generated(food_id, image_url)
+        published += 1
+    return published
 
 
 def _recover_food_asset_jobs():
@@ -11051,15 +11130,17 @@ async def _food_asset_worker(worker_no):
     last_overlay_refresh = 0.0
     while True:
         try:
-            food_id, label = await asyncio.wait_for(
+            food_id, label, style_version = await asyncio.wait_for(
                 _FOOD_ASSET_CANDIDATES.get(), timeout=1.0
             )
             try:
-                await asyncio.to_thread(_enqueue_food_asset_job, food_id, label)
+                await asyncio.to_thread(
+                    _enqueue_food_asset_job, food_id, label, style_version
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                _FOOD_ASSET_SEEN.pop((food_id, FA.STYLE_VERSION), None)
+                _FOOD_ASSET_SEEN.pop((food_id, style_version), None)
                 log.warning(
                     "food asset enqueue failed: worker=%s error=%s",
                     worker_no, type(exc).__name__,
@@ -11098,12 +11179,14 @@ async def _food_asset_worker(worker_no):
         try:
             result = await loop.run_in_executor(
                 _FOOD_ASSET_EXECUTOR,
-                FA.generate_and_store,
+                _asset_module(job["style_version"]).generate_and_store,
                 job["canonical_label"],
                 job["attempts"],
             )
             await asyncio.to_thread(_finish_food_asset_job, job, result, None)
-            FA.RESOLVER.publish_generated(job["canonical_id"], result["image_url"])
+            _asset_module(job["style_version"]).RESOLVER.publish_generated(
+                job["canonical_id"], result["image_url"]
+            )
             log.info(
                 "food asset ready: worker=%s canonical_id=%s",
                 worker_no, job["canonical_id"],
@@ -13769,6 +13852,20 @@ async def _api_track(request):
     payload = await asyncio.to_thread(_api_track_sync, cid, body)
     return _cors(web.json_response(payload))
 
+def _with_workout_assets(records):
+    """Дополнить записи тренировок картинками.
+
+    Раньше картинку подбирал фронт по манифесту, и в этом была вся беда:
+    подбор ничего не знал ни про словоформы, ни про заглушку, а когда не
+    находил — возвращал null, и строка рисовалась пустой. Решение о
+    картинке принимается там же, где для еды: на сервере.
+    """
+    return [
+        SA.decorate(record) if isinstance(record, dict) else record
+        for record in (records or [])
+    ]
+
+
 async def _api_train_day(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -13780,7 +13877,9 @@ async def _api_train_day(request):
         return _cors(web.json_response(error, status=status))
     d = dd.isoformat()
     ev(cid, "button", meta="web_train_day")
-    return _cors(web.json_response({"ok": True, "d": d, "workouts": workouts_of(cid, d)}))
+    workouts = _with_workout_assets(workouts_of(cid, d))
+    _offer_food_asset_candidates(workouts, assets=SA)
+    return _cors(web.json_response({"ok": True, "d": d, "workouts": workouts}))
 
 async def _api_train(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -13792,7 +13891,8 @@ async def _api_train(request):
     except (TypeError, ValueError):
         wo = 0
     wo = max(-52, min(0, wo))
-    tod = workouts_of(cid)
+    tod = _with_workout_assets(workouts_of(cid))
+    _offer_food_asset_candidates(tod, assets=SA)
     return _cors(web.json_response({"ok": True, "profile": train_profile_get(cid), "week": train_week(cid, wo),
         "today": tod, "last_review": (tod[-1]["review"] if tod else ""),
         "favorite_types": [t for t, _ in favorite_activities(cid)]}))
@@ -13821,13 +13921,16 @@ def _workout_committed_receipt(cid, mutation, target):
         "committed": True,
         "duplicate": mutation.get("status") == "duplicate",
         "date": target,
-        "workout": saved,
+        "workout": SA.decorate(saved),
         "review": saved.get("review") or "",
         "calories": int(saved.get("kcal") or 0),
         "muscles": saved.get("muscles") or "",
     }
     try:
-        payload.update({"week": train_week(cid), "today": workouts_of(cid)})
+        payload.update({
+            "week": train_week(cid),
+            "today": _with_workout_assets(workouts_of(cid)),
+        })
     except Exception:
         receipt_pending = True
     payload["receipt_pending"] = receipt_pending

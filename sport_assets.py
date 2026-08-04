@@ -385,3 +385,89 @@ def generate_and_store(
         "prompt_version": GENERATED_PROMPT_VERSION,
         "validation_score": validation_score,
     }
+
+#: Резолвер тренировок — тот же механизм, что у еды.
+#:
+#: Подбор картинки тренировки жил на фронте отдельным кодом: точное совпадение,
+#: потом вхождение подстроки, потом список из двадцати корней, выписанный
+#: руками. Словоформ он не знал, и «мягкая разминка для спины» не находила
+#: каталожную «Спину» — «спины» это не «спина». Запасного варианта тоже не
+#: было: подбор возвращал null, и строка рисовалась без картинки вовсе.
+#:
+#: Всё, что делалось для еды — приведение форм, совпадение по подмножеству
+#: токенов, честная заглушка, очередь на догенерацию, — обходило тренировки
+#: стороной, потому что у них не было резолвера. Теперь он общий: класс из
+#: food_assets работает над любым каталогом.
+TRAIN_PLACEHOLDER = "/assets/train/workout-placeholder.webp"
+_MANIFEST_PATH = Path(__file__).resolve().parent / "webapp2/assets/train/manifest.json"
+
+
+def _manifest() -> dict[str, str]:
+    with _MANIFEST_PATH.open("r", encoding="utf-8") as source:
+        payload = json.load(source)
+    if not isinstance(payload, dict):
+        raise ValueError("sport_manifest")
+    return payload
+
+
+#: Композиции у тренировок нет: занятие одно, склеивать нечего.
+RESOLVER = food_assets.CatalogResolver(
+    _manifest(),
+    placeholder=TRAIN_PLACEHOLDER,
+    style_version=STYLE_VERSION,
+    identity=canonical_id,
+    compose=False,
+)
+
+
+def resolver_enabled() -> bool:
+    return os.environ.get(
+        "AIWA_SPORT_ASSET_RESOLVER", "1"
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def generation_enabled() -> bool:
+    value = os.environ.get(
+        "AIWA_SPORT_ASSET_GENERATION",
+        os.environ.get("AIWA_FOOD_ASSET_GENERATION", "0"),
+    )
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def resolve(label: object) -> dict[str, object]:
+    return RESOLVER.resolve(label)
+
+
+def decorate(record: object, *, key: str = "type") -> dict:
+    """Дополнить запись о тренировке картинкой и качеством совпадения.
+
+    Раньше это делал фронт по манифесту, и поэтому не делал никто: тот код не
+    умел ни словоформ, ни заглушки. Решение о картинке принимает сервер — там
+    же, где оно принимается для еды.
+    """
+    if not isinstance(record, dict):
+        return {}
+    result = dict(record)
+    if not resolver_enabled():
+        return result
+    result.update(resolve(result.get(key)))
+    return result
+
+
+def decorate_plan(plan: object) -> dict:
+    """Варианты тренировки на день — с картинками.
+
+    Названия вариантов придумывает модель («Мягкая разминка для спины»), и
+    каталог их, разумеется, не содержит. Промах виден по asset_state и уезжает
+    в догенерацию — как у еды.
+    """
+    if not isinstance(plan, dict):
+        return {}
+    result = dict(plan)
+    options = result.get("options")
+    if isinstance(options, list):
+        result["options"] = [
+            decorate(option, key="name") if isinstance(option, dict) else option
+            for option in options
+        ]
+    return result
