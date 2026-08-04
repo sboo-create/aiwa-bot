@@ -489,6 +489,33 @@ class FoodAssetResolver:
                 return None      # непересекающиеся кандидаты — не гадаем
         return best_label, self.manifest[best_label], len(best_tokens) / len(query_tokens)
 
+    def _composed_url(self, items: Iterable[dict] | None) -> str | None:
+        names = []
+        for item in items or ():
+            if not isinstance(item, dict):
+                continue
+            name = " ".join(str(item.get("name") or "").split())
+            if name and name not in names:
+                names.append(name)
+        if len(names) < 2:
+            return None
+        paths = []
+        for name in names[:COMPOSITION_LIMIT]:
+            match = self._manifest_match(name)
+            # Точное и близкое клеим, приблизительное — нет. Коллаж из двух
+            # реальных продуктов честнее одного выбранного; коллаж из двух
+            # «похожих на что-то» — уже выдумка.
+            if not match or match_quality(match[2]) not in {"exact", "close"}:
+                return None
+            paths.append(_ROOT / match[1].lstrip("/"))
+        try:
+            tile = compose(paths, composition_dir())
+        except Exception:
+            return None
+        if not tile:
+            return None
+        return f"{composition_public_base()}/{tile.name}"
+
     def _manifest_match(self, label: str) -> tuple[str, str, str] | None:
         normalized = normalize_label(label)
         with self._match_cache_lock:
@@ -591,6 +618,24 @@ class FoodAssetResolver:
         items: Iterable[dict] | None = None,
     ) -> dict[str, object]:
         title = str(label or "").strip()
+
+        # Приём из нескольких продуктов показываем композицией, а не одним из
+        # них: любой выбор одного — половина правды. Собираем, только если у
+        # каждой позиции есть СВОЯ точная картинка, иначе получится коллаж из
+        # приблизительных, а это хуже честной одной.
+        composed = self._composed_url(items)
+        if composed:
+            return {
+                "canonical_id": canonical_id(title),
+                "canonical_label": title,
+                "image_url": composed,
+                "image_source": "composition",
+                "asset_state": "ready",
+                "match_quality": "exact",
+                "requested_label": title,
+                "style_version": STYLE_VERSION,
+            }
+
         # Сначала спрашиваем разбор: он знает главную позицию точно. Целая
         # строка — запасной путь для мест, где разбора нет (меню, чат).
         head = head_item(items)
@@ -663,6 +708,71 @@ class FoodAssetResolver:
 
 
 RESOLVER = FoodAssetResolver.from_default_manifest()
+
+
+
+#: Сколько позиций показываем в композиции. Больше четырёх на превью 88×88
+#: превращается в кашу, и честнее показать три и счётчик, чем шесть точек.
+COMPOSITION_LIMIT = 4
+
+
+def _compose_layout(count: int) -> tuple[tuple[int, int, int, int], ...]:
+    """Раскладка плиток внутри квадрата 512×512 для двух-четырёх позиций."""
+    if count == 2:
+        return ((0, 0, 256, 512), (256, 0, 256, 512))
+    if count == 3:
+        return ((0, 0, 256, 512), (256, 0, 256, 256), (256, 256, 256, 256))
+    return ((0, 0, 256, 256), (256, 0, 256, 256),
+            (0, 256, 256, 256), (256, 256, 256, 256))
+
+
+def compose(paths: "list[Path]", destination: "Path") -> "Path | None":
+    """Собрать одну плитку из картинок нескольких позиций приёма пищи.
+
+    Приём из нескольких продуктов раньше показывал картинку одного из них —
+    выбранного правилом, которое ошибалось, а когда перестало ошибаться, всё
+    равно осталось выбором: «вареники с вишней, сливочное масло» это два
+    продукта, и любой один из них — половина правды.
+
+    Композиция детерминированная и без модели: имя файла считается от состава,
+    поэтому один и тот же набор всегда даёт один и тот же файл, а кэш работает
+    сам собой. Фон белый, как у всех картинок каталога: приложение кладёт
+    плитку на свою подложку через mix-blend-mode: darken.
+    """
+    from PIL import Image
+
+    usable = [p for p in paths if p and Path(p).is_file()][:COMPOSITION_LIMIT]
+    if len(usable) < 2:
+        return None
+    digest = hashlib.sha256(
+        "|".join(sorted(Path(p).name for p in usable)).encode("utf-8")
+    ).hexdigest()
+    target = Path(destination) / f"{digest}.webp"
+    if target.exists():
+        return target
+    canvas = Image.new("RGB", (512, 512), (255, 255, 255))
+    for (x, y, w, h), path in zip(_compose_layout(len(usable)), usable):
+        with Image.open(path) as tile:
+            tile = tile.convert("RGB")
+        tile.thumbnail((w - 8, h - 8), Image.Resampling.LANCZOS)
+        canvas.paste(tile, (x + (w - tile.width) // 2, y + (h - tile.height) // 2))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    canvas.save(temporary, "WEBP", quality=82, method=6)
+    os.replace(temporary, target)
+    return target
+
+_ROOT = Path(__file__).resolve().parent / "webapp2"
+
+
+def composition_dir() -> Path:
+    """Куда кладём собранные плитки. Рядом с генерируемыми картинками."""
+    return generated_asset_dir() / "compositions"
+
+
+def composition_public_base() -> str:
+    return generated_public_base() + "/compositions"
+
 
 
 def decorate(record: dict) -> dict:
