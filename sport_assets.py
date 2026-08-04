@@ -39,9 +39,18 @@ def canonical_id(value: object) -> str:
     return f"sport:{digest}"
 
 
+#: Заглушки самого приложения. «Своё» — это подпись кнопки «впишу сам», и
+#: когда человек ничего не вписал, она так и остаётся в записи. Рисовать
+#: картинку «Своего» не к чему: за словом нет активности. Такие записи
+#: показывают общую заглушку и в догенерацию не идут.
+_UI_STUB_LABELS = frozenset({"свое", "другая", "другое", "прочее"})
+
+
 def reviewed_generation_label(value: object) -> str | None:
     label = " ".join(str(value or "").strip().split())[:80]
     normalized = normalize_label(label)
+    if normalized in _UI_STUB_LABELS:
+        return None
     words = normalized.split()
     if not (1 <= len(words) <= 10):
         return None

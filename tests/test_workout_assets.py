@@ -216,3 +216,12 @@ class GenerationBudgetTests(unittest.TestCase):
             _, label, style = bot._FOOD_ASSET_CANDIDATES.get_nowait()
         self.assertEqual(style, SA.STYLE_VERSION)
         self.assertEqual(label, "Заплыв на сапе")
+
+    def test_ui_stub_type_is_not_generated(self):
+        """«Своё» — подпись кнопки, а не активность: рисовать нечего."""
+        record = SA.decorate({"type": "Своё"})
+        with mock.patch.dict(os.environ, {"AIWA_SPORT_ASSET_GENERATION": "1"}):
+            bot._FOOD_ASSET_CANDIDATES = asyncio.Queue(maxsize=4)
+            self.assertEqual(
+                bot._offer_food_asset_candidates([record], assets=SA), 0
+            )
