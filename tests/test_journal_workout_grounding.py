@@ -15,6 +15,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -185,6 +186,20 @@ class QuotedPathTests(unittest.TestCase):
         )
         self.assertEqual((result or {}).get("intent"), "logworkout")
 
+    def test_prefixed_run_and_handstand_report_is_written_down(self):
+        """Реальная голосовая фраза не должна зависеть от каталога картинок."""
+        text = "Побегал по улице 10 минут и постоял на руках несколько минут."
+        result = bot._normalize_semantic_journal(
+            quoted_workout(
+                text,
+                type="Кардио",
+                duration_minutes=10,
+                items=[{"name": "стойка на руках"}],
+            ),
+            text, CONTEXT, enable_v2=True,
+        )
+        self.assertEqual((result or {}).get("intent"), "logworkout")
+
     def test_impersonal_food_report_is_written_down(self):
         result = bot._normalize_semantic_journal(
             quoted_meal("сегодня был творог и банан", "творог и банан",
@@ -276,8 +291,26 @@ class PrefilterTests(unittest.TestCase):
                     text,
                 )
 
+    def test_prefixed_run_reaches_the_router_without_catalog_art(self):
+        text = "Побегал по улице 10 минут и постоял на руках несколько минут."
+        self.assertFalse(bot.SA.RESOLVER.mentions(text))
+        self.assertTrue(bot._journal_workout_named(text, {}))
+        self.assertTrue(
+            bot._semantic_journal_candidate(text, self.CONTEXT, enable_v2=True)
+        )
+        self.assertTrue(bot._journal_completed_event_signal(text))
+
+    def test_skate_report_uses_activity_vocabulary_not_food_catalog(self):
+        text = "Немного поездил на скейте, минут 10:15 в быстром темпе по улице."
+        self.assertFalse(bot.SA.RESOLVER.mentions(text))
+        with mock.patch.object(bot.FA.RESOLVER, "mentions", return_value=False):
+            self.assertTrue(bot._journal_workout_named(text, {}))
+            self.assertTrue(
+                bot._semantic_journal_candidate(text, self.CONTEXT, enable_v2=True)
+            )
+
     def test_past_tense_alone_does_not_call_the_model(self):
-        """Новая ветка требует и прошедшего времени, и слова из каталога.
+        """Новая ветка требует прошедшего времени и названной еды/активности.
 
         Иначе фильтр звал бы модель на любую фразу в прошедшем времени —
         а он стоит на пути каждого сообщения.
