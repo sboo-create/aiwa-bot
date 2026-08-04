@@ -518,6 +518,78 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(statuses.count("miss"), 1)
         self.assertEqual(statuses.count("hit"), 3)
 
+    def test_dashboard_cache_waiter_recomputes_after_concurrent_write(self):
+        """A pre-write computation must not republish stale data after invalidation."""
+        key = (1, "mixed")
+        self.module._DASHBOARD_CACHE.clear()
+        first_compute_started = threading.Event()
+        release_first_compute = threading.Event()
+        second_waiting = threading.Event()
+        calls = []
+        results = []
+
+        class ObservedLock:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.guard = threading.Lock()
+                self.entries = 0
+
+            def __enter__(self):
+                with self.guard:
+                    self.entries += 1
+                    if self.entries == 2:
+                        second_waiting.set()
+                self.lock.acquire()
+                return self
+
+            def __exit__(self, *_exc):
+                self.lock.release()
+
+        self.module._DASHBOARD_KEY_LOCKS[key] = ObservedLock()
+
+        def compute(_days, _source):
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                first_compute_started.set()
+                self.assertTrue(release_first_compute.wait(2))
+                return {"marker": "before-write"}
+            return {"marker": "after-write"}
+
+        def request():
+            results.append(self.module._cached_dashboard(1, "mixed")[:2])
+
+        with mock.patch.object(self.module, "compute_dashboard", side_effect=compute):
+            first = threading.Thread(target=request)
+            second = threading.Thread(target=request)
+            first.start()
+            self.assertTrue(first_compute_started.wait(2))
+            second.start()
+            self.assertTrue(second_waiting.wait(2))
+
+            # Match the production write path: commit under DB_LOCK, then
+            # invalidate while that lock is still held.
+            with self.module.DB_LOCK:
+                self.module._db.execute(
+                    "INSERT INTO events(event_id,ts,device_id,name,properties,ingested_at,"
+                    "provenance,confidence,payload_version) VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("racing-write", time.time(), "u2", "app_opened", "{}",
+                     time.time(), "observed", "high", 2),
+                )
+                self.module._db.commit()
+                self.module._invalidate_dashboard_cache()
+            release_first_compute.set()
+            first.join(2)
+            second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(calls, [1, 2])
+        self.assertIn(({"marker": "before-write"}, "miss"), results)
+        self.assertIn(({"marker": "after-write"}, "miss"), results)
+        cached, status, _ = self.module._cached_dashboard(1, "mixed")
+        self.assertEqual(status, "hit")
+        self.assertEqual(cached, {"marker": "after-write"})
+
     # --- windowed read: the aggregates must stay identical to a full scan ---
 
     def _all_rows(self, source_mode="mixed"):
