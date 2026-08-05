@@ -8147,7 +8147,7 @@ async def refs_cmd(update, context):
 async def stats_cmd(update, context):
     cid = update.effective_chat.id
     if not AIWA_ADMIN:
-        return await update.message.reply_text(f"Статистика закрыта. Твой chat id: {cid}. Задай в production-конфигурации AIWA_ADMIN={cid}, и команда станет доступна только тебе.")
+        return await update.message.reply_text(f"Статистика закрыта. Твой chat id: {cid}. Задай в /srv/aiwa/config/app.env переменную AIWA_ADMIN={cid}, и команда станет доступна только тебе.")
     if str(cid) != str(AIWA_ADMIN):
         return await update.message.reply_text("Эта команда доступна только администратору.")
     _txt = await asyncio.to_thread(aggregate_stats)

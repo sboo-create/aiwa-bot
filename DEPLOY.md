@@ -47,6 +47,9 @@ AIWA_ALLOWED_ORIGINS=https://app.aiwa-wellness.app
 Railway hostnames не должны возвращаться в allowed origins, Telegram menu
 buttons или BotFather Main Mini App URL.
 
+В live `/srv/aiwa/config/app.env` переменная `AIWA_CANDIDATE` должна
+отсутствовать: candidate-mode отключает Telegram polling и фоновые jobs.
+
 ## Порядок релиза
 
 1. Убедиться, что точный SHA находится в `origin/main`, а обязательные CI
