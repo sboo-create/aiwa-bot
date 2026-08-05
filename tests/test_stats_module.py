@@ -173,8 +173,12 @@ class StatsModuleTests(unittest.TestCase):
         self.assertEqual(day["overview"], week["overview"])
 
     def test_ingest_allow_list_drops_sensitive_properties_and_upgrades_payload(self):
-        safe = self.module._safe_properties({"screen": "food", "symptoms": "secret", "cycle_date": "secret"})
-        self.assertEqual(safe, {"screen": "food"})
+        safe = self.module._safe_properties({"screen": "food", "assistant_variant": "female",
+                                             "mode": "preg", "symptoms": "secret",
+                                             "cycle_date": "secret"})
+        self.assertEqual(safe, {"screen": "food", "assistant_variant": "female"})
+        self.assertEqual(self.module._safe_properties({"assistant_variant": "preg"}),
+                         {"assistant_variant": "unknown"})
 
     def test_dashboard_explains_data_sources_without_requiring_technical_terms(self):
         html = (ROOT / "stats" / "index.html").read_text()
@@ -191,6 +195,58 @@ class StatsModuleTests(unittest.TestCase):
         self.assertIn("Recovered request", html)
         self.assertIn("Terminal failure", html)
         self.assertIn("Attempt error rate", html)
+        self.assertIn("Осмысленное использование", html)
+        self.assertIn("Мужской и женский помощник", html)
+        self.assertIn("Сигналы проблем пользователей", html)
+        self.assertIn("assistant_variant=${selectedAssistant}", html)
+
+    def test_assistant_segments_preserve_total_calls_and_expose_outcomes(self):
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc).timestamp()
+        female = {"assistant_variant": "female"}
+        male = {"assistant_variant": "male"}
+        self.add("f-msg", "female-user", "user_message_sent", female, now - 100)
+        self.add("f-answer", "female-user", "assistant_message_sent", female, now - 90)
+        self.add("f-call-1", "female-user", "ai_call",
+                 {**female, "request_id": "fr1", "status": "success"}, now - 95)
+        self.add("f-call-2", "female-user", "ai_call",
+                 {**female, "request_id": "fr2", "status": "success"}, now - 85)
+        self.add("f-outcome", "female-user", "tool_outcome_completed",
+                 {**female, "status": "success", "outcome_type": "journal_meal_create"}, now - 80)
+        self.add("m-msg", "male-user", "user_message_sent", male, now - 70)
+        self.add("m-call", "male-user", "ai_call",
+                 {**male, "request_id": "mr1", "status": "success"}, now - 65)
+        self.add("m-checkin", "male-user", "checkin_completed", male, now - 60)
+        self.add("m-tool-error", "male-user", "tool_execution_completed",
+                 {**male, "status": "error", "tool_name": "today_diary"}, now - 55)
+        self.add("u-msg", "old-user", "user_message_sent", ts=now - 50)
+
+        with mock.patch.object(self.module.time, "time", return_value=now):
+            total = self.module.compute_dashboard(1)
+            female_data = self.module.compute_dashboard(1, "mixed", "female")
+            male_data = self.module.compute_dashboard(1, "mixed", "male")
+            unknown_data = self.module.compute_dashboard(1, "mixed", "unknown")
+
+        self.assertEqual(total["ai"]["attempts"], 3)
+        self.assertEqual(
+            total["ai"]["attempts"],
+            female_data["ai"]["attempts"] + male_data["ai"]["attempts"]
+            + unknown_data["ai"]["attempts"],
+        )
+        self.assertEqual(female_data["overview"]["tools_per_dau"], 2.0)
+        self.assertEqual(male_data["overview"]["tools_per_dau"], 1.0)
+        self.assertEqual(unknown_data["overview"]["tools_per_dau"], 0.0)
+        self.assertEqual(total["meaningful_outcomes"]["value_user_days"], 2)
+        self.assertEqual(total["meaningful_outcomes"]["value_coverage"], 66.7)
+        assistants = {item["id"]: item for item in total["assistants"]["items"]}
+        self.assertEqual(assistants["female"]["ai_attempts"], 2)
+        self.assertEqual(assistants["male"]["value_coverage"], 100.0)
+        self.assertEqual(assistants["unknown"]["active_users"], 1)
+        self.assertEqual(total["data_quality"]["assistant_variant_coverage"], 90.0)
+        failed_tools = next(
+            item for item in total["problems"]["items"]
+            if item["id"] == "failed_tool_executions"
+        )
+        self.assertEqual((failed_tools["events"], failed_tools["users"]), (1, 1))
 
     def test_request_success_is_hidden_when_request_ids_are_missing(self):
         self.add("call", "u1", "ai_call", {"provider": "p", "model": "m", "status": "error"})

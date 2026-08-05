@@ -468,7 +468,8 @@ class StableReviewBackendTests(unittest.TestCase):
 
     def test_week_food_review_started_after_photo_admission_cannot_publish_after_commit(self):
         self.seed_food()
-        generation, profile = bot._prepare_food_photo(self.cid)
+        generation, profile, assistant_variant = bot._prepare_food_photo(self.cid)
+        self.assertEqual(assistant_variant, "female")
         review_started = asyncio.Event()
         finish_review = asyncio.Event()
 

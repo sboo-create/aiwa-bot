@@ -5,6 +5,7 @@ canonical Disrupt Analytics contract at `/p/aiwa/`:
 
 - `GET /health`
 - `GET /summary?days=N`
+- `GET /dashboard?days=N&source=mixed&assistant_variant=all`
 - `POST /events` with `X-Ingest-Token`
 - `GET /` dashboard
 
@@ -33,8 +34,28 @@ status, request id, timing and product surface; arguments, returned profile
 data and medical context are never exported. Structured function executions
 are a narrower diagnostic and are not added to `tools_per_dau`, because their
 model hop is already counted as an AI invocation. A tool-assisted outcome
-means a tool succeeded and AIWA subsequently generated the final answer; it
-does not replace explicit user feedback.
+means a tool or verified journal mutation reached a confirmed result. It does
+not replace explicit user feedback.
+
+## Meaningful outcomes and assistant variants
+
+The additive `meaningful_outcomes` block deduplicates value by pseudonymous
+user and Moscow product day. A day qualifies when an answer was delivered, a
+tool outcome succeeded, or the user completed a check-in, saved a meal/workout
+or opened a summary. This does not change the canonical Answer activation KPI
+and it does not change the `tools_per_dau` numerator.
+
+`assistant_variant` is the only accepted assistant segment: `female`, `male`
+or `unknown`. It is captured at event/call time. Historical rows without the
+property remain unknown; the service never backfills them from a user's current
+profile. The default `all` filter preserves the existing total-call contract,
+while the response includes segment coverage and a warning when it is below
+80%.
+
+The `problems` block ranks observed terminal AI requests, failed tool
+executions/outcomes, unhelpful feedback, undelivered push campaigns and explicit
+application errors per 100 active user-days, with affected users shown next to
+the rate.
 
 Dashboard responses are cached in-process for 15 seconds and include
 `Server-Timing` plus `X-Stats-Cache` diagnostics. Parsed SQLite rows are reused

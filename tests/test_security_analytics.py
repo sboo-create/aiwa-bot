@@ -269,6 +269,36 @@ class SecurityAnalyticsTests(unittest.TestCase):
             bot._EVENT_WRITER_ACTIVE = original_active
             bot._EVENT_WRITER_STOP = original_stop
 
+    def test_event_batch_resolves_assistant_variants_once(self):
+        now = bot.datetime.now(bot.timezone.utc).isoformat()
+        items = [
+            (930, "user_message", "text", 0, 0, None, None, now),
+            (930, "assistant_message", "text", 0, 0, None, None, now),
+        ]
+        with mock.patch.object(
+            bot.A2, "assistant_variants_for_users",
+            wraps=bot.A2.assistant_variants_for_users,
+        ) as variants:
+            self.assertEqual(bot._write_event_batch(items), 2)
+        variants.assert_called_once()
+
+    def test_event_batch_segment_failure_degrades_to_unknown(self):
+        now = bot.datetime.now(bot.timezone.utc).isoformat()
+        item = (931, "user_message", "text", 0, 0, None, None, now)
+        with mock.patch.object(
+            bot.A2, "assistant_variants_for_users",
+            side_effect=RuntimeError("segment lookup failed"),
+        ):
+            self.assertEqual(bot._write_event_batch([item]), 1)
+        c = bot.db()
+        try:
+            props = json.loads(c.execute(
+                "SELECT properties_json FROM events_v2 ORDER BY occurred_at DESC LIMIT 1"
+            ).fetchone()[0])
+        finally:
+            c.close()
+        self.assertEqual(props["assistant_variant"], "unknown")
+
     def test_event_writer_retries_failed_batch_without_dropping_it(self):
         original_queue = bot._EVENT_WRITE_Q
         original_thread = bot._EVENT_WRITER_THREAD
@@ -785,7 +815,9 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn.close()
         self.assertEqual(row[1:4], ("screen_viewed", "webapp", "food"))
         self.assertNotIn("987654321", row[0])
-        self.assertEqual(json.loads(row[4]), {"platform": "webapp"})
+        self.assertEqual(json.loads(row[4]), {
+            "platform": "webapp", "assistant_variant": "unknown",
+        })
 
     def test_external_traction_outbox_is_pseudonymous_and_idempotent(self):
         cid = 987654321
@@ -850,6 +882,42 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(execution["platform"], "webapp")
         self.assertEqual(outcome["outcome_type"], "tool_assisted_answer")
         self.assertFalse({"arguments", "result", "profile", "symptoms"} & set(execution))
+
+    def test_verified_journal_mutation_is_a_privacy_safe_tool_outcome(self):
+        cid = 457
+        bot.ev(cid, "journal_mutation_verified", meta="create|meal|private payload ignored")
+
+        event = a2.traction_batch(bot.DB)[0]
+
+        self.assertEqual(event["name"], "tool_outcome_completed")
+        self.assertEqual(event["properties"]["status"], "success")
+        self.assertEqual(event["properties"]["outcome_type"], "journal_meal_create")
+        self.assertEqual(event["properties"]["assistant_variant"], "unknown")
+        self.assertNotIn("private payload ignored", json.dumps(event["properties"]))
+
+    def test_failed_journal_mutation_is_not_a_successful_outcome(self):
+        bot.ev(459, "journal_mutation_failed", meta="food|verify_failed")
+
+        event = a2.traction_batch(bot.DB)[0]
+
+        self.assertEqual(event["name"], "tool_outcome_completed")
+        self.assertEqual(event["properties"]["status"], "error")
+        self.assertEqual(event["properties"]["outcome_type"], "journal_mutation")
+
+    def test_journal_outcome_rejects_unlisted_domain_and_operation(self):
+        bot.ev(
+            458, "journal_mutation_verified",
+            meta="symptom-name|private-diagnosis",
+        )
+
+        event = a2.traction_batch(bot.DB)[0]
+
+        self.assertEqual(event["name"], "tool_outcome_completed")
+        self.assertEqual(
+            event["properties"]["outcome_type"], "journal_journal_mutation",
+        )
+        self.assertNotIn("symptom", json.dumps(event["properties"]))
+        self.assertNotIn("diagnosis", json.dumps(event["properties"]))
 
     def test_agent_records_real_tool_execution_and_assisted_outcome(self):
         plan = {
@@ -1166,11 +1234,17 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM llm_calls WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 0)
         conn.close()
 
-        fresh = dict(record, call_id="fresh-call", user_generation=new_generation)
+        fresh = dict(record, call_id="fresh-call", user_generation=new_generation,
+                     assistant_variant="male")
         a2.persist_llm_call(bot.DB, fresh)
         conn = bot.db()
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM llm_calls WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 1)
+        self.assertEqual(conn.execute(
+            "SELECT assistant_variant FROM llm_calls WHERE call_id='fresh-call'"
+        ).fetchone()[0], "male")
         conn.close()
+        ai_event = next(item for item in a2.traction_batch(bot.DB) if item["name"] == "ai_call")
+        self.assertEqual(ai_event["properties"]["assistant_variant"], "male")
 
     def test_canonical_chat_checkin_and_summary_event_semantics(self):
         cid = 80
@@ -1473,7 +1547,8 @@ class SecurityAnalyticsTests(unittest.TestCase):
         llm.set_usage_sink(captured.append)
         usage = []
         try:
-            with llm.call_context(user_key="u_test", request_id="r_test", purpose="final_answer"):
+            with llm.call_context(user_key="u_test", request_id="r_test", purpose="final_answer",
+                                  assistant_variant="male"):
                 llm._capture_usage(usage, {"usage": {"prompt_tokens": 100, "completion_tokens": 25,
                                                       "total_tokens": 125, "cost": 0.012}},
                                    "provider", "model", time.time(), cost_unit="usd")
@@ -1484,8 +1559,89 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(captured[0]["input_tokens"], 100)
         self.assertEqual(captured[0]["output_tokens"], 25)
         self.assertEqual(captured[0]["request_id"], "r_test")
+        self.assertEqual(captured[0]["assistant_variant"], "male")
         self.assertEqual(captured[0]["reported_cost"], 0.012)
         self.assertEqual(captured[0]["cost_unit"], "usd")
+
+    def test_assistant_analytics_lookup_cannot_block_an_ai_call(self):
+        with mock.patch.object(bot, "db", side_effect=sqlite3.OperationalError("busy")):
+            self.assertEqual(bot._llm_analytics_context(123), (-1, "unknown"))
+
+    def test_llm_analytics_context_reuses_one_connection(self):
+        cid = 124
+        generation = bot._activate_user(cid)
+        bot.upsert(cid, mode="male")
+        with mock.patch.object(bot, "db", wraps=bot.db) as open_db:
+            actual_generation, variant = bot._llm_analytics_context(cid)
+        self.assertEqual((actual_generation, variant), (generation, "male"))
+        open_db.assert_called_once()
+
+    def test_llm_context_lookup_runs_off_event_loop_thread(self):
+        cid = 127
+        bot._activate_user(cid)
+        main_thread = bot.threading.get_ident()
+        lookup_threads = []
+        real_db = bot.db
+
+        def tracked_db():
+            lookup_threads.append(bot.threading.get_ident())
+            return real_db()
+
+        with mock.patch.object(bot, "db", side_effect=tracked_db):
+            result = asyncio.run(
+                bot.llm_to_thread(cid, "test", lambda: "ok")
+            )
+        self.assertEqual(result, "ok")
+        self.assertTrue(lookup_threads)
+        self.assertTrue(all(thread_id != main_thread for thread_id in lookup_threads))
+
+    def test_assistant_variant_coarsens_every_product_mode(self):
+        expected = {
+            "cycle": "female", "preg": "female", "meno": "female",
+            "irregular": "female", "none": "female", "female": "female",
+            "male": "male", "legacy_custom": "unknown", "": "unknown",
+            None: "unknown",
+        }
+        for mode, variant in expected.items():
+            with self.subTest(mode=mode):
+                self.assertEqual(a2.normalize_assistant_variant(mode), variant)
+
+    def test_llm_analytics_context_preserves_generation_if_segment_fails(self):
+        cid = 125
+        generation = bot._activate_user(cid)
+        with mock.patch.object(
+            a2, "normalize_assistant_variant", side_effect=RuntimeError("segment failed")
+        ):
+            actual_generation, variant = bot._llm_analytics_context(cid)
+        self.assertEqual((actual_generation, variant), (generation, "unknown"))
+
+    def test_known_llm_context_does_not_open_db(self):
+        with mock.patch.object(bot, "db", side_effect=AssertionError("unexpected DB read")):
+            self.assertEqual(
+                bot._llm_analytics_context(126, 7, "male"), (7, "male")
+            )
+            self.assertEqual(
+                bot._llm_analytics_context(126, 7), (7, "unknown")
+            )
+
+    def test_think_llm_uses_loaded_segment_without_opening_db(self):
+        context = types.SimpleNamespace(
+            bot=types.SimpleNamespace(send_chat_action=mock.AsyncMock())
+        )
+        captured = {}
+
+        def fake_call():
+            captured.update(llm._CALL_CONTEXT.get())
+            return "ok"
+
+        with mock.patch.object(bot, "db", side_effect=AssertionError("unexpected DB read")):
+            result = asyncio.run(
+                bot.think_llm(
+                    context, 123, fake_call, _assistant_variant="male"
+                )
+            )
+        self.assertEqual(result, "ok")
+        self.assertEqual(captured["assistant_variant"], "male")
 
     def test_synthetic_load_users_are_excluded_only_from_background_audiences(self):
         regular_id = 501

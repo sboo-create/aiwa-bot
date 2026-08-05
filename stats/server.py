@@ -44,7 +44,7 @@ SAFE_PROPERTIES = {
     "payload_version", "app_version", "migration_batch", "token_precision",
     "answer_id", "rating", "safety_level", "campaign_id", "campaign_type",
     "delivery_status", "failure_class", "retryable", "platform", "tool_name",
-    "outcome_type",
+    "outcome_type", "assistant_variant",
 }
 NUMERIC_PROPERTIES = {
     "calls", "retry_index", "latency_ms", "input_tokens", "output_tokens",
@@ -54,6 +54,8 @@ NUMERIC_PROPERTIES = {
 ALIASES = {
     "legacy_signup": "onboarding_started",
     "legacy_activated": "onboarding_completed",
+    "legacy_journal_mutation_verified": "tool_outcome_completed",
+    "legacy_journal_mutation_failed": "tool_outcome_completed",
 }
 SYSTEM_NAMES = {
     "ai_call", "ai_usage_recorded", "legacy_ai_usage", "user_deleted", "error",
@@ -68,6 +70,10 @@ RESPONSE_NAMES = {"assistant_message_sent", "assistant_response_received"}
 # Check-ins, meals, workouts and summary opens remain important product results,
 # but do not silently redefine the activation/value KPI.
 VALUE_NAMES = RESPONSE_NAMES
+MEANINGFUL_VALUE_NAMES = {
+    "checkin_completed", "meal_add_completed", "workout_add_completed", "summary_opened",
+}
+ASSISTANT_VARIANTS = ("female", "male", "unknown")
 PRODUCT_ACTION_NAMES = {
     "user_message_sent", "checkin_updated", "checkin_symptom_selected", "checkin_completed",
     "food_flow_started", "meal_add_completed", "workout_flow_started", "workout_add_completed",
@@ -152,6 +158,32 @@ def _is_delivered_answer(row: dict[str, Any]) -> bool:
             (row["name"] == "assistant_response_received" and row["provenance"] != "observed"))
 
 
+def _is_successful_tool_outcome(row: dict[str, Any]) -> bool:
+    return (
+        row["name"] == "tool_outcome_completed"
+        and (
+            str(row["properties"].get("status") or "") in SUCCESS
+            or row.get("raw_name") == "legacy_journal_mutation_verified"
+        )
+    )
+
+
+def _is_failed_tool_outcome(row: dict[str, Any]) -> bool:
+    return (
+        row["name"] == "tool_outcome_completed"
+        and not _is_successful_tool_outcome(row)
+        and (
+            bool(row["properties"].get("status"))
+            or row.get("raw_name") == "legacy_journal_mutation_failed"
+        )
+    )
+
+
+def _is_meaningful_value(row: dict[str, Any]) -> bool:
+    return (_is_delivered_answer(row) or _is_successful_tool_outcome(row)
+            or row["name"] in MEANINGFUL_VALUE_NAMES)
+
+
 def _ai_failure_class(status: str) -> str:
     """Collapse transport-specific statuses into stable operator-facing buckets."""
     value = str(status or "unknown").strip().lower()
@@ -227,8 +259,8 @@ _db.execute("CREATE INDEX IF NOT EXISTS ix_events_name_ts ON events(name,ts)")
 _db.commit()
 DB_LOCK = threading.RLock()
 CACHE_LOCK = threading.RLock()
-_DASHBOARD_CACHE: dict[tuple[int, str], tuple[float, int, dict[str, Any]]] = {}
-_DASHBOARD_KEY_LOCKS: dict[tuple[int, str], threading.Lock] = {}
+_DASHBOARD_CACHE: dict[tuple, tuple[float, int, dict[str, Any]]] = {}
+_DASHBOARD_KEY_LOCKS: dict[tuple, threading.Lock] = {}
 DASHBOARD_CACHE_SECONDS = max(1.0, float(os.environ.get("STATS_DASHBOARD_CACHE_SECONDS", "15")))
 
 
@@ -249,7 +281,7 @@ def _invalidate_dashboard_cache() -> None:
 
 
 def _dashboard_cache_lookup(
-    key: tuple[int, str], now_mono: float
+    key: tuple, now_mono: float
 ) -> tuple[dict[str, Any] | None, int]:
     """Read a cache entry atomically with the SQLite connection state.
 
@@ -310,6 +342,31 @@ IS_OBSERVED_SQL = (
 )
 
 
+def _normalize_assistant_filter(value: str | None) -> str:
+    value = str(value or "all").strip().lower()
+    return value if value in ASSISTANT_VARIANTS else "all"
+
+
+def _assistant_clause(value: str) -> tuple[str, tuple[Any, ...]]:
+    """SQL predicate for the privacy-safe event-time assistant segment."""
+    value = _normalize_assistant_filter(value)
+    if value == "all":
+        return "", ()
+    extracted = "json_extract(properties,'$.assistant_variant')"
+    if value == "unknown":
+        return (
+            " AND (NOT json_valid(properties) OR " + extracted
+            + " IS NULL OR " + extracted + " NOT IN ('female','male'))",
+            (),
+        )
+    return " AND json_valid(properties) AND " + extracted + " = ?", (value,)
+
+
+def _assistant_variant(row: dict[str, Any]) -> str:
+    value = str(row["properties"].get("assistant_variant") or "unknown").lower()
+    return value if value in ASSISTANT_VARIANTS else "unknown"
+
+
 def _percent(n: float, d: float, digits: int = 1) -> float:
     return round(n * 100.0 / d, digits) if d else 0.0
 
@@ -332,6 +389,10 @@ def _safe_properties(raw: Any) -> dict[str, Any]:
         if key in NUMERIC_PROPERTIES:
             if isinstance(value, (int, float)) and math.isfinite(float(value)):
                 out[key] = value
+        elif key == "assistant_variant":
+            out[key] = _normalize_assistant_filter(str(value))
+            if out[key] == "all":
+                out[key] = "unknown"
         elif isinstance(value, (str, bool)):
             out[key] = value[:180] if isinstance(value, str) else value
     return out
@@ -357,7 +418,8 @@ def _row_from_record(record: tuple) -> dict[str, Any]:
     }
 
 
-def _window_rows(since: float, source_mode: str) -> list[dict[str, Any]]:
+def _window_rows(since: float, source_mode: str,
+                 assistant_filter: str = "all") -> list[dict[str, Any]]:
     """Materialise only the events a dashboard window can reach.
 
     Deliberately open-ended on the right: clock-skewed future events were
@@ -370,13 +432,16 @@ def _window_rows(since: float, source_mode: str) -> list[dict[str, Any]]:
     params: list[Any] = [since]
     if source_mode == "observed":
         sql += " AND " + IS_OBSERVED_SQL
+    assistant_sql, assistant_params = _assistant_clause(assistant_filter)
+    sql += assistant_sql
+    params.extend(assistant_params)
     sql += " ORDER BY ts,event_id"
     with DB_LOCK:
         records = _db.execute(sql, params).fetchall()
     return [_row_from_record(record) for record in records]
 
 
-def _history_facts(source_mode: str) -> dict[str, Any]:
+def _history_facts(source_mode: str, assistant_filter: str = "all") -> dict[str, Any]:
     """All-time facts that survive windowing, as aggregates instead of rows.
 
     `first_last` is the first and last *active* event per device over the whole
@@ -386,13 +451,14 @@ def _history_facts(source_mode: str) -> dict[str, Any]:
     exactly like the full-table read they replace.
     """
     source_clause = (" AND " + IS_OBSERVED_SQL) if source_mode == "observed" else ""
+    assistant_clause, assistant_params = _assistant_clause(assistant_filter)
     with DB_LOCK:
         # ACTIVE_NAME_SQL/source_clause — константы модуля с ?-плейсхолдерами,
         # значения уходят параметрами; пользовательских данных в тексте нет.
         first_last = _db.execute(
             "SELECT device_id, MIN(ts), MAX(ts) FROM events WHERE "  # nosec B608
-            + ACTIVE_NAME_SQL + source_clause + " GROUP BY device_id",
-            INACTIVE_RAW_NAMES,
+            + ACTIVE_NAME_SQL + source_clause + assistant_clause + " GROUP BY device_id",
+            INACTIVE_RAW_NAMES + assistant_params,
         ).fetchall()
         total, observed_events, min_ts, observed_start, latest_observed_ts = _db.execute(
             "SELECT COUNT(*), COALESCE(SUM(is_observed),0), MIN(ts),"  # nosec B608
@@ -410,7 +476,7 @@ def _history_facts(source_mode: str) -> dict[str, Any]:
 
 
 def _rolling_active_counts(period_starts: dict[str, float], until: float,
-                           source_mode: str) -> dict[str, int]:
+                           source_mode: str, assistant_filter: str = "all") -> dict[str, int]:
     """DAU/WAU/MAU as distinct-device counts, over the same predicate as the rest.
 
     These are the only windowed figures that reach further back than the
@@ -419,15 +485,17 @@ def _rolling_active_counts(period_starts: dict[str, float], until: float,
     Nothing downstream needs the identities behind the counts.
     """
     source_clause = (" AND " + IS_OBSERVED_SQL) if source_mode == "observed" else ""
+    assistant_clause, assistant_params = _assistant_clause(assistant_filter)
     with DB_LOCK:
         # см. выше: склеиваются только константные фрагменты
         dau, wau, mau = _db.execute(
             "SELECT COUNT(DISTINCT CASE WHEN ts >= ? THEN device_id END),"  # nosec B608
             "       COUNT(DISTINCT CASE WHEN ts >= ? THEN device_id END),"
             "       COUNT(DISTINCT device_id)"
-            " FROM events WHERE ts >= ? AND ts <= ? AND " + ACTIVE_NAME_SQL + source_clause,
+            " FROM events WHERE ts >= ? AND ts <= ? AND " + ACTIVE_NAME_SQL + source_clause
+            + assistant_clause,
             (period_starts["dau"], period_starts["wau"],
-             period_starts["mau"], until) + INACTIVE_RAW_NAMES,
+             period_starts["mau"], until) + INACTIVE_RAW_NAMES + assistant_params,
         ).fetchone()
     return {"dau": int(dau), "wau": int(wau), "mau": int(mau)}
 
@@ -508,6 +576,9 @@ def _series(rows: list[dict[str, Any]], days: float, now: float, available_start
                 "active": len({r["device_id"] for r in chunk if _is_active(r["name"])}),
                 "messages": sum(r["name"] == "user_message_sent" for r in chunk),
                 "ai_calls": sum(r["name"] == "ai_call" for r in chunk),
+                "value_users": len({r["device_id"] for r in chunk if _is_meaningful_value(r)}),
+                "tool_outcome_users": len({r["device_id"] for r in chunk
+                                           if _is_successful_tool_outcome(r)}),
             })
         return result
     span = max(1, int(math.ceil(days)))
@@ -526,16 +597,21 @@ def _series(rows: list[dict[str, Any]], days: float, now: float, available_start
             "active": len({r["device_id"] for r in chunk if _is_active(r["name"])}),
             "messages": sum(r["name"] == "user_message_sent" for r in chunk),
             "ai_calls": sum(r["name"] == "ai_call" for r in chunk),
+            "value_users": len({r["device_id"] for r in chunk if _is_meaningful_value(r)}),
+            "tool_outcome_users": len({r["device_id"] for r in chunk
+                                       if _is_successful_tool_outcome(r)}),
         })
         day += timedelta(days=1)
     return result
 
 
-def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any]:
+def compute_dashboard(days: float = 1.0, source: str = "mixed",
+                      assistant_variant: str = "all") -> dict[str, Any]:
     now = time.time()
     window_days, period_starts = _period_starts(now, days)
     since = period_starts["selected"]
     source_mode = "observed" if str(source).lower() == "observed" else "mixed"
+    assistant_filter = _normalize_assistant_filter(assistant_variant)
     # Every row-level consumer below reads from `since` or later; everything the
     # dashboard needs from before it — the all-time facts and the rolling
     # DAU/WAU/MAU windows — is an aggregate now, not a materialised row.
@@ -544,10 +620,13 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     # ingest landing mid-dashboard must not add a device to the all-time
     # population that the windowed rows have never heard of.
     with DB_LOCK:
-        history = _history_facts(source_mode)
-        rolling = _rolling_active_counts(period_starts, now, source_mode)
-        rows = _window_rows(since, source_mode)
+        history = _history_facts(source_mode, assistant_filter)
+        rolling = _rolling_active_counts(period_starts, now, source_mode, assistant_filter)
+        rows = _window_rows(since, source_mode, assistant_filter)
     selected = [r for r in rows if since <= r["ts"] <= now]
+    known_assistant_events = sum(
+        _assistant_variant(r) in {"female", "male"} for r in selected
+    )
     data_start = history["data_start"]
     available_start = max(since, data_start) if data_start is not None else None
     requested_days = max(1, int(math.ceil(window_days)))
@@ -1074,13 +1153,19 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         "token_split_coverage": _percent(token_covered, len(ai_rows)),
         "model_coverage": _percent(model_covered, len(ai_rows)),
         "cost_coverage": _percent(cost_covered, len(ai_rows)),
+        "assistant_variant_coverage": (
+            _percent(known_assistant_events, len(selected)) if selected else None
+        ),
         "warnings": (["Точный слой пока короче 7 дней; retention и тренды предварительные."] if coverage_days < 7 else []) +
                     (["Request ID покрывает меньше 80% AI-попыток; успех пользовательских запросов пока не показывается."] if ai_rows and _percent(request_covered, len(ai_rows)) < 80 else []) +
                     ([f"Выбрано {requested_days} дн., но источник содержит только {available_days} дн.; средние и график не включают дни до начала сбора."] if 0 < available_days < requested_days else []) +
                     (["Показаны только события, которые новая аналитика v2 записала напрямую. Восстановленная старая история исключена из расчётов."]
                      if source_mode == "observed" and reconstructed_events else []) +
                     (["Добавлены события, восстановленные из старой таблицы. Они расширяют историю, но могут быть неполными; стоимость по ним не считается."]
-                     if source_mode == "mixed" and reconstructed_events else []),
+                     if source_mode == "mixed" and reconstructed_events else []) +
+                    (["Вариант помощника известен менее чем для 80% событий окна; сравнивайте мужской и женский сегменты вместе со строкой «Не определено»."]
+                     if assistant_filter == "all" and selected
+                     and _percent(known_assistant_events, len(selected)) < 80 else []),
     }
 
     series_data = _series(rows, window_days, now, available_start)
@@ -1122,9 +1207,14 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
     exact_tool_outcomes = [
         r for r in selected
         if r["provenance"] == "observed"
-        and r["name"] == "tool_outcome_completed"
-        and str(r["properties"].get("status") or "") in SUCCESS
+        and _is_successful_tool_outcome(r)
     ]
+    all_tool_outcomes = [r for r in selected if r["name"] == "tool_outcome_completed"]
+    failed_tool_rows = [
+        r for r in exact_tool_rows
+        if str(r["properties"].get("status") or "") not in SUCCESS
+    ]
+    failed_tool_outcomes = [r for r in selected if _is_failed_tool_outcome(r)]
     tool_counts: dict[str, Counter] = defaultdict(Counter)
     for tool_row in exact_tool_rows:
         tool_name = str(tool_row["properties"].get("tool_name") or "unknown")
@@ -1137,6 +1227,16 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         for r in selected if _is_delivered_answer(r)
     }
     value_actions = len(response_user_days)
+    meaningful_user_days = {
+        (r["device_id"], _product_day(r["ts"]))
+        for r in selected if _is_meaningful_value(r)
+    }
+    meaningful_users = {user for user, _ in meaningful_user_days}
+    tool_outcome_user_days = {
+        (r["device_id"], _product_day(r["ts"]))
+        for r in selected if _is_successful_tool_outcome(r)
+    }
+    tool_outcome_users = {user for user, _ in tool_outcome_user_days}
     feature_days: dict[tuple[str, str], set[str]] = defaultdict(set)
     for row in active_selected:
         feature = _feature(row)
@@ -1144,6 +1244,149 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
             day = _product_day(row["ts"])
             feature_days[(row["device_id"], day)].add(feature)
     distinct_feature_uses = sum(len(feature_set) for feature_set in feature_days.values())
+
+    meaningful_outcomes = {
+        "value_user_days": len(meaningful_user_days),
+        "value_users": len(meaningful_users),
+        "value_coverage": (_percent(len(meaningful_user_days), active_user_days)
+                           if active_user_days else None),
+        "response_user_days": len(response_user_days),
+        "successful_tool_outcomes": len(exact_tool_outcomes),
+        "tool_outcome_users": len(tool_outcome_users),
+        "tool_outcome_user_days": len(tool_outcome_user_days),
+        "tool_outcome_success_rate": (
+            _percent(len(exact_tool_outcomes), len(all_tool_outcomes))
+            if all_tool_outcomes else None
+        ),
+        "ai_attempts_per_value_day": (
+            round(len(ai_rows) / len(meaningful_user_days), 2)
+            if meaningful_user_days else None
+        ),
+        "help": (
+            "Осмысленный user-day — уникальная пара пользователь × московская дата, где AIWA "
+            "доставила ответ, успешно завершила инструментальный результат или пользователь "
+            "сохранил чек-ин, еду, тренировку либо открыл сводку. Пересекающиеся события "
+            "дедуплицируются. Канонический Answer activation при этом не меняется."
+        ),
+    }
+
+    assistant_labels = {
+        "female": "Женский помощник", "male": "Мужской помощник", "unknown": "Не определено",
+    }
+    assistant_items = []
+    for variant in ASSISTANT_VARIANTS:
+        variant_rows = [r for r in selected if _assistant_variant(r) == variant]
+        variant_active = [r for r in variant_rows if _is_active(r["name"])]
+        variant_users = {r["device_id"] for r in variant_active}
+        variant_active_days = {
+            (r["device_id"], _product_day(r["ts"])) for r in variant_active
+        }
+        variant_values = {
+            (r["device_id"], _product_day(r["ts"]))
+            for r in variant_rows if _is_meaningful_value(r)
+        }
+        variant_ai = sum(r["name"] == "ai_call" for r in variant_rows)
+        variant_outcomes = [r for r in variant_rows if _is_successful_tool_outcome(r)]
+        assistant_items.append({
+            "id": variant, "label": assistant_labels[variant],
+            "active_users": len(variant_users),
+            "active_user_days": len(variant_active_days),
+            "ai_attempts": variant_ai,
+            "attempts_per_user_day": (
+                round(variant_ai / len(variant_active_days), 2) if variant_active_days else None
+            ),
+            "value_user_days": len(variant_values),
+            "value_coverage": (
+                _percent(len(variant_values), len(variant_active_days))
+                if variant_active_days else None
+            ),
+            "successful_tool_outcomes": len(variant_outcomes),
+            "tool_outcome_users": len({r["device_id"] for r in variant_outcomes}),
+        })
+    assistant_breakdown = {
+        "filter": assistant_filter,
+        "items": assistant_items,
+        "known_event_coverage": (_percent(known_assistant_events, len(selected))
+                                 if selected else None),
+        "known_events": known_assistant_events,
+        "total_events": len(selected),
+        "help": (
+            "Разрез строится по варианту помощника в момент события. Один пользователь может "
+            "попасть в разные строки, если менял режим. Старая история без признака остаётся в "
+            "«Не определено» и не восстанавливается по текущему профилю."
+        ),
+    }
+
+    terminal_request_rows = [
+        rr for rr in requests.values()
+        if not any(str(r["properties"].get("status") or "") in SUCCESS for r in rr)
+    ]
+    terminal_request_users = {
+        r["device_id"] for rr in terminal_request_rows for r in rr
+    }
+    unhelpful_users = {
+        item["device_id"] for item in latest_feedback.values()
+        if item["properties"].get("rating") == "unhelpful"
+    }
+    explicit_error_rows = [r for r in selected if r["name"] in {"error", "legacy_error"}]
+
+    def _problem(problem_id: str, label: str, event_count: int, users: set[str],
+                 severity: str, help_text: str, coverage: float | None = None) -> dict[str, Any]:
+        return {
+            "id": problem_id, "label": label, "events": int(event_count),
+            "users": len(users),
+            "rate_per_100_user_days": (
+                round(event_count * 100 / active_user_days, 2) if active_user_days else None
+            ),
+            "severity": severity, "help": help_text, "coverage": coverage,
+        }
+
+    problem_items = [
+        _problem(
+            "terminal_ai_requests", "AI-запросы без успешной попытки",
+            len(terminal_request_rows), terminal_request_users, "critical",
+            "Логический запрос, где все связанные по request_id AI-попытки завершились ошибкой.",
+            _percent(request_covered, len(ai_rows)) if ai_rows else None,
+        ),
+        _problem(
+            "failed_tool_executions", "Ошибки исполнения инструментов",
+            len(failed_tool_rows), {r["device_id"] for r in failed_tool_rows}, "high",
+            "Структурированный инструмент был выбран, но локальное исполнение завершилось ошибкой.",
+        ),
+        _problem(
+            "failed_tool_outcomes", "Не достигнут результат инструмента",
+            len(failed_tool_outcomes), {r["device_id"] for r in failed_tool_outcomes}, "high",
+            "Инструментальная операция дошла до проверки результата, но полезное изменение не подтвердилось.",
+        ),
+        _problem(
+            "unhelpful_feedback", "Ответы отмечены как неполезные",
+            unhelpful, unhelpful_users, "medium",
+            "Последняя явная оценка ответа — «Не полезно». Низкий охват feedback нужно учитывать отдельно.",
+            answer_quality["feedback_response_rate"],
+        ),
+        _problem(
+            "push_undelivered", "Push не доставлен",
+            push_funnel["failed"], failed_recipients, "medium",
+            "Кампании с терминальной ошибкой доставки после учёта последующего успешного retry.",
+        ),
+        _problem(
+            "explicit_errors", "Явные ошибки приложения",
+            len(explicit_error_rows), {r["device_id"] for r in explicit_error_rows}, "high",
+            "События error/legacy_error, которые приложение записало явно; AI-attempt errors считаются отдельно.",
+        ),
+    ]
+    problems = {
+        "items": sorted(
+            problem_items,
+            key=lambda item: (-(item["rate_per_100_user_days"] or 0), item["label"]),
+        ),
+        "denominator": active_user_days,
+        "denominator_label": "активных user-days",
+        "help": (
+            "Ранжирование по числу наблюдаемых проблем на 100 активных user-days. "
+            "Это диагностические сигналы, а не число уникальных проблем: рядом показаны затронутые пользователи."
+        ),
+    }
 
     calendar_day_start = period_starts["dau"]
     day_sessions, _, _ = _sessions(rows, calendar_day_start, now)
@@ -1208,7 +1451,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
          "denominator": exact_active_user_days, "denominator_label": "точных v2 user-days",
          "status": ("no_active_users" if not exact_active_user_days else "ok"),
          "selected_for_overview": False,
-         "help": "Более узкая диагностика function calls модели за выбранный период: cycle_status, recent_symptoms, today_diary, recent_workouts, user_profile, recall и remember. Учитываются успешные и завершившиеся ошибкой исполнения. Аргументы и результаты в аналитику не передаются."},
+         "help": "Более узкая диагностика фактически исполненных инструментов за выбранный период: контекстные функции агента и подтверждённые операции с дневником. Учитываются успехи и ошибки; аргументы, медицинские данные и результаты в аналитику не передаются."},
         {"id": "successful_tool_executions", "label": "Successful tool executions / DAU",
          "value": per_dau(day_successful_tool_executions),
          "numerator": day_successful_tool_executions,
@@ -1299,6 +1542,7 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
         pass
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "window_days": window_days,
+        "assistant_filter": assistant_filter,
         "installs": len(ever_ids), "dau": len(selected_ids), "events": len(selected),
         "errors": (failed_requests if requests else 0) + explicit_errors, "overview": overview,
         "metrics": [{"label": x["label"], "value": ("—" if x["value"] is None else str(x["value"])),
@@ -1328,6 +1572,9 @@ def compute_dashboard(days: float = 1.0, source: str = "mixed") -> dict[str, Any
             ),
         },
         "tool_definitions": tool_definitions,
+        "meaningful_outcomes": meaningful_outcomes,
+        "assistants": assistant_breakdown,
+        "problems": problems,
         "diagnostics": diagnostics,
         "funnel": funnel, "value_delivery": value_delivery, "feature_funnels": feature_funnels,
         "product_health": product_health, "answer_quality": answer_quality,
@@ -1473,10 +1720,16 @@ async def delete_migration_batch(batch_id: str, request: Request) -> JSONRespons
     return _no_store({"ok": True, "batch": batch_id, "removed": removed})
 
 
-def _cached_dashboard(days: float, source: str) -> tuple[dict[str, Any], str, float]:
+def _cached_dashboard(days: float, source: str,
+                      assistant_variant: str = "all") -> tuple[dict[str, Any], str, float]:
     """Keep the live dashboard responsive without caching across a DB write."""
-    key = (max(1, min(int(math.ceil(float(days))), 365)),
-           "observed" if str(source).lower() == "observed" else "mixed")
+    normalized_days = max(1, min(int(math.ceil(float(days))), 365))
+    normalized_source = "observed" if str(source).lower() == "observed" else "mixed"
+    assistant_filter = _normalize_assistant_filter(assistant_variant)
+    # The long-standing aggregate keeps its two-part key; segment caches add
+    # the variant so existing cache observers do not break.
+    key = ((normalized_days, normalized_source) if assistant_filter == "all"
+           else (normalized_days, normalized_source, assistant_filter))
     started = time.monotonic()
     cached, _ = _dashboard_cache_lookup(key, started)
     if cached is not None:
@@ -1492,7 +1745,11 @@ def _cached_dashboard(days: float, source: str) -> tuple[dict[str, Any], str, fl
         cached, changes = _dashboard_cache_lookup(key, time.monotonic())
         if cached is not None:
             return cached, "hit", (time.monotonic() - started) * 1000
-        value = compute_dashboard(key[0], key[1])
+        # Keep the established two-argument contract for the default aggregate;
+        # older integrations and tests wrap compute_dashboard(days, source).
+        value = (compute_dashboard(normalized_days, normalized_source)
+                 if assistant_filter == "all"
+                 else compute_dashboard(normalized_days, normalized_source, assistant_filter))
         with CACHE_LOCK:
             _DASHBOARD_CACHE[key] = (
                 time.monotonic() + DASHBOARD_CACHE_SECONDS, changes, value
@@ -1500,8 +1757,9 @@ def _cached_dashboard(days: float, source: str) -> tuple[dict[str, Any], str, fl
         return value, "miss", (time.monotonic() - started) * 1000
 
 
-def _dashboard_response(days: float, source: str) -> JSONResponse:
-    value, cache_status, elapsed_ms = _cached_dashboard(days, source)
+def _dashboard_response(days: float, source: str,
+                        assistant_variant: str = "all") -> JSONResponse:
+    value, cache_status, elapsed_ms = _cached_dashboard(days, source, assistant_variant)
     return _no_store(value, headers={
         "Server-Timing": f'dashboard;dur={elapsed_ms:.1f};desc="{cache_status}"',
         "X-Stats-Cache": cache_status,
@@ -1509,13 +1767,15 @@ def _dashboard_response(days: float, source: str) -> JSONResponse:
 
 
 @app.get("/summary")
-def summary(days: float = 1.0, source: str = "mixed") -> JSONResponse:
-    return _dashboard_response(days, source)
+def summary(days: float = 1.0, source: str = "mixed",
+            assistant_variant: str = "all") -> JSONResponse:
+    return _dashboard_response(days, source, assistant_variant)
 
 
 @app.get("/dashboard")
-def dashboard_data(days: float = 1.0, source: str = "mixed") -> JSONResponse:
-    return _dashboard_response(days, source)
+def dashboard_data(days: float = 1.0, source: str = "mixed",
+                   assistant_variant: str = "all") -> JSONResponse:
+    return _dashboard_response(days, source, assistant_variant)
 
 
 @app.get("/logo.png")
