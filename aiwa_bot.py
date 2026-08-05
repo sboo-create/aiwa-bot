@@ -917,7 +917,14 @@ def _write_event_batch(items):
         # Otherwise /stop can delete a user between the check and the insert,
         # allowing a queued telemetry item to reappear after deletion.
         c.execute("BEGIN IMMEDIATE")
-        variants = A2.assistant_variants_for_users(c, (item[0] for item in items))
+        try:
+            variants = A2.assistant_variants_for_users(
+                c, (item[0] for item in items),
+            )
+        except Exception as exc:
+            # Coarse enrichment is never allowed to stall the event writer.
+            log.warning("event assistant segment batch unavailable: %s", exc)
+            variants = {}
         for item in items:
             cid, action, meta, ms, calls, request_id, generation, occurred_at = item
             if not A2.write_allowed(

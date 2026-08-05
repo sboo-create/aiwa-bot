@@ -282,6 +282,23 @@ class SecurityAnalyticsTests(unittest.TestCase):
             self.assertEqual(bot._write_event_batch(items), 2)
         variants.assert_called_once()
 
+    def test_event_batch_segment_failure_degrades_to_unknown(self):
+        now = bot.datetime.now(bot.timezone.utc).isoformat()
+        item = (931, "user_message", "text", 0, 0, None, None, now)
+        with mock.patch.object(
+            bot.A2, "assistant_variants_for_users",
+            side_effect=RuntimeError("segment lookup failed"),
+        ):
+            self.assertEqual(bot._write_event_batch([item]), 1)
+        c = bot.db()
+        try:
+            props = json.loads(c.execute(
+                "SELECT properties_json FROM events_v2 ORDER BY occurred_at DESC LIMIT 1"
+            ).fetchone()[0])
+        finally:
+            c.close()
+        self.assertEqual(props["assistant_variant"], "unknown")
+
     def test_event_writer_retries_failed_batch_without_dropping_it(self):
         original_queue = bot._EVENT_WRITE_Q
         original_thread = bot._EVENT_WRITER_THREAD
