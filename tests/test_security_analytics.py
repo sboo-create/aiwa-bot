@@ -785,7 +785,9 @@ class SecurityAnalyticsTests(unittest.TestCase):
         conn.close()
         self.assertEqual(row[1:4], ("screen_viewed", "webapp", "food"))
         self.assertNotIn("987654321", row[0])
-        self.assertEqual(json.loads(row[4]), {"platform": "webapp"})
+        self.assertEqual(json.loads(row[4]), {
+            "platform": "webapp", "assistant_variant": "unknown",
+        })
 
     def test_external_traction_outbox_is_pseudonymous_and_idempotent(self):
         cid = 987654321
@@ -850,6 +852,18 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(execution["platform"], "webapp")
         self.assertEqual(outcome["outcome_type"], "tool_assisted_answer")
         self.assertFalse({"arguments", "result", "profile", "symptoms"} & set(execution))
+
+    def test_verified_journal_mutation_is_a_privacy_safe_tool_outcome(self):
+        cid = 457
+        bot.ev(cid, "journal_mutation_verified", meta="create|meal|private payload ignored")
+
+        event = a2.traction_batch(bot.DB)[0]
+
+        self.assertEqual(event["name"], "tool_outcome_completed")
+        self.assertEqual(event["properties"]["status"], "success")
+        self.assertEqual(event["properties"]["outcome_type"], "journal_meal_create")
+        self.assertEqual(event["properties"]["assistant_variant"], "unknown")
+        self.assertNotIn("private payload ignored", json.dumps(event["properties"]))
 
     def test_agent_records_real_tool_execution_and_assisted_outcome(self):
         plan = {
@@ -1166,11 +1180,17 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM llm_calls WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 0)
         conn.close()
 
-        fresh = dict(record, call_id="fresh-call", user_generation=new_generation)
+        fresh = dict(record, call_id="fresh-call", user_generation=new_generation,
+                     assistant_variant="male")
         a2.persist_llm_call(bot.DB, fresh)
         conn = bot.db()
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM llm_calls WHERE user_key=?", (a2.user_key(cid),)).fetchone()[0], 1)
+        self.assertEqual(conn.execute(
+            "SELECT assistant_variant FROM llm_calls WHERE call_id='fresh-call'"
+        ).fetchone()[0], "male")
         conn.close()
+        ai_event = next(item for item in a2.traction_batch(bot.DB) if item["name"] == "ai_call")
+        self.assertEqual(ai_event["properties"]["assistant_variant"], "male")
 
     def test_canonical_chat_checkin_and_summary_event_semantics(self):
         cid = 80
@@ -1473,7 +1493,8 @@ class SecurityAnalyticsTests(unittest.TestCase):
         llm.set_usage_sink(captured.append)
         usage = []
         try:
-            with llm.call_context(user_key="u_test", request_id="r_test", purpose="final_answer"):
+            with llm.call_context(user_key="u_test", request_id="r_test", purpose="final_answer",
+                                  assistant_variant="male"):
                 llm._capture_usage(usage, {"usage": {"prompt_tokens": 100, "completion_tokens": 25,
                                                       "total_tokens": 125, "cost": 0.012}},
                                    "provider", "model", time.time(), cost_unit="usd")
@@ -1484,8 +1505,13 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(captured[0]["input_tokens"], 100)
         self.assertEqual(captured[0]["output_tokens"], 25)
         self.assertEqual(captured[0]["request_id"], "r_test")
+        self.assertEqual(captured[0]["assistant_variant"], "male")
         self.assertEqual(captured[0]["reported_cost"], 0.012)
         self.assertEqual(captured[0]["cost_unit"], "usd")
+
+    def test_assistant_analytics_lookup_cannot_block_an_ai_call(self):
+        with mock.patch.object(bot, "db", side_effect=sqlite3.OperationalError("busy")):
+            self.assertEqual(bot._assistant_variant(123), "unknown")
 
     def test_synthetic_load_users_are_excluded_only_from_background_audiences(self):
         regular_id = 501

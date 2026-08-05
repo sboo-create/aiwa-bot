@@ -711,6 +711,20 @@ def _user_generation(cid):
     finally:
         c.close()
 
+def _assistant_variant(cid):
+    """Return a coarse event-time segment without exposing the underlying mode."""
+    c = None
+    try:
+        c = db()
+        return A2.assistant_variant_for_user(c, cid)
+    except Exception as exc:
+        # Analytics enrichment must never suppress the provider call.
+        log.warning("assistant analytics variant unavailable: %s", exc)
+        return "unknown"
+    finally:
+        if c is not None:
+            c.close()
+
 def _user_write_allowed(cid, generation=None, conn=None):
     own_connection = conn is None
     c = conn or db()
@@ -1086,9 +1100,10 @@ async def llm_to_thread(cid, purpose, func, *args, request_id=None, user_generat
     """Run a provider call with a shared trace id and pseudonymous user key."""
     request_id = request_id or ("r_" + secrets.token_hex(16))
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    assistant_variant = _assistant_variant(cid)
     def run():
         with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose,
-                            user_generation=generation):
+                            user_generation=generation, assistant_variant=assistant_variant):
             return func(*args, **kwargs)
     return await asyncio.to_thread(run)
 
@@ -7141,8 +7156,10 @@ async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
     request_id = kwargs.pop("_request_id", None) or ("r_" + secrets.token_hex(16))
     purpose = kwargs.pop("_purpose", None) or getattr(fn, "__name__", "llm_call").lstrip("_")
+    assistant_variant = _assistant_variant(cid)
     def run():
-        with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose):
+        with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose,
+                            assistant_variant=assistant_variant):
             return fn(*args, **kwargs)
     task = asyncio.create_task(asyncio.to_thread(run))
     while not task.done():

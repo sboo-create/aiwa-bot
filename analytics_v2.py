@@ -49,6 +49,7 @@ SCHEMA = (
         total_tokens INTEGER DEFAULT 0,
         retry_index INTEGER DEFAULT 0,
         fallback_from TEXT,
+        assistant_variant TEXT NOT NULL DEFAULT 'unknown',
         reported_cost REAL,
         cost_unit TEXT,
         estimated_cost_usd REAL,
@@ -86,7 +87,8 @@ SCHEMA = (
 def init_schema(conn):
     for statement in SCHEMA:
         conn.execute(statement)
-    for column in ("reported_cost REAL", "cost_unit TEXT"):
+    for column in ("reported_cost REAL", "cost_unit TEXT",
+                   "assistant_variant TEXT NOT NULL DEFAULT 'unknown'"):
         try:
             conn.execute("ALTER TABLE llm_calls ADD COLUMN " + column)
         except sqlite3.OperationalError:
@@ -142,6 +144,28 @@ def user_key(chat_id):
         return None
     digest = hmac.new(_analytics_secret(), str(chat_id).encode("utf-8"), hashlib.sha256).hexdigest()
     return "u_" + digest[:32]
+
+
+FEMALE_ASSISTANT_MODES = {"cycle", "irregular", "none", "meno", "preg"}
+
+
+def normalize_assistant_variant(value):
+    """Collapse product modes to the only privacy-safe dashboard dimension."""
+    mode = str(value or "").strip().lower()
+    if mode == "male":
+        return "male"
+    if mode in FEMALE_ASSISTANT_MODES or mode == "female":
+        return "female"
+    return "unknown"
+
+
+def assistant_variant_for_user(conn, chat_id):
+    """Read the event-time assistant variant; pre-mode history stays unknown."""
+    try:
+        row = conn.execute("SELECT mode FROM users WHERE chat_id=?", (chat_id,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    return normalize_assistant_variant(row[0] if row else None)
 
 
 def _lifecycle_row(conn, key):
@@ -271,6 +295,8 @@ def _legacy_event_name(action, meta):
         return "tool_execution_completed", None
     if action == "tool_outcome":
         return "tool_outcome_completed", None
+    if action in {"journal_mutation_verified", "journal_mutation_failed"}:
+        return "tool_outcome_completed", None
     if action == "fallback":
         return "fallback_served", None
     if action == "ai_job":
@@ -342,14 +368,20 @@ def _epoch(value):
 
 def insert_event_v2(
     conn, chat_id, action, meta=None, latency_ms=0, app_version=None,
-    request_id=None, calls=0, occurred_at=None,
+    request_id=None, calls=0, occurred_at=None, assistant_variant=None,
 ):
     if not write_allowed(conn, chat_id=chat_id):
         return None
     event_name, screen = _legacy_event_name(action, meta)
     text = str(meta or "")
     source = _source_for(action, meta)
-    props = {"platform": source}
+    props = {
+        "platform": source,
+        "assistant_variant": normalize_assistant_variant(
+            assistant_variant if assistant_variant is not None
+            else assistant_variant_for_user(conn, chat_id)
+        ),
+    }
     # Only coarse, explicitly safe dimensions are copied from legacy metadata.
     if meta in {"text", "voice", "webapp", "food_photo", "food_text", "diary_reco"}:
         props["channel"] = meta
@@ -397,9 +429,19 @@ def insert_event_v2(
             props["status"] = status
         if tool_name:
             props["tool_name"] = tool_name
-    elif action == "tool_outcome":
-        status = safe_id(parts[0] if parts else "", 20)
-        outcome_type = safe_id(parts[1] if len(parts) > 1 else "", 48)
+    elif action in {"tool_outcome", "journal_mutation_verified", "journal_mutation_failed"}:
+        if action == "tool_outcome":
+            status = safe_id(parts[0] if parts else "", 20)
+            outcome_type = safe_id(parts[1] if len(parts) > 1 else "", 48)
+        else:
+            status = "success" if action == "journal_mutation_verified" else "error"
+            operation = safe_id(parts[0] if parts else "mutation", 32) or "mutation"
+            if action == "journal_mutation_verified":
+                domain = safe_id(parts[1] if len(parts) > 1 else "journal", 24) or "journal"
+                outcome_type = safe_id("journal_" + domain + "_" + operation, 48)
+            else:
+                # The second failure part is a status/reason, not a product domain.
+                outcome_type = safe_id("journal_" + operation, 48)
         if status in {"success", "error"}:
             props["status"] = status
         if outcome_type:
@@ -468,18 +510,20 @@ def persist_llm_call(db_path, record):
         model = record.get("model")
         purpose = record.get("purpose")
         status = record.get("status") or "unknown"
+        assistant_variant = normalize_assistant_variant(record.get("assistant_variant"))
         conn.execute(
             """INSERT INTO llm_calls(call_id,occurred_at,user_key,request_id,provider,model,purpose,status,
                                       latency_ms,input_tokens,output_tokens,cached_tokens,total_tokens,retry_index,
-                                      fallback_from,reported_cost,cost_unit,estimated_cost_usd,meta_json)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                      fallback_from,assistant_variant,reported_cost,cost_unit,estimated_cost_usd,meta_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (call_id, occurred_at,
              record.get("user_key"), record.get("request_id"), provider,
              model, purpose, status,
              int(record.get("latency_ms") or 0), int(record.get("input_tokens") or 0),
              int(record.get("output_tokens") or 0), int(record.get("cached_tokens") or 0),
              int(record.get("total_tokens") or 0), int(record.get("retry_index") or 0),
-             record.get("fallback_from"), record.get("reported_cost"), record.get("cost_unit"),
+             record.get("fallback_from"), assistant_variant,
+             record.get("reported_cost"), record.get("cost_unit"),
              record.get("estimated_cost_usd"),
              json.dumps(record.get("meta") or {}, ensure_ascii=False, separators=(",", ":"))),
         )
@@ -493,6 +537,7 @@ def persist_llm_call(db_path, record):
             "total_tokens": int(record.get("total_tokens") or 0),
             "retry_index": int(record.get("retry_index") or 0),
             "fallback_from": record.get("fallback_from"),
+            "assistant_variant": assistant_variant,
             "reported_cost": record.get("reported_cost"),
             "cost_unit": record.get("cost_unit"),
             "estimated_cost_usd": record.get("estimated_cost_usd"),
@@ -525,16 +570,17 @@ def seed_traction_outbox(db_path):
         for row in conn.execute(
                 """SELECT call_id,occurred_at,user_key,request_id,provider,model,purpose,status,
                           latency_ms,input_tokens,output_tokens,cached_tokens,total_tokens,retry_index,
-                          fallback_from,reported_cost,cost_unit,estimated_cost_usd FROM llm_calls"""):
+                          fallback_from,assistant_variant,reported_cost,cost_unit,estimated_cost_usd FROM llm_calls"""):
             (call_id, occurred_at, key, request_id, provider, model, purpose, status,
              latency_ms, input_tokens, output_tokens, cached_tokens, total_tokens, retry_index,
-             fallback_from, reported_cost, cost_unit, estimated_cost_usd) = row
+             fallback_from, assistant_variant, reported_cost, cost_unit, estimated_cost_usd) = row
             _queue_traction(conn, "llm_" + call_id, _epoch(occurred_at), key, "ai_call", {
                 "provider": provider, "model": model, "purpose": purpose, "status": status,
                 "request_id": request_id, "latency_ms": int(latency_ms or 0),
                 "input_tokens": int(input_tokens or 0), "output_tokens": int(output_tokens or 0),
                 "cached_tokens": int(cached_tokens or 0), "total_tokens": int(total_tokens or 0),
                 "retry_index": int(retry_index or 0), "fallback_from": fallback_from,
+                "assistant_variant": normalize_assistant_variant(assistant_variant),
                 "reported_cost": reported_cost, "cost_unit": cost_unit,
                 "estimated_cost_usd": estimated_cost_usd,
                 "provenance": "observed", "confidence": "high",
