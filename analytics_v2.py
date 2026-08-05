@@ -186,6 +186,17 @@ def assistant_variants_for_users(conn, chat_ids):
     return variants
 
 
+def llm_analytics_values_for_user(conn, chat_id):
+    """Fetch lifecycle generation and raw mode in one SQLite round-trip."""
+    row = conn.execute(
+        """SELECT
+               COALESCE((SELECT generation FROM user_lifecycle WHERE user_key=?), 0),
+               (SELECT mode FROM users WHERE chat_id=?)""",
+        (user_key(chat_id), chat_id),
+    ).fetchone()
+    return int(row[0] or 0), row[1]
+
+
 def _lifecycle_row(conn, key):
     return conn.execute(
         "SELECT generation,active FROM user_lifecycle WHERE user_key=?", (key,)

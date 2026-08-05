@@ -726,13 +726,13 @@ def _llm_analytics_context(cid, user_generation=None, assistant_variant=None):
     try:
         try:
             c = db()
-            generation = A2.lifecycle_generation(c, cid)
+            generation, raw_mode = A2.llm_analytics_values_for_user(c, cid)
         except Exception as exc:
             # Analytics enrichment must never suppress the provider call.
             log.warning("LLM analytics lifecycle unavailable: %s", exc)
             return fallback_generation, normalized_variant or "unknown"
         try:
-            variant = normalized_variant or A2.assistant_variant_for_user(c, cid)
+            variant = normalized_variant or A2.normalize_assistant_variant(raw_mode)
         except Exception as exc:
             # Preserve the lifecycle generation if only coarse segmentation failed.
             log.warning("LLM assistant segment unavailable: %s", exc)
@@ -8596,10 +8596,20 @@ async def handle_text(update, context, txt):
             return await update.message.reply_text("Не поняла вопрос. Напиши словами, например: «как её поддержать сегодня» или «что ей купить».")
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
+        generation = _user_generation(cid)
+        assistant_variant = _assistant_variant_from_user(u)
         if wu and wu.get("mode") == "preg" and wu.get("last_period"):
-            ans = await llm_to_thread(cid, "partner_answer", L.partner_preg_answer, C.preg_status(wu["last_period"]), txt, last_hint(wid), usage=usage)
+            ans = await llm_to_thread(
+                cid, "partner_answer", L.partner_preg_answer,
+                C.preg_status(wu["last_period"]), txt, last_hint(wid), usage=usage,
+                user_generation=generation, assistant_variant=assistant_variant,
+            )
         elif wst:
-            ans = await llm_to_thread(cid, "partner_answer", L.partner_answer, wst, txt, last_hint(wid), usage=usage)
+            ans = await llm_to_thread(
+                cid, "partner_answer", L.partner_answer, wst, txt, last_hint(wid),
+                usage=usage, user_generation=generation,
+                assistant_variant=assistant_variant,
+            )
         else:
             return await update.message.reply_text(partner_info_for(cid))
         ev(cid, "answered", tokens=sum(usage), meta="partner_q", ms=int((time.monotonic()-t0)*1000), n=len(txt), calls=len(usage), usage=usage)

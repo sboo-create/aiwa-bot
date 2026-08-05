@@ -878,6 +878,15 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(event["properties"]["assistant_variant"], "unknown")
         self.assertNotIn("private payload ignored", json.dumps(event["properties"]))
 
+    def test_failed_journal_mutation_is_not_a_successful_outcome(self):
+        bot.ev(459, "journal_mutation_failed", meta="food|verify_failed")
+
+        event = a2.traction_batch(bot.DB)[0]
+
+        self.assertEqual(event["name"], "tool_outcome_completed")
+        self.assertEqual(event["properties"]["status"], "error")
+        self.assertEqual(event["properties"]["outcome_type"], "journal_mutation")
+
     def test_journal_outcome_rejects_unlisted_domain_and_operation(self):
         bot.ev(
             458, "journal_mutation_verified",
@@ -1554,7 +1563,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
         cid = 125
         generation = bot._activate_user(cid)
         with mock.patch.object(
-            a2, "assistant_variant_for_user", side_effect=RuntimeError("segment failed")
+            a2, "normalize_assistant_variant", side_effect=RuntimeError("segment failed")
         ):
             actual_generation, variant = bot._llm_analytics_context(cid)
         self.assertEqual((actual_generation, variant), (generation, "unknown"))
