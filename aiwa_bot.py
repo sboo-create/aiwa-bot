@@ -913,10 +913,6 @@ def _write_event_batch(items):
     written = 0
     c = db()
     try:
-        # The lifecycle check and event inserts must be one write transaction.
-        # Otherwise /stop can delete a user between the check and the insert,
-        # allowing a queued telemetry item to reappear after deletion.
-        c.execute("BEGIN IMMEDIATE")
         try:
             variants = A2.assistant_variants_for_users(
                 c, (item[0] for item in items),
@@ -925,6 +921,10 @@ def _write_event_batch(items):
             # Coarse enrichment is never allowed to stall the event writer.
             log.warning("event assistant segment batch unavailable: %s", exc)
             variants = {}
+        # The lifecycle check and event inserts must be one write transaction.
+        # Otherwise /stop can delete a user between the check and the insert,
+        # allowing a queued telemetry item to reappear after deletion.
+        c.execute("BEGIN IMMEDIATE")
         for item in items:
             cid, action, meta, ms, calls, request_id, generation, occurred_at = item
             if not A2.write_allowed(
@@ -1128,12 +1128,12 @@ async def llm_to_thread(cid, purpose, func, *args, request_id=None, user_generat
                         assistant_variant=None, **kwargs):
     """Run a provider call with a shared trace id and pseudonymous user key."""
     request_id = request_id or ("r_" + secrets.token_hex(16))
-    generation, assistant_variant = _llm_analytics_context(
-        cid, user_generation, assistant_variant,
-    )
     def run():
+        generation, resolved_variant = _llm_analytics_context(
+            cid, user_generation, assistant_variant,
+        )
         with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose,
-                            user_generation=generation, assistant_variant=assistant_variant):
+                            user_generation=generation, assistant_variant=resolved_variant):
             return func(*args, **kwargs)
     return await asyncio.to_thread(run)
 

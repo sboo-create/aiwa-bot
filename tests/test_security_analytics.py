@@ -1576,6 +1576,36 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual((actual_generation, variant), (generation, "male"))
         open_db.assert_called_once()
 
+    def test_llm_context_lookup_runs_off_event_loop_thread(self):
+        cid = 127
+        bot._activate_user(cid)
+        main_thread = bot.threading.get_ident()
+        lookup_threads = []
+        real_db = bot.db
+
+        def tracked_db():
+            lookup_threads.append(bot.threading.get_ident())
+            return real_db()
+
+        with mock.patch.object(bot, "db", side_effect=tracked_db):
+            result = asyncio.run(
+                bot.llm_to_thread(cid, "test", lambda: "ok")
+            )
+        self.assertEqual(result, "ok")
+        self.assertTrue(lookup_threads)
+        self.assertTrue(all(thread_id != main_thread for thread_id in lookup_threads))
+
+    def test_assistant_variant_coarsens_every_product_mode(self):
+        expected = {
+            "cycle": "female", "preg": "female", "meno": "female",
+            "irregular": "female", "none": "female", "female": "female",
+            "male": "male", "legacy_custom": "unknown", "": "unknown",
+            None: "unknown",
+        }
+        for mode, variant in expected.items():
+            with self.subTest(mode=mode):
+                self.assertEqual(a2.normalize_assistant_variant(mode), variant)
+
     def test_llm_analytics_context_preserves_generation_if_segment_fails(self):
         cid = 125
         generation = bot._activate_user(cid)
