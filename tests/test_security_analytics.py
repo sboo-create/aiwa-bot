@@ -1548,7 +1548,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
 
     def test_assistant_analytics_lookup_cannot_block_an_ai_call(self):
         with mock.patch.object(bot, "db", side_effect=sqlite3.OperationalError("busy")):
-            self.assertEqual(bot._llm_analytics_context(123), (0, "unknown"))
+            self.assertEqual(bot._llm_analytics_context(123), (-1, "unknown"))
 
     def test_llm_analytics_context_reuses_one_connection(self):
         cid = 124

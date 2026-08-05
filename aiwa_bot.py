@@ -713,7 +713,9 @@ def _user_generation(cid):
 
 def _llm_analytics_context(cid, user_generation=None, assistant_variant=None):
     """Resolve lifecycle and segment without adding a connection to known contexts."""
-    fallback_generation = int(user_generation) if user_generation is not None else 0
+    # -1 is a deny-only analytics sentinel: unlike legitimate legacy generation
+    # 0 it cannot pass write_allowed if the lifecycle lookup itself failed.
+    fallback_generation = int(user_generation) if user_generation is not None else -1
     normalized_variant = (
         A2.normalize_assistant_variant(assistant_variant)
         if assistant_variant is not None else None
@@ -13808,7 +13810,7 @@ def _prepare_food_photo(cid):
     if not is_onboarded(u) or not _user_write_allowed(cid, generation):
         return None
     ev(cid, "flow_start", meta="food", user_generation=generation)
-    return generation, profile_of(u)
+    return generation, profile_of(u), _assistant_variant_from_user(u)
 
 
 def _food_photo_mutation_identity(raw, target=None, request_id=None):
@@ -13986,7 +13988,7 @@ async def _api_food_photo_bounded(request):
         return _cors(web.json_response(
             _api_error_payload("onboard", "Сначала настрой Айву в боте: /start."), status=403
         ))
-    generation, prof = prepared
+    generation, prof, assistant_variant = prepared
     raw, fn = _read_upload(data.get("photo"))
     if not raw:
         return _cors(web.json_response(
@@ -14068,10 +14070,7 @@ async def _api_food_photo_bounded(request):
             parsed = await llm_to_thread(
                 cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
                 user_generation=generation,
-                assistant_variant=(
-                    "male" if (prof or {}).get("male") else
-                    ("female" if prof is not None else "unknown")
-                ),
+                assistant_variant=assistant_variant,
             )
         except Exception as e:
             log.warning("food_photo analyze %s: %s", cid, e); parsed = None
