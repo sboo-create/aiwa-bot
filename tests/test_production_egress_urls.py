@@ -9,12 +9,13 @@ RELAY_PORTS = {"openrouter.ai": {14443, 24443}, "api.telegram.org": {8443, 18443
 
 def _env_from_example(path):
     out = {}
-    for line in open(path, encoding="utf-8"):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        out[k] = v
+    with open(path, encoding="utf-8") as source:
+        for line in source:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            out[k] = v
     return out
 
 
@@ -37,3 +38,7 @@ class ProductionEgressUrlsTest(unittest.TestCase):
             if expected and parts.port not in expected:
                 bad.append(f"{key}={value} (ожидался порт из {sorted(expected)})")
         self.assertEqual(bad, [], "URL мимо relay:\n" + "\n".join(bad))
+
+    def test_production_example_enables_polling_and_jobs(self):
+        env = _env_from_example("deploy/i167/aiwa-production.env.example")
+        self.assertNotIn("AIWA_CANDIDATE", env)

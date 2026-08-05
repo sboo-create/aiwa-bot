@@ -77,7 +77,7 @@ jobs:
           BODY=$(curl -fsS --max-time 15 https://app.aiwa-wellness.app/health)
           echo "$BODY" | head -c 300
           echo "$BODY" | grep -q "\"release_sha\": \"$SHA\"" \
-            || { echo "public endpoint does not serve $SHA"; exit 1; }
+            || { echo "public endpoint does not serve $SHA; local activation was already verified, so triage DNS/TLS/Caddy before rollback"; exit 1; }
 
       - name: Clean key
         if: always()
