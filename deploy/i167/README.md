@@ -12,8 +12,8 @@ service:
 - SQLite: `/srv/aiwa-staging/data/aiwa.db`;
 - configuration: `/srv/aiwa-staging/config/app.env`;
 - bot token: systemd credential in `/srv/aiwa-staging/secrets/bot-token`;
-- provider credentials: `/srv/aiwa-staging/secrets/providers.env`, copied
-  directly from Railway without printing values;
+- provider credentials: `/srv/aiwa-staging/secrets/providers.env`, installed
+  through the protected operator path without printing values;
 - HTTP bind: `127.0.0.1:9910`;
 - public HTTPS: Caddy;
 - Telegram: the existing host tunnel on `127.0.0.1:8443`, visible only through

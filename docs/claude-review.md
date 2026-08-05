@@ -1,8 +1,8 @@
 # Claude pull-request review
 
 AIWA runs Claude only on pull requests, after the existing `test` job succeeds. Merging
-to `main` remains a deliberate human action because Railway may deploy that merge
-immediately.
+to `main` remains a deliberate human action; production deploy to i167 is a separate
+manually confirmed workflow.
 
 ## Model policy
 
@@ -90,11 +90,11 @@ ruleset. The reviewer reports findings; a human still decides whether they block
 ## Delivery sequence
 
 1. Develop and test in a feature branch.
-2. Open a pull request; CI runs without touching Railway production.
+2. Open a pull request; CI runs without touching production.
 3. After tests pass, Claude reviews the same PR revision.
 4. Whenever a deeper pass is useful, add `claude-deep-review`; this manual review does
    not depend on the test status. Expect roughly three times the Opus token spend of a
    single-model review.
 5. Merge only after CI, review, and the relevant staging checks are complete.
-6. Treat the resulting Railway deployment as production and keep a rollback commit or
-   release available.
+6. Run the manually confirmed i167 deploy and keep the previous immutable release
+   available for rollback.

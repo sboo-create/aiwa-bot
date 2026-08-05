@@ -382,20 +382,12 @@ class PostReleaseSystemicTests(unittest.TestCase):
 
     def test_release_sha_is_exact_and_never_accepts_arbitrary_metadata(self):
         release = "a" * 40
-        railway = "b" * 40
         self.assertEqual(
             bot._detected_release_sha(
                 {"AIWA_RELEASE_SHA": release},
                 "/srv/aiwa/releases/not-a-sha/aiwa_bot.py",
             ),
             release,
-        )
-        self.assertEqual(
-            bot._detected_release_sha(
-                {"RAILWAY_GIT_COMMIT_SHA": railway},
-                "/app/aiwa_bot.py",
-            ),
-            railway,
         )
         self.assertEqual(
             bot._detected_release_sha(
@@ -694,7 +686,7 @@ class PostReleaseSystemicTests(unittest.TestCase):
         self.assertTrue(lock_file.exists())
         self.assertEqual(current.resolve(), partial.resolve())
 
-    def test_aiwa_upstream_serves_static_manifest_for_i167_proxy(self):
+    def test_i167_serves_static_manifest_and_catalog_asset(self):
         async def fetch_manifest():
             client = TestClient(TestServer(bot.build_web()))
             await client.start_server()

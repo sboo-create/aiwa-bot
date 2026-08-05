@@ -32,16 +32,15 @@ Worker получает только проверенное короткое н�
 Ответные URL провайдера намеренно не скачиваются: это закрывает SSRF-класс
 ошибок.
 
-Production-каталог должен быть на Railway Volume:
+Production-каталог хранится на постоянном диске i167:
 
 ```text
-AIWA_FOOD_ASSET_DIR=/data/food-assets
+AIWA_FOOD_ASSET_DIR=/srv/aiwa/data/food-assets
 AIWA_FOOD_ASSET_PUBLIC_BASE=/generated-food
 ```
 
 При переходе на object storage `AIWA_FOOD_ASSET_PUBLIC_BASE` должен указывать
 на immutable CDN URL, а storage adapter — публиковать тот же content hash.
-До появления такого adapter безопасный production-вариант — Railway Volume.
 
 ## Защита от пика в 1000 пользователей
 

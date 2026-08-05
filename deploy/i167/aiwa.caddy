@@ -1,7 +1,5 @@
-# AIWA production. До появления собственного домена работает на временном
-# candidate-имени; при подключении домена меняется только hostname этой
-# строки (и env AIWA_WEBAPP_URL/AIWA_ALLOWED_ORIGINS).
-aiwa-candidate-167.158-160-163-167.sslip.io {
+# AIWA production Mini App. Единственный публичный production hostname.
+app.aiwa-wellness.app {
 	encode zstd gzip
 
 	# Манифест «название -> файл» — изменяемые данные, и immutable ему не
