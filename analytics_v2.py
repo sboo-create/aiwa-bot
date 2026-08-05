@@ -453,9 +453,16 @@ def insert_event_v2(
             outcome_type = safe_id(parts[1] if len(parts) > 1 else "", 48)
         else:
             status = "success" if action == "journal_mutation_verified" else "error"
-            operation = safe_id(parts[0] if parts else "mutation", 32) or "mutation"
+            allowed_operations = {
+                "create", "move_slot", "append", "update", "food_update",
+                "workout", "workout_update", "mutation",
+            }
+            raw_operation = safe_id(parts[0] if parts else "mutation", 32)
+            operation = raw_operation if raw_operation in allowed_operations else "mutation"
             if action == "journal_mutation_verified":
-                domain = safe_id(parts[1] if len(parts) > 1 else "journal", 24) or "journal"
+                allowed_domains = {"food", "meal", "workout", "journal"}
+                raw_domain = safe_id(parts[1] if len(parts) > 1 else "journal", 24)
+                domain = raw_domain if raw_domain in allowed_domains else "journal"
                 outcome_type = safe_id("journal_" + domain + "_" + operation, 48)
             else:
                 # The second failure part is a status/reason, not a product domain.

@@ -711,18 +711,33 @@ def _user_generation(cid):
     finally:
         c.close()
 
-def _llm_analytics_context(cid, user_generation=None):
-    """Resolve lifecycle and coarse segment through one short-lived connection."""
+def _llm_analytics_context(cid, user_generation=None, assistant_variant=None):
+    """Resolve lifecycle and segment without adding a connection to known contexts."""
+    fallback_generation = int(user_generation) if user_generation is not None else 0
+    normalized_variant = (
+        A2.normalize_assistant_variant(assistant_variant)
+        if assistant_variant is not None else None
+    )
+    # Callers that already loaded lifecycle state must also pass any segment they
+    # already know. Missing segment stays unknown instead of adding a hot-path read.
+    if user_generation is not None:
+        return fallback_generation, normalized_variant or "unknown"
     c = None
     try:
-        c = db()
-        generation = (A2.lifecycle_generation(c, cid) if user_generation is None
-                      else int(user_generation))
-        return generation, A2.assistant_variant_for_user(c, cid)
-    except Exception as exc:
-        # Analytics enrichment must never suppress the provider call.
-        log.warning("LLM analytics context unavailable: %s", exc)
-        return (int(user_generation) if user_generation is not None else 0), "unknown"
+        try:
+            c = db()
+            generation = A2.lifecycle_generation(c, cid)
+        except Exception as exc:
+            # Analytics enrichment must never suppress the provider call.
+            log.warning("LLM analytics lifecycle unavailable: %s", exc)
+            return fallback_generation, normalized_variant or "unknown"
+        try:
+            variant = normalized_variant or A2.assistant_variant_for_user(c, cid)
+        except Exception as exc:
+            # Preserve the lifecycle generation if only coarse segmentation failed.
+            log.warning("LLM assistant segment unavailable: %s", exc)
+            variant = "unknown"
+        return generation, variant
     finally:
         if c is not None:
             c.close()
@@ -1100,10 +1115,13 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
         log.warning("events_v2 write failed: %s", exc)
         return False
 
-async def llm_to_thread(cid, purpose, func, *args, request_id=None, user_generation=None, **kwargs):
+async def llm_to_thread(cid, purpose, func, *args, request_id=None, user_generation=None,
+                        assistant_variant=None, **kwargs):
     """Run a provider call with a shared trace id and pseudonymous user key."""
     request_id = request_id or ("r_" + secrets.token_hex(16))
-    generation, assistant_variant = _llm_analytics_context(cid, user_generation)
+    generation, assistant_variant = _llm_analytics_context(
+        cid, user_generation, assistant_variant,
+    )
     def run():
         with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose,
                             user_generation=generation, assistant_variant=assistant_variant):
@@ -5123,12 +5141,14 @@ async def prepare_daily_summary(cid, target_day=None):
             cid, "daily_summary_prepare", L.general_summary,
             profile_of(u), u.get("mode"), hint=hint, usage=usage,
             user_generation=generation,
+            assistant_variant=_assistant_variant_from_user(u),
         )
     else:
         body = await llm_to_thread(
             cid, "daily_summary_prepare", L.generate_summary,
             st, u["modules"], hint=hint, usage=usage,
             user_generation=generation,
+            assistant_variant=_assistant_variant_from_user(u),
         )
     if not body or not _user_write_allowed(cid, generation=generation):
         return False
@@ -5139,6 +5159,7 @@ async def prepare_daily_summary(cid, target_day=None):
             cid, "summary_card_facts", L.summary_card_facts,
             mode, st, pregnancy, hint, usage,
             user_generation=generation,
+            assistant_variant=_assistant_variant_from_user(u),
         )
     if not _user_write_allowed(cid, generation=generation):
         return False
@@ -5881,12 +5902,14 @@ async def push_general(
                 cid, "daily_summary", L.general_summary,
                 profile_of(u), u.get("mode"), hint=hint, usage=usage,
                 user_generation=generation,
+                assistant_variant=_assistant_variant_from_user(u),
             )
             if u.get("mode") == "preg" and _user_write_allowed(cid, generation=generation):
                 facts = await llm_to_thread(
                     cid, "summary_card_facts", L.summary_card_facts,
                     "preg", None, pregnancy, hint, usage,
                     user_generation=generation,
+                    assistant_variant=_assistant_variant_from_user(u),
                 )
             if body and _user_write_allowed(cid, generation=generation):
                 value = _summary_pack(body, facts)
@@ -6347,12 +6370,14 @@ async def push_summary(context, cid, with_image=True, campaign=None):
                 cid, "daily_summary", L.generate_summary,
                 st, u["modules"], hint=hint, usage=usage,
                 user_generation=generation,
+                assistant_variant=_assistant_variant_from_user(u),
             )
             if _user_write_allowed(cid, generation=generation):
                 facts = await llm_to_thread(
                     cid, "summary_card_facts", L.summary_card_facts,
                     "cycle", st, None, hint, usage,
                     user_generation=generation,
+                    assistant_variant=_assistant_variant_from_user(u),
                 )
             if body and _user_write_allowed(cid, generation=generation):
                 value = _summary_pack(body, facts)
@@ -8460,6 +8485,7 @@ async def _on_photo_bounded(update, context):
         parsed = await llm_to_thread(
             cid, "food_vision", L.analyze_food, bytes(ba), "food.jpg",
             prof, usage, user_generation=generation,
+            assistant_variant=_assistant_variant_from_user(u),
         )
     except Exception as e:
         log.warning("on_photo analyze %s: %s", cid, e); parsed = None
@@ -10857,6 +10883,7 @@ async def _generate_section(cid, kind, u, st, key):
                 cid, "menu_generation", menu_cached, cid, st, prof, target,
                 (u.get("mode") if st is None else None), usage,
                 user_generation=generation,
+                assistant_variant=_assistant_variant_from_user(u),
             )
             if usage:
                 ev(cid, "tokens", sum(usage), meta="menu", calls=len(usage), usage=usage)
@@ -10899,6 +10926,7 @@ async def _generate_section(cid, kind, u, st, key):
                 st, prof, _recent_workouts_text(cid), u.get("mode"), usage,
                 pregnancy=pregnancy, checkin=log_get(cid, dtoday().isoformat()),
                 user_generation=generation,
+                assistant_variant=_assistant_variant_from_user(u),
             )
             if isinstance(plan, dict) and plan.pop("_fallback", None):
                 ev(cid, "fallback", meta="static:training_plan")
@@ -12245,6 +12273,7 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None, ch
     2) финальный ответ пишется прежним качественным промптом (answer_question/general_answer) с этими данными.
     Возвращает текст или None (тогда вызывающий откатывается к обычному ответу)."""
     male = is_male_profile(u)
+    assistant_variant = _assistant_variant_from_user(u)
     plan_sys = (
                 ("Ты — планировщик wellness-ассистента для мужчины. "
                  "Женская репродуктивная физиология и соответствующие инструменты запрещены. "
@@ -12277,7 +12306,8 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None, ch
 
     for _r in range(2):
         m = await llm_to_thread(cid, "tool_plan", L.call_tools, messages, tools, usage, 0.2, 480,
-                                request_id=request_id, user_generation=user_generation)
+                                request_id=request_id, user_generation=user_generation,
+                                assistant_variant=assistant_variant)
         if not m:
             return None if _r == 0 else await finish()
         tc = m.get("tool_calls")
@@ -12311,6 +12341,7 @@ async def _agent_answer(cid, u, msg, usage, request_id, user_generation=None, ch
 
 async def _agent_final(cid, u, msg, gathered, usage, request_id, user_generation=None):
     _, st = status_of(cid); prof = llm_profile_of(u)
+    assistant_variant = _assistant_variant_from_user(u)
     q = msg
     if gathered:
         if is_male_profile(u):
@@ -12320,16 +12351,19 @@ async def _agent_final(cid, u, msg, gathered, usage, request_id, user_generation
     q = _with_memory(cid, q)
     if st is not None:
         return await llm_to_thread(cid, "final_answer", L.answer_question, st, q, prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
-                                   request_id=request_id, user_generation=user_generation)
+                                   request_id=request_id, user_generation=user_generation,
+                                   assistant_variant=assistant_variant)
     return await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), q, chat_hint(cid), hist_get(cid, male=is_male_profile(u)), usage=usage,
-                               request_id=request_id, user_generation=user_generation)
+                               request_id=request_id, user_generation=user_generation,
+                               assistant_variant=assistant_variant)
 
-async def _memory_learn(cid, umsg, amsg, user_generation=None):
+async def _memory_learn(cid, umsg, amsg, user_generation=None, assistant_variant=None):
     """Фоновая выжимка устойчивых фактов из диалога в долгую память (не блокирует ответ)."""
     try:
         existing = mem_text(cid, 30); usage = []
         facts = await llm_to_thread(cid, "memory_extract", L.memory_extract, umsg, amsg, existing, usage,
-                                    user_generation=user_generation)
+                                    user_generation=user_generation,
+                                    assistant_variant=assistant_variant)
         if not _user_write_allowed(cid, user_generation):
             return
         for f in (facts or []):
@@ -12343,6 +12377,7 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
                       require_mutation_key=False, channel="bot"):
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    assistant_variant = _assistant_variant_from_user(u)
     intent = match_intent(msg)
     if intent == "current_date":
         answer = current_date_text()
@@ -12581,16 +12616,20 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
             fq = _with_memory(cid, fq)
             if st is not None:
                 ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, fq, prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
-                                          request_id=request_id, user_generation=generation)
+                                          request_id=request_id, user_generation=generation,
+                                          assistant_variant=assistant_variant)
             else:
                 ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), fq, chat_hint(cid), hist_get(cid, male=is_male_profile(u)), usage=usage,
-                                          request_id=request_id, user_generation=generation)
+                                          request_id=request_id, user_generation=generation,
+                                          assistant_variant=assistant_variant)
         elif st is not None:
             ans = await llm_to_thread(cid, "final_answer", L.answer_question, st, _with_memory(cid, msg), prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
-                                      request_id=request_id, user_generation=generation)
+                                      request_id=request_id, user_generation=generation,
+                                      assistant_variant=assistant_variant)
         else:
             ans = await llm_to_thread(cid, "final_answer", L.general_answer, prof, u.get("mode"), _with_memory(cid, msg), chat_hint(cid), hist_get(cid, male=is_male_profile(u)), usage=usage,
-                                      request_id=request_id, user_generation=generation)
+                                      request_id=request_id, user_generation=generation,
+                                      assistant_variant=assistant_variant)
     current = _user_write_allowed(cid, generation)
     clean, sugg = L.split_followups(ans)
     clean = guard_aiwa_reply(cid, clean)
@@ -12606,7 +12645,9 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
         ev(cid, "answered", tokens=sum(usage), meta="webapp", n=len(msg), calls=len(usage),
            request_id=request_id, usage=usage)
         try:
-            asyncio.create_task(_memory_learn(cid, msg, clean, generation))
+            asyncio.create_task(_memory_learn(
+                cid, msg, clean, generation, assistant_variant,
+            ))
         except Exception:
             pass
     return guard_chat_payload(
@@ -13155,6 +13196,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
             cid, "food_text", L.analyze_food_text, food, profile_of(u), usage,
             journal_v2_enabled(cid),
             user_generation=generation,
+            assistant_variant=_assistant_variant_from_user(u),
         )
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
@@ -13379,6 +13421,7 @@ async def append_meal_item_action(cid, u, meal_id, food_text, user_generation=No
             cid, "food_text", L.analyze_food_text, addition, profile_of(u), usage,
             journal_v2_enabled(cid),
             user_generation=generation,
+            assistant_variant=_assistant_variant_from_user(u),
         )
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
@@ -13478,6 +13521,7 @@ async def log_food_update_action(cid, u, text, target_id, user_generation=None,
             cid, "food_update", L.analyze_food_text, correction, profile_of(u), usage,
             journal_v2_enabled(cid),
             user_generation=generation,
+            assistant_variant=_assistant_variant_from_user(u),
         )
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
@@ -13545,6 +13589,7 @@ async def log_workout_action(cid, u, text, user_generation=None, mutation_key=No
             parsed = await llm_to_thread(
                 cid, "workout_text", L.analyze_workout_text, text, usage,
                 user_generation=generation,
+                assistant_variant=_assistant_variant_from_user(u),
             )
         except Exception as exc:
             log.warning("workout text analyze %s: %s", cid, exc)
@@ -13613,6 +13658,7 @@ async def log_workout_update_action(cid, u, text, target_id, user_generation=Non
             cid, "workout_update", L.analyze_workout_text,
             f"{current['type']} {current.get('note') or ''}. Уточнение: {text}", usage,
             user_generation=generation,
+            assistant_variant=_assistant_variant_from_user(u),
         )
     if not _user_write_allowed(cid, generation):
         return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
@@ -14012,6 +14058,10 @@ async def _api_food_photo_bounded(request):
             parsed = await llm_to_thread(
                 cid, "food_vision", L.analyze_food, raw, fn, prof, usage,
                 user_generation=generation,
+                assistant_variant=(
+                    "male" if (prof or {}).get("male") else
+                    ("female" if prof is not None else "unknown")
+                ),
             )
         except Exception as e:
             log.warning("food_photo analyze %s: %s", cid, e); parsed = None
@@ -14048,7 +14098,9 @@ async def _api_food_text(request):
         parsed = await llm_to_thread(
             cid, "food_text", L.analyze_food_text, txt, prof, usage,
             journal_v2,
-                                     user_generation=generation)
+            user_generation=generation,
+            assistant_variant=_assistant_variant_from_user(u),
+        )
     except Exception as e:
         log.warning("food_text analyze %s: %s", cid, e); parsed = None
     if not _user_write_allowed(cid, generation):

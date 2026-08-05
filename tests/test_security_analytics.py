@@ -878,6 +878,21 @@ class SecurityAnalyticsTests(unittest.TestCase):
         self.assertEqual(event["properties"]["assistant_variant"], "unknown")
         self.assertNotIn("private payload ignored", json.dumps(event["properties"]))
 
+    def test_journal_outcome_rejects_unlisted_domain_and_operation(self):
+        bot.ev(
+            458, "journal_mutation_verified",
+            meta="symptom-name|private-diagnosis",
+        )
+
+        event = a2.traction_batch(bot.DB)[0]
+
+        self.assertEqual(event["name"], "tool_outcome_completed")
+        self.assertEqual(
+            event["properties"]["outcome_type"], "journal_journal_mutation",
+        )
+        self.assertNotIn("symptom", json.dumps(event["properties"]))
+        self.assertNotIn("diagnosis", json.dumps(event["properties"]))
+
     def test_agent_records_real_tool_execution_and_assisted_outcome(self):
         plan = {
             "content": "",
@@ -1534,6 +1549,24 @@ class SecurityAnalyticsTests(unittest.TestCase):
             actual_generation, variant = bot._llm_analytics_context(cid)
         self.assertEqual((actual_generation, variant), (generation, "male"))
         open_db.assert_called_once()
+
+    def test_llm_analytics_context_preserves_generation_if_segment_fails(self):
+        cid = 125
+        generation = bot._activate_user(cid)
+        with mock.patch.object(
+            a2, "assistant_variant_for_user", side_effect=RuntimeError("segment failed")
+        ):
+            actual_generation, variant = bot._llm_analytics_context(cid)
+        self.assertEqual((actual_generation, variant), (generation, "unknown"))
+
+    def test_known_llm_context_does_not_open_db(self):
+        with mock.patch.object(bot, "db", side_effect=AssertionError("unexpected DB read")):
+            self.assertEqual(
+                bot._llm_analytics_context(126, 7, "male"), (7, "male")
+            )
+            self.assertEqual(
+                bot._llm_analytics_context(126, 7), (7, "unknown")
+            )
 
     def test_think_llm_uses_loaded_segment_without_opening_db(self):
         context = types.SimpleNamespace(
