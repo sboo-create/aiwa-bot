@@ -1524,7 +1524,7 @@ class SecurityAnalyticsTests(unittest.TestCase):
 
     def test_assistant_analytics_lookup_cannot_block_an_ai_call(self):
         with mock.patch.object(bot, "db", side_effect=sqlite3.OperationalError("busy")):
-            self.assertEqual(bot._assistant_variant(123), "unknown")
+            self.assertEqual(bot._llm_analytics_context(123), (0, "unknown"))
 
     def test_llm_analytics_context_reuses_one_connection(self):
         cid = 124
@@ -1534,6 +1534,25 @@ class SecurityAnalyticsTests(unittest.TestCase):
             actual_generation, variant = bot._llm_analytics_context(cid)
         self.assertEqual((actual_generation, variant), (generation, "male"))
         open_db.assert_called_once()
+
+    def test_think_llm_uses_loaded_segment_without_opening_db(self):
+        context = types.SimpleNamespace(
+            bot=types.SimpleNamespace(send_chat_action=mock.AsyncMock())
+        )
+        captured = {}
+
+        def fake_call():
+            captured.update(llm._CALL_CONTEXT.get())
+            return "ok"
+
+        with mock.patch.object(bot, "db", side_effect=AssertionError("unexpected DB read")):
+            result = asyncio.run(
+                bot.think_llm(
+                    context, 123, fake_call, _assistant_variant="male"
+                )
+            )
+        self.assertEqual(result, "ok")
+        self.assertEqual(captured["assistant_variant"], "male")
 
     def test_synthetic_load_users_are_excluded_only_from_background_audiences(self):
         regular_id = 501

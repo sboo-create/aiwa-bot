@@ -727,10 +727,6 @@ def _llm_analytics_context(cid, user_generation=None):
         if c is not None:
             c.close()
 
-def _assistant_variant(cid):
-    """Compatibility helper for call sites that need only the coarse segment."""
-    return _llm_analytics_context(cid, user_generation=0)[1]
-
 def _user_write_allowed(cid, generation=None, conn=None):
     own_connection = conn is None
     c = conn or db()
@@ -2297,6 +2293,10 @@ def llm_profile_of(u):
     if name:
         profile["first_name"] = name
     return profile or None
+
+def _assistant_variant_from_user(u):
+    """Resolve the privacy-safe segment from an already loaded user row."""
+    return A2.normalize_assistant_variant((u or {}).get("mode"))
 _UNVERIFIED_MUTATION_CLAIM_RE = re.compile(
     r"(?<!бы\s)\b(?:я\s+)?(?:записал[аи]?|сохранил[аи]?|внесл[аи]?|"
     r"скорректировал[аи]?)\b(?!\s+бы\b)|"
@@ -5180,6 +5180,8 @@ async def send_menu(context, cid, with_image=False):
 async def send_section(context, cid, st, key):
     """Нагрузка и питание: подробный текст с мед-обоснованием и переходом в приложение."""
     await context.bot.send_chat_action(cid, "typing"); ev(cid, "button")
+    u = row(cid)
+    assistant_variant = _assistant_variant_from_user(u)
     usage = []
     if key == "training":
         _recent = _recent_workouts_text(cid)
@@ -5187,12 +5189,14 @@ async def send_section(context, cid, st, key):
                + (_recent or "данных нет") + ". ОБЯЗАТЕЛЬНО учти их: если вчера была тяжёлая тренировка "
                "(например на ноги) — сегодня предложи другие группы мышц или восстановление, и скажи об этом прямо. "
                "Формат: короткий заголовок, почему именно так (гормоны и восстановление), 2-3 конкретных варианта с «как».")
-        text = await think_llm(context, cid, L.answer_question, st, _fq, llm_profile_of(row(cid)), None, usage=usage)
+        text = await think_llm(context, cid, L.answer_question, st, _fq, llm_profile_of(u), None,
+                               usage=usage, _assistant_variant=assistant_variant)
         if not text or "не вернула ответ" in text:
-            text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage)
+            text = await think_llm(context, cid, L.explain_section, st, "training", usage=usage,
+                                   _assistant_variant=assistant_variant)
         text += "\n\nВ приложении Айвы можно посмотреть нагрузку рядом с календарём, симптомами и фазой цикла. Открой приложение кнопкой ниже."
         return await send_answer(context, cid, text, st, "нагрузка сегодня", usage=usage,
-            app_user=row(cid), app_label="Открыть нагрузку")
+            app_user=u, app_label="Открыть нагрузку")
     if key == "food":
         res = await send_menu(context, cid, with_image=False)
         if res:
@@ -5928,7 +5932,9 @@ async def send_general(context, cid, key):
     qmap = {"food": "Что мне есть сегодня под мой возраст и самочувствие? Дай конкретные продукты или меню на день.",
             "training": "Какая физическая активность мне сейчас подходит и почему? Дай конкретные варианты."}
     usage = []; q = qmap.get(key, key)
-    ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), q, hint=chat_hint(cid), usage=usage)
+    ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), q,
+                          hint=chat_hint(cid), usage=usage,
+                          _assistant_variant=_assistant_variant_from_user(u))
     _, st = status_of(cid)
     if key == "food":
         ans += "\n\nВ приложении Айвы можно открыть питание и заменить блюдо кнопкой «Заменить»."
@@ -7163,7 +7169,11 @@ async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
     request_id = kwargs.pop("_request_id", None) or ("r_" + secrets.token_hex(16))
     purpose = kwargs.pop("_purpose", None) or getattr(fn, "__name__", "llm_call").lstrip("_")
-    _, assistant_variant = _llm_analytics_context(cid, user_generation=0)
+    # Interactive routes already loaded the user row to build the prompt. Pass
+    # that event-time segment in so analytics never adds a DB read to this hot path.
+    assistant_variant = A2.normalize_assistant_variant(
+        kwargs.pop("_assistant_variant", None)
+    )
     def run():
         with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose,
                             assistant_variant=assistant_variant):
@@ -8546,7 +8556,8 @@ async def handle_text(update, context, txt):
     if value_hint and is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
         _, _qst = status_of(cid)
-        a = await think_llm(context, cid, L.answer_question, _qst, txt, llm_profile_of(u), None)
+        a = await think_llm(context, cid, L.answer_question, _qst, txt, llm_profile_of(u), None,
+                            _assistant_variant=_assistant_variant_from_user(u))
         await reply_long(update.message, L.split_followups(a)[0])
         return await update.message.reply_text("А теперь вернёмся к настройке. " + value_hint)
 
@@ -8572,7 +8583,10 @@ async def handle_text(update, context, txt):
         d, reason = await understand_date(context, cid, txt)
         if not d:
             if is_question_like(txt):
-                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
+                _oq = []; a = await think_llm(
+                    context, cid, L.answer_question, None, txt, llm_profile_of(u), None,
+                    usage=_oq, _assistant_variant=_assistant_variant_from_user(u),
+                )
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши дату начала последних месячных, например 25.05.2026. Потом даты можно редактировать в приложении.")
             if reason == "unknown":
@@ -8595,7 +8609,10 @@ async def handle_text(update, context, txt):
             n = int(txt); assert 20 <= n <= 60
         except (ValueError, AssertionError):
             if is_question_like(txt):
-                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
+                _oq = []; a = await think_llm(
+                    context, cid, L.answer_question, None, txt, llm_profile_of(u), None,
+                    usage=_oq, _assistant_variant=_assistant_variant_from_user(u),
+                )
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: какая средняя длина цикла в днях? Обычно это 21-35 дней, но у многих бывает иначе.")
             return await update.message.reply_text("Нужно число от 20 до 60. Если не знаешь точно, напиши примерное значение, потом его можно поправить. Если цикл нерегулярный, можно начать заново через /start и выбрать «Нет регулярного цикла».")
@@ -8632,7 +8649,10 @@ async def handle_text(update, context, txt):
             assert 120 < cm < 220 and 30 < kg < 250 and 10 < age < 80
         except Exception:
             if is_question_like(txt):
-                _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
+                _oq = []; a = await think_llm(
+                    context, cid, L.answer_question, None, txt, llm_profile_of(u), None,
+                    usage=_oq, _assistant_variant=_assistant_variant_from_user(u),
+                )
                 ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
@@ -8779,7 +8799,11 @@ async def handle_text(update, context, txt):
         if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
         await context.bot.send_chat_action(cid, "typing")
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), txt, hint=chat_hint(cid), history=hist_get(cid, male=is_male_profile(u)), usage=usage)
+        ans = await think_llm(
+            context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), txt,
+            hint=chat_hint(cid), history=hist_get(cid, male=is_male_profile(u)),
+            usage=usage, _assistant_variant=_assistant_variant_from_user(u),
+        )
         ev(cid, "answered", meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
@@ -8790,14 +8814,21 @@ async def handle_text(update, context, txt):
         g = match_guide(txt)
         if g: await send_guide(context, cid, g)
         t0 = time.monotonic(); usage = []
-        ans = await think_llm(context, cid, L.answer_question, st, txt, llm_profile_of(u), hist_get(cid, male=is_male_profile(u)), usage=usage)
+        ans = await think_llm(
+            context, cid, L.answer_question, st, txt, llm_profile_of(u),
+            hist_get(cid, male=is_male_profile(u)), usage=usage,
+            _assistant_variant=_assistant_variant_from_user(u),
+        )
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
         return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt)
     if is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
-        _oq = []; a = await think_llm(context, cid, L.answer_question, None, txt, llm_profile_of(u), None, usage=_oq)
+        _oq = []; a = await think_llm(
+            context, cid, L.answer_question, None, txt, llm_profile_of(u), None,
+            usage=_oq, _assistant_variant=_assistant_variant_from_user(u),
+        )
         ev(cid, "tokens", sum(_oq), meta="onboard_q", calls=len(_oq), usage=_oq)
         await reply_long(update.message, L.split_followups(a)[0])
     await need_onboard(update.message)
@@ -9036,11 +9067,19 @@ async def on_cb(update, context):
         ev(cid, "user_message", meta="suggest", n=len(question))
         await context.bot.send_chat_action(cid, "typing")
         if general:
-            usage = []; ans = await think_llm(context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), question, hint=chat_hint(cid), history=hist_get(cid, male=is_male_profile(u)), usage=usage)
+            usage = []; ans = await think_llm(
+                context, cid, L.general_answer, llm_profile_of(u), u.get("mode"), question,
+                hint=chat_hint(cid), history=hist_get(cid, male=is_male_profile(u)),
+                usage=usage, _assistant_variant=_assistant_variant_from_user(u),
+            )
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, None, question, usage=usage, quote=question)
         else:
-            usage = []; ans = await think_llm(context, cid, L.answer_question, st, question, llm_profile_of(u), hist_get(cid, male=is_male_profile(u)), usage=usage)
+            usage = []; ans = await think_llm(
+                context, cid, L.answer_question, st, question, llm_profile_of(u),
+                hist_get(cid, male=is_male_profile(u)), usage=usage,
+                _assistant_variant=_assistant_variant_from_user(u),
+            )
             hist_push(cid, question, ans)
             await send_answer(context, cid, ans, st, question, usage=usage, quote=question)
 
