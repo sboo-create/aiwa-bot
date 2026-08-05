@@ -120,7 +120,7 @@ logging.getLogger("apscheduler").setLevel(logging.WARNING)
 log = logging.getLogger("aiwa")
 TZ = ZoneInfo(os.environ.get("AIWA_TZ", "Europe/Moscow"))
 def dtoday():
-    """«Сегодня» в часовом поясе пользовательниц (МСК), а не сервера: Railway живёт в UTC,
+    """«Сегодня» в часовом поясе пользовательниц (МСК), а не системном UTC,
     и серверная дата после полуночи по Москве ещё показывает вчера."""
     return datetime.now(TZ).date()
 
@@ -176,7 +176,7 @@ DISCLAIMER = "AIWA не ставит диагнозы; при тревожных
 AIWA_VERSION = os.environ.get(
     "AIWA_VERSION", "2026-07-29-v180-cx-day-diary"
 )
-print("AIWA_VERSION:", AIWA_VERSION)  # видно в Railway logs при старте
+print("AIWA_VERSION:", AIWA_VERSION)  # видно в service logs при старте
 
 def _detected_release_sha(environ=None, source_path=None):
     env = environ if environ is not None else os.environ
@@ -191,7 +191,6 @@ def _detected_release_sha(environ=None, source_path=None):
         path_release = os.path.basename(source_dir)
     candidates = (
         env.get("AIWA_RELEASE_SHA"),
-        env.get("RAILWAY_GIT_COMMIT_SHA"),
         path_release,
     )
     for candidate in candidates:
@@ -445,7 +444,7 @@ def _migrate_db_on_connection(c):
     c.execute("PRAGMA synchronous=NORMAL")
     # The Python lock below coordinates threads in this process. BEGIN IMMEDIATE
     # additionally serializes schema work against a concurrently starting
-    # process (for example an overlapping Railway replacement).
+    # replacement process.
     c.execute("BEGIN IMMEDIATE")
     c.execute("""CREATE TABLE IF NOT EXISTS users(chat_id INTEGER PRIMARY KEY, last_period TEXT, cycle_len INTEGER,
         send_time TEXT DEFAULT '08:00', daily_summary_enabled INTEGER DEFAULT 1,
@@ -8148,7 +8147,7 @@ async def refs_cmd(update, context):
 async def stats_cmd(update, context):
     cid = update.effective_chat.id
     if not AIWA_ADMIN:
-        return await update.message.reply_text(f"Статистика закрыта. Твой chat id: {cid}. Задай в Railway переменную AIWA_ADMIN={cid}, и команда станет доступна только тебе.")
+        return await update.message.reply_text(f"Статистика закрыта. Твой chat id: {cid}. Задай в production-конфигурации AIWA_ADMIN={cid}, и команда станет доступна только тебе.")
     if str(cid) != str(AIWA_ADMIN):
         return await update.message.reply_text("Эта команда доступна только администратору.")
     _txt = await asyncio.to_thread(aggregate_stats)
@@ -15781,7 +15780,7 @@ def build_web():
     _bd2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp2", "assets")
     if os.path.isdir(_bd2):
         # Keep this strict content-addressed route before the broad static
-        # mount: Railway/aiohttp then gets an explicit WebP MIME type, while
+        # mount: aiohttp then gets an explicit WebP MIME type, while
         # i167 Caddy serves the same immutable path directly.
         aio.router.add_get(
             "/assets/{kind}/catalog-v2/{filename}",
@@ -15892,13 +15891,13 @@ async def run_all():
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_text))
     runner = web.AppRunner(build_web()); await runner.setup()
     port = int(os.environ.get("PORT", "8080"))
-    # Railway needs the default public container bind; hardened i167 explicitly
-    # sets AIWA_BIND_HOST=127.0.0.1 and exposes it only through Caddy.
+    # Hardened i167 explicitly sets AIWA_BIND_HOST=127.0.0.1 and exposes the
+    # application only through Caddy; the fallback supports local containers.
     bind_host = os.environ.get("AIWA_BIND_HOST", "0.0.0.0")  # nosec B104
     http_backlog = max(
         128, min(4096, int(os.environ.get("AIWA_HTTP_BACKLOG", "1024")))
     )
-    # The Railway default remains all interfaces; self-hosted staging binds loopback.
+    # The generic container default remains all interfaces; i167 binds loopback.
     site = web.TCPSite(
         runner, bind_host, port, backlog=http_backlog
     ); await site.start()  # nosec B104

@@ -2,7 +2,6 @@
 venv/
 aiwa.db
 __pycache__/
-railway_variables.txt
 .DS_Store
 *.pyc
 archive/

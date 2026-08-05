@@ -130,7 +130,7 @@ def _analytics_secret():
     value = os.environ.get("AIWA_ANALYTICS_SALT")
     if value:
         return value.encode("utf-8")
-    # Stable compatibility fallback. Railway must receive a dedicated salt
+    # Stable compatibility fallback. Production must receive a dedicated salt
     # before production deploy; changing it later starts a new analytics cohort.
     value = os.environ.get("BOT_TOKEN", "local-development-only")
     if not _warned_salt:

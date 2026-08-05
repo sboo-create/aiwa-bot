@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read-only live-provider canary for the journal-v2 model contracts.
 
-It never imports aiwa_bot and never touches the application database. Railway
-variables are used only to call the same configured provider as the service.
+It never imports aiwa_bot and never touches the application database.
+Environment variables are used only to call the configured provider.
 """
 
 import json

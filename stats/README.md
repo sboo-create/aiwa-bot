@@ -1,6 +1,6 @@
 # AIWA module for Disrupt Analytics
 
-The module receives privacy-safe events from the Railway worker and serves the
+The module receives privacy-safe events from the AIWA production service and serves the
 canonical Disrupt Analytics contract at `/p/aiwa/`:
 
 - `GET /health`
@@ -130,7 +130,7 @@ STATS_DB=/srv/stats/aiwa/data/events.db
 STATS_INGEST_TOKEN=<write-only random token>
 ```
 
-The Railway service must receive the matching values:
+The AIWA production service must receive the matching values:
 
 ```text
 AIWA_TRACTION_URL=https://stats.multitool.works/p/aiwa/events
