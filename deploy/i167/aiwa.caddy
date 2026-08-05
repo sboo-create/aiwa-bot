@@ -1,7 +1,5 @@
-# AIWA production Mini App. app.aiwa-wellness.app — канонический адрес;
-# прежнее sslip.io-имя оставлено бесплатным аварийным alias на время
-# доменного cutover и не должно попадать в новые Telegram-кнопки.
-app.aiwa-wellness.app, aiwa-candidate-167.158-160-163-167.sslip.io {
+# AIWA production Mini App. Единственный публичный production hostname.
+app.aiwa-wellness.app {
 	encode zstd gzip
 
 	# Манифест «название -> файл» — изменяемые данные, и immutable ему не

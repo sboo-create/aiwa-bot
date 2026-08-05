@@ -28,13 +28,17 @@ Main Mini App URL в BotFather и ручной Telegram iOS/Android smoke под
 - `app.aiwa-wellness.app` — канонический Mini App и API;
 - `worker-production-505e.up.railway.app` — короткоживущий compatibility
   proxy только для уже отправленных Telegram inline-кнопок;
-- `aiwa-candidate-167.158-160-163-167.sslip.io` — аварийный прямой alias,
-  который не используется в новых сообщениях.
+- `aiwa-candidate-167.158-160-163-167.sslip.io` — исторический candidate alias;
+  в итоговой Caddy-конфигурации он удалён.
 
 Фронтенд использует root-relative `/api/*` и `/assets/*`, поэтому Mini App
 живёт на отдельном hostname, а не под `/app` на домене лендинга.
 
-## Cutover на собственный домен
+## Исторический cutover на собственный домен
+
+Ниже зафиксированы шаги, выполненные 2026-08-04. Это не актуальная инструкция
+для повторного применения: текущий `AIWA_ALLOWED_ORIGINS` содержит только
+`https://app.aiwa-wellness.app`.
 
 1. DNS `A app.aiwa-wellness.app -> 158.160.163.167`, TTL 300.
 2. Добавить hostname в `/etc/caddy/aiwa.caddy`, `caddy validate`, reload.
@@ -43,7 +47,7 @@ Main Mini App URL в BotFather и ручной Telegram iOS/Android smoke под
 
    ```text
    AIWA_WEBAPP_URL=https://app.aiwa-wellness.app
-   AIWA_ALLOWED_ORIGINS=https://app.aiwa-wellness.app,https://worker-production-505e.up.railway.app
+   AIWA_ALLOWED_ORIGINS=https://app.aiwa-wellness.app  # текущее значение
    ```
 
 5. Перезапустить `aiwa`; проверить exact `release_sha`, единственный poller и
@@ -93,5 +97,6 @@ Main Mini App URL в BotFather и ручной Telegram iOS/Android smoke под
 
 Railway больше не является rollback target. Откат выполняется переключением
 на предыдущий immutable release i167; SQLite остаётся актуальной, если нет
-подтверждённого повреждения данных. Для аварийного обхода DNS сохраняется
-прямой sslip.io alias i167.
+подтверждённого повреждения данных. При проблеме DNS оператор проверяет i167
+локально или через временный явно согласованный диагностический hostname, не
+возвращая старые aliases в production Caddy.
