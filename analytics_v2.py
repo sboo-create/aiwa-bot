@@ -168,6 +168,24 @@ def assistant_variant_for_user(conn, chat_id):
     return normalize_assistant_variant(row[0] if row else None)
 
 
+def assistant_variants_for_users(conn, chat_ids):
+    """Resolve one batch with a single query; missing/pre-mode users stay unknown."""
+    ids = list(dict.fromkeys(chat_id for chat_id in chat_ids if chat_id is not None))
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            "SELECT chat_id,mode FROM users WHERE chat_id IN (" + placeholders + ")",  # nosec B608
+            ids,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    variants = {chat_id: "unknown" for chat_id in ids}
+    variants.update({chat_id: normalize_assistant_variant(mode) for chat_id, mode in rows})
+    return variants
+
+
 def _lifecycle_row(conn, key):
     return conn.execute(
         "SELECT generation,active FROM user_lifecycle WHERE user_key=?", (key,)

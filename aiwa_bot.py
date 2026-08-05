@@ -711,19 +711,25 @@ def _user_generation(cid):
     finally:
         c.close()
 
-def _assistant_variant(cid):
-    """Return a coarse event-time segment without exposing the underlying mode."""
+def _llm_analytics_context(cid, user_generation=None):
+    """Resolve lifecycle and coarse segment through one short-lived connection."""
     c = None
     try:
         c = db()
-        return A2.assistant_variant_for_user(c, cid)
+        generation = (A2.lifecycle_generation(c, cid) if user_generation is None
+                      else int(user_generation))
+        return generation, A2.assistant_variant_for_user(c, cid)
     except Exception as exc:
         # Analytics enrichment must never suppress the provider call.
-        log.warning("assistant analytics variant unavailable: %s", exc)
-        return "unknown"
+        log.warning("LLM analytics context unavailable: %s", exc)
+        return (int(user_generation) if user_generation is not None else 0), "unknown"
     finally:
         if c is not None:
             c.close()
+
+def _assistant_variant(cid):
+    """Compatibility helper for call sites that need only the coarse segment."""
+    return _llm_analytics_context(cid, user_generation=0)[1]
 
 def _user_write_allowed(cid, generation=None, conn=None):
     own_connection = conn is None
@@ -898,6 +904,7 @@ def _write_event_batch(items):
         # Otherwise /stop can delete a user between the check and the insert,
         # allowing a queued telemetry item to reappear after deletion.
         c.execute("BEGIN IMMEDIATE")
+        variants = A2.assistant_variants_for_users(c, (item[0] for item in items))
         for item in items:
             cid, action, meta, ms, calls, request_id, generation, occurred_at = item
             if not A2.write_allowed(
@@ -908,6 +915,7 @@ def _write_event_batch(items):
                 c, cid, action, meta=meta, latency_ms=ms,
                 app_version=AIWA_VERSION, request_id=request_id, calls=calls,
                 occurred_at=occurred_at,
+                assistant_variant=variants.get(cid, "unknown"),
             )
             if event_id:
                 written += 1
@@ -1099,8 +1107,7 @@ def ev(cid, action, tokens=0, meta=None, ms=0, n=0, calls=0, request_id=None, us
 async def llm_to_thread(cid, purpose, func, *args, request_id=None, user_generation=None, **kwargs):
     """Run a provider call with a shared trace id and pseudonymous user key."""
     request_id = request_id or ("r_" + secrets.token_hex(16))
-    generation = _user_generation(cid) if user_generation is None else int(user_generation)
-    assistant_variant = _assistant_variant(cid)
+    generation, assistant_variant = _llm_analytics_context(cid, user_generation)
     def run():
         with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose,
                             user_generation=generation, assistant_variant=assistant_variant):
@@ -7156,7 +7163,7 @@ async def think_llm(context, cid, fn, *args, **kwargs):
     """Выполняет тяжёлый вызов модели в фоне и держит индикатор «печатает» живым."""
     request_id = kwargs.pop("_request_id", None) or ("r_" + secrets.token_hex(16))
     purpose = kwargs.pop("_purpose", None) or getattr(fn, "__name__", "llm_call").lstrip("_")
-    assistant_variant = _assistant_variant(cid)
+    _, assistant_variant = _llm_analytics_context(cid, user_generation=0)
     def run():
         with L.call_context(user_key=A2.user_key(cid), request_id=request_id, purpose=purpose,
                             assistant_variant=assistant_variant):

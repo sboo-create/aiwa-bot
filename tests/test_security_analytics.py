@@ -269,6 +269,19 @@ class SecurityAnalyticsTests(unittest.TestCase):
             bot._EVENT_WRITER_ACTIVE = original_active
             bot._EVENT_WRITER_STOP = original_stop
 
+    def test_event_batch_resolves_assistant_variants_once(self):
+        now = bot.datetime.now(bot.timezone.utc).isoformat()
+        items = [
+            (930, "user_message", "text", 0, 0, None, None, now),
+            (930, "assistant_message", "text", 0, 0, None, None, now),
+        ]
+        with mock.patch.object(
+            bot.A2, "assistant_variants_for_users",
+            wraps=bot.A2.assistant_variants_for_users,
+        ) as variants:
+            self.assertEqual(bot._write_event_batch(items), 2)
+        variants.assert_called_once()
+
     def test_event_writer_retries_failed_batch_without_dropping_it(self):
         original_queue = bot._EVENT_WRITE_Q
         original_thread = bot._EVENT_WRITER_THREAD
@@ -1512,6 +1525,15 @@ class SecurityAnalyticsTests(unittest.TestCase):
     def test_assistant_analytics_lookup_cannot_block_an_ai_call(self):
         with mock.patch.object(bot, "db", side_effect=sqlite3.OperationalError("busy")):
             self.assertEqual(bot._assistant_variant(123), "unknown")
+
+    def test_llm_analytics_context_reuses_one_connection(self):
+        cid = 124
+        generation = bot._activate_user(cid)
+        bot.upsert(cid, mode="male")
+        with mock.patch.object(bot, "db", wraps=bot.db) as open_db:
+            actual_generation, variant = bot._llm_analytics_context(cid)
+        self.assertEqual((actual_generation, variant), (generation, "male"))
+        open_db.assert_called_once()
 
     def test_synthetic_load_users_are_excluded_only_from_background_audiences(self):
         regular_id = 501
