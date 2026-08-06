@@ -2449,6 +2449,30 @@ def _male_reply_fallback(original=None, escalation_required=None):
         )
     return text
 
+def ensure_red_flag_escalation(question, answer):
+    """Deterministic safety net for rerouted situational food questions.
+
+    When the question itself carries red-flag vocabulary (the same set the
+    male-profile fallback uses) and the model's reply dropped every doctor
+    referral, append the standard escalation line so the safety information
+    cannot be lost to model variance.
+    """
+    text = str(answer or "")
+    if not _MEDICAL_ESCALATION_RE.search(str(question or "")):
+        return answer
+    if re.search(
+        r"\b(?:врач\w*|гинеколог\w*|доктор\w*|скор\w+\s+помощ\w*|"
+        r"неотложн\w*|больниц\w*|103|112)\b",
+        text, re.I,
+    ):
+        return answer
+    return (
+        text
+        + "\n\nЕсли есть сильная или нарастающая боль, обильное кровотечение, "
+        "высокая температура или резкое ухудшение состояния — обратись к "
+        "врачу, при экстренных симптомах — за неотложной помощью."
+    )
+
 def _male_safe_history(items, text_key="text"):
     """Preserve ordering/user turns; rewrite unsafe assistant text consistently."""
     out = []
@@ -2690,6 +2714,29 @@ _TRAINING_SECTION_INTENT_RE = re.compile(
     re.I,
 )
 
+# Situational qualifiers inside a food-topic message. "Что есть при боли /
+# после анализов / чтобы уменьшить спазмы" is a question about a specific
+# situation: routing it to the pre-built daily menu card would silently drop
+# the actual question (and any red-flag symptom mentioned in it), so such
+# messages must reach the conversational answer path instead. The first group
+# catches the grammatical shape of a condition or purpose clause, so new
+# situations need no new keywords; the word cluster below is a safety net for
+# marker-less phrasings ("болит живот, что поесть").
+_FOOD_QUESTION_CONTEXT_RE = re.compile(
+    r"\b(?:при|после|перед|до|чтобы|если|когда|от|против|вместо|без|из|из-за)\b"
+    r"|\bво\s+время\b|\bна\s+фоне\b|\bна\s+ночь\b|\bнатощак\b"
+    # "для меня/себя" is personalization and "для завтрака/ужина" is a meal
+    # slot: both are ordinary menu requests, not situational conditions.
+    r"|\bдля\b(?!\s+(?:меня|себя|нас|завтрак\w*|обед\w*|ужин\w*|перекус\w*|полдник\w*)\b)"
+    r"|\b(?:бол(?:ью?|и|ит|ят|ел[аи]?)\b|болезнен\w*|больно\b|тошн\w*|спазм\w*|"
+    r"судорог\w*|мигрен\w*|кровотеч\w*|кровит\b|анализ\w*|температур\w*|"
+    r"отравлен\w*|диаре\w*|понос\w*|запор\w*|изжог\w*|вздути\w*|аллерг\w*|"
+    r"анеми\w*|гемоглобин\w*|желез\w*|диабет\w*|гастрит\w*|язв\w*|беремен\w*|"
+    r"простуд\w*|заболе\w*|болею\b|похмель\w*|похуде\w*|тренировк\w*|"
+    r"месячн\w*|менструац\w*|пмс\b)",
+    re.I,
+)
+
 def match_intent(t):
     raw_t = str(t or "")
     t = t.lower()
@@ -2845,7 +2892,15 @@ def match_intent(t):
     if _TRAINING_SECTION_INTENT_RE.search(t):
         return "training"
     if re.search(r"(мой\s+дневник|дневник\s+питани|что\s+(?:мне\s+)?добрать|добрать\s+.{0,12}(белк|калор|бжу)|сколько\s+.{0,12}(съел|калор|ккал)\s*.{0,10}сегодн|мой\s+калораж|хватает\s+ли\s+.{0,12}(белк|калор)|итог\w*\s*.{0,10}(дн|калор|по\s+еде|бжу)|сколько\s+осталось\s+.{0,12}(калор|ккал|съесть))", t): return "diary"
-    if re.search(r"(что\s+(?:мне\s+|тебе\s+|лучше\s+|полезн\w*\s+|стоит\s+|сейчас\s+|сегодня\s+|можно\s+|бы\s+|такого\s+|нужно\s+)*(?:есть|поесть|съесть|покушать|скушать|кушать|приготовить|готовить)\b(?!\s*(?:ли\b|у\s+мен|в\s+профил|в\s+приложени|в\s+холодильник|дома|интересн|врем|деньг|дела|презентац|отчёт|доклад))|полезн\w*\s+(?:есть|поесть|кушать|съесть)|(?:поесть|покушать|съесть|скушать|кушать)\s+полезн|что\s+(?:есть|поесть)\s+(?:полезн|при\b|для\s|чтобы|на\s+(?:завтрак|обед|ужин|перекус))|какое\s+питани|какая\s+(?:сегодня\s+)?еда|какие\s+(?:мне\s+)?продукт|какие\s+продукты\s+полезн|меню\s+(?:на\s+)?(?:сегодня|день|завтра)|составь\s+меню|подбери\s+меню|обнови\s+меню|дай\s+меню|покажи\s+меню|пересобер\w*\s+меню|чем\s+(?:мне\s+)?(?:сегодня\s+)?питат|как\s+(?:мне\s+)?(?:лучше\s+)?питат|что\s+по\s+(?:еде|питани)|(?:посоветуй|подскажи|дай|хочу|можешь|порекоменду)\w*\s+.{0,24}(?:поесть|съесть|еду|питани|меню|рацион|продукт|блюд)|\bрацион\b|еда\s+на\s+сегодня|что\s+поедим|проголодал|что\s+на\s+(?:завтрак|обед|ужин|перекус))", t): return "food"
+    if re.search(r"(что\s+(?:мне\s+|тебе\s+|лучше\s+|полезн\w*\s+|стоит\s+|сейчас\s+|сегодня\s+|можно\s+|бы\s+|такого\s+|нужно\s+)*(?:есть|поесть|съесть|покушать|скушать|кушать|приготовить|готовить)\b(?!\s*(?:ли\b|у\s+мен|в\s+профил|в\s+приложени|в\s+холодильник|дома|интересн|врем|деньг|дела|презентац|отчёт|доклад))|полезн\w*\s+(?:есть|поесть|кушать|съесть)|(?:поесть|покушать|съесть|скушать|кушать)\s+полезн|что\s+(?:есть|поесть)\s+(?:полезн|при\b|для\s|чтобы|на\s+(?:завтрак|обед|ужин|перекус))|какое\s+питани|какая\s+(?:сегодня\s+)?еда|какие\s+(?:мне\s+)?продукт|какие\s+продукты\s+полезн|меню\s+(?:на\s+)?(?:сегодня|день|завтра)|составь\s+меню|подбери\s+меню|обнови\s+меню|дай\s+меню|покажи\s+меню|пересобер\w*\s+меню|чем\s+(?:мне\s+)?(?:сегодня\s+)?питат|как\s+(?:мне\s+)?(?:лучше\s+)?питат|что\s+по\s+(?:еде|питани)|(?:посоветуй|подскажи|дай|хочу|можешь|порекоменду)\w*\s+.{0,24}(?:поесть|съесть|еду|питани|меню|рацион|продукт|блюд)|\bрацион\b|еда\s+на\s+сегодня|что\s+поедим|проголодал|что\s+на\s+(?:завтрак|обед|ужин|перекус))", t):
+        # Same split as the training section above: a plain menu request opens
+        # the generated daily menu, while a situational question ("что есть
+        # после анализов / чтобы снизить боль") must be answered in
+        # conversation. Callers resolve "food_question" through their regular
+        # free-form answer path; dispatch_intent never receives it.
+        if _FOOD_QUESTION_CONTEXT_RE.search(t):
+            return "food_question"
+        return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
     if re.search(r"(проанализир|сделай анализ|^\s*анализ|разбер|оцени мой цикл|что (говор|показыв)\w*.*(данн|цикл|выписк)|анализ (выписк|цикл|данн))", t): return "analysis"
     if re.search(r"(выписк|выпуск|для врача|истори[яю]|отчёт|отчет|справк)", t): return "history"
@@ -5842,11 +5897,15 @@ def _submit_feedback(cid, answer_id, rating, channel="bot"):
     ev(cid, "feedback", meta=f"{rating}|{answer_id}|{saved_channel}")
     return "saved"
 
-async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None):
+async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None, red_flag_guard_q=None):
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
     clean, sugg = sf(text) if sf else (text, [])
     clean = guard_aiwa_reply(cid, clean)
+    if red_flag_guard_q:
+        # Applied after followup extraction so the appended line stays in the
+        # visible reply instead of leaking into suggestion parsing.
+        clean = ensure_red_flag_escalation(red_flag_guard_q, clean)
     try:
         topical = L.followups(st, basis_q, clean)
         # For known product topics deterministic relevance wins over a model
@@ -8893,6 +8952,7 @@ async def handle_text(update, context, txt):
         ev(cid, "fallback", meta="gibberish", n=len(txt))
         return await update.message.reply_text("Не поняла запрос. Напиши вопрос словами, например: «почему тянет на сладкое» или «какая тренировка сегодня».")
 
+    _situational_food_q = False
     if is_onboarded(u):
         _turn_generation = _user_generation(cid)
         _intent = match_intent(txt)
@@ -8934,6 +8994,15 @@ async def handle_text(update, context, txt):
                 )
             if _journal:
                 _intent = _journal["intent"]
+        if _intent == "food_question":
+            # A situational nutrition question ("что есть после анализов")
+            # needs an answer to the actual wording. dispatch_intent would
+            # render the generated menu card and drop the question, so fall
+            # through to the free-form answer paths below instead.
+            ev(cid, "fallback", meta="food_question_qa",
+               user_generation=_turn_generation)
+            _intent = None
+            _situational_food_q = True
         if _intent:
             return await dispatch_intent(
                 context, update, cid, u, _intent, txt, journal=_journal,
@@ -8952,7 +9021,8 @@ async def handle_text(update, context, txt):
         ev(cid, "answered", meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
-        return await send_answer(context, cid, ans, None, txt, usage=usage, quote=txt)
+        return await send_answer(context, cid, ans, None, txt, usage=usage, quote=txt,
+                                 red_flag_guard_q=(txt if _situational_food_q else None))
     if is_onboarded(u):
         if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
         _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing")
@@ -8967,7 +9037,8 @@ async def handle_text(update, context, txt):
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
-        return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt)
+        return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt,
+                                 red_flag_guard_q=(txt if _situational_food_q else None))
     if is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
         _oq = []; a = await think_llm(
@@ -13517,6 +13588,10 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
     current = _user_write_allowed(cid, generation)
     clean, sugg = L.split_followups(ans)
     clean = guard_aiwa_reply(cid, clean)
+    if intent == "food_question":
+        # Same deterministic net as the telegram path: a red-flag food
+        # question must never lose the doctor referral to model variance.
+        clean = ensure_red_flag_escalation(msg, clean)
     if current:
         hist_push(cid, msg, clean)
     try:
