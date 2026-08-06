@@ -248,6 +248,41 @@ class JournalJobTests(unittest.TestCase):
         self.assertNotEqual((plan or {}).get("route"), "structured")
         self.assertNotEqual((plan or {}).get("intent"), "logmeal")
 
+    def test_multiple_food_events_never_use_structured_lane(self):
+        text = "Вчера поела омлет, потом перекусила яблоком"
+        with mock.patch.object(
+            bot.L, "classify_journal_event", return_value={"action": "none"},
+        ) as classifier:
+            plan = asyncio.run(bot.resolve_semantic_journal_action(
+                self.cid, text, route_timeout_s=None,
+            ))
+        classifier.assert_called_once()
+        self.assertNotEqual((plan or {}).get("route"), "structured")
+        self.assertNotEqual((plan or {}).get("intent"), "logmeal")
+
+    def test_database_busy_becomes_retryable_rejection(self):
+        with (
+            mock.patch.object(
+                bot, "_enqueue_journal_job",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ),
+            mock.patch.object(bot, "ev"),
+        ):
+            result = asyncio.run(bot._submit_journal_mutation(
+                self.cid, "Съела яблоко",
+                bot.chat_mutation_key("webchat", "busy"),
+                channel="webapp", request_id="busy",
+            ))
+
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], "database_busy")
+        self.assertEqual(result["retry_after"], 2)
+        payload = bot._journal_rejection_payload(
+            result["reason"], result["retry_after"],
+        )
+        self.assertEqual(payload["retry_after"], 2)
+        self.assertIn("Ничего не добавила", payload["answer"])
+
     def test_receipt_token_is_opaque_scoped_and_opens_exact_record(self):
         mutation = {"kind": "food", "record_id": 91, "date": "2026-08-05"}
         receipt = bot._create_receipt_link(self.cid, mutation)

@@ -4028,8 +4028,9 @@ async def resolve_semantic_journal_action(
         and not is_question_like(raw)
         and "\n" not in raw and "\r" not in raw
     )
+    food_events = list(_JOURNAL_FOOD_COMPLETED_RE.finditer(raw))
     food_done = bool(
-        _JOURNAL_FOOD_COMPLETED_RE.search(raw)
+        len(food_events) == 1
         and not _JOURNAL_FOOD_NEGATED_RE.search(raw)
     )
     workout_done = bool(
@@ -8894,6 +8895,11 @@ async def handle_text(update, context, txt):
                 return await update.message.reply_text(
                     "Разбираю и сохраняю запись. Можно продолжать пользоваться Айвой — пришлю подтверждение, когда запись появится."
                 )
+            if _submitted["status"] == "rejected":
+                _rejection = _journal_rejection_payload(
+                    _submitted.get("reason"), _submitted.get("retry_after")
+                )
+                return await update.message.reply_text(_rejection["answer"])
             _result = _submitted.get("result") or {}
             return await update.message.reply_text(
                 _result.get("answer") or "Не получилось надёжно обработать запись. Попробуй ещё раз позже."
@@ -12710,16 +12716,28 @@ def _ensure_journal_workers_running():
 async def _submit_journal_mutation(cid, msg, mutation_key, *, channel,
                                    request_id=None, notify=False,
                                    known_intent=None, food_prompt_mode=False):
-    job = await asyncio.to_thread(
-        _enqueue_journal_job, cid, msg, mutation_key, channel=channel,
-        known_intent=known_intent, notify=False, request_id=request_id,
-        food_prompt_mode=food_prompt_mode,
-    )
+    try:
+        job = await asyncio.to_thread(
+            _enqueue_journal_job, cid, msg, mutation_key, channel=channel,
+            known_intent=known_intent, notify=False, request_id=request_id,
+            food_prompt_mode=food_prompt_mode,
+        )
+    except sqlite3.OperationalError as exc:
+        # db() already gives SQLite a 30-second busy timeout. If contention
+        # still survives it, fail explicitly instead of leaking a handler 500
+        # or extending the request with another long retry loop.
+        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+            raise
+        ev(cid, "ai_job", meta="rejected|journal_mutation|database_busy",
+           request_id=request_id, user_generation=-1)
+        return {"status": "rejected", "reason": "database_busy", "retry_after": 2}
     status = job.get("status")
     ev(cid, "ai_job", meta=f"{'deduped' if job.get('deduped') else 'accepted'}|journal_mutation",
        request_id=request_id, user_generation=job.get("generation"))
     if status == "rejected":
-        return {"status": "rejected", "reason": job.get("reason")}
+        reason = job.get("reason")
+        retry_after = 5 if reason in {"queue_full", "chat_queue_full"} else None
+        return {"status": "rejected", "reason": reason, "retry_after": retry_after}
     _ensure_journal_workers_running()
     if status == "completed" and job.get("result"):
         return {"status": "completed", "job_id": job["job_id"],
@@ -12748,6 +12766,28 @@ async def _submit_journal_mutation(cid, msg, mutation_key, *, channel,
     ev(cid, "ai_job", meta="pending|journal_mutation",
        request_id=request_id, user_generation=job.get("generation"))
     return {"status": "pending", "job_id": job["job_id"]}
+
+def _journal_rejection_payload(reason, retry_after=None):
+    retry_after = int(retry_after or 0)
+    if reason == "missing_request_id":
+        answer = (
+            "Не стала менять дневник без надёжного идентификатора запроса. "
+            "Обнови приложение и попробуй ещё раз."
+        )
+    elif reason == "chat_queue_full":
+        answer = (
+            "Уже разбираю несколько твоих записей. Ничего не потеряно — "
+            "подожди несколько секунд и отправь эту запись ещё раз."
+        )
+    else:
+        answer = (
+            "Сервис записей сейчас занят. Ничего не добавила и не задублировала; "
+            "попробуй ещё раз через несколько секунд."
+        )
+    payload = {"answer": answer, "suggestions": ["Открыть питание"]}
+    if retry_after:
+        payload["retry_after"] = retry_after
+    return payload
 
 async def _api_chat(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -12788,10 +12828,9 @@ async def _api_chat(request):
                 "job": {"id": submitted["job_id"], "status": "pending"},
             }
         else:
-            reply = {
-                "answer": "Не стала менять дневник без надёжного идентификатора запроса. Обнови приложение и попробуй ещё раз.",
-                "suggestions": ["Открыть питание"],
-            }
+            reply = _journal_rejection_payload(
+                submitted.get("reason"), submitted.get("retry_after")
+            )
     else:
         reply = await _chat_reply(
             cid, u, msg, user_generation=generation,
@@ -13374,10 +13413,9 @@ async def _api_voice(request):
                 "job": {"id": submitted["job_id"], "status": "pending"},
             }
         else:
-            reply = (submitted.get("result") or {
-                "answer": "Не получилось надёжно обработать запись. Попробуй ещё раз позже.",
-                "suggestions": ["Открыть питание"],
-            })
+            reply = submitted.get("result") or _journal_rejection_payload(
+                submitted.get("reason"), submitted.get("retry_after")
+            )
     else:
         reply = await _chat_reply(
             cid, u, msg, user_generation=generation,
