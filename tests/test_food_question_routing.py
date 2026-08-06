@@ -11,6 +11,7 @@ os.environ.setdefault("BOT_TOKEN", "123456:test-token")
 os.environ.setdefault("AIWA_ANALYTICS_SALT", "test-analytics-salt")
 
 import aiwa_bot as bot
+import llm
 
 
 SITUATIONAL_QUESTIONS = [
@@ -91,6 +92,22 @@ class FoodQuestionIntentTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(bot.match_intent(text), expected)
         self.assertIsNone(bot.match_intent("Полезно ли кардио"))
+
+    def test_red_flag_food_questions_reach_the_escalation_capable_path(self):
+        # The menu card never sees the message text, so it cannot escalate a
+        # red-flag symptom. The conversational prompts can: both answer paths
+        # are built on llm.SYSTEM, which instructs the model to refer alarming
+        # symptoms to a doctor. Pin the routing and that prompt guarantee.
+        for text in (
+            "сильное кровотечение, что можно есть?",
+            "очень болит живот, что поесть?",
+            "что есть при обильных месячных",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(bot.match_intent(text), "food_question")
+        self.assertIn("тревожных симптомах", llm.SYSTEM)
+        self.assertIn("обильное кровотечение", llm.SYSTEM)
+        self.assertIn("гинеколог", llm.SYSTEM)
 
     def test_food_question_is_not_a_journal_mutation_intent(self):
         # The journal queue must treat the new intent exactly like "food":
@@ -220,6 +237,34 @@ class FoodQuestionHandlerTests(unittest.TestCase):
         self.assertEqual(think.await_count, 1)
         # general_answer path: the question is the sixth positional argument.
         self.assertEqual(think.await_args.args[5], text)
+
+    def test_journal_resolution_wins_over_food_question_clearing(self):
+        # A mixed message can classify as food_question by regex while the
+        # semantic router recognises a diary write in it. The journal intent
+        # must survive the food_question fallthrough and reach dispatch.
+        text = "съела суп, и что есть при тошноте?"
+        self.assertEqual(bot.match_intent(text), "food_question")
+        update, context = self._telegram_env(95004)
+        journal = {"intent": "logmeal", "food_text": "суп"}
+        with (
+            mock.patch.object(
+                bot, "resolve_semantic_journal_action",
+                new=mock.AsyncMock(return_value=journal),
+            ),
+            mock.patch.object(
+                bot, "dispatch_intent", new=mock.AsyncMock()
+            ) as dispatch,
+            mock.patch.object(
+                bot, "think_llm",
+                new=mock.AsyncMock(
+                    side_effect=AssertionError("journal intent lost to QA path")
+                ),
+            ),
+        ):
+            asyncio.run(bot.handle_text(update, context, text))
+        self.assertEqual(dispatch.await_count, 1)
+        self.assertEqual(dispatch.await_args.args[4], "logmeal")
+        self.assertIs(dispatch.await_args.kwargs.get("journal"), journal)
 
     def test_webapp_chat_answers_the_original_wording(self):
         text = "Что есть чтобы снизить боль?"
