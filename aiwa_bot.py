@@ -12520,7 +12520,17 @@ async def _send_journal_job_notification(job_id, chat_id, text, reply_markup=Non
 async def _journal_job_worker(worker_no):
     """Dedicated write lane: routing latency never turns into a lost mutation."""
     while True:
-        job = await asyncio.to_thread(_claim_ai_job, "journal_mutation")
+        try:
+            job = await asyncio.to_thread(_claim_ai_job, "journal_mutation")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning(
+                "journal job claim failed: worker=%s error=%s",
+                worker_no, type(exc).__name__,
+            )
+            await asyncio.sleep(0.5)
+            continue
         if not job:
             try:
                 await asyncio.wait_for(_AI_JOB_WAKE.wait(), timeout=1)

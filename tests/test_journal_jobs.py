@@ -186,6 +186,54 @@ class JournalJobTests(unittest.TestCase):
             len(bot.meals_of(self.cid, (bot.dtoday() - timedelta(days=1)).isoformat())), 1,
         )
 
+    def test_worker_survives_transient_job_claim_failure(self):
+        parsed = {
+            "title": "Творог", "grams": 200, "kcal": 240,
+            "protein": 32, "fat": 10, "carbs": 6,
+        }
+        original_claim = bot._claim_ai_job
+        claim_calls = 0
+
+        def flaky_claim(kind):
+            nonlocal claim_calls
+            claim_calls += 1
+            if claim_calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return original_claim(kind)
+
+        async def scenario():
+            old_wake = bot._AI_JOB_WAKE
+            bot._AI_JOB_WAKE = asyncio.Event()
+            try:
+                queued = bot._enqueue_journal_job(
+                    self.cid, "Вчера съела творог",
+                    bot.chat_mutation_key("webchat", "claim-retry"),
+                    request_id="claim-retry",
+                )
+                worker = asyncio.create_task(bot._journal_job_worker(0))
+                for _ in range(150):
+                    status = bot._journal_job_status(self.cid, queued["job_id"])
+                    if status and status["status"] == "completed":
+                        break
+                    self.assertFalse(worker.done())
+                    await asyncio.sleep(0.02)
+                else:
+                    self.fail("worker did not recover from claim failure")
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+                return status
+            finally:
+                bot._AI_JOB_WAKE = old_wake
+
+        with (
+            mock.patch.object(bot, "_claim_ai_job", side_effect=flaky_claim),
+            mock.patch.object(bot.L, "analyze_food_text", return_value=parsed),
+        ):
+            status = asyncio.run(scenario())
+
+        self.assertGreaterEqual(claim_calls, 2)
+        self.assertEqual(status["status"], "completed")
+
     def test_semantic_worker_uses_a_bounded_long_route_timeout(self):
         seen = []
 
