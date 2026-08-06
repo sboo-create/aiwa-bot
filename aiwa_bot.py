@@ -2907,6 +2907,14 @@ _JOURNAL_WORKOUT_COMPLETED_RE = re.compile(
     r"\b(?:сделал\w*|провел\w*|закончил\w*)\b",
     re.I,
 )
+_JOURNAL_WORKOUT_MENTION_RE = re.compile(
+    r"\b(?:тренир\w*|потренир\w*|заним\w*|спорт\w*|зал\w*|упражнен\w*|"
+    r"бег\w*|пробеж\w*|ходьб\w*|гуля\w*|плав\w*|бассейн\w*|йог\w*|"
+    r"пилатес\w*|кардио\w*|силов\w*|растяж\w*|разм\w*|зарядк\w*|"
+    r"велосипед\w*|присед\w*|выпад\w*|планк\w*|отжим\w*|подтяг\w*|"
+    r"жим\w*|тяг\w*)\b",
+    re.I,
+)
 #: Прошедшее время: форма «быть» или глагол на -ла/-лась/-ли/-лся.
 #: Это грамматика, а не список слов: «была», «сделала», «размялась»,
 #: «поприседала» проходят одинаково, и дописывать сюда ничего не надо.
@@ -4018,6 +4026,7 @@ async def resolve_semantic_journal_action(
     simple_safe = bool(
         completed_signal
         and _JOURNAL_PAST_DAY_RE.search(raw)
+        and len(_JOURNAL_PAST_ACTION_RE.findall(raw)) == 1
         and len(set(re.findall(
             r"\b(завтрак\w*|обед\w*|ужин\w*|перекус\w*|полдник\w*)\b",
             raw.casefold(), re.I,
@@ -4025,6 +4034,7 @@ async def resolve_semantic_journal_action(
         and _semantic_source_subject_safe(raw)
         and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(raw)
         and not _JOURNAL_CORRECTION_RE.search(raw)
+        and not _JOURNAL_WORKOUT_MENTION_RE.search(raw)
         and not is_question_like(raw)
         and "\n" not in raw and "\r" not in raw
     )

@@ -260,6 +260,18 @@ class JournalJobTests(unittest.TestCase):
         self.assertNotEqual((plan or {}).get("route"), "structured")
         self.assertNotEqual((plan or {}).get("intent"), "logmeal")
 
+    def test_workout_adjacent_text_never_uses_food_structured_lane(self):
+        text = "Вчера поела омлет и размялась десять минут"
+        with mock.patch.object(
+            bot.L, "classify_journal_event", return_value={"action": "none"},
+        ) as classifier:
+            plan = asyncio.run(bot.resolve_semantic_journal_action(
+                self.cid, text, route_timeout_s=None,
+            ))
+        classifier.assert_called_once()
+        self.assertNotEqual((plan or {}).get("route"), "structured")
+        self.assertNotEqual((plan or {}).get("intent"), "logmeal")
+
     def test_database_busy_becomes_retryable_rejection(self):
         with (
             mock.patch.object(
@@ -282,6 +294,56 @@ class JournalJobTests(unittest.TestCase):
         )
         self.assertEqual(payload["retry_after"], 2)
         self.assertIn("Ничего не добавила", payload["answer"])
+
+    def test_worker_retry_after_mutation_commit_does_not_duplicate_meal(self):
+        parsed = {
+            "title": "Творог", "grams": 200, "kcal": 240,
+            "protein": 32, "fat": 10, "carbs": 6,
+        }
+        original_finish = bot._finish_ai_job
+        crashed = False
+
+        def crash_before_job_completion(job, status, *args, **kwargs):
+            nonlocal crashed
+            if status == "completed" and not crashed:
+                crashed = True
+                raise RuntimeError("crash_after_mutation_commit")
+            return original_finish(job, status, *args, **kwargs)
+
+        async def scenario():
+            old_wake = bot._AI_JOB_WAKE
+            bot._AI_JOB_WAKE = asyncio.Event()
+            try:
+                queued = bot._enqueue_journal_job(
+                    self.cid, "Запиши 200 г творога",
+                    bot.chat_mutation_key("webchat", "retry-after-commit"),
+                    request_id="retry-after-commit", known_intent="logmeal",
+                )
+                worker = asyncio.create_task(bot._journal_job_worker(0))
+                bot._AI_JOB_WAKE.set()
+                for _ in range(250):
+                    status = bot._journal_job_status(self.cid, queued["job_id"])
+                    if status and status["status"] == "completed":
+                        break
+                    await asyncio.sleep(0.02)
+                else:
+                    self.fail("retried journal worker did not complete")
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+                return status
+            finally:
+                bot._AI_JOB_WAKE = old_wake
+
+        with (
+            mock.patch.object(bot.L, "analyze_food_text", return_value=parsed),
+            mock.patch.object(bot, "_finish_ai_job", side_effect=crash_before_job_completion),
+        ):
+            status = asyncio.run(scenario())
+
+        self.assertTrue(crashed)
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["attempts"], 2)
+        self.assertEqual(len(bot.meals_of(self.cid)), 1)
 
     def test_receipt_token_is_opaque_scoped_and_opens_exact_record(self):
         mutation = {"kind": "food", "record_id": 91, "date": "2026-08-05"}
