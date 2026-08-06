@@ -330,6 +330,12 @@ def _legacy_event_name(action, meta):
         return "fallback_served", None
     if action == "ai_job":
         return "ai_job_status_changed", None
+    if action == "journal_route_failed":
+        return "journal_route_failed", None
+    if action == "journal_job_stage":
+        return "journal_job_stage_completed", None
+    if action == "journal_receipt_opened":
+        return "journal_receipt_opened", None
     if action in {"manual", "suggest"}:
         return "legacy_message_interaction", None
     if action == "tokens":
@@ -496,6 +502,21 @@ def insert_event_v2(
             props["job_kind"] = kind
         if reason:
             props["reason"] = reason
+    elif action == "journal_route_failed":
+        allowed = {
+            "timeout", "error", "empty", "validation", "mixed_segment",
+            "multimeal_segment", "food_prompt_validation", "corroboration",
+        }
+        reason = safe_id(parts[0] if parts else "", 32)
+        props["failure_reason"] = reason if reason in allowed else "other"
+    elif action == "journal_job_stage":
+        stage = safe_id(parts[0] if parts else "", 24)
+        route = safe_id(parts[1] if len(parts) > 1 else "", 32)
+        if stage: props["stage"] = stage
+        if route: props["route"] = route
+    elif action == "journal_receipt_opened":
+        tab = safe_id(parts[0] if parts else "", 16)
+        if tab in {"food", "train"}: props["target_tab"] = tab
     event_id = str(uuid.uuid4())
     occurred = (
         datetime.fromisoformat(str(occurred_at).replace("Z", "+00:00"))

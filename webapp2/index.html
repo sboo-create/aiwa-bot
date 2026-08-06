@@ -1926,6 +1926,8 @@ function symptomDiary(){var logs=(D&&D.sym_log)||[];logs=logs.filter(function(l)
 function applyViewport(){if(!tg)return;try{var sa=(tg.safeAreaInset&&tg.safeAreaInset.top)||0;var ca=(tg.contentSafeAreaInset&&tg.contentSafeAreaInset.top)||0;var t=sa+ca;if(tg.isFullscreen&&t<44)t=56;document.documentElement.style.setProperty('--safe-top',t+'px');}catch(e){}}
 if(tg){try{tg.onEvent&&tg.onEvent('viewportChanged',applyViewport);tg.onEvent&&tg.onEvent('safeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('contentSafeAreaChanged',applyViewport);tg.onEvent&&tg.onEvent('fullscreenChanged',applyViewport);}catch(e){}applyViewport();setTimeout(applyViewport,800);}
 
+var OPEN_RECEIPT=null;
+window.aiwaConsumeOpenReceipt=function(){var value=OPEN_RECEIPT;OPEN_RECEIPT=null;return value;};
 document.addEventListener('click',function(e){
   var b=e.target.closest&&e.target.closest('.pbtn,.chip,.swapbtn,.copylink,[data-haptic="light"]');
   if(!b||b.closest(':disabled,[inert],[aria-disabled="true"],[data-disabled="true"],[data-haptic="off"]'))return;
@@ -1935,7 +1937,23 @@ document.addEventListener('click',function(e){
   if(!(b.matches&&b.matches('.pbtn,.chip,.swapbtn,.copylink')))return;
   var r=document.createElement('span');r.className='ripple';var rc=b.getBoundingClientRect();r.style.left=(e.clientX-rc.left)+'px';r.style.top=(e.clientY-rc.top)+'px';b.appendChild(r);setTimeout(function(){if(r.parentNode)r.parentNode.removeChild(r);},600);
 },true);
-function boot(){applyCanonicalToday();installDayRollover();renderToday();try{if(window.AiwaDeslop&&window.AiwaDeslop.prefetch)window.AiwaDeslop.prefetch();}catch(e){}var _tab=null;try{_tab=new URLSearchParams(location.search).get('tab');}catch(e){}var _ok={today:1,food:1,train:1,chat:1};go(_ok[_tab]?_tab:'today');}
+function boot(){return (async function(){
+  applyCanonicalToday();installDayRollover();renderToday();
+  try{if(window.AiwaDeslop&&window.AiwaDeslop.prefetch)window.AiwaDeslop.prefetch();}catch(e){}
+  var _tab=null,_open=null;
+  try{var _params=new URLSearchParams(location.search);_tab=_params.get('tab');_open=_params.get('open');}catch(e){}
+  if(_open&&INIT){
+    try{
+      var _target=await api('/api/open_receipt',{token:_open});
+      if(_target&&_target.ok){
+        OPEN_RECEIPT=_target;
+        if(_target.date)aiwaSelectDay(_target.date);
+        _tab=_target.tab;
+      }
+    }catch(e){}
+  }
+  var _ok={today:1,food:1,train:1,chat:1};go(_ok[_tab]?_tab:'today');
+})();}
 function demoAiwaData(){
   var p1=isoOf(addDays(today,-99)),p2=isoOf(addDays(today,-71)),p3=isoOf(addDays(today,-40)),p4=isoOf(addDays(today,-11));
   return{

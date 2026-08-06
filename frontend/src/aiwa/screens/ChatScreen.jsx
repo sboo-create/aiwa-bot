@@ -5,6 +5,9 @@ import { AIWA_CARD_SEQUENCE_FRAMES } from "../lib/sequence";
 import { CrossIcon } from "../lib/icons";
 import { apiCall, showToast, call } from "../lib/api";
 
+const requestId = () => globalThis.crypto?.randomUUID?.()
+  || `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
 export function ChatScreen({ initialMessages = [] }) {
   const [messages, setMessages] = useState(() => initialMessages.map((message, index) => ({
     id: `initial-${index}`,
@@ -30,8 +33,25 @@ export function ChatScreen({ initialMessages = [] }) {
         suggestions: ["Можно ли тренироваться?", "Что съесть сегодня?", "Как моё самочувствие?"],
       }]);
     }
-  }, []);
+  }, [maleMode, messages.length]);
   useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [messages, busy]);
+
+  const pollJournalJob = async (jobId, assistantId) => {
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      const result = await apiCall("/api/journal_job", { job_id: jobId }).catch(() => null);
+      const status = result?.job?.status;
+      if (!result || !["completed", "failed", "expired", "superseded"].includes(status)) continue;
+      setMessages((current) => current.map((message) => (
+        message.id === assistantId ? {
+          ...message,
+          text: result.answer || (status === "completed" ? "Запись обработана." : "Не получилось обработать запись."),
+          suggestions: result.suggestions || [],
+        } : message
+      )));
+      return;
+    }
+  };
 
   const send = async (message = value) => {
     const text = String(message || "").trim();
@@ -39,31 +59,38 @@ export function ChatScreen({ initialMessages = [] }) {
     setValue("");
     setMessages((current) => [...current, { id: `user-${Date.now()}`, role: "user", text, suggestions: [] }]);
     setBusy(true);
-    const result = await apiCall("/api/chat", { message: text }).catch(() => null);
+    const turnId = requestId();
+    const result = await apiCall("/api/chat", { message: text, request_id: turnId }).catch(() => null);
+    const assistantId = `assistant-${turnId}`;
     setMessages((current) => [...current, {
-      id: `assistant-${Date.now()}`,
+      id: assistantId,
       role: "assistant",
       text: result?.answer || "Не получилось ответить, попробуй ещё раз.",
       suggestions: result?.suggestions || [],
     }]);
     setBusy(false);
+    if (result?.pending && result?.job?.id) pollJournalJob(result.job.id, assistantId);
   };
 
   const uploadVoice = async (blob, type) => {
     setBusy(true);
     const form = new FormData();
+    const turnId = requestId();
     form.append("initData", window.aiwaInit || "");
+    form.append("request_id", turnId);
     form.append("audio", blob, type?.includes("mp4") ? "voice.mp4" : "voice.webm");
     try {
       const response = await fetch("/api/voice", { method: "POST", body: form });
       const result = await response.json();
       if (result.transcript) setMessages((current) => [...current, { id: `voice-${Date.now()}`, role: "user", text: result.transcript, suggestions: [] }]);
+      const assistantId = `voice-answer-${turnId}`;
       setMessages((current) => [...current, {
-        id: `voice-answer-${Date.now()}`,
+        id: assistantId,
         role: "assistant",
         text: result.answer || "Не получилось распознать голос.",
         suggestions: result.suggestions || [],
       }]);
+      if (result?.pending && result?.job?.id) pollJournalJob(result.job.id, assistantId);
     } catch {
       showToast("Не получилось отправить голос", { type: "error" });
     } finally {

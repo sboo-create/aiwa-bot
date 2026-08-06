@@ -101,6 +101,7 @@ export function FoodScreen({ mode, revision = 0 }) {
   const [weekReview, setWeekReview] = useState(null);
   const [weekBusy, setWeekBusy] = useState(false);
   const [panel, setPanel] = useState("");
+  const [openReceipt] = useState(() => read("aiwaConsumeOpenReceipt"));
   const [editingMeal, setEditingMeal] = useState(null);
   const [editingMutation, setEditingMutation] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -125,6 +126,12 @@ export function FoodScreen({ mode, revision = 0 }) {
     canonicalDiaryRef.current = data.diary;
     canonicalVersion.current += 1;
   }
+
+  useEffect(() => {
+    if (openReceipt?.tab === "food" && openReceipt?.view === "diary") {
+      setPanel("diary");
+    }
+  }, [openReceipt]);
 
   const commitDayEntry = useCallback((iso, entry) => {
     const next = { ...dayDiariesRef.current, [iso]: entry };
@@ -767,6 +774,7 @@ export function FoodScreen({ mode, revision = 0 }) {
             onClose={() => setPanel("")}
             diary={viewingPast ? (selectedDiary || { meals: [], totals: {}, target }) : diary}
             canAdd={!viewingPast}
+            focusMealId={openReceipt?.tab === "food" ? openReceipt?.record_id : null}
             onAdd={openAdd}
             onEdit={(meal) => {
               setEditingMutation({
