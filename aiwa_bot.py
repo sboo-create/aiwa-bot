@@ -2449,6 +2449,30 @@ def _male_reply_fallback(original=None, escalation_required=None):
         )
     return text
 
+def ensure_red_flag_escalation(question, answer):
+    """Deterministic safety net for rerouted situational food questions.
+
+    When the question itself carries red-flag vocabulary (the same set the
+    male-profile fallback uses) and the model's reply dropped every doctor
+    referral, append the standard escalation line so the safety information
+    cannot be lost to model variance.
+    """
+    text = str(answer or "")
+    if not _MEDICAL_ESCALATION_RE.search(str(question or "")):
+        return answer
+    if re.search(
+        r"\b(?:врач\w*|гинеколог\w*|доктор\w*|скор\w+\s+помощ\w*|"
+        r"неотложн\w*|больниц\w*|103|112)\b",
+        text, re.I,
+    ):
+        return answer
+    return (
+        text
+        + "\n\nЕсли есть сильная или нарастающая боль, обильное кровотечение, "
+        "высокая температура или резкое ухудшение состояния — обратись к "
+        "врачу, при экстренных симптомах — за неотложной помощью."
+    )
+
 def _male_safe_history(items, text_key="text"):
     """Preserve ordering/user turns; rewrite unsafe assistant text consistently."""
     out = []
@@ -2701,7 +2725,9 @@ _TRAINING_SECTION_INTENT_RE = re.compile(
 _FOOD_QUESTION_CONTEXT_RE = re.compile(
     r"\b(?:при|после|перед|до|чтобы|если|когда|от|против|вместо|без|из|из-за)\b"
     r"|\bво\s+время\b|\bна\s+фоне\b|\bна\s+ночь\b|\bнатощак\b"
-    r"|\bдля\b(?!\s+(?:меня|себя|нас)\b)"
+    # "для меня/себя" is personalization and "для завтрака/ужина" is a meal
+    # slot: both are ordinary menu requests, not situational conditions.
+    r"|\bдля\b(?!\s+(?:меня|себя|нас|завтрак\w*|обед\w*|ужин\w*|перекус\w*|полдник\w*)\b)"
     r"|\b(?:бол(?:ью?|и|ит|ят|ел[аи]?)\b|болезнен\w*|больно\b|тошн\w*|спазм\w*|"
     r"судорог\w*|мигрен\w*|кровотеч\w*|кровит\b|анализ\w*|температур\w*|"
     r"отравлен\w*|диаре\w*|понос\w*|запор\w*|изжог\w*|вздути\w*|аллерг\w*|"
@@ -5871,11 +5897,15 @@ def _submit_feedback(cid, answer_id, rating, channel="bot"):
     ev(cid, "feedback", meta=f"{rating}|{answer_id}|{saved_channel}")
     return "saved"
 
-async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None):
+async def send_answer(context, cid, text, st, basis_q, usage=None, quote=None, app_user=None, app_label=None, red_flag_guard_q=None):
     if usage is None: usage = []
     sf = getattr(L, "split_followups", None)
     clean, sugg = sf(text) if sf else (text, [])
     clean = guard_aiwa_reply(cid, clean)
+    if red_flag_guard_q:
+        # Applied after followup extraction so the appended line stays in the
+        # visible reply instead of leaking into suggestion parsing.
+        clean = ensure_red_flag_escalation(red_flag_guard_q, clean)
     try:
         topical = L.followups(st, basis_q, clean)
         # For known product topics deterministic relevance wins over a model
@@ -8922,6 +8952,7 @@ async def handle_text(update, context, txt):
         ev(cid, "fallback", meta="gibberish", n=len(txt))
         return await update.message.reply_text("Не поняла запрос. Напиши вопрос словами, например: «почему тянет на сладкое» или «какая тренировка сегодня».")
 
+    _situational_food_q = False
     if is_onboarded(u):
         _turn_generation = _user_generation(cid)
         _intent = match_intent(txt)
@@ -8971,6 +9002,7 @@ async def handle_text(update, context, txt):
             ev(cid, "fallback", meta="food_question_qa",
                user_generation=_turn_generation)
             _intent = None
+            _situational_food_q = True
         if _intent:
             return await dispatch_intent(
                 context, update, cid, u, _intent, txt, journal=_journal,
@@ -8989,7 +9021,8 @@ async def handle_text(update, context, txt):
         ev(cid, "answered", meta="general", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
-        return await send_answer(context, cid, ans, None, txt, usage=usage, quote=txt)
+        return await send_answer(context, cid, ans, None, txt, usage=usage, quote=txt,
+                                 red_flag_guard_q=(txt if _situational_food_q else None))
     if is_onboarded(u):
         if not _VOICE_TURN.get(cid): ev(cid, "user_message", meta="text", n=len(txt))
         _, st = status_of(cid); await context.bot.send_chat_action(cid, "typing")
@@ -9004,7 +9037,8 @@ async def handle_text(update, context, txt):
         ev(cid, "answered", meta="answer", ms=int((time.monotonic()-t0)*1000), n=len(txt))
         ans = guard_aiwa_reply(cid, ans)
         hist_push(cid, txt, ans)
-        return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt)
+        return await send_answer(context, cid, ans, st, txt, usage=usage, quote=txt,
+                                 red_flag_guard_q=(txt if _situational_food_q else None))
     if is_question_like(txt):
         await context.bot.send_chat_action(cid, "typing")
         _oq = []; a = await think_llm(
@@ -13554,6 +13588,10 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
     current = _user_write_allowed(cid, generation)
     clean, sugg = L.split_followups(ans)
     clean = guard_aiwa_reply(cid, clean)
+    if intent == "food_question":
+        # Same deterministic net as the telegram path: a red-flag food
+        # question must never lose the doctor referral to model variance.
+        clean = ensure_red_flag_escalation(msg, clean)
     if current:
         hist_push(cid, msg, clean)
     try:

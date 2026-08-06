@@ -53,6 +53,8 @@ GENERIC_MENU_REQUESTS = [
     "что на завтрак",
     "что на ужин",
     "что есть на завтрак",
+    "что съесть для завтрака",
+    "что приготовить для ужина",
     "Что есть в мою фазу?",
     "чем мне питаться",
     "чем питаться сегодня",
@@ -108,6 +110,22 @@ class FoodQuestionIntentTests(unittest.TestCase):
         self.assertIn("тревожных симптомах", llm.SYSTEM)
         self.assertIn("обильное кровотечение", llm.SYSTEM)
         self.assertIn("гинеколог", llm.SYSTEM)
+
+    def test_escalation_net_appends_doctor_referral_only_when_missing(self):
+        question = "сильное кровотечение, что можно есть?"
+        bare = "Гречка и говядина помогут восстановить железо."
+        guarded = bot.ensure_red_flag_escalation(question, bare)
+        self.assertIn("обратись к врачу", guarded)
+        self.assertIn("неотложной помощью", guarded)
+        # An answer that already refers to a doctor is left untouched.
+        referred = "При таком кровотечении сначала обратись к гинекологу."
+        self.assertEqual(
+            bot.ensure_red_flag_escalation(question, referred), referred
+        )
+        # A question without red-flag vocabulary never gets the banner.
+        self.assertEqual(
+            bot.ensure_red_flag_escalation("что есть при тошноте", bare), bare
+        )
 
     def test_food_question_is_not_a_journal_mutation_intent(self):
         # The journal queue must treat the new intent exactly like "food":
@@ -293,6 +311,86 @@ class FoodQuestionHandlerTests(unittest.TestCase):
         self.assertIn("снизить боль", question)
         self.assertNotIn("Дай конкретные продукты", question)
         self.assertIn("Ответ по существу вопроса.", result["answer"])
+
+    def test_telegram_reply_carries_escalation_when_model_drops_it(self):
+        text = "сильное кровотечение, что можно есть?"
+        update, context = self._telegram_env(95005)
+        context.bot.send_message = mock.AsyncMock()
+        with (
+            mock.patch.object(
+                bot, "resolve_semantic_journal_action",
+                new=mock.AsyncMock(return_value=None),
+            ),
+            mock.patch.object(
+                bot, "think_llm",
+                new=mock.AsyncMock(
+                    return_value="Гречка и говядина помогут восстановить железо.\n"
+                                 "СЛЕДУЮЩИЕ: Что ещё добавить? ;; Как спать лучше?"
+                ),
+            ),
+            mock.patch.object(bot.L, "followups", return_value=[]),
+            mock.patch.object(bot, "RICH_OK", False),
+        ):
+            asyncio.run(bot.handle_text(update, context, text))
+        sent = "\n".join(
+            str(call.args[1]) for call in context.bot.send_message.await_args_list
+        )
+        self.assertIn("обратись к", sent)
+        self.assertIn("врачу", sent)
+
+    def test_webapp_reply_carries_escalation_when_model_drops_it(self):
+        text = "сильное кровотечение, что можно есть?"
+        with (
+            mock.patch.object(
+                bot, "_agent_answer", new=mock.AsyncMock(return_value=None)
+            ),
+            mock.patch.object(
+                bot, "resolve_semantic_journal_action",
+                new=mock.AsyncMock(return_value=None),
+            ),
+            mock.patch.object(
+                bot, "llm_to_thread",
+                new=mock.AsyncMock(
+                    return_value="Гречка и говядина помогут восстановить железо."
+                ),
+            ),
+            mock.patch.object(bot.L, "followups", return_value=[]),
+            mock.patch.object(
+                bot, "_memory_learn", new=mock.AsyncMock(return_value=None)
+            ),
+        ):
+            result = asyncio.run(
+                bot._chat_reply(self.cid, bot.row(self.cid), text)
+            )
+        self.assertIn("обратись к врачу", result["answer"])
+
+    def test_webapp_reply_keeps_model_referral_without_duplicate_banner(self):
+        text = "сильное кровотечение, что можно есть?"
+        with (
+            mock.patch.object(
+                bot, "_agent_answer", new=mock.AsyncMock(return_value=None)
+            ),
+            mock.patch.object(
+                bot, "resolve_semantic_journal_action",
+                new=mock.AsyncMock(return_value=None),
+            ),
+            mock.patch.object(
+                bot, "llm_to_thread",
+                new=mock.AsyncMock(
+                    return_value="При таком кровотечении сначала обратись к гинекологу, "
+                                 "еда вторична."
+                ),
+            ),
+            mock.patch.object(bot.L, "followups", return_value=[]),
+            mock.patch.object(
+                bot, "_memory_learn", new=mock.AsyncMock(return_value=None)
+            ),
+        ):
+            result = asyncio.run(
+                bot._chat_reply(self.cid, bot.row(self.cid), text)
+            )
+        self.assertIn("гинеколог", result["answer"])
+        self.assertNotIn("неотложной помощью", result["answer"])
 
     def test_webapp_chat_keeps_menu_template_for_generic_requests(self):
         text = "что мне есть сегодня"
