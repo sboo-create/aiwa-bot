@@ -12203,11 +12203,23 @@ def _confirm_semantic_duplicate_meal(cid, job_id):
     existing = meal_get(cid, candidate.get("record_id"))
     if not existing or existing.get("date") != candidate.get("date"):
         return {"ok": False, "text": "Исходной записи уже нет. Ничего не добавила."}
+    snapshot = candidate.get("meal") or {}
+    if (
+        snapshot.get("date") != candidate.get("date")
+        or snapshot.get("slot") not in {"breakfast", "lunch", "snack", "dinner"}
+        or not str(snapshot.get("title") or "").strip()
+    ):
+        return {"ok": False, "text": "Подтверждение повреждено. Ничего не добавила."}
+    copy_record = normalize_food(snapshot, str(snapshot.get("source") or "text"))
+    if not copy_record or not food_record_admissible(copy_record):
+        return {"ok": False, "text": "Подтверждение повреждено. Ничего не добавила."}
+    copy_record["slot"] = snapshot["slot"]
+    copy_record["slot_guessed"] = bool(snapshot.get("slot_guessed"))
     generation = _user_generation(cid)
     mutation_key = chat_mutation_key("dupconfirm", job_id)
     args_hash = chat_mutation_args_hash("food", "confirmed:" + job_id)
     saved = meal_add(
-        cid, existing, d=existing["date"], user_generation=generation,
+        cid, copy_record, d=snapshot["date"], user_generation=generation,
         mutation_key=mutation_key, args_hash=args_hash, return_status=True,
     )
     if not saved or saved.get("status") in {"mismatch", "reversed"}:
@@ -14099,9 +14111,12 @@ def _food_records_look_same(left, right):
     )
     return kcal_close and (token_match or title_match)
 
-def _find_semantic_duplicate_meal(cid, event_date, args_hash, rec=None):
+def _find_semantic_duplicate_meal(cid, event_date, args_hash, rec=None,
+                                  expected_slot=None):
     """Find a live same-day meal created by equivalent user input/content."""
     target = event_date.isoformat() if isinstance(event_date, date) else str(event_date)
+    if expected_slot not in {"breakfast", "lunch", "snack", "dinner"}:
+        return None
     c = db()
     try:
         exact = c.execute(
@@ -14109,9 +14124,9 @@ def _find_semantic_duplicate_meal(cid, event_date, args_hash, rec=None):
                FROM chat_mutations cm
                JOIN meals m ON m.chat_id=cm.chat_id AND CAST(m.id AS TEXT)=cm.record_id
                WHERE cm.chat_id=? AND cm.kind='food' AND cm.args_hash=?
-                 AND cm.reversed_at IS NULL AND m.d=?
+                 AND cm.reversed_at IS NULL AND m.d=? AND m.slot=?
                ORDER BY cm.created_at DESC LIMIT 1""",
-            (cid, args_hash or "", target),
+            (cid, args_hash or "", target, expected_slot),
         ).fetchone()
     finally:
         c.close()
@@ -14120,11 +14135,18 @@ def _find_semantic_duplicate_meal(cid, event_date, args_hash, rec=None):
     if not isinstance(rec, dict):
         return None
     for existing in reversed(meals_of(cid, target)):
-        if _food_records_look_same(existing, rec):
+        if existing.get("slot") == expected_slot and _food_records_look_same(existing, rec):
             existing = dict(existing)
             existing["date"] = target
             return existing
     return None
+
+def _duplicate_meal_snapshot(existing):
+    fields = (
+        "title", "kcal", "protein", "fat", "carbs", "grams", "items",
+        "source", "slot", "fclass", "slot_guessed", "date",
+    )
+    return {field: existing.get(field) for field in fields}
 
 def _semantic_duplicate_food_result(existing):
     slot = SLOT_RU.get(existing.get("slot"), "приёме пищи")
@@ -14133,6 +14155,7 @@ def _semantic_duplicate_food_result(existing):
         "semantic_duplicate": {
             "record_id": existing.get("id"),
             "date": existing.get("date"),
+            "meal": _duplicate_meal_snapshot(existing),
         },
         "text": (
             f"Похоже, такой приём уже записан в {slot}: "
@@ -14161,17 +14184,20 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
     event_date, date_error = chat_event_date(text, max_past_days=31)
     if date_error:
         return {"ok": False, "text": "Не стала записывать: укажи сегодняшнюю дату или один из последних 31 дней."}
-    duplicate = _find_semantic_duplicate_meal(cid, event_date, args_hash)
-    if duplicate:
-        ev(cid, "journal_semantic_duplicate", meta="food|exact",
-           user_generation=generation)
-        return _semantic_duplicate_food_result(duplicate)
-    ev(cid, "flow_start", meta="food")
     slot = (
         preparsed_slot
         if preparsed_slot in {"breakfast", "lunch", "snack", "dinner"}
         else slot_from_text(text)
     )
+    resolved_slot = slot or slot_for_now()
+    duplicate = _find_semantic_duplicate_meal(
+        cid, event_date, args_hash, expected_slot=resolved_slot,
+    )
+    if duplicate:
+        ev(cid, "journal_semantic_duplicate", meta="food|exact",
+           user_generation=generation)
+        return _semantic_duplicate_food_result(duplicate)
+    ev(cid, "flow_start", meta="food")
     food = str(preparsed_food_text or "").strip()[:500] or extract_food_log_text(text)
     if not food:
         return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «200 г творога, запиши»."}
@@ -14191,10 +14217,10 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
     rec = normalize_food(parsed, "text") if parsed else None
     if not rec or not food_record_admissible(rec):
         return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «200 г творога 5%, запиши»."}
-    rec["slot"] = slot or slot_for_now()
+    rec["slot"] = resolved_slot
     rec["slot_guessed"] = not bool(slot)
     duplicate = _find_semantic_duplicate_meal(
-        cid, event_date, args_hash, rec=rec,
+        cid, event_date, args_hash, rec=rec, expected_slot=resolved_slot,
     )
     if duplicate:
         ev(cid, "journal_semantic_duplicate", meta="food|content",

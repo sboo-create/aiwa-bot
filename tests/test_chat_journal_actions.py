@@ -755,13 +755,21 @@ class ChatJournalActionTests(unittest.TestCase):
         rows = bot._journal_result_rows(bot.row(self.cid), prompt_result)
         self.assertEqual(rows[0][0].callback_data, f"jdup:{queued['job_id']}")
 
+        bot.meal_edit(
+            self.cid, first["record_id"],
+            title="Исправленная яичница", kcal=600,
+        )
         confirmed = bot._confirm_semantic_duplicate_meal(self.cid, queued["job_id"])
         replay = bot._confirm_semantic_duplicate_meal(self.cid, queued["job_id"])
         meals = bot.meals_of(self.cid, target)
         self.assertTrue(confirmed["ok"])
         self.assertTrue(replay["ok"])
         self.assertEqual(len(meals), 2)
-        self.assertEqual({meal["kcal"] for meal in meals}, {445})
+        self.assertEqual({meal["kcal"] for meal in meals}, {445, 600})
+        self.assertEqual(
+            {meal["title"] for meal in meals},
+            {"Яичница с помидорами и батоном", "Исправленная яичница"},
+        )
         self.assertEqual({meal["slot"] for meal in meals}, {"dinner"})
 
     def test_similar_rewording_is_confirmed_instead_of_silently_inserted(self):
@@ -791,6 +799,37 @@ class ChatJournalActionTests(unittest.TestCase):
         self.assertFalse(second["ok"])
         self.assertIn("semantic_duplicate", second)
         self.assertEqual(len(bot.meals_of(self.cid)), 1)
+
+    def test_same_food_in_different_slots_is_not_a_duplicate(self):
+        parsed = {
+            "title": "Творог",
+            "grams": 200,
+            "kcal": 240,
+            "protein": 32,
+            "fat": 10,
+            "carbs": 6,
+            "items": [{"name": "Творог"}],
+        }
+        with mock.patch.object(bot.L, "analyze_food_text", return_value=parsed):
+            breakfast = asyncio.run(bot.log_food_action(
+                self.cid, bot.row(self.cid), "Сегодня на завтрак съела творог",
+                mutation_key=bot.chat_mutation_key("telegram", "breakfast-cottage"),
+            ))
+            dinner = asyncio.run(bot.log_food_action(
+                self.cid, bot.row(self.cid), "Сегодня на ужин съела творог",
+                mutation_key=bot.chat_mutation_key("telegram", "dinner-cottage"),
+            ))
+        self.assertTrue(breakfast["ok"])
+        self.assertTrue(dinner["ok"])
+        self.assertEqual(
+            [meal["slot"] for meal in bot.meals_of(self.cid)],
+            ["breakfast", "dinner"],
+        )
+
+    def test_explicit_meal_slot_precedes_relative_time_phrase(self):
+        self.assertEqual(bot.slot_from_text("Утром записать на ужин суп"), "dinner")
+        self.assertEqual(bot.slot_from_text("Вечером это был завтрак"), "breakfast")
+        self.assertEqual(bot.slot_from_text("Вчера под ночь съела суп"), "dinner")
 
     def test_food_update_is_owned_idempotent_and_reversed_with_the_record(self):
         original = bot.normalize_food({
