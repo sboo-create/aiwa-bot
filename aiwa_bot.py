@@ -4028,7 +4028,10 @@ async def resolve_semantic_journal_action(
         and not is_question_like(raw)
         and "\n" not in raw and "\r" not in raw
     )
-    food_done = bool(_JOURNAL_FOOD_COMPLETED_RE.search(raw))
+    food_done = bool(
+        _JOURNAL_FOOD_COMPLETED_RE.search(raw)
+        and not _JOURNAL_FOOD_NEGATED_RE.search(raw)
+    )
     workout_done = bool(
         _JOURNAL_WORKOUT_COMPLETED_RE.search(raw)
         and not _JOURNAL_WORKOUT_NEGATED_RE.search(raw)
@@ -8874,8 +8877,7 @@ async def handle_text(update, context, txt):
         _telegram_request_id = str(getattr(update, "update_id", "") or "")
         _telegram_mutation_key = chat_mutation_key("telegram", _telegram_request_id)
         _queued_candidate, _known_intent = _journal_queue_candidate(cid, txt, _intent)
-        journal_runtime_ready = _journal_workers_ready()
-        if _queued_candidate and journal_runtime_ready:
+        if _queued_candidate:
             _submitted = await _submit_journal_mutation(
                 cid, txt, _telegram_mutation_key, channel="telegram",
                 request_id=_telegram_request_id, notify=True,
@@ -9265,10 +9267,17 @@ async def load_logger(app):
             ai_jobs = await asyncio.to_thread(_ai_job_status_counts)
             log.info(
                 "LOAD/60s llm_calls=%d avg_ms=%d wait_ms=%d queued=%d err=%d "
-                "bcast_q=%d event_q=%d ai_queued=%d ai_running=%d ai_failed=%d users=%d",
+                "bcast_q=%d event_q=%d "
+                "today_queued=%d today_running=%d today_failed=%d "
+                "journal_queued=%d journal_running=%d journal_failed=%d users=%d",
                 calls, avg, wms, wq, s["err"], q, _EVENT_WRITE_Q.qsize(),
-                ai_jobs.get("queued", 0), ai_jobs.get("running", 0),
-                ai_jobs.get("failed", 0), len(all_users(include_synthetic=True)),
+                ai_jobs.get("today_note_queued", 0),
+                ai_jobs.get("today_note_running", 0),
+                ai_jobs.get("today_note_failed", 0),
+                ai_jobs.get("journal_mutation_queued", 0),
+                ai_jobs.get("journal_mutation_running", 0),
+                ai_jobs.get("journal_mutation_failed", 0),
+                len(all_users(include_synthetic=True)),
             )
             err_threshold = int(os.environ.get("AIWA_ALERT_LLM_ERRS", "2"))
             if calls and s["err"] >= err_threshold and (s["err"] / calls) >= 0.5:
@@ -9286,6 +9295,15 @@ async def load_logger(app):
                     app, "today_queue",
                     f"Очередь персональных сводок выросла до {today_queued}. "
                     "Обычные экраны продолжают обслуживаться, новые сводки получают fallback.",
+                    cooldown=600,
+                )
+            journal_threshold = int(os.environ.get("AIWA_ALERT_JOURNAL_Q", "250"))
+            journal_queued = ai_jobs.get("journal_mutation_queued", 0)
+            if journal_queued >= journal_threshold:
+                await admin_alert(
+                    app, "journal_queue",
+                    f"Очередь записей дневника выросла до {journal_queued}. "
+                    "Записи приняты надёжно, но подтверждения задерживаются.",
                     cooldown=600,
                 )
         except Exception as e:
@@ -9349,7 +9367,7 @@ async def traction_worker():
 
 async def on_startup(app):
     global BOT_USERNAME, BCAST_Q, FOOD_Q, TRAIN_Q, _AI_JOB_WAKE, _AI_JOB_TASKS
-    global _JOURNAL_JOB_TASKS
+    global _JOURNAL_JOB_TASKS, _AI_JOB_RUNTIME_STOPPING
     global _AI_BACKGROUND_SEM, _FOOD_VISION_SEM, _FOOD_VISION_WAITERS
     global _FOOD_ASSET_CANDIDATES, _FOOD_ASSET_TASKS, _FOOD_ASSET_EXECUTOR
     # Fail before scheduling/sending anything if the boundary protecting real
@@ -9395,6 +9413,7 @@ async def on_startup(app):
     _AI_BACKGROUND_SEM = asyncio.Semaphore(_AI_BACKGROUND_CONCURRENCY)
     _FOOD_VISION_SEM = asyncio.Semaphore(_FOOD_VISION_CONCURRENCY)
     _FOOD_VISION_WAITERS = 0
+    _AI_JOB_RUNTIME_STOPPING = False
     _AI_JOB_WAKE = asyncio.Event()
     await asyncio.to_thread(_recover_ai_jobs)
     _AI_JOB_TASKS = [
@@ -11595,7 +11614,8 @@ async def _shutdown_food_asset_workers():
         executor.shutdown(wait=False, cancel_futures=True)
 
 async def _shutdown_ai_job_workers():
-    global _AI_JOB_TASKS, _JOURNAL_JOB_TASKS
+    global _AI_JOB_TASKS, _JOURNAL_JOB_TASKS, _AI_JOB_RUNTIME_STOPPING
+    _AI_JOB_RUNTIME_STOPPING = True
     tasks = [*_AI_JOB_TASKS, *_JOURNAL_JOB_TASKS]
     for task in tasks:
         task.cancel()
@@ -11609,6 +11629,7 @@ _TODAY_CACHE_REVISION = {}
 _AI_JOB_WAKE = None
 _AI_JOB_TASKS = []
 _JOURNAL_JOB_TASKS = []
+_AI_JOB_RUNTIME_STOPPING = False
 _AI_JOB_COMPLETIONS = deque(maxlen=200)
 _AI_LLM_CONCURRENCY_LIMIT = max(
     1, min(64, int(os.environ.get("AIWA_LLM_CONCURRENCY", "8")))
@@ -11634,6 +11655,13 @@ _AI_JOURNAL_WORKERS = max(
 _AI_JOURNAL_QUEUE_MAX = max(
     _AI_JOURNAL_WORKERS,
     min(3000, int(os.environ.get("AIWA_JOURNAL_QUEUE_MAX", "1000"))),
+)
+_AI_JOURNAL_CHAT_QUEUE_MAX = max(
+    1,
+    min(
+        _AI_JOURNAL_QUEUE_MAX,
+        int(os.environ.get("AIWA_JOURNAL_CHAT_QUEUE_MAX", "25")),
+    ),
 )
 _AI_JOURNAL_SYNC_WAIT_SECONDS = max(
     1.0, min(20.0, float(os.environ.get("AIWA_JOURNAL_SYNC_WAIT_SECONDS", "8")))
@@ -11907,6 +11935,15 @@ def _enqueue_journal_job(cid, text, mutation_key, *, channel="webapp",
             if int(active or 0) >= _AI_JOURNAL_QUEUE_MAX:
                 c.rollback()
                 return {"status": "rejected", "reason": "queue_full"}
+            chat_active = c.execute(
+                """SELECT COUNT(*) FROM ai_jobs
+                   WHERE kind='journal_mutation' AND chat_id=?
+                     AND status IN ('queued','running')""",
+                (cid,),
+            ).fetchone()[0]
+            if int(chat_active or 0) >= _AI_JOURNAL_CHAT_QUEUE_MAX:
+                c.rollback()
+                return {"status": "rejected", "reason": "chat_queue_full"}
             job_id = "journal_" + secrets.token_hex(16)
             c.execute(
                 """INSERT INTO ai_jobs(
@@ -12015,7 +12052,7 @@ async def _wait_journal_job(cid, job_id, timeout_s=None):
         await asyncio.sleep(0.15)
     return await asyncio.to_thread(_journal_job_status, cid, job_id)
 
-def _create_receipt_link(cid, mutation):
+def _create_receipt_link(cid, mutation, *, user_generation=None):
     if not isinstance(mutation, dict):
         return None
     kind = str(mutation.get("kind") or "")
@@ -12026,10 +12063,16 @@ def _create_receipt_link(cid, mutation):
         return None
     token = secrets.token_urlsafe(32)
     token_hash = _hashlib.sha256(token.encode("utf-8")).hexdigest()
-    generation = _user_generation(cid)
+    generation = int(
+        _user_generation(cid) if user_generation is None else user_generation
+    )
     now = datetime.now(TZ)
     c = db()
     try:
+        c.execute("BEGIN IMMEDIATE")
+        if not _user_write_allowed(cid, generation, conn=c):
+            c.rollback()
+            return None
         c.execute(
             """INSERT INTO receipt_links(token_hash,chat_id,user_generation,kind,
                        record_id,target_date,view_name,created_at,expires_at)
@@ -12491,7 +12534,10 @@ async def _journal_job_worker(worker_no):
                      if (item or {}).get("record_id")),
                     receipt_mutation,
                 )
-            receipt = _create_receipt_link(job["chat_id"], receipt_mutation)
+            receipt = _create_receipt_link(
+                job["chat_id"], receipt_mutation,
+                user_generation=job["generation"],
+            )
             if receipt:
                 result["receipt"] = receipt
             result["route"] = route
@@ -12639,10 +12685,27 @@ def _journal_queue_candidate(cid, msg, intent=None):
         msg, context, enable_v2=journal_v2_enabled(cid)
     )), None
 
-def _journal_workers_ready():
-    return bool(_AI_JOB_WAKE is not None and any(
-        not task.done() for task in _JOURNAL_JOB_TASKS
-    ))
+def _ensure_journal_workers_running():
+    """Keep one durable execution path alive without falling back to inline writes."""
+    global _AI_JOB_WAKE, _JOURNAL_JOB_TASKS
+    if _AI_JOB_RUNTIME_STOPPING:
+        return 0
+    loop = asyncio.get_running_loop()
+    wake_loop = getattr(_AI_JOB_WAKE, "_loop", None)
+    if _AI_JOB_WAKE is None or (wake_loop is not None and wake_loop is not loop):
+        _AI_JOB_WAKE = asyncio.Event()
+    alive = [
+        task for task in _JOURNAL_JOB_TASKS
+        if not task.done() and task.get_loop() is loop
+    ]
+    for worker_no in range(len(alive), _AI_JOURNAL_WORKERS):
+        alive.append(asyncio.create_task(
+            _journal_job_worker(worker_no),
+            name=f"aiwa-journal-worker-{worker_no}",
+        ))
+    _JOURNAL_JOB_TASKS = alive
+    _AI_JOB_WAKE.set()
+    return len(alive)
 
 async def _submit_journal_mutation(cid, msg, mutation_key, *, channel,
                                    request_id=None, notify=False,
@@ -12657,8 +12720,7 @@ async def _submit_journal_mutation(cid, msg, mutation_key, *, channel,
        request_id=request_id, user_generation=job.get("generation"))
     if status == "rejected":
         return {"status": "rejected", "reason": job.get("reason")}
-    if _AI_JOB_WAKE is not None:
-        _AI_JOB_WAKE.set()
+    _ensure_journal_workers_running()
     if status == "completed" and job.get("result"):
         return {"status": "completed", "job_id": job["job_id"],
                 "result": job["result"]}
@@ -12707,7 +12769,7 @@ async def _api_chat(request):
     request_id = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(body.get("request_id") or ""))[:96]
     ev(cid, "user_message", meta="webapp", n=len(msg), request_id=request_id or None)
     queued, known_intent = _journal_queue_candidate(cid, msg)
-    if queued and _journal_workers_ready():
+    if queued:
         submitted = await _submit_journal_mutation(
             cid, msg, chat_mutation_key("webchat", request_id), channel="webapp",
             request_id=request_id, known_intent=known_intent,
@@ -13298,7 +13360,7 @@ async def _api_voice(request):
     msg, _addr = strip_aiwa_address(txt.strip())
     if not msg: msg = txt.strip()
     queued, known_intent = _journal_queue_candidate(cid, msg)
-    if queued and _journal_workers_ready():
+    if queued:
         submitted = await _submit_journal_mutation(
             cid, msg, chat_mutation_key("webvoice", request_id),
             channel="webapp", request_id=request_id, known_intent=known_intent,

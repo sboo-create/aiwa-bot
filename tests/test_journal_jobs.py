@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import os
 import sqlite3
 import tempfile
@@ -100,6 +101,53 @@ class JournalJobTests(unittest.TestCase):
         conn.close()
         self.assertEqual(count, 1)
 
+    def test_concurrent_retries_create_one_durable_job(self):
+        key = bot.chat_mutation_key("telegram", "concurrent-retry")
+
+        def enqueue(_index):
+            return bot._enqueue_journal_job(
+                self.cid, "Вчера съела творог", key,
+                channel="telegram", request_id="concurrent-retry",
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            jobs = list(pool.map(enqueue, range(16)))
+
+        self.assertEqual(len({job["job_id"] for job in jobs}), 1)
+        conn = sqlite3.connect(bot.DB)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ai_jobs WHERE dedupe_key=?",
+            (bot._journal_job_key(self.cid, bot._user_generation(self.cid), key),),
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 1)
+
+    def test_per_chat_cap_preserves_capacity_for_other_users(self):
+        other_cid = self.cid + 1
+        bot._activate_user(other_cid)
+        old_limit = bot._AI_JOURNAL_CHAT_QUEUE_MAX
+        bot._AI_JOURNAL_CHAT_QUEUE_MAX = 2
+        try:
+            for index in range(2):
+                accepted = bot._enqueue_journal_job(
+                    self.cid, f"Съела яблоко {index}",
+                    bot.chat_mutation_key("webchat", f"same-chat-{index}"),
+                )
+                self.assertEqual(accepted["status"], "queued")
+            rejected = bot._enqueue_journal_job(
+                self.cid, "Съела ещё одно яблоко",
+                bot.chat_mutation_key("webchat", "same-chat-overflow"),
+            )
+            other = bot._enqueue_journal_job(
+                other_cid, "Съела грушу",
+                bot.chat_mutation_key("webchat", "other-chat"),
+            )
+        finally:
+            bot._AI_JOURNAL_CHAT_QUEUE_MAX = old_limit
+
+        self.assertEqual(rejected, {"status": "rejected", "reason": "chat_queue_full"})
+        self.assertEqual(other["status"], "queued")
+
     def test_dedicated_worker_completes_verified_food_write(self):
         parsed = {
             "title": "Творог", "grams": 200, "kcal": 240,
@@ -188,6 +236,18 @@ class JournalJobTests(unittest.TestCase):
         self.assertEqual(plan["route"], "structured")
         self.assertEqual(plan["food_text"], text)
 
+    def test_negated_food_never_uses_structured_lane(self):
+        text = "Вчера вечером не ела ужин"
+        with mock.patch.object(
+            bot.L, "classify_journal_event", return_value={"action": "none"},
+        ) as classifier:
+            plan = asyncio.run(bot.resolve_semantic_journal_action(
+                self.cid, text, route_timeout_s=None,
+            ))
+        classifier.assert_called_once()
+        self.assertNotEqual((plan or {}).get("route"), "structured")
+        self.assertNotEqual((plan or {}).get("intent"), "logmeal")
+
     def test_receipt_token_is_opaque_scoped_and_opens_exact_record(self):
         mutation = {"kind": "food", "record_id": 91, "date": "2026-08-05"}
         receipt = bot._create_receipt_link(self.cid, mutation)
@@ -220,6 +280,37 @@ class JournalJobTests(unittest.TestCase):
         bot.del_user(self.cid)
         bot._activate_user(self.cid)
         self.assertIsNone(bot._resolve_receipt_link(self.cid, next_receipt["token"]))
+
+    def test_receipt_creation_is_generation_atomic(self):
+        mutation = {"kind": "food", "record_id": 7, "date": "2026-08-05"}
+        stale_generation = bot._user_generation(self.cid)
+        bot.del_user(self.cid)
+        bot._activate_user(self.cid)
+
+        receipt = bot._create_receipt_link(
+            self.cid, mutation, user_generation=stale_generation,
+        )
+
+        self.assertIsNone(receipt)
+        conn = sqlite3.connect(bot.DB)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM receipt_links WHERE chat_id=?", (self.cid,),
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
+
+    def test_job_counters_remain_separate_by_kind(self):
+        bot._enqueue_journal_job(
+            self.cid, "Съела яблоко",
+            bot.chat_mutation_key("webchat", "counter-journal"),
+        )
+        bot._enqueue_today_job(self.cid)
+
+        counts = bot._ai_job_status_counts()
+
+        self.assertEqual(counts["queued"], 2)
+        self.assertEqual(counts["journal_mutation_queued"], 1)
+        self.assertEqual(counts["today_note_queued"], 1)
 
     def test_miniapp_consumes_receipt_and_chat_polls_pending_job(self):
         root = Path(__file__).resolve().parents[1]
