@@ -159,7 +159,7 @@ class JournalJobTests(unittest.TestCase):
             bot._AI_JOB_WAKE = asyncio.Event()
             try:
                 queued = bot._enqueue_journal_job(
-                    self.cid, "Запиши 200 г творога",
+                    self.cid, "Вчера съела творог",
                     bot.chat_mutation_key("webchat", "worker-1"),
                     request_id="worker-1", known_intent="logmeal",
                 )
@@ -182,7 +182,9 @@ class JournalJobTests(unittest.TestCase):
             status = asyncio.run(scenario())
         self.assertIn("Записала", status["result"]["answer"])
         self.assertEqual(status["result"]["mutation"]["record_id"], 1)
-        self.assertEqual(len(bot.meals_of(self.cid)), 1)
+        self.assertEqual(
+            len(bot.meals_of(self.cid, (bot.dtoday() - timedelta(days=1)).isoformat())), 1,
+        )
 
     def test_semantic_worker_uses_a_bounded_long_route_timeout(self):
         seen = []
@@ -201,7 +203,7 @@ class JournalJobTests(unittest.TestCase):
                 queued = bot._enqueue_journal_job(
                     self.cid, "Вчера съела творог",
                     bot.chat_mutation_key("webchat", "bounded-timeout"),
-                    request_id="bounded-timeout",
+                    request_id="bounded-timeout", known_intent="logmeal",
                 )
                 worker = asyncio.create_task(bot._journal_job_worker(0))
                 bot._AI_JOB_WAKE.set()
@@ -295,6 +297,25 @@ class JournalJobTests(unittest.TestCase):
         self.assertEqual(payload["retry_after"], 2)
         self.assertIn("Ничего не добавила", payload["answer"])
 
+    def test_telegram_notification_retries_transient_delivery_errors(self):
+        send_message = mock.AsyncMock(side_effect=[
+            RuntimeError("telegram unavailable"),
+            RuntimeError("telegram unavailable"),
+            None,
+        ])
+        fake_app = mock.Mock()
+        fake_app.bot.send_message = send_message
+        with (
+            mock.patch.object(bot, "BOT_APP", fake_app),
+            mock.patch.object(bot.asyncio, "sleep", new=mock.AsyncMock()),
+        ):
+            delivered = asyncio.run(bot._send_journal_job_notification(
+                "job-retry", self.cid, "Записала",
+            ))
+
+        self.assertTrue(delivered)
+        self.assertEqual(send_message.await_count, 3)
+
     def test_worker_retry_after_mutation_commit_does_not_duplicate_meal(self):
         parsed = {
             "title": "Творог", "grams": 200, "kcal": 240,
@@ -315,7 +336,7 @@ class JournalJobTests(unittest.TestCase):
             bot._AI_JOB_WAKE = asyncio.Event()
             try:
                 queued = bot._enqueue_journal_job(
-                    self.cid, "Запиши 200 г творога",
+                    self.cid, "Вчера съела творог",
                     bot.chat_mutation_key("webchat", "retry-after-commit"),
                     request_id="retry-after-commit", known_intent="logmeal",
                 )
@@ -343,7 +364,12 @@ class JournalJobTests(unittest.TestCase):
         self.assertTrue(crashed)
         self.assertEqual(status["status"], "completed")
         self.assertEqual(status["attempts"], 2)
-        self.assertEqual(len(bot.meals_of(self.cid)), 1)
+        conn = sqlite3.connect(bot.DB)
+        meal_count = conn.execute(
+            "SELECT COUNT(*) FROM meals WHERE chat_id=?", (self.cid,),
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(meal_count, 1)
 
     def test_receipt_token_is_opaque_scoped_and_opens_exact_record(self):
         mutation = {"kind": "food", "record_id": 91, "date": "2026-08-05"}
@@ -361,6 +387,9 @@ class JournalJobTests(unittest.TestCase):
         self.assertEqual(resolved["record_id"], "91")
         self.assertEqual(resolved["date"], "2026-08-05")
         self.assertEqual(resolved["view"], "diary")
+        self.assertEqual(
+            bot._resolve_receipt_link(self.cid, receipt["token"]), resolved,
+        )
         self.assertIsNone(bot._resolve_receipt_link(self.cid + 1, receipt["token"]))
 
         conn = sqlite3.connect(bot.DB)

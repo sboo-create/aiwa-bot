@@ -12104,6 +12104,12 @@ def _create_receipt_link(cid, mutation, *, user_generation=None):
             "record_id": record_id, "view": "diary"}
 
 def _resolve_receipt_link(cid, token):
+    """Resolve an authenticated navigation hint, intentionally reusable for reloads.
+
+    The token is not authorization: the endpoint binds it to Telegram initData's
+    chat_id and the current lifecycle generation. Keeping it reusable lets the
+    Mini App retry boot/open after a network failure without losing the target.
+    """
     token = str(token or "")
     if not 20 <= len(token) <= 96:
         return None
@@ -12482,6 +12488,35 @@ async def _ai_job_worker(worker_no):
                 ev(job["chat_id"], "ai_job", meta="failed|today_note")
             log.warning("ai job %s worker %s: %s", job["job_id"], worker_no, error)
 
+async def _send_journal_job_notification(job_id, chat_id, text, reply_markup=None):
+    """Retry the only Telegram delivery path and escalate terminal loss."""
+    if not BOT_APP:
+        return False
+    last_error = None
+    for attempt in range(3):
+        try:
+            await BOT_APP.bot.send_message(
+                chat_id, text, reply_markup=reply_markup,
+            )
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                await asyncio.sleep(0.25 * (2 ** attempt))
+    log.error(
+        "journal notification lost: job=%s error=%s",
+        job_id, type(last_error).__name__ if last_error else "unknown",
+    )
+    try:
+        await admin_alert(
+            BOT_APP, "journal_notification",
+            f"Не удалось доставить подтверждение journal job {job_id} после 3 попыток.",
+            cooldown=300,
+        )
+    except Exception:
+        log.exception("journal notification admin alert %s", job_id)
+    return False
+
 async def _journal_job_worker(worker_no):
     """Dedicated write lane: routing latency never turns into a lost mutation."""
     while True:
@@ -12505,15 +12540,12 @@ async def _journal_job_worker(worker_no):
                     _finish_ai_job, job, "superseded", None, "user_inactive"
                 )
                 continue
-            known_intent = payload.get("known_intent") or None
             journal = chat_mutation_route_preflight(
                 job["chat_id"], payload.get("mutation_key")
             )
             if journal:
                 known_intent = journal.get("intent")
                 route = "replay"
-            elif known_intent in _JOURNAL_MUTATION_INTENTS:
-                route = "deterministic"
             else:
                 route_started = time.monotonic()
                 journal = await resolve_semantic_journal_action(
@@ -12570,8 +12602,9 @@ async def _journal_job_worker(worker_no):
                 job["chat_id"], job["generation"]
             ):
                 rows = _journal_result_rows(row(job["chat_id"]), result)
-                await BOT_APP.bot.send_message(
-                    job["chat_id"], result.get("answer") or "Запись обработана.",
+                await _send_journal_job_notification(
+                    job["job_id"], job["chat_id"],
+                    result.get("answer") or "Запись обработана.",
                     reply_markup=InlineKeyboardMarkup(rows) if rows else None,
                 )
         except Exception as exc:
@@ -12597,10 +12630,9 @@ async def _journal_job_worker(worker_no):
                    ms=int((time.monotonic() - started) * 1000),
                    request_id=request_id, user_generation=job["generation"])
                 if notify_due and BOT_APP:
-                    try:
-                        await BOT_APP.bot.send_message(job["chat_id"], failure["answer"])
-                    except Exception:
-                        log.exception("journal failure notification %s", job["job_id"])
+                    await _send_journal_job_notification(
+                        job["job_id"], job["chat_id"], failure["answer"]
+                    )
             log.warning("journal job %s worker %s: %s", job["job_id"], worker_no, error)
 
 def _api_today_lookup(cid):
