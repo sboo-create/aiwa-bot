@@ -11638,6 +11638,13 @@ _AI_JOURNAL_QUEUE_MAX = max(
 _AI_JOURNAL_SYNC_WAIT_SECONDS = max(
     1.0, min(20.0, float(os.environ.get("AIWA_JOURNAL_SYNC_WAIT_SECONDS", "8")))
 )
+_AI_JOURNAL_WORKER_ROUTE_TIMEOUT_SECONDS = max(
+    20.0,
+    min(
+        120.0,
+        float(os.environ.get("AIWA_JOURNAL_WORKER_ROUTE_TIMEOUT_SECONDS", "45")),
+    ),
+)
 _AI_BACKGROUND_CONCURRENCY = max(
     1, _AI_LLM_CONCURRENCY_LIMIT - _AI_CHAT_RESERVED_SLOTS
 )
@@ -12028,7 +12035,7 @@ def _create_receipt_link(cid, mutation):
                        record_id,target_date,view_name,created_at,expires_at)
                VALUES(?,?,?,?,?,?,?,?,?)""",
             (token_hash, cid, generation, kind, str(record_id), target_date,
-             "diary", now.isoformat(), (now + timedelta(days=7)).isoformat()),
+             "diary", now.isoformat(), (now + timedelta(hours=24)).isoformat()),
         )
         c.execute("DELETE FROM receipt_links WHERE expires_at<=?", (now.isoformat(),))
         c.commit()
@@ -12454,7 +12461,8 @@ async def _journal_job_worker(worker_no):
                     job["chat_id"], payload.get("text") or "",
                     user_generation=job["generation"],
                     food_prompt_mode=bool(payload.get("food_prompt_mode")),
-                    route_timeout_s=None, request_id=request_id,
+                    route_timeout_s=_AI_JOURNAL_WORKER_ROUTE_TIMEOUT_SECONDS,
+                    request_id=request_id,
                 )
                 known_intent = (journal or {}).get("intent")
                 route = str((journal or {}).get("route") or "semantic")

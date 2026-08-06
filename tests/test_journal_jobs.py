@@ -77,6 +77,29 @@ class JournalJobTests(unittest.TestCase):
         self.assertEqual(payload, "{}")
         self.assertIn("Записала", saved)
 
+    def test_retry_while_job_is_running_reuses_the_same_durable_identity(self):
+        key = bot.chat_mutation_key("telegram", "running-retry")
+        first = bot._enqueue_journal_job(
+            self.cid, "Вчера съела творог", key,
+            channel="telegram", request_id="running-retry",
+        )
+        claimed = bot._claim_ai_job("journal_mutation")
+        self.assertEqual(claimed["job_id"], first["job_id"])
+
+        retry = bot._enqueue_journal_job(
+            self.cid, "Вчера съела творог", key,
+            channel="telegram", request_id="running-retry",
+        )
+        self.assertEqual(retry["job_id"], first["job_id"])
+        self.assertEqual(retry["status"], "running")
+        conn = sqlite3.connect(bot.DB)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ai_jobs WHERE dedupe_key=?",
+            (bot._journal_job_key(self.cid, bot._user_generation(self.cid), key),),
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 1)
+
     def test_dedicated_worker_completes_verified_food_write(self):
         parsed = {
             "title": "Творог", "grams": 200, "kcal": 240,
@@ -113,6 +136,45 @@ class JournalJobTests(unittest.TestCase):
         self.assertEqual(status["result"]["mutation"]["record_id"], 1)
         self.assertEqual(len(bot.meals_of(self.cid)), 1)
 
+    def test_semantic_worker_uses_a_bounded_long_route_timeout(self):
+        seen = []
+
+        async def resolve(*_args, **kwargs):
+            seen.append(kwargs.get("route_timeout_s"))
+            return {"intent": "logmeal", "food_text": "творог"}
+
+        async def reply(*_args, **_kwargs):
+            return {"answer": "Записала", "suggestions": []}
+
+        async def scenario():
+            old_wake = bot._AI_JOB_WAKE
+            bot._AI_JOB_WAKE = asyncio.Event()
+            try:
+                queued = bot._enqueue_journal_job(
+                    self.cid, "Вчера съела творог",
+                    bot.chat_mutation_key("webchat", "bounded-timeout"),
+                    request_id="bounded-timeout",
+                )
+                worker = asyncio.create_task(bot._journal_job_worker(0))
+                bot._AI_JOB_WAKE.set()
+                for _ in range(100):
+                    status = bot._journal_job_status(self.cid, queued["job_id"])
+                    if status and status["status"] == "completed":
+                        break
+                    await asyncio.sleep(0.02)
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            finally:
+                bot._AI_JOB_WAKE = old_wake
+
+        with (
+            mock.patch.object(bot, "resolve_semantic_journal_action", side_effect=resolve),
+            mock.patch.object(bot, "_chat_reply", side_effect=reply),
+        ):
+            asyncio.run(scenario())
+        self.assertEqual(seen, [bot._AI_JOURNAL_WORKER_ROUTE_TIMEOUT_SECONDS])
+        self.assertGreaterEqual(seen[0], 20)
+
     def test_unambiguous_completed_food_uses_structured_lane(self):
         text = "Вчера вечером съела два яйца и помидоры"
         with mock.patch.object(
@@ -143,6 +205,21 @@ class JournalJobTests(unittest.TestCase):
         self.assertEqual(resolved["date"], "2026-08-05")
         self.assertEqual(resolved["view"], "diary")
         self.assertIsNone(bot._resolve_receipt_link(self.cid + 1, receipt["token"]))
+
+        conn = sqlite3.connect(bot.DB)
+        conn.execute(
+            "UPDATE receipt_links SET expires_at=? WHERE token_hash=?",
+            ("2000-01-01T00:00:00+03:00", bot._hashlib.sha256(
+                receipt["token"].encode("utf-8")
+            ).hexdigest()),
+        )
+        conn.commit(); conn.close()
+        self.assertIsNone(bot._resolve_receipt_link(self.cid, receipt["token"]))
+
+        next_receipt = bot._create_receipt_link(self.cid, mutation)
+        bot.del_user(self.cid)
+        bot._activate_user(self.cid)
+        self.assertIsNone(bot._resolve_receipt_link(self.cid, next_receipt["token"]))
 
     def test_miniapp_consumes_receipt_and_chat_polls_pending_job(self):
         root = Path(__file__).resolve().parents[1]
