@@ -1,0 +1,163 @@
+import asyncio
+import os
+import sqlite3
+import tempfile
+import unittest
+from datetime import timedelta
+from pathlib import Path
+from unittest import mock
+
+
+os.environ.setdefault("BOT_TOKEN", "123456:test-token")
+os.environ.setdefault("AIWA_ANALYTICS_SALT", "test-analytics-salt")
+
+import aiwa_bot as bot
+
+
+class JournalJobTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_db = bot.DB
+        bot.DB = os.path.join(self.tmp.name, "journal-jobs.db")
+        self.cid = 8801
+        bot._activate_user(self.cid)
+        bot.upsert(
+            self.cid,
+            mode="cycle",
+            cycle_len=28,
+            last_period=(bot.dtoday() - timedelta(days=10)).isoformat(),
+            height=168,
+            weight=60,
+            age=30,
+            activity=2,
+        )
+
+    def tearDown(self):
+        bot.DB = self.old_db
+        self.tmp.cleanup()
+
+    def test_journal_job_is_durable_deduplicated_and_kind_isolated(self):
+        key = bot.chat_mutation_key("telegram", "42")
+        first = bot._enqueue_journal_job(
+            self.cid, "Вчера съела творог", key,
+            channel="telegram", request_id="42", notify=True,
+        )
+        second = bot._enqueue_journal_job(
+            self.cid, "Вчера съела творог", key,
+            channel="telegram", request_id="42", notify=True,
+        )
+        bot._enqueue_today_job(self.cid)
+
+        self.assertEqual(first["job_id"], second["job_id"])
+        claimed = bot._claim_ai_job("journal_mutation")
+        self.assertEqual(claimed["job_id"], first["job_id"])
+        self.assertEqual(claimed["kind"], "journal_mutation")
+        today = bot._claim_ai_job("today_note")
+        self.assertIsNotNone(today)
+        self.assertEqual(today["kind"], "today_note")
+
+    def test_completed_journal_result_remains_pollable_but_payload_is_redacted(self):
+        key = bot.chat_mutation_key("webchat", "abc")
+        queued = bot._enqueue_journal_job(
+            self.cid, "Съела яблоко", key, request_id="abc",
+        )
+        job = bot._claim_ai_job("journal_mutation")
+        result = {"answer": "Записала", "completed": True}
+        bot._finish_ai_job(job, "completed", result)
+
+        status = bot._journal_job_status(self.cid, queued["job_id"])
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["result"], result)
+        conn = sqlite3.connect(bot.DB)
+        payload, saved = conn.execute(
+            "SELECT payload_json,result_json FROM ai_jobs WHERE job_id=?",
+            (queued["job_id"],),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(payload, "{}")
+        self.assertIn("Записала", saved)
+
+    def test_dedicated_worker_completes_verified_food_write(self):
+        parsed = {
+            "title": "Творог", "grams": 200, "kcal": 240,
+            "protein": 32, "fat": 10, "carbs": 6,
+        }
+
+        async def scenario():
+            old_wake = bot._AI_JOB_WAKE
+            bot._AI_JOB_WAKE = asyncio.Event()
+            try:
+                queued = bot._enqueue_journal_job(
+                    self.cid, "Запиши 200 г творога",
+                    bot.chat_mutation_key("webchat", "worker-1"),
+                    request_id="worker-1", known_intent="logmeal",
+                )
+                worker = asyncio.create_task(bot._journal_job_worker(0))
+                bot._AI_JOB_WAKE.set()
+                for _ in range(100):
+                    status = bot._journal_job_status(self.cid, queued["job_id"])
+                    if status and status["status"] == "completed":
+                        break
+                    await asyncio.sleep(0.02)
+                else:
+                    self.fail("journal worker did not complete")
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+                return status
+            finally:
+                bot._AI_JOB_WAKE = old_wake
+
+        with mock.patch.object(bot.L, "analyze_food_text", return_value=parsed):
+            status = asyncio.run(scenario())
+        self.assertIn("Записала", status["result"]["answer"])
+        self.assertEqual(status["result"]["mutation"]["record_id"], 1)
+        self.assertEqual(len(bot.meals_of(self.cid)), 1)
+
+    def test_unambiguous_completed_food_uses_structured_lane(self):
+        text = "Вчера вечером съела два яйца и помидоры"
+        with mock.patch.object(
+            bot.L, "classify_journal_event",
+            side_effect=AssertionError("universal classifier must be skipped"),
+        ):
+            plan = asyncio.run(bot.resolve_semantic_journal_action(
+                self.cid, text, route_timeout_s=None,
+            ))
+        self.assertEqual(plan["intent"], "logmeal")
+        self.assertEqual(plan["route"], "structured")
+        self.assertEqual(plan["food_text"], text)
+
+    def test_receipt_token_is_opaque_scoped_and_opens_exact_record(self):
+        mutation = {"kind": "food", "record_id": 91, "date": "2026-08-05"}
+        receipt = bot._create_receipt_link(self.cid, mutation)
+        self.assertGreaterEqual(len(receipt["token"]), 40)
+        self.assertRegex(receipt["token"], r"^[A-Za-z0-9_-]+$")
+        with mock.patch.object(bot, "AIWA_WEBAPP_URL", "https://app.example.test/"):
+            url = bot.campaign_webapp_url(bot.row(self.cid), open_token=receipt["token"])
+        self.assertIn("?open=", url)
+        self.assertNotIn("date=", url)
+        self.assertNotIn("record", url)
+
+        resolved = bot._resolve_receipt_link(self.cid, receipt["token"])
+        self.assertEqual(resolved["tab"], "food")
+        self.assertEqual(resolved["record_id"], "91")
+        self.assertEqual(resolved["date"], "2026-08-05")
+        self.assertEqual(resolved["view"], "diary")
+        self.assertIsNone(bot._resolve_receipt_link(self.cid + 1, receipt["token"]))
+
+    def test_miniapp_consumes_receipt_and_chat_polls_pending_job(self):
+        root = Path(__file__).resolve().parents[1]
+        host = (root / "webapp2" / "index.html").read_text(encoding="utf-8")
+        food = (root / "frontend" / "src" / "aiwa" / "screens" / "FoodScreen.jsx").read_text(encoding="utf-8")
+        panel = (root / "frontend" / "src" / "aiwa" / "panels" / "FoodDiaryPanel.jsx").read_text(encoding="utf-8")
+        chat = (root / "frontend" / "src" / "aiwa" / "screens" / "ChatScreen.jsx").read_text(encoding="utf-8")
+
+        self.assertIn("/api/open_receipt", host)
+        self.assertIn("aiwaConsumeOpenReceipt", host)
+        self.assertIn('setPanel("diary")', food)
+        self.assertIn("focusMealId", panel)
+        self.assertIn("request_id: turnId", chat)
+        self.assertIn("/api/journal_job", chat)
+
+
+if __name__ == "__main__":
+    unittest.main()

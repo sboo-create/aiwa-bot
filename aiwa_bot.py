@@ -257,12 +257,15 @@ def campaign_id(kind):
     """Stable, non-sensitive daily campaign id for push attribution."""
     kind = re.sub(r"[^a-z0-9_:-]", "", str(kind or "push").lower())[:40] or "push"
     return f"{kind}:{dtoday().isoformat()}"
-def campaign_webapp_url(u, campaign=None, tab=None):
+def campaign_webapp_url(u, campaign=None, tab=None, open_token=None):
     url = webapp_url(u) or AIWA_WEBAPP_URL
     if not url: return None
     params = []
     if campaign: params.append("campaign=" + _urlquote(str(campaign)[:80], safe=":_-"))
     if tab: params.append("tab=" + _urlquote(str(tab)[:20], safe="_-"))
+    if open_token:
+        # Opaque capability only: never put dates, record ids or health data in URLs.
+        params.append("open=" + _urlquote(str(open_token)[:96], safe="_-"))
     if not params: return url
     return url + ("&" if "?" in url else "?") + "&".join(params)
 def menu_kb_for(u, general=False):
@@ -526,6 +529,18 @@ def _migrate_db_on_connection(c):
         expires_at TEXT,
         reported_cost REAL DEFAULT 0
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS receipt_links(
+        token_hash TEXT PRIMARY KEY,
+        chat_id INTEGER NOT NULL,
+        user_generation INTEGER NOT NULL DEFAULT 0,
+        kind TEXT NOT NULL,
+        record_id TEXT,
+        target_date TEXT,
+        view_name TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        opened_at TEXT
+    )""")
     c.execute("""CREATE TABLE IF NOT EXISTS food_assets(
         canonical_id TEXT NOT NULL,
         style_version TEXT NOT NULL,
@@ -629,6 +644,7 @@ def _migrate_db_on_connection(c):
                 "CREATE INDEX IF NOT EXISTS ix_prepared_summary_date ON prepared_summaries(summary_date)",
                 "CREATE INDEX IF NOT EXISTS ix_ai_jobs_pick ON ai_jobs(status,priority,available_at,created_at)",
                 "CREATE INDEX IF NOT EXISTS ix_ai_jobs_user_kind ON ai_jobs(chat_id,kind,created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_receipt_links_user ON receipt_links(chat_id,created_at)",
                 "CREATE INDEX IF NOT EXISTS ix_food_asset_jobs_pick ON food_asset_jobs(status,available_at,created_at)",
                 "CREATE INDEX IF NOT EXISTS ix_food_asset_attempts_started ON food_asset_attempts(started_at)"):
         try: c.execute(_ix)
@@ -1949,7 +1965,8 @@ def del_user(cid):
     c = db()
     for t in ("users", "cycles", "logs", "chat_log", "intimacy", "sugg", "events", "meals", "workouts",
               "proactive_log", "proactive_state", "memory", "referrals", "push_deliveries",
-              "prepared_summaries", "feedback_requests", "chat_mutations", "ai_jobs", "day_cache"):
+              "prepared_summaries", "feedback_requests", "chat_mutations", "ai_jobs",
+              "receipt_links", "day_cache"):
         c.execute(f"DELETE FROM {t} WHERE chat_id=?", (cid,))  # nosec B608
     c.execute("DELETE FROM partners WHERE woman_id=? OR partner_id=?", (cid, cid))
     A2.delete_user(c, cid)
@@ -3950,6 +3967,7 @@ def _semantic_update_clarification(
 
 async def resolve_semantic_journal_action(
     cid, text, user_generation=None, food_prompt_mode=False,
+    route_timeout_s="default", request_id=None,
 ):
     """Распознаёт естественное журналирование без привязки к порядку конкретных слов."""
     context = _journal_recent_context(cid)
@@ -3993,6 +4011,33 @@ async def resolve_semantic_journal_action(
         and not _semantic_journal_candidate(text, context, enable_v2=v2)
     ):
         return None
+    # Safe structured lane for a single, unambiguous completed event.  It skips
+    # the universal classifier but still uses the domain extractor and every
+    # verify-after-write/idempotency guard below.
+    raw = str(text or "").strip()
+    simple_safe = bool(
+        completed_signal
+        and _JOURNAL_PAST_DAY_RE.search(raw)
+        and len(set(re.findall(
+            r"\b(завтрак\w*|обед\w*|ужин\w*|перекус\w*|полдник\w*)\b",
+            raw.casefold(), re.I,
+        ))) <= 1
+        and _semantic_source_subject_safe(raw)
+        and not _JOURNAL_SEMANTIC_HARD_BLOCK_RE.search(raw)
+        and not _JOURNAL_CORRECTION_RE.search(raw)
+        and not is_question_like(raw)
+        and "\n" not in raw and "\r" not in raw
+    )
+    food_done = bool(_JOURNAL_FOOD_COMPLETED_RE.search(raw))
+    workout_done = bool(
+        _JOURNAL_WORKOUT_COMPLETED_RE.search(raw)
+        and not _JOURNAL_WORKOUT_NEGATED_RE.search(raw)
+    )
+    if simple_safe and food_done and not workout_done:
+        ev(cid, "journal_action_planned", meta="logmeal|structured",
+           request_id=request_id, user_generation=user_generation)
+        return {"intent": "logmeal", "food_text": raw, "source_text": raw,
+                "route": "structured"}
     segments = _journal_explicit_meal_segments(text) if v2 else []
     if segments:
         plans = await asyncio.gather(*(
@@ -4021,20 +4066,24 @@ async def resolve_semantic_journal_action(
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     usage = []
     try:
-        timeout_s = max(
-            3.0,
-            min(30.0, float(os.environ.get("AIWA_JOURNAL_ROUTE_TIMEOUT_SECONDS") or "15")),
+        route_call = llm_to_thread(
+            cid, "journal_route", L.classify_journal_event, text, usage, context,
+            v2, user_generation=generation, request_id=request_id,
         )
-        classified = await asyncio.wait_for(
-            llm_to_thread(
-                cid, "journal_route", L.classify_journal_event, text, usage, context,
-                v2,
-                user_generation=generation,
-            ),
-            timeout=timeout_s,
-        )
+        if route_timeout_s is None:
+            classified = await route_call
+        else:
+            if route_timeout_s == "default":
+                configured_timeout = (
+                    os.environ.get("AIWA_JOURNAL_ROUTE_TIMEOUT_SECONDS") or "15"
+                )
+            else:
+                configured_timeout = route_timeout_s
+            timeout_s = max(3.0, min(30.0, float(configured_timeout)))
+            classified = await asyncio.wait_for(route_call, timeout=timeout_s)
     except asyncio.TimeoutError:
-        ev(cid, "journal_route_failed", meta="timeout", user_generation=generation)
+        ev(cid, "journal_route_failed", meta="timeout", request_id=request_id,
+           user_generation=generation)
         return {"intent": "journalunavailable", "reason": "timeout"}
     except Exception as exc:
         log.warning("journal route %s: %s", cid, exc)
@@ -4568,7 +4617,6 @@ def sugg_kb(cid, items, app_user=None, app_label=None, feedback_id=None, campaig
     rows = [[B(_short(t), f"q:{add_sugg(cid,t)}")] for t in items[:2]]
     if app_user and AIWA_WEBAPP_URL:
         app_tab = {
-            "Открыть дневник": "food",
             "Открыть питание": "food",
             "Открыть нагрузку": "train",
         }.get(app_label)
@@ -6255,7 +6303,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         wu = campaign_webapp_url(u, tab="food")
         if wu and result.get("record_ids"):
             rows.append([
-                InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu)),
+                InlineKeyboardButton("Открыть питание", web_app=WebAppInfo(url=wu)),
             ])
         return await msg.reply_text(
             result["text"],
@@ -6276,7 +6324,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
             wu = campaign_webapp_url(u, tab="food")
             if wu:
-                rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
+                rows.append([InlineKeyboardButton("Открыть питание", web_app=WebAppInfo(url=wu))])
         return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
     if intent == "updatemeal":
         await context.bot.send_chat_action(cid, "typing")
@@ -6292,7 +6340,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
             wu = campaign_webapp_url(u, tab="food")
             if wu:
-                rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
+                rows.append([InlineKeyboardButton("Открыть питание", web_app=WebAppInfo(url=wu))])
         return await msg.reply_text(result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
     if intent == "movemealslot":
         await context.bot.send_chat_action(cid, "typing")
@@ -8397,6 +8445,7 @@ async def on_voice(update, context):
         return
     cid = update.effective_chat.id; txt = None; _sti = {}
     generation = _user_generation(cid)
+    request_id = str(getattr(update, "update_id", "") or "") or None
     await context.bot.send_chat_action(cid, "typing")
     try:
         f = await context.bot.get_file(update.message.voice.file_id)
@@ -8406,10 +8455,10 @@ async def on_voice(update, context):
         log.warning("voice: %s", e)
     if not _user_write_allowed(cid, generation):
         return await update.message.reply_text("Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start.")
-    if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1)
+    if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1, request_id=request_id)
     if not txt:
         return await update.message.reply_text("Не разобрала голосовое, попробуй ещё раз или напиши текстом.")
-    ev(cid, "voice", n=len(txt))
+    ev(cid, "voice", n=len(txt), request_id=request_id)
     await update.message.reply_text(f"🎙 Расслышала: «{txt}»")
     _VOICE_TURN[cid] = True          # спросили голосом — ответим текстом и голосом
     sent_texts = []
@@ -8512,7 +8561,7 @@ async def _on_photo_bounded(update, context):
     mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
     rows = [[B("🗑 Убрать из дневника", f"mdel:{mid}")]]
     wu = campaign_webapp_url(u, tab="food")
-    if wu: rows.append([InlineKeyboardButton("Открыть дневник", web_app=WebAppInfo(url=wu))])
+    if wu: rows.append([InlineKeyboardButton("Открыть питание", web_app=WebAppInfo(url=wu))])
     await update.message.reply_text(food_card(rec), reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
 
 async def handle_text(update, context, txt):
@@ -8822,10 +8871,32 @@ async def handle_text(update, context, txt):
         _turn_generation = _user_generation(cid)
         _intent = match_intent(txt)
         _journal = None
-        if _intent not in _JOURNAL_MUTATION_INTENTS:
-            _telegram_mutation_key = chat_mutation_key(
-                "telegram", getattr(update, "update_id", None),
+        _telegram_request_id = str(getattr(update, "update_id", "") or "")
+        _telegram_mutation_key = chat_mutation_key("telegram", _telegram_request_id)
+        _queued_candidate, _known_intent = _journal_queue_candidate(cid, txt, _intent)
+        journal_runtime_ready = _journal_workers_ready()
+        if _queued_candidate and journal_runtime_ready:
+            _submitted = await _submit_journal_mutation(
+                cid, txt, _telegram_mutation_key, channel="telegram",
+                request_id=_telegram_request_id, notify=True,
+                known_intent=_known_intent,
             )
+            if _submitted["status"] == "completed":
+                _result = _submitted["result"]
+                _rows = _journal_result_rows(u, _result)
+                return await update.message.reply_text(
+                    _result.get("answer") or "Запись обработана.",
+                    reply_markup=InlineKeyboardMarkup(_rows) if _rows else None,
+                )
+            if _submitted["status"] == "pending":
+                return await update.message.reply_text(
+                    "Разбираю и сохраняю запись. Можно продолжать пользоваться Айвой — пришлю подтверждение, когда запись появится."
+                )
+            _result = _submitted.get("result") or {}
+            return await update.message.reply_text(
+                _result.get("answer") or "Не получилось надёжно обработать запись. Попробуй ещё раз позже."
+            )
+        if _intent not in _JOURNAL_MUTATION_INTENTS:
             _journal = chat_mutation_route_preflight(cid, _telegram_mutation_key)
             if not _journal:
                 _journal = await resolve_semantic_journal_action(
@@ -9209,10 +9280,11 @@ async def load_logger(app):
                 await admin_alert(app, "broadcast_queue",
                     f"Очередь рассылки выросла до {q}. Возможно, модель или Telegram тормозит.", cooldown=600)
             ai_threshold = int(os.environ.get("AIWA_ALERT_TODAY_Q", "1200"))
-            if ai_jobs.get("queued", 0) >= ai_threshold:
+            today_queued = ai_jobs.get("today_note_queued", 0)
+            if today_queued >= ai_threshold:
                 await admin_alert(
                     app, "today_queue",
-                    f"Очередь персональных сводок выросла до {ai_jobs['queued']}. "
+                    f"Очередь персональных сводок выросла до {today_queued}. "
                     "Обычные экраны продолжают обслуживаться, новые сводки получают fallback.",
                     cooldown=600,
                 )
@@ -9277,6 +9349,7 @@ async def traction_worker():
 
 async def on_startup(app):
     global BOT_USERNAME, BCAST_Q, FOOD_Q, TRAIN_Q, _AI_JOB_WAKE, _AI_JOB_TASKS
+    global _JOURNAL_JOB_TASKS
     global _AI_BACKGROUND_SEM, _FOOD_VISION_SEM, _FOOD_VISION_WAITERS
     global _FOOD_ASSET_CANDIDATES, _FOOD_ASSET_TASKS, _FOOD_ASSET_EXECUTOR
     # Fail before scheduling/sending anything if the boundary protecting real
@@ -9328,8 +9401,13 @@ async def on_startup(app):
         asyncio.create_task(_ai_job_worker(i), name=f"aiwa-today-worker-{i}")
         for i in range(_AI_TODAY_WORKERS)
     ]
+    _JOURNAL_JOB_TASKS = [
+        asyncio.create_task(_journal_job_worker(i), name=f"aiwa-journal-worker-{i}")
+        for i in range(_AI_JOURNAL_WORKERS)
+    ]
     _AI_JOB_WAKE.set()
     log.info("durable today workers started: %d", _AI_TODAY_WORKERS)
+    log.info("durable journal workers started: %d", _AI_JOURNAL_WORKERS)
     loaded_assets = await asyncio.to_thread(_load_generated_food_assets)
     if FA.generation_enabled() or SA.generation_enabled():
         import concurrent.futures
@@ -11515,11 +11593,22 @@ async def _shutdown_food_asset_workers():
     _FOOD_ASSET_EXECUTOR = None
     if executor is not None:
         executor.shutdown(wait=False, cancel_futures=True)
+
+async def _shutdown_ai_job_workers():
+    global _AI_JOB_TASKS, _JOURNAL_JOB_TASKS
+    tasks = [*_AI_JOB_TASKS, *_JOURNAL_JOB_TASKS]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _AI_JOB_TASKS = []
+    _JOURNAL_JOB_TASKS = []
 # Сводка дня в мини-аппе: кэш на день, чтобы апп открывался сразу, а не ждал модель.
 _TODAY_CACHE = {}
 _TODAY_CACHE_REVISION = {}
 _AI_JOB_WAKE = None
 _AI_JOB_TASKS = []
+_JOURNAL_JOB_TASKS = []
 _AI_JOB_COMPLETIONS = deque(maxlen=200)
 _AI_LLM_CONCURRENCY_LIMIT = max(
     1, min(64, int(os.environ.get("AIWA_LLM_CONCURRENCY", "8")))
@@ -11538,6 +11627,16 @@ _AI_TODAY_WORKERS = max(
         int(os.environ.get("AIWA_TODAY_CONCURRENCY", "6")),
         _AI_LLM_CONCURRENCY_LIMIT - _AI_CHAT_RESERVED_SLOTS,
     ),
+)
+_AI_JOURNAL_WORKERS = max(
+    1, min(16, int(os.environ.get("AIWA_JOURNAL_WORKERS", "3")))
+)
+_AI_JOURNAL_QUEUE_MAX = max(
+    _AI_JOURNAL_WORKERS,
+    min(3000, int(os.environ.get("AIWA_JOURNAL_QUEUE_MAX", "1000"))),
+)
+_AI_JOURNAL_SYNC_WAIT_SECONDS = max(
+    1.0, min(20.0, float(os.environ.get("AIWA_JOURNAL_SYNC_WAIT_SECONDS", "8")))
 )
 _AI_BACKGROUND_CONCURRENCY = max(
     1, _AI_LLM_CONCURRENCY_LIMIT - _AI_CHAT_RESERVED_SLOTS
@@ -11757,19 +11856,252 @@ def _enqueue_today_job(cid, _caller_u=None, _caller_st=None):
         "generation": generation, "payload": payload,
     }
 
-def _claim_ai_job():
-    now = datetime.now(TZ).isoformat()
+def _journal_job_key(cid, generation, mutation_key):
+    raw = f"{cid}:{generation}:{mutation_key}"
+    return "journal:" + _hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
+
+def _enqueue_journal_job(cid, text, mutation_key, *, channel="webapp",
+                         known_intent=None, notify=False, request_id=None,
+                         food_prompt_mode=False):
+    """Durably accept one journal mutation before any model call starts."""
+    if not mutation_key:
+        return {"status": "rejected", "reason": "missing_request_id"}
+    generation = _user_generation(cid)
+    now_dt = datetime.now(TZ)
+    now = now_dt.isoformat()
+    expires = (now_dt + timedelta(hours=24)).isoformat()
+    dedupe_key = _journal_job_key(cid, generation, mutation_key)
+    payload = {
+        "text": str(text or "")[:2000],
+        "mutation_key": str(mutation_key)[:160],
+        "channel": str(channel or "webapp")[:24],
+        "known_intent": str(known_intent or "")[:40] or None,
+        "notify": bool(notify),
+        "notify_not_before": (
+            now_dt + timedelta(seconds=_AI_JOURNAL_SYNC_WAIT_SECONDS)
+        ).isoformat() if notify else None,
+        "request_id": str(request_id or "")[:96] or None,
+        "food_prompt_mode": bool(food_prompt_mode),
+    }
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        existing = c.execute(
+            """SELECT job_id,status,attempts,result_json,created_at,started_at,
+                      finished_at,last_error_class
+               FROM ai_jobs WHERE dedupe_key=?""",
+            (dedupe_key,),
+        ).fetchone()
+        if not existing:
+            active = c.execute(
+                """SELECT COUNT(*) FROM ai_jobs
+                   WHERE kind='journal_mutation' AND status IN ('queued','running')"""
+            ).fetchone()[0]
+            if int(active or 0) >= _AI_JOURNAL_QUEUE_MAX:
+                c.rollback()
+                return {"status": "rejected", "reason": "queue_full"}
+            job_id = "journal_" + secrets.token_hex(16)
+            c.execute(
+                """INSERT INTO ai_jobs(
+                       job_id,chat_id,user_generation,kind,dedupe_key,priority,status,
+                       payload_json,created_at,available_at,expires_at)
+                   VALUES(?,?,?,?,?,10,'queued',?,?,?,?)""",
+                (job_id, cid, generation, "journal_mutation", dedupe_key,
+                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                 now, now, expires),
+            )
+            existing = (job_id, "queued", 0, None, now, None, None, None)
+        c.commit()
+    finally:
+        c.close()
+    return {
+        "job_id": existing[0], "status": existing[1],
+        "attempts": int(existing[2] or 0),
+        "result": json.loads(existing[3]) if existing[3] else None,
+        "created_at": existing[4], "started_at": existing[5],
+        "finished_at": existing[6], "error": existing[7],
+        "deduped": existing[1] != "queued" or bool(existing[2]),
+        "generation": generation, "kind": "journal_mutation",
+    }
+
+def _journal_job_status(cid, job_id=None, mutation_key=None):
+    c = db()
+    try:
+        if job_id:
+            row_ = c.execute(
+                """SELECT job_id,status,result_json,attempts,last_error_class,
+                          created_at,started_at,finished_at,user_generation
+                   FROM ai_jobs WHERE chat_id=? AND kind='journal_mutation' AND job_id=?""",
+                (cid, str(job_id)),
+            ).fetchone()
+        elif mutation_key:
+            row_ = c.execute(
+                """SELECT job_id,status,result_json,attempts,last_error_class,
+                          created_at,started_at,finished_at,user_generation
+                   FROM ai_jobs WHERE chat_id=? AND kind='journal_mutation' AND dedupe_key=?""",
+                (cid, _journal_job_key(cid, _user_generation(cid), mutation_key)),
+            ).fetchone()
+        else:
+            row_ = None
+    finally:
+        c.close()
+    if not row_ or int(row_[8] or 0) != _user_generation(cid):
+        return None
+    return {
+        "job_id": row_[0], "status": row_[1],
+        "result": json.loads(row_[2]) if row_[2] else None,
+        "attempts": int(row_[3] or 0), "error": row_[4],
+        "created_at": row_[5], "started_at": row_[6], "finished_at": row_[7],
+    }
+
+def _enable_journal_job_notification(job_id):
     c = db()
     try:
         c.execute("BEGIN IMMEDIATE")
         row_ = c.execute(
-            """SELECT job_id,chat_id,user_generation,kind,payload_json,attempts
-               FROM ai_jobs
-               WHERE status='queued' AND available_at<=?
-                 AND (expires_at IS NULL OR expires_at>?)
-               ORDER BY priority ASC,created_at ASC LIMIT 1""",
-            (now, now),
+            """SELECT payload_json FROM ai_jobs
+               WHERE job_id=? AND kind='journal_mutation'
+                 AND status IN ('queued','running')""",
+            (str(job_id),),
         ).fetchone()
+        if not row_:
+            c.commit()
+            return False
+        payload = json.loads(row_[0] or "{}")
+        payload["notify"] = True
+        payload["notify_not_before"] = datetime.now(TZ).isoformat()
+        c.execute(
+            "UPDATE ai_jobs SET payload_json=? WHERE job_id=?",
+            (json.dumps(payload, ensure_ascii=False, separators=(",", ":")), str(job_id)),
+        )
+        c.commit()
+        return True
+    finally:
+        c.close()
+
+def _journal_job_notification_due(job_id):
+    c = db()
+    try:
+        row_ = c.execute(
+            "SELECT payload_json FROM ai_jobs WHERE job_id=?",
+            (str(job_id),),
+        ).fetchone()
+    finally:
+        c.close()
+    if not row_:
+        return False
+    try:
+        payload = json.loads(row_[0] or "{}")
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        payload.get("notify")
+        and str(payload.get("notify_not_before") or "") <= datetime.now(TZ).isoformat()
+    )
+
+async def _wait_journal_job(cid, job_id, timeout_s=None):
+    deadline = time.monotonic() + float(timeout_s or _AI_JOURNAL_SYNC_WAIT_SECONDS)
+    while time.monotonic() < deadline:
+        status = await asyncio.to_thread(_journal_job_status, cid, job_id)
+        if not status or status.get("status") in {"completed", "failed", "expired", "superseded"}:
+            return status
+        await asyncio.sleep(0.15)
+    return await asyncio.to_thread(_journal_job_status, cid, job_id)
+
+def _create_receipt_link(cid, mutation):
+    if not isinstance(mutation, dict):
+        return None
+    kind = str(mutation.get("kind") or "")
+    tab = "food" if kind.startswith("food") else ("train" if kind.startswith("workout") else "")
+    record_id = mutation.get("record_id")
+    target_date = str(mutation.get("date") or "")
+    if not tab or not record_id or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", target_date):
+        return None
+    token = secrets.token_urlsafe(32)
+    token_hash = _hashlib.sha256(token.encode("utf-8")).hexdigest()
+    generation = _user_generation(cid)
+    now = datetime.now(TZ)
+    c = db()
+    try:
+        c.execute(
+            """INSERT INTO receipt_links(token_hash,chat_id,user_generation,kind,
+                       record_id,target_date,view_name,created_at,expires_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (token_hash, cid, generation, kind, str(record_id), target_date,
+             "diary", now.isoformat(), (now + timedelta(days=7)).isoformat()),
+        )
+        c.execute("DELETE FROM receipt_links WHERE expires_at<=?", (now.isoformat(),))
+        c.commit()
+    finally:
+        c.close()
+    return {"token": token, "tab": tab, "date": target_date,
+            "record_id": record_id, "view": "diary"}
+
+def _resolve_receipt_link(cid, token):
+    token = str(token or "")
+    if not 20 <= len(token) <= 96:
+        return None
+    token_hash = _hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = datetime.now(TZ).isoformat()
+    c = db()
+    try:
+        row_ = c.execute(
+            """SELECT user_generation,kind,record_id,target_date,view_name,expires_at
+               FROM receipt_links WHERE token_hash=? AND chat_id=?""",
+            (token_hash, cid),
+        ).fetchone()
+        if not row_ or int(row_[0] or 0) != _user_generation(cid) or row_[5] <= now:
+            return None
+        c.execute("UPDATE receipt_links SET opened_at=? WHERE token_hash=?", (now, token_hash))
+        c.commit()
+    finally:
+        c.close()
+    tab = "food" if str(row_[1]).startswith("food") else "train"
+    return {"ok": True, "tab": tab, "record_id": row_[2],
+            "date": row_[3], "view": row_[4] or "diary"}
+
+def _journal_result_rows(u, result):
+    rows = []
+    mutations = list(result.get("mutations") or [])
+    if result.get("mutation"):
+        mutations.insert(0, result["mutation"])
+    seen = set()
+    for mutation in mutations:
+        kind = str((mutation or {}).get("kind") or "")
+        record_id = (mutation or {}).get("record_id")
+        identity = (kind, str(record_id))
+        if not record_id or identity in seen:
+            continue
+        seen.add(identity)
+        if kind.startswith("food"):
+            rows.append([B("🗑 Убрать из дневника", f"mdel:{record_id}")])
+        elif kind.startswith("workout"):
+            rows.append([B("🗑 Убрать тренировку", f"wdel:{record_id}")])
+    receipt = result.get("receipt") or {}
+    target_url = campaign_webapp_url(
+        u, open_token=receipt.get("token")
+    ) if receipt else None
+    if target_url:
+        rows.append([InlineKeyboardButton(
+            "Открыть запись в дневнике", web_app=WebAppInfo(url=target_url),
+        )])
+    return rows
+
+def _claim_ai_job(kind="today_note"):
+    now = datetime.now(TZ).isoformat()
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        sql = """SELECT job_id,chat_id,user_generation,kind,payload_json,attempts
+                 FROM ai_jobs
+                 WHERE status='queued' AND available_at<=?
+                   AND (expires_at IS NULL OR expires_at>?)"""
+        args = [now, now]
+        if kind:
+            sql += " AND kind=?"
+            args.append(str(kind))
+        sql += " ORDER BY priority ASC,created_at ASC LIMIT 1"
+        row_ = c.execute(sql, tuple(args)).fetchone()
         if not row_:
             c.commit()
             return None
@@ -11805,10 +12137,17 @@ def _recover_ai_jobs():
                  AND expires_at IS NOT NULL AND expires_at<=?""",
             (now, now),
         )
+        # Today-note output is copied into the day cache and can be redacted.
+        # Journal receipts must remain pollable until their short expiry.
         c.execute(
-            """UPDATE ai_jobs
-               SET payload_json='{}',result_json=NULL
-               WHERE status IN ('completed','failed','expired','superseded')"""
+            """UPDATE ai_jobs SET payload_json='{}',result_json=NULL
+               WHERE kind='today_note'
+                 AND status IN ('completed','failed','expired','superseded')"""
+        )
+        c.execute(
+            """UPDATE ai_jobs SET payload_json='{}'
+               WHERE kind='journal_mutation'
+                 AND status IN ('completed','failed','expired','superseded')"""
         )
         c.execute(
             """DELETE FROM ai_jobs
@@ -11829,6 +12168,10 @@ def _ai_job_status_counts():
                 "SELECT status,COUNT(*) FROM ai_jobs GROUP BY status"
             ).fetchall()
         }
+        for kind, status, count in c.execute(
+            "SELECT kind,status,COUNT(*) FROM ai_jobs GROUP BY kind,status"
+        ).fetchall():
+            counts[f"{kind}_{status}"] = int(count)
         counts["active"] = counts.get("queued", 0) + counts.get("running", 0)
         return counts
     finally:
@@ -11845,6 +12188,21 @@ def _finish_ai_job(job, status, result=None, error=None, retry_delay=0):
                    SET status='queued',available_at=?,started_at=NULL,last_error_class=?
                    WHERE job_id=?""",
                 (available, str(error or "error")[:48], job["job_id"]),
+            )
+        elif job.get("kind") == "journal_mutation":
+            c.execute(
+                """UPDATE ai_jobs
+                   SET status=?,payload_json='{}',result_json=?,
+                       last_error_class=?,finished_at=?
+                   WHERE job_id=?""",
+                (
+                    status,
+                    json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+                    if result is not None else None,
+                    str(error or "")[:48] or None,
+                    now.isoformat(),
+                    job["job_id"],
+                ),
             )
         else:
             c.execute(
@@ -12058,6 +12416,123 @@ async def _ai_job_worker(worker_no):
                 ev(job["chat_id"], "ai_job", meta="failed|today_note")
             log.warning("ai job %s worker %s: %s", job["job_id"], worker_no, error)
 
+async def _journal_job_worker(worker_no):
+    """Dedicated write lane: routing latency never turns into a lost mutation."""
+    while True:
+        job = await asyncio.to_thread(_claim_ai_job, "journal_mutation")
+        if not job:
+            try:
+                await asyncio.wait_for(_AI_JOB_WAKE.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                pass
+            if _AI_JOB_WAKE is not None:
+                _AI_JOB_WAKE.clear()
+            continue
+        started = time.monotonic()
+        payload = job["payload"]
+        request_id = payload.get("request_id") or job["job_id"]
+        try:
+            if not await asyncio.to_thread(
+                _user_write_allowed, job["chat_id"], job["generation"]
+            ):
+                await asyncio.to_thread(
+                    _finish_ai_job, job, "superseded", None, "user_inactive"
+                )
+                continue
+            known_intent = payload.get("known_intent") or None
+            journal = chat_mutation_route_preflight(
+                job["chat_id"], payload.get("mutation_key")
+            )
+            if journal:
+                known_intent = journal.get("intent")
+                route = "replay"
+            elif known_intent in _JOURNAL_MUTATION_INTENTS:
+                route = "deterministic"
+            else:
+                route_started = time.monotonic()
+                journal = await resolve_semantic_journal_action(
+                    job["chat_id"], payload.get("text") or "",
+                    user_generation=job["generation"],
+                    food_prompt_mode=bool(payload.get("food_prompt_mode")),
+                    route_timeout_s=None, request_id=request_id,
+                )
+                known_intent = (journal or {}).get("intent")
+                route = str((journal or {}).get("route") or "semantic")
+                ev(job["chat_id"], "journal_job_stage",
+                   meta=f"routed|{route}",
+                   ms=int((time.monotonic() - route_started) * 1000),
+                   request_id=request_id, user_generation=job["generation"])
+            if not known_intent:
+                result = {"answer": "Не увидела однозначной записи для дневника.",
+                          "suggestions": []}
+            elif known_intent == "journalunavailable":
+                raise RuntimeError("route_unavailable")
+            else:
+                result = await _chat_reply(
+                    job["chat_id"], row(job["chat_id"]), payload.get("text") or "",
+                    user_generation=job["generation"],
+                    mutation_key=payload.get("mutation_key"),
+                    require_mutation_key=True, channel=payload.get("channel") or "bot",
+                    journal_override=journal, intent_override=known_intent,
+                    request_id=request_id,
+                )
+            receipt_mutation = result.get("mutation")
+            if not (receipt_mutation or {}).get("record_id"):
+                receipt_mutation = next(
+                    (item for item in (result.get("mutations") or [])
+                     if (item or {}).get("record_id")),
+                    receipt_mutation,
+                )
+            receipt = _create_receipt_link(job["chat_id"], receipt_mutation)
+            if receipt:
+                result["receipt"] = receipt
+            result["route"] = route
+            result["job_id"] = job["job_id"]
+            result["completed"] = True
+            notify_due = await asyncio.to_thread(
+                _journal_job_notification_due, job["job_id"]
+            )
+            await asyncio.to_thread(_finish_ai_job, job, "completed", result)
+            elapsed = int((time.monotonic() - started) * 1000)
+            ev(job["chat_id"], "ai_job", meta=f"completed|journal_mutation|{route}",
+               ms=elapsed, request_id=request_id, user_generation=job["generation"])
+            if notify_due and BOT_APP and _user_write_allowed(
+                job["chat_id"], job["generation"]
+            ):
+                rows = _journal_result_rows(row(job["chat_id"]), result)
+                await BOT_APP.bot.send_message(
+                    job["chat_id"], result.get("answer") or "Запись обработана.",
+                    reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+                )
+        except Exception as exc:
+            error = type(exc).__name__
+            if "route_unavailable" in str(exc):
+                error = "route_unavailable"
+            if job["attempts"] < _AI_JOB_MAX_ATTEMPTS:
+                await asyncio.to_thread(
+                    _finish_ai_job, job, "queued", None, error, 2 ** job["attempts"]
+                )
+                if _AI_JOB_WAKE is not None:
+                    _AI_JOB_WAKE.set()
+            else:
+                failure = {
+                    "answer": "Не получилось надёжно обработать запись. Ничего не задвоилось; попробуй ещё раз позже.",
+                    "suggestions": ["Открыть питание"], "completed": True,
+                }
+                notify_due = await asyncio.to_thread(
+                    _journal_job_notification_due, job["job_id"]
+                )
+                await asyncio.to_thread(_finish_ai_job, job, "failed", failure, error)
+                ev(job["chat_id"], "ai_job", meta=f"failed|journal_mutation|{error}",
+                   ms=int((time.monotonic() - started) * 1000),
+                   request_id=request_id, user_generation=job["generation"])
+                if notify_due and BOT_APP:
+                    try:
+                        await BOT_APP.bot.send_message(job["chat_id"], failure["answer"])
+                    except Exception:
+                        log.exception("journal failure notification %s", job["job_id"])
+            log.warning("journal job %s worker %s: %s", job["job_id"], worker_no, error)
+
 def _api_today_lookup(cid):
     u = row(cid)
     if not is_onboarded(u):
@@ -12147,6 +12622,63 @@ async def _api_today(request):
         job = dict(job, status="superseded", result=None)
     return _cors(web.json_response(_today_job_fallback(st, job)))
 
+def _journal_queue_candidate(cid, msg, intent=None):
+    intent = intent or match_intent(msg)
+    if intent in _JOURNAL_MUTATION_INTENTS:
+        return True, intent
+    context = _journal_recent_context(cid)
+    return bool(_semantic_journal_candidate(
+        msg, context, enable_v2=journal_v2_enabled(cid)
+    )), None
+
+def _journal_workers_ready():
+    return bool(_AI_JOB_WAKE is not None and any(
+        not task.done() for task in _JOURNAL_JOB_TASKS
+    ))
+
+async def _submit_journal_mutation(cid, msg, mutation_key, *, channel,
+                                   request_id=None, notify=False,
+                                   known_intent=None, food_prompt_mode=False):
+    job = await asyncio.to_thread(
+        _enqueue_journal_job, cid, msg, mutation_key, channel=channel,
+        known_intent=known_intent, notify=False, request_id=request_id,
+        food_prompt_mode=food_prompt_mode,
+    )
+    status = job.get("status")
+    ev(cid, "ai_job", meta=f"{'deduped' if job.get('deduped') else 'accepted'}|journal_mutation",
+       request_id=request_id, user_generation=job.get("generation"))
+    if status == "rejected":
+        return {"status": "rejected", "reason": job.get("reason")}
+    if _AI_JOB_WAKE is not None:
+        _AI_JOB_WAKE.set()
+    if status == "completed" and job.get("result"):
+        return {"status": "completed", "job_id": job["job_id"],
+                "result": job["result"]}
+    final = await _wait_journal_job(cid, job["job_id"])
+    if final and final.get("status") == "completed" and final.get("result"):
+        return {"status": "completed", "job_id": job["job_id"],
+                "result": final["result"]}
+    if final and final.get("status") == "failed":
+        return {"status": "failed", "job_id": job["job_id"],
+                "result": final.get("result")}
+    if notify:
+        enabled = await asyncio.to_thread(
+            _enable_journal_job_notification, job["job_id"]
+        )
+        if not enabled:
+            final = await asyncio.to_thread(
+                _journal_job_status, cid, job["job_id"]
+            )
+            if final and final.get("status") == "completed" and final.get("result"):
+                return {"status": "completed", "job_id": job["job_id"],
+                        "result": final["result"]}
+            if final and final.get("status") == "failed":
+                return {"status": "failed", "job_id": job["job_id"],
+                        "result": final.get("result")}
+    ev(cid, "ai_job", meta="pending|journal_mutation",
+       request_id=request_id, user_generation=job.get("generation"))
+    return {"status": "pending", "job_id": job["job_id"]}
+
 async def _api_chat(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
@@ -12164,13 +12696,38 @@ async def _api_chat(request):
                 "suggestions": ["Что съесть сегодня?", "Собери тренировку"],
             }))
         return _cors(web.json_response({"answer": "Я тут. Напиши вопрос про цикл, питание, нагрузку или самочувствие.", "suggestions": ["Когда овуляция?", "Что есть сегодня?"]}))
-    ev(cid, "user_message", meta="webapp", n=len(msg))
-    reply = await _chat_reply(
-        cid, u, msg, user_generation=generation,
-        mutation_key=chat_mutation_key("webchat", body.get("request_id")),
-        require_mutation_key=True,
-        channel="webapp",
-    )
+    request_id = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(body.get("request_id") or ""))[:96]
+    ev(cid, "user_message", meta="webapp", n=len(msg), request_id=request_id or None)
+    queued, known_intent = _journal_queue_candidate(cid, msg)
+    if queued and _journal_workers_ready():
+        submitted = await _submit_journal_mutation(
+            cid, msg, chat_mutation_key("webchat", request_id), channel="webapp",
+            request_id=request_id, known_intent=known_intent,
+        )
+        if submitted["status"] == "completed":
+            reply = submitted["result"]
+        elif submitted["status"] == "failed":
+            reply = submitted.get("result") or {
+                "answer": "Не получилось надёжно обработать запись. Попробуй ещё раз позже.",
+                "suggestions": ["Открыть питание"],
+            }
+        elif submitted["status"] == "pending":
+            reply = {
+                "answer": "Разбираю и сохраняю запись. Можно закрыть чат — обработка продолжится.",
+                "suggestions": [], "pending": True,
+                "job": {"id": submitted["job_id"], "status": "pending"},
+            }
+        else:
+            reply = {
+                "answer": "Не стала менять дневник без надёжного идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                "suggestions": ["Открыть питание"],
+            }
+    else:
+        reply = await _chat_reply(
+            cid, u, msg, user_generation=generation,
+            mutation_key=chat_mutation_key("webchat", request_id),
+            require_mutation_key=True, channel="webapp", request_id=request_id or None,
+        )
     reply = guard_chat_payload(cid, reply)
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
@@ -12178,6 +12735,33 @@ async def _api_chat(request):
     answer_id = _instrument_feedback_prompt(cid, reply.get("answer"), "webapp")
     reply["answer_id"] = answer_id
     return _cors(web.json_response(reply))
+
+async def _api_journal_job(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid:
+        return _cors(web.json_response({"error": "auth"}, status=401))
+    status = await asyncio.to_thread(
+        _journal_job_status, cid, body.get("job_id"),
+        chat_mutation_key("webchat", body.get("request_id"))
+        if body.get("request_id") else None,
+    )
+    if not status:
+        return _cors(web.json_response({"error": "not_found"}, status=404))
+    out = {"job": {"id": status["job_id"], "status": status["status"],
+                   "attempts": status["attempts"]}}
+    if status.get("result"):
+        out.update(status["result"])
+    return _cors(web.json_response(out))
+
+async def _api_open_receipt(request):
+    body = await request.json(); cid = _verify_init(body.get("initData", ""))
+    if not cid:
+        return _cors(web.json_response({"error": "auth"}, status=401))
+    target = await asyncio.to_thread(_resolve_receipt_link, cid, body.get("token"))
+    if not target:
+        return _cors(web.json_response({"error": "expired_or_invalid"}, status=404))
+    ev(cid, "journal_receipt_opened", meta=target["tab"])
+    return _cors(web.json_response(target))
 
 async def _api_feedback(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
@@ -12392,21 +12976,23 @@ async def _memory_learn(cid, umsg, amsg, user_generation=None, assistant_variant
         log.warning("memory_learn: %s", e)
 
 async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
-                      require_mutation_key=False, channel="bot"):
+                      require_mutation_key=False, channel="bot",
+                      journal_override=None, intent_override=None,
+                      request_id=None):
     """Единый ответ чата для текста и голоса. Возвращает dict {answer, suggestions}."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     assistant_variant = _assistant_variant_from_user(u)
-    intent = match_intent(msg)
+    intent = intent_override or match_intent(msg)
     if intent == "current_date":
         answer = current_date_text()
         chatlog_add(cid, "user", msg); chatlog_add(cid, "ai", answer)
         return {"answer": answer, "suggestions": ["Что запланировано сегодня?"]}
-    journal = None
-    if intent not in _JOURNAL_MUTATION_INTENTS:
+    journal = journal_override
+    if journal is None and intent not in _JOURNAL_MUTATION_INTENTS:
         journal = chat_mutation_route_preflight(cid, mutation_key)
         if not journal:
             journal = await resolve_semantic_journal_action(
-                cid, msg, user_generation=generation,
+                cid, msg, user_generation=generation, request_id=request_id,
             )
         if journal:
             intent = journal["intent"]
@@ -12683,6 +13269,7 @@ async def _api_voice(request):
     if not is_onboarded(u):
         return _cors(web.json_response({"answer": "Сначала настрой Айву в боте: /start.", "suggestions": []}, status=403))
     generation = _user_generation(cid)
+    request_id = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(data.get("request_id") or ""))[:96]
     field = data.get("audio")
     raw = b""
     if field is not None:
@@ -12696,18 +13283,37 @@ async def _api_voice(request):
     txt = await llm_to_thread(cid, "stt", L.transcribe, bytes(raw), fn, _sti, user_generation=generation)
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
-    if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1)
+    if _sti: ev(cid, "stt", meta="stt:" + str(_sti.get("provider")), ms=int(_sti.get("ms") or 0), calls=1, request_id=request_id or None)
     if not txt:
         return _cors(web.json_response({"transcript": "", "answer": "Не расслышала, попробуй ещё раз или напиши текстом.", "suggestions": []}))
     ev(cid, "voice", n=len(txt))
     msg, _addr = strip_aiwa_address(txt.strip())
     if not msg: msg = txt.strip()
-    reply = await _chat_reply(
-        cid, u, msg, user_generation=generation,
-        mutation_key=chat_mutation_key("webvoice", data.get("request_id")),
-        require_mutation_key=True,
-        channel="webapp",
-    )
+    queued, known_intent = _journal_queue_candidate(cid, msg)
+    if queued and _journal_workers_ready():
+        submitted = await _submit_journal_mutation(
+            cid, msg, chat_mutation_key("webvoice", request_id),
+            channel="webapp", request_id=request_id, known_intent=known_intent,
+        )
+        if submitted["status"] == "completed":
+            reply = submitted["result"]
+        elif submitted["status"] == "pending":
+            reply = {
+                "answer": "Разбираю и сохраняю запись. Можно закрыть чат — обработка продолжится.",
+                "suggestions": [], "pending": True,
+                "job": {"id": submitted["job_id"], "status": "pending"},
+            }
+        else:
+            reply = (submitted.get("result") or {
+                "answer": "Не получилось надёжно обработать запись. Попробуй ещё раз позже.",
+                "suggestions": ["Открыть питание"],
+            })
+    else:
+        reply = await _chat_reply(
+            cid, u, msg, user_generation=generation,
+            mutation_key=chat_mutation_key("webvoice", request_id),
+            require_mutation_key=True, channel="webapp", request_id=request_id or None,
+        )
     reply = guard_chat_payload(cid, reply)
     if not _user_write_allowed(cid, generation):
         return _cors(web.json_response({"error": "deleted"}, status=409))
@@ -13029,7 +13635,8 @@ def _food_action_success(rec, mid, event_date):
             + "». Напиши, что это было, и я дополню запись."
         )
     return {"ok": True, "text": text_out, "record_id": mid, "rec": rec,
-            "mutation": {"kind": "food", "date": event_date.isoformat()}}
+            "mutation": {"kind": "food", "date": event_date.isoformat(),
+                         "record_id": mid, "slot": slot}}
 
 def _food_update_success(rec, mid, event_date):
     grams = f", примерно {rec['grams']} г" if rec.get("grams") else ""
@@ -13041,7 +13648,8 @@ def _food_update_success(rec, mid, event_date):
     )
     return {
         "ok": True, "text": text_out, "record_id": mid, "rec": rec,
-        "mutation": {"kind": "food_update", "date": event_date.isoformat()},
+        "mutation": {"kind": "food_update", "date": event_date.isoformat(),
+                     "record_id": mid, "slot": rec.get("slot")},
     }
 
 def _workout_action_success(rec, wid, event_date):
@@ -13058,7 +13666,8 @@ def _workout_action_success(rec, wid, event_date):
         "text": f"Записала тренировку{when}: {rec['type']}{suffix}{kcal_note}. Она уже видна в разделе «Нагрузка».",
         "record_id": wid,
         "rec": rec,
-        "mutation": {"kind": "workout", "date": event_date.isoformat()},
+        "mutation": {"kind": "workout", "date": event_date.isoformat(),
+                     "record_id": wid},
     }
 
 def _workout_update_success(rec, wid, event_date):
@@ -13077,7 +13686,8 @@ def _workout_update_success(rec, wid, event_date):
         ),
         "record_id": wid,
         "rec": rec,
-        "mutation": {"kind": "workout_update", "date": event_date.isoformat()},
+        "mutation": {"kind": "workout_update", "date": event_date.isoformat(),
+                     "record_id": wid},
     }
 
 _CHAT_DATE_RE = re.compile(
@@ -15719,6 +16329,7 @@ async def _security_headers(request, handler):
 
 async def _health(request):
     status = 200 if APP_READY else 503
+    job_counts = await asyncio.to_thread(_ai_job_status_counts)
     return web.json_response(
         {
             "status": "ok" if APP_READY else "starting",
@@ -15737,6 +16348,11 @@ async def _health(request):
             "event_writer_dropped": _EVENT_WRITER_DROPPED,
             "ai_workers": sum(1 for task in _AI_JOB_TASKS if not task.done()),
             "ai_worker_limit": _AI_TODAY_WORKERS,
+            "journal_workers": sum(1 for task in _JOURNAL_JOB_TASKS if not task.done()),
+            "journal_worker_limit": _AI_JOURNAL_WORKERS,
+            "journal_queued": job_counts.get("journal_mutation_queued", 0),
+            "journal_running": job_counts.get("journal_mutation_running", 0),
+            "journal_failed": job_counts.get("journal_mutation_failed", 0),
             "llm_concurrency_limit": _AI_LLM_CONCURRENCY_LIMIT,
             "chat_reserved_slots": _AI_CHAT_RESERVED_SLOTS,
             "ai_background_concurrency_limit": _AI_BACKGROUND_CONCURRENCY,
@@ -15810,6 +16426,8 @@ def build_web():
     aio.router.add_post("/api/food-assets/revision", _api_food_asset_revision)
     aio.router.add_post("/api/today", _api_today)
     aio.router.add_post("/api/chat", _api_chat)
+    aio.router.add_post("/api/journal_job", _api_journal_job)
+    aio.router.add_post("/api/open_receipt", _api_open_receipt)
     aio.router.add_post("/api/feedback", _api_feedback)
     aio.router.add_post("/api/voice", _api_voice)
     aio.router.add_post("/api/food_photo", _api_food_photo)
@@ -15916,6 +16534,7 @@ async def run_all():
         # in-flight handlers. This is the explicit SIGINT/SIGTERM deploy path;
         # atexit remains a final fallback only.
         await _shutdown_food_asset_workers()
+        await _shutdown_ai_job_workers()
         for name, shutdown in (
             ("telegram polling", app.updater.stop),
             ("telegram application", app.stop),
