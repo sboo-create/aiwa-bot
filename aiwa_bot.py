@@ -2690,6 +2690,27 @@ _TRAINING_SECTION_INTENT_RE = re.compile(
     re.I,
 )
 
+# Situational qualifiers inside a food-topic message. "Что есть при боли /
+# после анализов / чтобы уменьшить спазмы" is a question about a specific
+# situation: routing it to the pre-built daily menu card would silently drop
+# the actual question (and any red-flag symptom mentioned in it), so such
+# messages must reach the conversational answer path instead. The first group
+# catches the grammatical shape of a condition or purpose clause, so new
+# situations need no new keywords; the word cluster below is a safety net for
+# marker-less phrasings ("болит живот, что поесть").
+_FOOD_QUESTION_CONTEXT_RE = re.compile(
+    r"\b(?:при|после|перед|до|чтобы|если|когда|от|против|вместо|без|из|из-за)\b"
+    r"|\bво\s+время\b|\bна\s+фоне\b|\bна\s+ночь\b|\bнатощак\b"
+    r"|\bдля\b(?!\s+(?:меня|себя|нас)\b)"
+    r"|\b(?:бол(?:ью?|и|ит|ят|ел[аи]?)\b|болезнен\w*|больно\b|тошн\w*|спазм\w*|"
+    r"судорог\w*|мигрен\w*|кровотеч\w*|кровит\b|анализ\w*|температур\w*|"
+    r"отравлен\w*|диаре\w*|понос\w*|запор\w*|изжог\w*|вздути\w*|аллерг\w*|"
+    r"анеми\w*|гемоглобин\w*|желез\w*|диабет\w*|гастрит\w*|язв\w*|беремен\w*|"
+    r"простуд\w*|заболе\w*|болею\b|похмель\w*|похуде\w*|тренировк\w*|"
+    r"месячн\w*|менструац\w*|пмс\b)",
+    re.I,
+)
+
 def match_intent(t):
     raw_t = str(t or "")
     t = t.lower()
@@ -2845,7 +2866,15 @@ def match_intent(t):
     if _TRAINING_SECTION_INTENT_RE.search(t):
         return "training"
     if re.search(r"(мой\s+дневник|дневник\s+питани|что\s+(?:мне\s+)?добрать|добрать\s+.{0,12}(белк|калор|бжу)|сколько\s+.{0,12}(съел|калор|ккал)\s*.{0,10}сегодн|мой\s+калораж|хватает\s+ли\s+.{0,12}(белк|калор)|итог\w*\s*.{0,10}(дн|калор|по\s+еде|бжу)|сколько\s+осталось\s+.{0,12}(калор|ккал|съесть))", t): return "diary"
-    if re.search(r"(что\s+(?:мне\s+|тебе\s+|лучше\s+|полезн\w*\s+|стоит\s+|сейчас\s+|сегодня\s+|можно\s+|бы\s+|такого\s+|нужно\s+)*(?:есть|поесть|съесть|покушать|скушать|кушать|приготовить|готовить)\b(?!\s*(?:ли\b|у\s+мен|в\s+профил|в\s+приложени|в\s+холодильник|дома|интересн|врем|деньг|дела|презентац|отчёт|доклад))|полезн\w*\s+(?:есть|поесть|кушать|съесть)|(?:поесть|покушать|съесть|скушать|кушать)\s+полезн|что\s+(?:есть|поесть)\s+(?:полезн|при\b|для\s|чтобы|на\s+(?:завтрак|обед|ужин|перекус))|какое\s+питани|какая\s+(?:сегодня\s+)?еда|какие\s+(?:мне\s+)?продукт|какие\s+продукты\s+полезн|меню\s+(?:на\s+)?(?:сегодня|день|завтра)|составь\s+меню|подбери\s+меню|обнови\s+меню|дай\s+меню|покажи\s+меню|пересобер\w*\s+меню|чем\s+(?:мне\s+)?(?:сегодня\s+)?питат|как\s+(?:мне\s+)?(?:лучше\s+)?питат|что\s+по\s+(?:еде|питани)|(?:посоветуй|подскажи|дай|хочу|можешь|порекоменду)\w*\s+.{0,24}(?:поесть|съесть|еду|питани|меню|рацион|продукт|блюд)|\bрацион\b|еда\s+на\s+сегодня|что\s+поедим|проголодал|что\s+на\s+(?:завтрак|обед|ужин|перекус))", t): return "food"
+    if re.search(r"(что\s+(?:мне\s+|тебе\s+|лучше\s+|полезн\w*\s+|стоит\s+|сейчас\s+|сегодня\s+|можно\s+|бы\s+|такого\s+|нужно\s+)*(?:есть|поесть|съесть|покушать|скушать|кушать|приготовить|готовить)\b(?!\s*(?:ли\b|у\s+мен|в\s+профил|в\s+приложени|в\s+холодильник|дома|интересн|врем|деньг|дела|презентац|отчёт|доклад))|полезн\w*\s+(?:есть|поесть|кушать|съесть)|(?:поесть|покушать|съесть|скушать|кушать)\s+полезн|что\s+(?:есть|поесть)\s+(?:полезн|при\b|для\s|чтобы|на\s+(?:завтрак|обед|ужин|перекус))|какое\s+питани|какая\s+(?:сегодня\s+)?еда|какие\s+(?:мне\s+)?продукт|какие\s+продукты\s+полезн|меню\s+(?:на\s+)?(?:сегодня|день|завтра)|составь\s+меню|подбери\s+меню|обнови\s+меню|дай\s+меню|покажи\s+меню|пересобер\w*\s+меню|чем\s+(?:мне\s+)?(?:сегодня\s+)?питат|как\s+(?:мне\s+)?(?:лучше\s+)?питат|что\s+по\s+(?:еде|питани)|(?:посоветуй|подскажи|дай|хочу|можешь|порекоменду)\w*\s+.{0,24}(?:поесть|съесть|еду|питани|меню|рацион|продукт|блюд)|\bрацион\b|еда\s+на\s+сегодня|что\s+поедим|проголодал|что\s+на\s+(?:завтрак|обед|ужин|перекус))", t):
+        # Same split as the training section above: a plain menu request opens
+        # the generated daily menu, while a situational question ("что есть
+        # после анализов / чтобы снизить боль") must be answered in
+        # conversation. Callers resolve "food_question" through their regular
+        # free-form answer path; dispatch_intent never receives it.
+        if _FOOD_QUESTION_CONTEXT_RE.search(t):
+            return "food_question"
+        return "food"
     if re.search(r"(календар|покажи цикл|инфограф|какой (у меня )?день цикла|где я в цикле)", t): return "calendar"
     if re.search(r"(проанализир|сделай анализ|^\s*анализ|разбер|оцени мой цикл|что (говор|показыв)\w*.*(данн|цикл|выписк)|анализ (выписк|цикл|данн))", t): return "analysis"
     if re.search(r"(выписк|выпуск|для врача|истори[яю]|отчёт|отчет|справк)", t): return "history"
@@ -8934,6 +8963,14 @@ async def handle_text(update, context, txt):
                 )
             if _journal:
                 _intent = _journal["intent"]
+        if _intent == "food_question":
+            # A situational nutrition question ("что есть после анализов")
+            # needs an answer to the actual wording. dispatch_intent would
+            # render the generated menu card and drop the question, so fall
+            # through to the free-form answer paths below instead.
+            ev(cid, "fallback", meta="food_question_qa",
+               user_generation=_turn_generation)
+            _intent = None
         if _intent:
             return await dispatch_intent(
                 context, update, cid, u, _intent, txt, journal=_journal,
