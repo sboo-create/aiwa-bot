@@ -943,10 +943,13 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
         return None
     cfg = cfgs[0]
     import time as _tt
-    STATS["calls"] += 1
+    queued = False
+    wait_ms = 0
+    wait_started = _tt.time()
     if not _LLM_SEM.acquire(blocking=False):
-        STATS["queued"] += 1
+        queued = True
         _LLM_SEM.acquire()
+    wait_ms = int((_tt.time() - wait_started) * 1000)
     t1 = _tt.time(); ok = False
     try:
         headers = {"Content-Type": "application/json"}
@@ -985,9 +988,10 @@ def call_tools(messages, tools, usage=None, temperature=0.4, max_tokens=900):
         return None
     finally:
         _LLM_SEM.release()
-        STATS["ms"] += int((_tt.time() - t1) * 1000)
-        if not ok:
-            STATS["err"] += 1
+        _record_stats_call(
+            ms=int((_tt.time() - t1) * 1000), error=not ok,
+            wait_ms=wait_ms, queued=queued,
+        )
 
 def _provider_chain(primary):
     """Return the configured provider chain without silently inventing fallbacks."""
@@ -1070,15 +1074,32 @@ def _compact_messages(messages):
 
 # --- метрики нагрузки: считаем вызовы модели и латентность за интервал ---
 STATS = {"calls": 0, "ms": 0, "err": 0, "wait_ms": 0, "queued": 0}
+_STATS_LOCK = threading.Lock()
+
+def _record_stats_call(*, ms, error, wait_ms=0, queued=False):
+    """Record one completed top-level call in a single reporting interval.
+
+    Calls used to be counted before provider I/O while errors were counted
+    after it.  A minute boundary could therefore report more errors than
+    calls.  Completion-time accounting keeps every outcome in one bucket.
+    """
+    with _STATS_LOCK:
+        STATS["calls"] += 1
+        STATS["ms"] += max(0, int(ms or 0))
+        STATS["err"] += int(bool(error))
+        STATS["wait_ms"] += max(0, int(wait_ms or 0))
+        STATS["queued"] += int(bool(queued))
+
 # семафор: не больше N одновременных обращений к модели, остальные ждут в очереди
 _LLM_SEM = threading.Semaphore(int(os.environ.get("AIWA_LLM_CONCURRENCY", "8")))
-def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2):
+def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2,
+          track_stats=True):
     import time as _tt
-    t0 = _tt.time(); STATS["calls"] += 1
+    t0 = _tt.time(); queued = False
     if not _LLM_SEM.acquire(blocking=False):
-        STATS["queued"] += 1
+        queued = True
         _LLM_SEM.acquire()  # ждём свободный слот
-    STATS["wait_ms"] += int((_tt.time() - t0) * 1000)
+    wait_ms = int((_tt.time() - t0) * 1000)
     t1 = _tt.time(); out = None
     try:
         out = _call_impl(messages, max_tokens, temperature, usage, attempts)
@@ -1089,8 +1110,11 @@ def _call(messages, max_tokens=1100, temperature=0.45, usage=None, attempts=2):
         return out
     finally:
         _LLM_SEM.release()
-        STATS["ms"] += int((_tt.time() - t1) * 1000)
-        if not out: STATS["err"] += 1
+        if track_stats:
+            _record_stats_call(
+                ms=int((_tt.time() - t1) * 1000), error=not out,
+                wait_ms=wait_ms, queued=queued,
+            )
 
 def _call_model(messages, model, max_tokens=1100, temperature=0.45, usage=None, attempts=1):
     """Call one explicitly selected proxy model without changing AIWA's main model."""
@@ -1103,12 +1127,13 @@ def _call_model(messages, model, max_tokens=1100, temperature=0.45, usage=None, 
         return _call(messages, max_tokens=max_tokens, temperature=temperature,
                      usage=usage, attempts=attempts)
     import time as _tt
-    STATS["calls"] += 1
+    queued = False
+    wait_ms = 0
     if not _LLM_SEM.acquire(blocking=False):
-        STATS["queued"] += 1
+        queued = True
         wait_started = _tt.time()
         _LLM_SEM.acquire()
-        STATS["wait_ms"] += int((_tt.time() - wait_started) * 1000)
+        wait_ms = int((_tt.time() - wait_started) * 1000)
     started = _tt.time()
     out = None
     try:
@@ -1129,9 +1154,10 @@ def _call_model(messages, model, max_tokens=1100, temperature=0.45, usage=None, 
         return None
     finally:
         _LLM_SEM.release()
-        STATS["ms"] += int((_tt.time() - started) * 1000)
-        if not out:
-            STATS["err"] += 1
+        _record_stats_call(
+            ms=int((_tt.time() - started) * 1000), error=not out,
+            wait_ms=wait_ms, queued=queued,
+        )
 
 def probe_once():
     """Один минимальный вызов к модели В ОБХОД семафора — для замера реальной параллельности тарифа."""
@@ -1145,16 +1171,18 @@ def probe_once():
         return (False, int((_t.time() - t0) * 1000))
 
 def pop_stats():
-    s = dict(STATS)
-    for k in STATS:
-        STATS[k] = 0
-    return s
+    with _STATS_LOCK:
+        s = dict(STATS)
+        for k in STATS:
+            STATS[k] = 0
+        return s
 
 def health_check(usage=None):
     out = _call([
         {"role": "system", "content": "Ты AIWA. Ответь только одним словом на русском."},
         {"role": "user", "content": "Служебная проверка. Ответь: работает"}
-    ], max_tokens=16, temperature=0.1, usage=usage, attempts=1)
+    ], max_tokens=16, temperature=0.1, usage=usage, attempts=1,
+        track_stats=False)
     return bool(out and out.strip()), (out or "").strip()
 
 
