@@ -84,7 +84,11 @@ if [ ${#FAILS[@]} -gt 0 ]; then
     FAIL_STREAK=$((PREV_FAILS + 1))
     NOW_STATUS=$([ "$FAIL_STREAK" -ge 2 ] && echo down || echo flaky)
     if [ "$NOW_STATUS" = "down" ] && [ "$PREV_STATUS" != "down" ]; then
-        MSG="🚨 AIWA DOWN: $(IFS='; '; echo "${FAILS[*]}") — $(now_msk)"
+        if [ ${#FAILS[@]} -eq 1 ] && [ "${FAILS[0]}" = "getMe через relay не проходит" ]; then
+            MSG="⚠️ AIWA DEGRADED: недоступен Telegram relay; приложение и /health проверяются отдельно — $(now_msk)"
+        else
+            MSG="🚨 AIWA DOWN: $(IFS='; '; echo "${FAILS[*]}") — $(now_msk)"
+        fi
         tg_send "$MSG" || logger -t aiwa-alert "alert send failed: $MSG"
         logger -t aiwa-alert "$MSG"
     fi
@@ -92,7 +96,7 @@ else
     NOW_STATUS=up
     FAIL_STREAK=0
     if [ "$PREV_STATUS" = "down" ]; then
-        tg_send "✅ AIWA снова работает — $(now_msk)" || true
+        tg_send "✅ AIWA: проверяемые пути снова работают — $(now_msk)" || true
         logger -t aiwa-alert "recovered"
     fi
     if [ -n "$RESTART_NOTE" ]; then

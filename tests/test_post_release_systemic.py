@@ -737,6 +737,21 @@ class PostReleaseSystemicTests(unittest.TestCase):
         )
         self.assertTrue(image_etag)
 
+    def test_relay_only_failure_is_degraded_not_full_app_down(self):
+        script = Path("deploy/i167/aiwa-alert").read_text(encoding="utf-8")
+        self.assertIn("AIWA DEGRADED: недоступен Telegram relay", script)
+        self.assertIn("[ ${#FAILS[@]} -eq 1 ]", script)
+        self.assertIn('"${FAILS[0]}" = "getMe через relay не проходит"', script)
+        self.assertIn("AIWA DOWN:", script)
+
+    def test_model_alerts_require_enough_completed_calls_and_probe_streak(self):
+        load_source = inspect.getsource(bot.load_logger)
+        probe_source = inspect.getsource(bot.model_probe)
+        self.assertIn('AIWA_ALERT_LLM_MIN_CALLS", "5"', load_source)
+        self.assertIn("calls >= min_calls", load_source)
+        self.assertIn("fail_streak >= 2", probe_source)
+        self.assertIn("model_probe_recovered", probe_source)
+
 
 if __name__ == "__main__":
     unittest.main()

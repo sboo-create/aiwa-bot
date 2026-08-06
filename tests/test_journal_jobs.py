@@ -148,6 +148,31 @@ class JournalJobTests(unittest.TestCase):
         self.assertEqual(rejected, {"status": "rejected", "reason": "chat_queue_full"})
         self.assertEqual(other["status"], "queued")
 
+    def test_same_diary_mutations_are_serial_while_other_users_stay_parallel(self):
+        other_cid = self.cid + 1
+        bot._activate_user(other_cid)
+        first = bot._enqueue_journal_job(
+            self.cid, "Съела яблоко",
+            bot.chat_mutation_key("telegram", "serial-1"),
+        )
+        second = bot._enqueue_journal_job(
+            self.cid, "Съела грушу",
+            bot.chat_mutation_key("telegram", "serial-2"),
+        )
+        other = bot._enqueue_journal_job(
+            other_cid, "Съела банан",
+            bot.chat_mutation_key("telegram", "parallel-other"),
+        )
+
+        claimed_first = bot._claim_ai_job("journal_mutation")
+        claimed_parallel = bot._claim_ai_job("journal_mutation")
+        self.assertEqual(claimed_first["job_id"], first["job_id"])
+        self.assertEqual(claimed_parallel["job_id"], other["job_id"])
+
+        bot._finish_ai_job(claimed_first, "completed", {"answer": "ok"})
+        claimed_second = bot._claim_ai_job("journal_mutation")
+        self.assertEqual(claimed_second["job_id"], second["job_id"])
+
     def test_dedicated_worker_completes_verified_food_write(self):
         parsed = {
             "title": "Творог", "grams": 200, "kcal": 240,

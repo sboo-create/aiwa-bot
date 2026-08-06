@@ -1338,6 +1338,18 @@ def slot_from_text(t):
     if "обед" in t: return "lunch"
     if "ужин" in t: return "dinner"
     if "перекус" in t or "полдник" in t: return "snack"
+    # Relative event time belongs to the event, not to the hour when a delayed
+    # message is processed.  In particular, an early-morning retry describing
+    # "вчера вечером, под ночь" must not become today's breakfast.
+    if re.search(r"\b(?:утром|с\s+утра|на\s+рассвете)\b", t):
+        return "breakfast"
+    if re.search(r"\b(?:дн[её]м|в\s+полдень)\b", t):
+        return "lunch"
+    if re.search(
+        r"\b(?:вечером|к\s+вечеру|поздно\s+вечером|ночью|на\s+ночь|под\s+ночь)\b",
+        t,
+    ):
+        return "dinner"
     return None
 
 def meal_edit(cid, mid, **kw):
@@ -8994,6 +9006,24 @@ async def on_cb(update, context):
     await q.answer()
     # Onboarding has several early returns, so record the tap before routing.
     ev(cid, "suggest" if data.startswith("q:") else "button", meta=data)
+    if data.startswith("jdup:"):
+        result = await asyncio.to_thread(
+            _confirm_semantic_duplicate_meal, cid, data.split(":", 1)[1]
+        )
+        await safe_edit(q, reply_markup=None)
+        rows = []
+        if result.get("ok") and result.get("mutation"):
+            receipt = await asyncio.to_thread(
+                _create_receipt_link, cid, result["mutation"]
+            )
+            payload = {"mutation": result["mutation"]}
+            if receipt:
+                payload["receipt"] = receipt
+            rows = _journal_result_rows(row(cid), payload)
+        return await q.message.reply_text(
+            result.get("text") or "Не получилось подтвердить повтор.",
+            reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+        )
     if data.startswith("pado:"):
         _parts = data.split(":")
         _intent = _parts[-1]
@@ -9296,9 +9326,10 @@ async def load_logger(app):
                 len(all_users(include_synthetic=True)),
             )
             err_threshold = int(os.environ.get("AIWA_ALERT_LLM_ERRS", "2"))
-            if calls and s["err"] >= err_threshold and (s["err"] / calls) >= 0.5:
+            min_calls = int(os.environ.get("AIWA_ALERT_LLM_MIN_CALLS", "5"))
+            if calls >= min_calls and s["err"] >= err_threshold and (s["err"] / calls) >= 0.5:
                 await admin_alert(app, "llm_errors",
-                    f"Модель отвечает нестабильно: ошибок {s['err']} из {calls} вызовов за последнюю минуту.\n"
+                    f"Модель отвечает нестабильно: завершилось с ошибкой {s['err']} из {calls} вызовов за последнюю минуту.\n"
                     f"Средняя задержка: {avg} мс, очередь модели: {wq}.", cooldown=600)
             q_threshold = int(os.environ.get("AIWA_ALERT_BCAST_Q", "250"))
             if q >= q_threshold:
@@ -9331,6 +9362,8 @@ async def model_probe(app):
     if interval <= 0:
         return
     await asyncio.sleep(30)
+    fail_streak = 0
+    degraded = False
     while True:
         usage = []
         ok = False; out = ""
@@ -9338,9 +9371,23 @@ async def model_probe(app):
             ok, out = await asyncio.to_thread(L.health_check, usage)
         except Exception as e:
             out = type(e).__name__
-        if not ok:
+        if ok:
+            fail_streak = 0
+            if degraded:
+                await admin_alert(
+                    app, "model_probe_recovered",
+                    "Путь к модели снова отвечает после двух последовательных сбоев.",
+                    cooldown=0,
+                )
+                degraded = False
+        else:
+            fail_streak += 1
+        if not ok and fail_streak >= 2:
             await admin_alert(app, "model_probe",
-                f"Служебная проверка модели не получила ответ.\nОтвет/ошибка: {out or 'пусто'}", cooldown=600)
+                "Путь к модели деградировал: две последовательные служебные проверки "
+                f"не получили ответ.\nОтвет/ошибка: {out or 'пустой ответ'}",
+                cooldown=600)
+            degraded = True
         await asyncio.sleep(interval)
 
 async def traction_worker():
@@ -12132,8 +12179,57 @@ def _resolve_receipt_link(cid, token):
     return {"ok": True, "tab": tab, "record_id": row_[2],
             "date": row_[3], "view": row_[4] or "diary"}
 
+def _confirm_semantic_duplicate_meal(cid, job_id):
+    """Idempotently copy the exact owned meal approved by a duplicate prompt."""
+    job_id = str(job_id or "")
+    if not re.fullmatch(r"journal_[a-f0-9]{32}", job_id):
+        return {"ok": False, "text": "Подтверждение устарело. Опиши приём ещё раз."}
+    c = db()
+    try:
+        row_ = c.execute(
+            """SELECT user_generation,status,result_json
+               FROM ai_jobs WHERE job_id=? AND chat_id=? AND kind='journal_mutation'""",
+            (job_id, cid),
+        ).fetchone()
+    finally:
+        c.close()
+    if not row_ or row_[1] != "completed" or int(row_[0] or 0) != _user_generation(cid):
+        return {"ok": False, "text": "Подтверждение устарело. Опиши приём ещё раз."}
+    try:
+        result = json.loads(row_[2] or "{}")
+    except (TypeError, ValueError):
+        result = {}
+    candidate = result.get("semantic_duplicate") or {}
+    existing = meal_get(cid, candidate.get("record_id"))
+    if not existing or existing.get("date") != candidate.get("date"):
+        return {"ok": False, "text": "Исходной записи уже нет. Ничего не добавила."}
+    generation = _user_generation(cid)
+    mutation_key = chat_mutation_key("dupconfirm", job_id)
+    args_hash = chat_mutation_args_hash("food", "confirmed:" + job_id)
+    saved = meal_add(
+        cid, existing, d=existing["date"], user_generation=generation,
+        mutation_key=mutation_key, args_hash=args_hash, return_status=True,
+    )
+    if not saved or saved.get("status") in {"mismatch", "reversed"}:
+        return {"ok": False, "text": "Не получилось подтвердить повтор. Ничего не добавила."}
+    verified = meal_get(cid, saved.get("id"))
+    if not verified:
+        return {"ok": False, "text": "Не получилось проверить повторную запись."}
+    if saved.get("created"):
+        ev(cid, "goal", meta="food_log", user_generation=generation)
+        ev(cid, "manual", meta="food_log", user_generation=generation)
+        ev(cid, "journal_semantic_duplicate_confirmed", meta="food",
+           user_generation=generation)
+    return _food_action_success(
+        verified, verified["id"], date.fromisoformat(verified["date"])
+    )
+
 def _journal_result_rows(u, result):
     rows = []
+    duplicate = result.get("semantic_duplicate") or {}
+    job_id = str(result.get("job_id") or "")
+    if duplicate.get("record_id") and re.fullmatch(r"journal_[a-f0-9]{32}", job_id):
+        rows.append([B("Записать ещё раз", f"jdup:{job_id}")])
     mutations = list(result.get("mutations") or [])
     if result.get("mutation"):
         mutations.insert(0, result["mutation"])
@@ -12165,13 +12261,22 @@ def _claim_ai_job(kind="today_note"):
     try:
         c.execute("BEGIN IMMEDIATE")
         sql = """SELECT job_id,chat_id,user_generation,kind,payload_json,attempts
-                 FROM ai_jobs
+                 FROM ai_jobs AS candidate
                  WHERE status='queued' AND available_at<=?
                    AND (expires_at IS NULL OR expires_at>?)"""
         args = [now, now]
         if kind:
             sql += " AND kind=?"
             args.append(str(kind))
+        if kind == "journal_mutation":
+            # Different users stay parallel, but two writes to the same diary
+            # must never pass semantic duplicate checks concurrently.
+            sql += """ AND NOT EXISTS (
+                         SELECT 1 FROM ai_jobs AS active
+                         WHERE active.kind='journal_mutation'
+                           AND active.status='running'
+                           AND active.chat_id=candidate.chat_id
+                     )"""
         sql += " ORDER BY priority ASC,created_at ASC LIMIT 1"
         row_ = c.execute(sql, tuple(args)).fetchone()
         if not row_:
@@ -13289,6 +13394,8 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
         out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
         if result.get("mutation"):
             out["mutation"] = result["mutation"]
+        if result.get("semantic_duplicate"):
+            out["semantic_duplicate"] = result["semantic_duplicate"]
         return out
     if intent == "updatemeal":
         if require_mutation_key and not mutation_key:
@@ -13948,6 +14055,92 @@ def extract_food_log_text(text):
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.:;—-\t")
     return cleaned
 
+def _food_identity_tokens(rec):
+    """Conservative content fingerprint for a same-day duplicate prompt."""
+    labels = [
+        str(item.get("name") or "")
+        for item in (rec.get("items") or [])
+        if isinstance(item, dict) and item.get("name")
+    ] or [str(rec.get("title") or "")]
+    text = " ".join(labels).casefold().replace("ё", "е")
+    stop = {
+        "и", "с", "со", "на", "в", "из", "для", "по", "при",
+        "жареный", "жареная", "жареные", "жареных",
+        "вареный", "вареная", "вареные", "вареных",
+    }
+    return {
+        token for token in re.findall(r"[а-яa-z0-9]+", text)
+        if len(token) > 1 and token not in stop
+    }
+
+def _food_records_look_same(left, right):
+    left_tokens = _food_identity_tokens(left)
+    right_tokens = _food_identity_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = len(left_tokens & right_tokens)
+    union = len(left_tokens | right_tokens)
+    token_match = overlap >= 1 and (overlap / max(1, union)) >= 0.8
+    left_title = re.sub(
+        r"\W+", " ", str(left.get("title") or "").casefold().replace("ё", "е")
+    ).strip()
+    right_title = re.sub(
+        r"\W+", " ", str(right.get("title") or "").casefold().replace("ё", "е")
+    ).strip()
+    title_match = bool(
+        left_title and right_title
+        and SequenceMatcher(None, left_title, right_title).ratio() >= 0.9
+    )
+    left_kcal = max(0, int(left.get("kcal") or 0))
+    right_kcal = max(0, int(right.get("kcal") or 0))
+    kcal_close = (
+        not left_kcal or not right_kcal
+        or abs(left_kcal - right_kcal) / max(left_kcal, right_kcal) <= 0.35
+    )
+    return kcal_close and (token_match or title_match)
+
+def _find_semantic_duplicate_meal(cid, event_date, args_hash, rec=None):
+    """Find a live same-day meal created by equivalent user input/content."""
+    target = event_date.isoformat() if isinstance(event_date, date) else str(event_date)
+    c = db()
+    try:
+        exact = c.execute(
+            """SELECT m.id
+               FROM chat_mutations cm
+               JOIN meals m ON m.chat_id=cm.chat_id AND CAST(m.id AS TEXT)=cm.record_id
+               WHERE cm.chat_id=? AND cm.kind='food' AND cm.args_hash=?
+                 AND cm.reversed_at IS NULL AND m.d=?
+               ORDER BY cm.created_at DESC LIMIT 1""",
+            (cid, args_hash or "", target),
+        ).fetchone()
+    finally:
+        c.close()
+    if exact:
+        return meal_get(cid, exact[0])
+    if not isinstance(rec, dict):
+        return None
+    for existing in reversed(meals_of(cid, target)):
+        if _food_records_look_same(existing, rec):
+            existing = dict(existing)
+            existing["date"] = target
+            return existing
+    return None
+
+def _semantic_duplicate_food_result(existing):
+    slot = SLOT_RU.get(existing.get("slot"), "приёме пищи")
+    return {
+        "ok": False,
+        "semantic_duplicate": {
+            "record_id": existing.get("id"),
+            "date": existing.get("date"),
+        },
+        "text": (
+            f"Похоже, такой приём уже записан в {slot}: "
+            f"{existing.get('title') or 'еда'} — около {existing.get('kcal') or 0} ккал. "
+            "Ничего не добавила. Если это был ещё один такой же приём, нажми «Записать ещё раз»."
+        ),
+    }
+
 async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
                           preparsed_food_text=None, preparsed_slot=None,
                           preparsed_food_record=None):
@@ -13965,15 +14158,20 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
             return _food_action_success(prior["data"], prior.get("id"), saved_date)
         if prior["status"] == "stale":
             return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
+    event_date, date_error = chat_event_date(text, max_past_days=31)
+    if date_error:
+        return {"ok": False, "text": "Не стала записывать: укажи сегодняшнюю дату или один из последних 31 дней."}
+    duplicate = _find_semantic_duplicate_meal(cid, event_date, args_hash)
+    if duplicate:
+        ev(cid, "journal_semantic_duplicate", meta="food|exact",
+           user_generation=generation)
+        return _semantic_duplicate_food_result(duplicate)
     ev(cid, "flow_start", meta="food")
     slot = (
         preparsed_slot
         if preparsed_slot in {"breakfast", "lunch", "snack", "dinner"}
         else slot_from_text(text)
     )
-    event_date, date_error = chat_event_date(text, max_past_days=31)
-    if date_error:
-        return {"ok": False, "text": "Не стала записывать: укажи сегодняшнюю дату или один из последних 31 дней."}
     food = str(preparsed_food_text or "").strip()[:500] or extract_food_log_text(text)
     if not food:
         return {"ok": False, "text": "Не поняла, что добавить. Напиши, например «200 г творога, запиши»."}
@@ -13995,6 +14193,13 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «200 г творога 5%, запиши»."}
     rec["slot"] = slot or slot_for_now()
     rec["slot_guessed"] = not bool(slot)
+    duplicate = _find_semantic_duplicate_meal(
+        cid, event_date, args_hash, rec=rec,
+    )
+    if duplicate:
+        ev(cid, "journal_semantic_duplicate", meta="food|content",
+           user_generation=generation)
+        return _semantic_duplicate_food_result(duplicate)
     saved = meal_add(
         cid, rec, d=event_date.isoformat(), user_generation=generation, mutation_key=mutation_key,
         args_hash=args_hash, return_status=True,

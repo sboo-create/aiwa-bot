@@ -701,6 +701,97 @@ class ChatJournalActionTests(unittest.TestCase):
         self.assertEqual(len(bot.meals_of(self.cid)), 1)
         analyze.assert_called_once()
 
+    def test_same_day_semantic_duplicate_requires_idempotent_confirmation(self):
+        text = (
+            "Вчера вечером, уже под ночь, съела 2 жареных яйца на масле "
+            "подсолнечном и 2 помидорки с половинкой маленького батона."
+        )
+        parsed = {
+            "title": "Яичница с помидорами и батоном",
+            "grams": 320,
+            "kcal": 445,
+            "protein": 18,
+            "fat": 26,
+            "carbs": 32,
+            "items": [
+                {"name": "Яйца", "kcal": 180},
+                {"name": "Подсолнечное масло", "kcal": 90},
+                {"name": "Помидоры", "kcal": 35},
+                {"name": "Батон", "kcal": 140},
+            ],
+        }
+        with mock.patch.object(bot.L, "analyze_food_text", return_value=parsed) as analyze:
+            first = asyncio.run(bot.log_food_action(
+                self.cid, bot.row(self.cid), text,
+                mutation_key=bot.chat_mutation_key("telegram", "first-message"),
+            ))
+            duplicate = asyncio.run(bot.log_food_action(
+                self.cid, bot.row(self.cid), text,
+                mutation_key=bot.chat_mutation_key("telegram", "second-message"),
+            ))
+
+        target = (bot.dtoday() - timedelta(days=1)).isoformat()
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["rec"]["slot"], "dinner")
+        self.assertFalse(first["rec"]["slot_guessed"])
+        self.assertFalse(duplicate["ok"])
+        self.assertEqual(duplicate["semantic_duplicate"]["record_id"], first["record_id"])
+        self.assertIn("Ничего не добавила", duplicate["text"])
+        self.assertEqual(len(bot.meals_of(self.cid, target)), 1)
+        analyze.assert_called_once()
+
+        queued = bot._enqueue_journal_job(
+            self.cid, text, bot.chat_mutation_key("telegram", "confirmation-prompt"),
+            channel="telegram", request_id="confirmation-prompt",
+        )
+        job = bot._claim_ai_job("journal_mutation")
+        prompt_result = {
+            "answer": duplicate["text"],
+            "semantic_duplicate": duplicate["semantic_duplicate"],
+            "job_id": queued["job_id"],
+            "completed": True,
+        }
+        bot._finish_ai_job(job, "completed", prompt_result)
+        rows = bot._journal_result_rows(bot.row(self.cid), prompt_result)
+        self.assertEqual(rows[0][0].callback_data, f"jdup:{queued['job_id']}")
+
+        confirmed = bot._confirm_semantic_duplicate_meal(self.cid, queued["job_id"])
+        replay = bot._confirm_semantic_duplicate_meal(self.cid, queued["job_id"])
+        meals = bot.meals_of(self.cid, target)
+        self.assertTrue(confirmed["ok"])
+        self.assertTrue(replay["ok"])
+        self.assertEqual(len(meals), 2)
+        self.assertEqual({meal["kcal"] for meal in meals}, {445})
+        self.assertEqual({meal["slot"] for meal in meals}, {"dinner"})
+
+    def test_similar_rewording_is_confirmed_instead_of_silently_inserted(self):
+        first_record = {
+            "title": "Творог с бананом",
+            "grams": 250,
+            "kcal": 310,
+            "protein": 28,
+            "fat": 8,
+            "carbs": 34,
+            "items": [{"name": "Творог"}, {"name": "Банан"}],
+        }
+        second_record = dict(first_record, title="Банан с творогом", kcal=325)
+        with mock.patch.object(
+            bot.L, "analyze_food_text", side_effect=[first_record, second_record],
+        ):
+            first = asyncio.run(bot.log_food_action(
+                self.cid, bot.row(self.cid), "Сегодня съела творог с бананом",
+                mutation_key=bot.chat_mutation_key("telegram", "wording-1"),
+            ))
+            second = asyncio.run(bot.log_food_action(
+                self.cid, bot.row(self.cid), "Сегодня был банан вместе с творогом",
+                mutation_key=bot.chat_mutation_key("telegram", "wording-2"),
+                preparsed_food_text="банан вместе с творогом",
+            ))
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertIn("semantic_duplicate", second)
+        self.assertEqual(len(bot.meals_of(self.cid)), 1)
+
     def test_food_update_is_owned_idempotent_and_reversed_with_the_record(self):
         original = bot.normalize_food({
             "title": "Чипсы", "grams": 150, "kcal": 795,
