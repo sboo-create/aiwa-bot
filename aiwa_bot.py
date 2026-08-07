@@ -174,7 +174,7 @@ L.set_usage_sink(lambda record: A2.persist_llm_call(DB, record))
 AIWA_ADMIN = os.environ.get("AIWA_ADMIN")
 DISCLAIMER = "AIWA не ставит диагнозы; при тревожных симптомах обратись к гинекологу."
 AIWA_VERSION = os.environ.get(
-    "AIWA_VERSION", "2026-07-29-v180-cx-day-diary"
+    "AIWA_VERSION", "2026-08-07-v181-log-review"
 )
 print("AIWA_VERSION:", AIWA_VERSION)  # видно в service logs при старте
 
@@ -8568,7 +8568,7 @@ async def on_voice(update, context):
         _SPOKEN_COLLECTOR.reset(collector_token)
         _VOICE_TURN.pop(cid, None)   # чтобы флаг не протёк на следующий текстовый вопрос
 
-def food_card(rec, added=True):
+def food_card(rec, added=True, review=""):
     conf = {"low": "низкая", "medium": "средняя", "high": "высокая"}.get(rec.get("confidence"), "средняя")
     head = f"🍽 <b>{html.escape(rec['title'])}</b>"
     if rec.get("grams"): head += f" · ~{rec['grams']} г"
@@ -8578,7 +8578,9 @@ def food_card(rec, added=True):
         g = f" {it['grams']} г" if it.get("grams") else ""
         lines.append(f"• {html.escape(it['name'])}{g} — {it['kcal']} ккал")
     if rec.get("note"): lines.append(f"<i>{html.escape(rec['note'])}</i>")
-    lines.append(f"\nОценка примерная (точность {conf})." + (" Добавила в дневник — итоги дня в приложении." if added else ""))
+    if review:
+        lines.append("\n" + html.escape(review.strip()))
+    lines.append(f"\nОценка примерная (точность {conf})." + (" Запись уже в разделе «Питание»." if added else ""))
     return "\n".join(lines)
 
 async def on_photo(update, context):
@@ -8644,10 +8646,19 @@ async def _on_photo_bounded(update, context):
         except Exception: pass
         return await update.message.reply_text("Не разобрала фото 🙈 Сфоткай ближе и светлее, либо напиши текстом." + (("\n\n⚙️ " + _e) if _e else ""))
     mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
+    # Карточка уходит сразу с коротким разбором; полный LLM-разбор догонит
+    # отдельным сообщением и не держит слот распознавания фото.
+    review = _food_short_analysis(rec)
+    try:
+        review += _food_day_context_line(cid, dtoday(), rec.get("slot"))
+    except Exception as exc:
+        log.warning("photo day context %s: %s", cid, exc)
+    _spawn_log_review(cid, u, "food_review", L.food_log_review,
+                      _food_review_facts(rec, cid, dtoday()), generation)
     rows = [[B("🗑 Убрать из дневника", f"mdel:{mid}")]]
     wu = campaign_webapp_url(u, tab="food")
     if wu: rows.append([InlineKeyboardButton("Открыть питание", web_app=WebAppInfo(url=wu))])
-    await update.message.reply_text(food_card(rec), reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
+    await update.message.reply_text(food_card(rec, review=review), reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
 
 async def handle_text(update, context, txt):
     cid = update.effective_chat.id; u = row(cid); state = u["state"] if u else None
@@ -12304,7 +12315,7 @@ def _confirm_semantic_duplicate_meal(cid, job_id):
         ev(cid, "journal_semantic_duplicate_confirmed", meta="food",
            user_generation=generation)
     return _food_action_success(
-        verified, verified["id"], date.fromisoformat(verified["date"])
+        verified, verified["id"], date.fromisoformat(verified["date"]), cid=cid
     )
 
 def _journal_result_rows(u, result):
@@ -13965,7 +13976,163 @@ def _food_short_analysis(rec):
         body = "это небольшой вклад в дневной рацион; итог лучше оценивать по всему дню"
     return "Короткий разбор: " + body + "."
 
-def _food_action_success(rec, mid, event_date):
+def _food_day_numbers(cid, event_date):
+    """(съедено ккал, цель ккал, съедено белка, цель белка) или None без профиля.
+
+    Только для сегодняшних записей: советовать по прошедшему дню поздно.
+    """
+    p = profile_of(row(cid))
+    if not p or event_date != dtoday():
+        return None
+    totals = _diary_totals_from_meals(meals_of(cid, event_date.isoformat()))
+    goal_kcal, goal_prot = profile_kcal(p)[:2]
+    if goal_kcal <= 0:
+        return None
+    return (int(round(totals["kcal"])), goal_kcal,
+            int(round(totals["protein"])), goal_prot)
+
+def _food_day_context_line(cid, event_date, slot=None):
+    """Детерминированный итог дня + не больше одной рекомендации по остатку.
+
+    Фолбэк, когда LLM-разбор недоступен: подтверждение остаётся полезным,
+    просто короче.
+    """
+    nums = _food_day_numbers(cid, event_date)
+    if not nums:
+        return ""
+    kcal, goal_kcal, prot, goal_prot = nums
+    out = f" Итог дня: {kcal} из ~{goal_kcal} ккал, белка {prot} из ~{goal_prot} г."
+    left = goal_kcal - kcal
+    evening = slot == "dinner" or slot_for_now() == "dinner"
+    if left < -goal_kcal * 0.05:
+        out += (" По калориям сегодня перебор — не компенсируй голодом, "
+                "просто вернись к обычному ритму со следующего приёма.")
+    elif evening and prot < goal_prot * 0.7:
+        out += (f" Белка к вечеру маловато — на ужин хорошо зайдут творог, рыба "
+                f"или яйца, нужно добрать ещё ~{max(10, goal_prot - prot)} г.")
+    elif 0 <= left <= goal_kcal * 0.15:
+        out += (" Дневной запас почти израсходован; если захочется есть — "
+                "выбирай лёгкий белок или овощи.")
+    return out
+
+def _food_review_facts(rec, cid, event_date):
+    """Факты для LLM-разбора приёма: продукты, КБЖУ, итог дня, ограничения."""
+    items = "; ".join(
+        str(i.get("name") or "").strip() + (f" {i['grams']} г" if i.get("grams") else "")
+        for i in (rec.get("items") or []) if str(i.get("name") or "").strip()
+    ) or str(rec.get("title") or "приём пищи")
+    slot = SLOT_RU.get(rec.get("slot") or "", "приём")
+    facts = (
+        f"Записанный приём ({slot}): {items}. "
+        f"КБЖУ записи: {int(rec.get('kcal') or 0)} ккал, "
+        f"белки {round(rec.get('protein') or 0)} г, жиры {round(rec.get('fat') or 0)} г, "
+        f"углеводы {round(rec.get('carbs') or 0)} г."
+    )
+    nums = _food_day_numbers(cid, event_date)
+    if nums:
+        facts += (f" Итог дня с учётом записи: {nums[0]} из ~{nums[1]} ккал, "
+                  f"белка {nums[2]} из ~{nums[3]} г.")
+    p = profile_of(row(cid))
+    if p and p.get("diet"):
+        facts += f" Ограничения питания: {diet_human(p['diet'])}."
+    return facts
+
+def _workout_review_facts(rec):
+    """Факты для LLM-разбора тренировки: тип, длительность, тяжесть, упражнения."""
+    parts = [str(rec.get("type") or "Тренировка")]
+    if rec.get("duration"):
+        parts.append(str(rec["duration"]))
+    if rec.get("rpe"):
+        parts.append(str(rec["rpe"]) + " по ощущениям")
+    facts = "Записанная тренировка: " + ", ".join(parts) + "."
+    if rec.get("kcal"):
+        facts += f" Потрачено примерно {int(rec['kcal'])} ккал."
+    names = [str(i.get("name") or "").strip()
+             for i in (rec.get("items") or []) if str(i.get("name") or "").strip()]
+    if names:
+        facts += " Упражнения: " + ", ".join(names[:8]) + "."
+    return facts
+
+async def _llm_log_review(cid, u, purpose, fn, facts, generation=None):
+    """Best-effort вызов LLM-разбора: жёсткий таймаут, любая ошибка -> None.
+
+    Разбор — дополнение к подтверждению; он не имеет права задерживать или
+    ломать сам чек записи, поэтому у вызывающего кода всегда есть фолбэк.
+    """
+    if os.environ.get("AIWA_LOG_REVIEW_LLM", "1") != "1":
+        return None
+    usage = []
+    male = bool((profile_of(u) or {}).get("male"))
+    try:
+        out = await asyncio.wait_for(
+            llm_to_thread(cid, purpose, fn, facts, usage, male,
+                          user_generation=generation,
+                          assistant_variant=_assistant_variant_from_user(u)),
+            timeout=12,
+        )
+    except Exception as exc:
+        log.warning("%s %s: %s", purpose, cid, exc)
+        out = None
+    if usage:
+        ev(cid, "tokens", sum(usage), meta=purpose, calls=len(usage), usage=usage,
+           user_generation=generation)
+    out = str(out or "").strip()
+    # Слишком короткий или неправдоподобно длинный ответ — не разбор, а мусор.
+    return out if 40 <= len(out) <= 900 else None
+
+_REVIEW_DAILY_CAP = int(os.environ.get("AIWA_LOG_REVIEW_DAILY_CAP", "15") or 15)
+_REVIEW_TASKS = set()
+# Глобальная крышка на одновременные фоновые разборы: сверх неё лишние
+# просто ждут своей очереди, не занимая тред-пул LLM-вызовов.
+_REVIEW_SEM = asyncio.Semaphore(int(os.environ.get("AIWA_LOG_REVIEW_CONCURRENCY", "4") or 4))
+
+def _review_quota_take(cid):
+    """Списывает одну единицу дневного лимита LLM-разборов; False — лимит исчерпан.
+
+    Запись еды — самое частое действие, поэтому у разбора есть потолок стоимости.
+    """
+    try:
+        used = int(dc_get(cid, "logrvw") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    if used >= _REVIEW_DAILY_CAP:
+        return False
+    dc_put(cid, "logrvw", used + 1)
+    return True
+
+def _spawn_log_review(cid, u, purpose, fn, facts, generation=None):
+    """Разбор не задерживает подтверждение записи: генерим фоном, шлём вдогонку.
+
+    Подтверждение уходит мгновенно с детерминированным разбором; когда модель
+    успевает — приходит отдельное сообщение с полным разбором. Ошибки и лимиты
+    здесь молчаливые: чек записи уже у пользователя.
+    """
+    if BOT_APP is None or os.environ.get("AIWA_LOG_REVIEW_LLM", "1") != "1":
+        return
+    if not _review_quota_take(cid):
+        return
+
+    async def _run():
+        try:
+            async with _REVIEW_SEM:
+                # Данные могли быть удалены, пока задача ждала очереди:
+                # проверяем до платного вызова, а не только перед отправкой.
+                if not _user_write_allowed(cid, generation):
+                    return
+                review = await _llm_log_review(cid, u, purpose, fn, facts, generation)
+            if review and _user_write_allowed(cid, generation):
+                await BOT_APP.bot.send_message(cid, review)
+        except Exception as exc:
+            log.warning("log review followup %s: %s", cid, exc)
+
+    try:
+        task = asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        return
+    _REVIEW_TASKS.add(task)
+    task.add_done_callback(_REVIEW_TASKS.discard)
+
+def _food_action_success(rec, mid, event_date, cid=None, review=None):
     slot = rec.get("slot") or slot_for_now()
     sm = SLOT_RU.get(slot, "приём")
     grams = f", примерно {rec['grams']} г" if rec.get("grams") else ""
@@ -13976,7 +14143,17 @@ def _food_action_success(rec, mid, event_date):
         f"(Б{round(rec['protein'])} Ж{round(rec['fat'])} У{round(rec['carbs'])}). "
         "Порция и КБЖУ оценочные, запись уже видна в разделе «Питание»."
     )
-    text_out += " " + _food_short_analysis(rec)
+    if review:
+        # Живой LLM-разбор: по продуктам, с итогом дня и рекомендациями.
+        text_out += "\n\n" + review.strip()
+    else:
+        text_out += " " + _food_short_analysis(rec)
+        if cid is not None:
+            # Контекст дня не должен ломать подтверждение записи ни при каких данных.
+            try:
+                text_out += _food_day_context_line(cid, event_date, slot)
+            except Exception as exc:
+                log.warning("food day context %s: %s", cid, exc)
     if rec.get("slot_guessed"):
         text_out += (
             f" Приём пищи определила по времени как «{sm}»; если это не так, "
@@ -14006,7 +14183,45 @@ def _food_update_success(rec, mid, event_date):
                      "record_id": mid, "slot": rec.get("slot")},
     }
 
-def _workout_action_success(rec, wid, event_date):
+_WORKOUT_BENEFIT = {
+    # тип: (чем полезна, совет после)
+    "Силовая": ("укрепляет мышцы и кости и разгоняет обмен — расход калорий растёт даже в покое",
+                "в ближайшие пару часов добавь белковый приём, мышцам нужен материал для восстановления"),
+    "Кардио": ("тренирует сердце и выносливость и активно тратит калории",
+               "восполни воду и сделай пару минут спокойной заминки"),
+    "Бег": ("тренирует сердце и выносливость и хорошо тратит калории",
+            "восполни воду; если бегаешь регулярно — следи, чтобы у ног были дни отдыха"),
+    "Велосипед": ("выносливость и ноги почти без ударной нагрузки на суставы",
+                  "восполни воду и потянись — квадрицепсам это нужно"),
+    "Плавание": ("нагрузка на всё тело без удара по суставам — выносливость, спина и осанка",
+                 "после бассейна согрейся и поешь белкового"),
+    "Йога": ("развивает подвижность и дыхание и заметно снижает уровень стресса",
+             "хорошо работает как восстановление между тяжёлыми днями"),
+    "Пилатес": ("укрепляет центр и глубокие мышцы спины, улучшает осанку", None),
+    "Растяжка": ("возвращает мышцам длину и снимает зажимы после нагрузок",
+                 "особенно полезна вечером — помогает быстрее уснуть"),
+    "Ходьба": ("мягкое кардио: поддерживает сосуды, восстановление и дневной расход калорий", None),
+    "Танцы": ("кардио плюс координация — выносливость, настроение и работа мозга", None),
+}
+
+def _workout_short_analysis(rec):
+    """Чем полезна записанная нагрузка + один совет. Детерминированно, без LLM."""
+    pair = _WORKOUT_BENEFIT.get(str(rec.get("type") or "")) or (
+        "любая регулярная активность укрепляет выносливость и помогает настроению", None,
+    )
+    benefit, tip = pair
+    rpe = str(rec.get("rpe") or "").lower()
+    if "тяж" in rpe:
+        tip = ("нагрузка была тяжёлой — этим мышцам нужно около 48 часов до "
+               "следующей тяжёлой, а сегодня главное сон")
+    elif "лег" in rpe and tip is None:
+        tip = "лёгкий режим — отличный способ восстановиться, не выпадая из ритма"
+    out = f"Что даёт: {benefit}."
+    if tip:
+        out += f" Совет: {tip}."
+    return out
+
+def _workout_action_success(rec, wid, event_date, review=None):
     details = []
     if rec.get("duration"):
         details.append(rec["duration"])
@@ -14015,9 +14230,17 @@ def _workout_action_success(rec, wid, event_date):
     when = "" if event_date == dtoday() else f" за {event_date.strftime('%d.%m.%Y')}"
     suffix = " · " + ", ".join(details) if details else ""
     kcal_note = f" · около {rec['kcal']} ккал" if rec.get("kcal") else ""
+    text_out = (
+        f"Записала тренировку{when}: {rec['type']}{suffix}{kcal_note}. "
+        "Она уже видна в разделе «Нагрузка»."
+    )
+    if review:
+        text_out += "\n\n" + review.strip()
+    else:
+        text_out += " " + _workout_short_analysis(rec)
     return {
         "ok": True,
-        "text": f"Записала тренировку{when}: {rec['type']}{suffix}{kcal_note}. Она уже видна в разделе «Нагрузка».",
+        "text": text_out,
         "record_id": wid,
         "rec": rec,
         "mutation": {"kind": "workout", "date": event_date.isoformat(),
@@ -14241,7 +14464,7 @@ def _semantic_duplicate_food_result(existing):
 
 async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
                           preparsed_food_text=None, preparsed_slot=None,
-                          preparsed_food_record=None):
+                          preparsed_food_record=None, day_context=True):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     args_hash = chat_mutation_args_hash("food", text)
@@ -14253,7 +14476,8 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
             return {"ok": False, "text": "Эта запись уже была отменена и не добавлена повторно."}
         if prior["status"] == "duplicate" and prior.get("data"):
             saved_date = date.fromisoformat(prior["data"].get("date") or dtoday().isoformat())
-            return _food_action_success(prior["data"], prior.get("id"), saved_date)
+            return _food_action_success(prior["data"], prior.get("id"), saved_date,
+                                        cid=cid if day_context else None)
         if prior["status"] == "stale":
             return {"ok": False, "text": "Запрос отменён: данные уже удалены. Чтобы начать заново, введи /start."}
     event_date, date_error = chat_event_date(text, max_past_days=31)
@@ -14327,7 +14551,12 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         ev(cid, "journal_mutation_executed", meta="create|food", user_generation=generation)
         ev(cid, "tool_execution", meta="success|create_meal|journal", user_generation=generation)
     ev(cid, "journal_mutation_verified", meta="create|food", user_generation=generation)
-    return _food_action_success(rec, mid, date.fromisoformat(rec.get("date") or event_date.isoformat()))
+    saved_date = date.fromisoformat(rec.get("date") or event_date.isoformat())
+    if day_context:
+        _spawn_log_review(cid, u, "food_review", L.food_log_review,
+                          _food_review_facts(rec, cid, saved_date), generation)
+    return _food_action_success(rec, mid, saved_date,
+                                cid=cid if day_context else None)
 
 async def log_food_batch_action(cid, u, journal, user_generation=None, mutation_key=None):
     """Persist every prevalidated explicit meal section with its own receipt."""
@@ -14359,6 +14588,8 @@ async def log_food_batch_action(cid, u, journal, user_generation=None, mutation_
             preparsed_food_text=entry.get("food_text"),
             preparsed_slot=entry.get("slot"),
             preparsed_food_record=entry.get("food_record"),
+            # Итог дня уместен один раз — после последнего чека серии.
+            day_context=(index == len(entries) - 1),
         )
         results.append(result)
     record_ids = [
@@ -14726,7 +14957,11 @@ async def log_workout_action(cid, u, text, user_generation=None, mutation_key=No
         ev(cid, "journal_mutation_executed", meta="create|workout", user_generation=generation)
         ev(cid, "tool_execution", meta="success|create_workout|journal", user_generation=generation)
     ev(cid, "journal_mutation_verified", meta="create|workout", user_generation=generation)
-    return _workout_action_success(rec, wid, date.fromisoformat(rec.get("date") or event_date.isoformat()))
+    _spawn_log_review(cid, u, "workout_review", L.workout_log_review,
+                      _workout_review_facts(rec), generation)
+    return _workout_action_success(
+        rec, wid, date.fromisoformat(rec.get("date") or event_date.isoformat()),
+    )
 
 async def log_workout_update_action(cid, u, text, target_id, user_generation=None,
                                     mutation_key=None, preparsed_workout=None):
