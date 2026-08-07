@@ -203,6 +203,8 @@ class FitModeSystemicTests(unittest.TestCase):
         self.assertIn("/period", own)   # назван как запрещённый
         self.assertIn("не зови", own)
         self.assertIn("/mode", own)
+        # ...но подсказка про /mode — только если она сама спросила.
+        self.assertIn("только если она прямо спрашивает", own)
 
     def test_off_text_promises_only_what_exists(self):
         """Текст обещал «одно касание» там, где кнопки не было."""
@@ -345,6 +347,10 @@ class FitModeSystemicTests(unittest.TestCase):
         )
         self.assertIn("женском роде", whole)
         self.assertIn("на «ты»", own)
+        # Сводка не должна каждый день напоминать про выключенный цикл:
+        # она только что явно выбрала режим без него.
+        self.assertIn("не предлагай включить отслеживание цикла", own)
+        self.assertIn("сама тему ведения цикла не поднимай", own)
         for token in ("аменорея", "мгт", "перименопауза", "приливы"):
             self.assertNotIn(token, own)
 
