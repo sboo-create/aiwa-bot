@@ -2398,7 +2398,10 @@ def kcal_floor(cm, kg, age, male=False):
         if b is not None and b < BMI_UNDERWEIGHT:
             return max(floor, int(round(calc_bmr(float(cm), float(kg), int(age), male))))
         return floor
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        # Молчаливый откат к общему минимуму на границе безопасности заметить
+        # нечем: профиль мог приехать битым, и разбирать это потом не по чему.
+        log.warning("kcal floor fallback for %r/%r/%r: %s", cm, kg, age, exc)
         return floor
 
 def profile_kcal_floor(u):
