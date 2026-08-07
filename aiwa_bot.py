@@ -14082,6 +14082,9 @@ async def _llm_log_review(cid, u, purpose, fn, facts, generation=None):
 
 _REVIEW_DAILY_CAP = int(os.environ.get("AIWA_LOG_REVIEW_DAILY_CAP", "15") or 15)
 _REVIEW_TASKS = set()
+# Глобальная крышка на одновременные фоновые разборы: сверх неё лишние
+# просто ждут своей очереди, не занимая тред-пул LLM-вызовов.
+_REVIEW_SEM = asyncio.Semaphore(int(os.environ.get("AIWA_LOG_REVIEW_CONCURRENCY", "4") or 4))
 
 def _review_quota_take(cid):
     """Списывает одну единицу дневного лимита LLM-разборов; False — лимит исчерпан.
@@ -14111,7 +14114,12 @@ def _spawn_log_review(cid, u, purpose, fn, facts, generation=None):
 
     async def _run():
         try:
-            review = await _llm_log_review(cid, u, purpose, fn, facts, generation)
+            async with _REVIEW_SEM:
+                # Данные могли быть удалены, пока задача ждала очереди:
+                # проверяем до платного вызова, а не только перед отправкой.
+                if not _user_write_allowed(cid, generation):
+                    return
+                review = await _llm_log_review(cid, u, purpose, fn, facts, generation)
             if review and _user_write_allowed(cid, generation):
                 await BOT_APP.bot.send_message(cid, review)
         except Exception as exc:
