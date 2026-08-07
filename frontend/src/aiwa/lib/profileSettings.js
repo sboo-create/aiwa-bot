@@ -52,7 +52,7 @@ export const isCompleteModeSettingsData = (data) => {
     return Boolean(data.preg && typeof data.preg === "object"
       && !data.cycle && data.periods.length === 0 && data.cycles.length === 0);
   }
-  if (["meno", "none", "male"].includes(data.mode)) {
+  if (["meno", "none", "male", "fit"].includes(data.mode)) {
     return !data.cycle && data.preg === null
       && data.periods.length === 0 && data.cycles.length === 0;
   }

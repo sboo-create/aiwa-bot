@@ -98,6 +98,7 @@ export const WORKOUT_EXERCISES = {
 
 export const MODE_OPTIONS = [
   { value: "cycle", label: "Регулярный цикл" },
+  { value: "fit", label: "Питание и нагрузка" },
   { value: "irregular", label: "Нерегулярный" },
   { value: "preg", label: "Беременность" },
   { value: "meno", label: "Менопауза" },

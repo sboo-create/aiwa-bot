@@ -45,7 +45,7 @@ export function CalendarPanel({ isOpen, onClose, mode, revision, symptomGroups }
   const pageRef = useRef(null);
   // Год истории и восемь месяцев вперёд; открывается на текущем месяце.
   const months = Array.from({ length: 20 }, (_, index) => read("getAiwaCalendarMonth", index - 12)).filter(Boolean);
-  const canEditPeriods = !["preg", "meno", "male", "none"].includes(mode);
+  const canEditPeriods = !["preg", "meno", "male", "none", "fit"].includes(mode);
   const markOptions = calendarMarkOptions(canEditPeriods ? ["period", "symptoms", "intimacy"] : ["symptoms", "intimacy"]);
   const activeMark = CALENDAR_MARK_MODES[markMode] || CALENDAR_MARK_MODES.symptoms;
 

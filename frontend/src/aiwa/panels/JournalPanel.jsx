@@ -23,7 +23,7 @@ export function JournalPanel({ isOpen, onClose, checkin, symptomGroups, mode, da
   const selectedDate = dayIso || todayIso;
   const sourceCheckin = checkin || EMPTY_CHECKIN;
   const isPastDay = selectedDate !== todayIso;
-  const canEditPeriod = !isPastDay && !["preg", "meno", "male", "none"].includes(mode);
+  const canEditPeriod = !isPastDay && !["preg", "meno", "male", "none", "fit"].includes(mode);
   const [symptoms, setSymptoms] = useState(sourceCheckin.symptoms || []);
   const [energy, setEnergy] = useState(sourceCheckin.energy || 0);
   const [mood, setMood] = useState(sourceCheckin.mood || 0);

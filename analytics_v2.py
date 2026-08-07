@@ -146,7 +146,7 @@ def user_key(chat_id):
     return "u_" + digest[:32]
 
 
-FEMALE_ASSISTANT_MODES = {"cycle", "irregular", "none", "meno", "preg"}
+FEMALE_ASSISTANT_MODES = {"cycle", "irregular", "none", "meno", "preg", "fit"}
 
 
 def normalize_assistant_variant(value):
