@@ -14080,36 +14080,20 @@ async def _llm_log_review(cid, u, purpose, fn, facts, generation=None):
     # Слишком короткий или неправдоподобно длинный ответ — не разбор, а мусор.
     return out if 40 <= len(out) <= 900 else None
 
-_REVIEW_DAILY_CAP = int(os.environ.get("AIWA_LOG_REVIEW_DAILY_CAP", "15") or 15)
 _REVIEW_TASKS = set()
 # Глобальная крышка на одновременные фоновые разборы: сверх неё лишние
-# просто ждут своей очереди, не занимая тред-пул LLM-вызовов.
+# просто ждут своей очереди, не занимая тред-пул LLM-вызовов. Дневного лимита
+# на количество разборов нет намеренно — вызовы дешёвые.
 _REVIEW_SEM = asyncio.Semaphore(int(os.environ.get("AIWA_LOG_REVIEW_CONCURRENCY", "4") or 4))
-
-def _review_quota_take(cid):
-    """Списывает одну единицу дневного лимита LLM-разборов; False — лимит исчерпан.
-
-    Запись еды — самое частое действие, поэтому у разбора есть потолок стоимости.
-    """
-    try:
-        used = int(dc_get(cid, "logrvw") or 0)
-    except (TypeError, ValueError):
-        used = 0
-    if used >= _REVIEW_DAILY_CAP:
-        return False
-    dc_put(cid, "logrvw", used + 1)
-    return True
 
 def _spawn_log_review(cid, u, purpose, fn, facts, generation=None):
     """Разбор не задерживает подтверждение записи: генерим фоном, шлём вдогонку.
 
     Подтверждение уходит мгновенно с детерминированным разбором; когда модель
-    успевает — приходит отдельное сообщение с полным разбором. Ошибки и лимиты
-    здесь молчаливые: чек записи уже у пользователя.
+    успевает — приходит отдельное сообщение с полным разбором. Ошибки здесь
+    молчаливые: чек записи уже у пользователя.
     """
     if BOT_APP is None or os.environ.get("AIWA_LOG_REVIEW_LLM", "1") != "1":
-        return
-    if not _review_quota_take(cid):
         return
 
     async def _run():
