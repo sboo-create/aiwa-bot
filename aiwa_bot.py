@@ -321,7 +321,7 @@ START_TEXT = ("Привет, это Айва — ИИ wellness-ассистен�
  "• выписка для врача\n\n"
  "Настройка займёт около минуты. Кто ты?")
 
-FEMALE_START_TEXT = ("Принято. Что ближе?")
+FEMALE_START_TEXT = ("Принято. С чего начнём? Это можно поменять в любой момент в профиле.")
 ABOUT_TEXT = ("Я Айва — ИИ wellness-ассистент: самочувствие, питание, нагрузка; для женщин — цикл и календарь.\n\n"
  "Что я умею:\n"
  "• веду календарь цикла и присылаю утреннюю сводку под фазу\n"
@@ -2416,6 +2416,38 @@ _MALE_CYCLE_MUTATION_KIND_RE = re.compile(
 def is_male_profile(u):
     return bool(u and u.get("mode") == "male")
 
+FIT_CYCLE_OFF_TEXT = (
+    "Сейчас цикл не отслеживается — в профиле выбран режим «Питание и нагрузка». "
+    "Включить его можно в одно касание, отметки и история сохранятся."
+)
+
+def cycle_features_off(u):
+    """Профили, у которых функции цикла выключены: у мужского их нет вовсе,
+    у fit они выключены её собственным выбором и включаются обратно."""
+    return bool(u and u.get("mode") in ("male", "fit"))
+
+def cycle_action_unavailable(u):
+    """Отказ действия цикла в машинных ответах чат-действий."""
+    return {"ok": False, "error": "unavailable",
+            "note": ("недоступно для этого профиля" if is_male_profile(u)
+                     else "цикл сейчас не отслеживается, включить можно в профиле")}
+
+def cycle_off_text(u):
+    return MALE_PROFILE_FUNCTION_TEXT if is_male_profile(u) else FIT_CYCLE_OFF_TEXT
+
+async def cycle_off_notice(msg, cid, u, where):
+    """Единый ответ на попытку открыть функцию цикла в режиме без цикла."""
+    if is_male_profile(u):
+        ev(cid, "male_mode_block", meta=where)
+        return await msg.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+    ev(cid, "fit_mode_block", meta=where)
+    return await msg.reply_text(
+        FIT_CYCLE_OFF_TEXT,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Включить цикл", callback_data="onb_cycle")]]
+        ),
+    )
+
 def _male_cycle_content_forbidden(text):
     """Block reproductive cycle copy without rejecting training/sleep cycles."""
     value = str(text or "")
@@ -4246,10 +4278,16 @@ def match_guide(text):
         if any(k in t for k in g["kw"]): return g
     return None
 
-def is_cycle(u): return not (u and u.get("mode") in ("irregular", "none", "meno", "preg", "male"))
+# Режимы без прогноза фазы. "fit" — женский профиль, который сознательно не
+# ведёт цикл: грамматика женская, контент только питание, нагрузка и
+# самочувствие. Данные цикла при переключении сохраняются.
+NO_CYCLE_MODES = ("irregular", "none", "meno", "preg", "male", "fit")
+VALID_MODES = ("cycle",) + NO_CYCLE_MODES
+
+def is_cycle(u): return not (u and u.get("mode") in NO_CYCLE_MODES)
 def is_onboarded(u):
     if not u: return False
-    if u.get("mode") in ("irregular", "none", "meno", "preg", "male"): return True
+    if u.get("mode") in NO_CYCLE_MODES: return True
     return bool(u.get("last_period") and u.get("cycle_len"))
 def status_of(cid):
     u = row(cid)
@@ -4291,7 +4329,8 @@ ONB_KB = InlineKeyboardMarkup([
 # Она лежала уровнем ниже, за кнопкой «Нет регулярного цикла», и беременные
 # на первом экране онбординга себя не находили.
 FEMALE_ONB_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Веду цикл", callback_data="onb_cycle")],
+    [InlineKeyboardButton("Цикл и самочувствие", callback_data="onb_cycle")],
+    [InlineKeyboardButton("Питание и нагрузка, без цикла", callback_data="mode:fit")],
     [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
     [InlineKeyboardButton("Нет регулярного цикла", callback_data="no_cycle")],
 ])
@@ -4311,7 +4350,7 @@ MORE_KB = InlineKeyboardMarkup([
     [B("Утренние сводки: вкл/выкл", "toggle:summary")],
     [B("Назад", "menu")],
 ])
-MALE_MORE_KB = InlineKeyboardMarkup([
+NOCYCLE_MORE_KB = InlineKeyboardMarkup([
     [B("История и выписка", "history")],
     [B("Время сводки", "set:time")],
     [B("Утренние сводки: вкл/выкл", "toggle:summary")],
@@ -4324,7 +4363,7 @@ EDIT_KB = InlineKeyboardMarkup([
     [B("Время рассылки", "set:time")],
     [B("Назад", "menu")],
 ])
-MALE_EDIT_KB = InlineKeyboardMarkup([
+NOCYCLE_EDIT_KB = InlineKeyboardMarkup([
     [B("Рост, вес, возраст", "profile_edit")],
     [B("Время рассылки", "set:time")],
     [B("Назад", "menu")],
@@ -4739,6 +4778,8 @@ def general_summary_suggestions(u):
         return ["Что есть сейчас?", "Какая активность?"]
     if mode == "irregular":
         return ["Почему цикл скачет?", "Что отмечать?"]
+    if mode == "fit":
+        return ["Что съесть сегодня?", "Собери тренировку"]
     return ["Что важно сегодня?", "Что отметить?"]
 def summary_sugg_kb(cid, u=None, st=None, app_label=None, campaign=None):
     items = summary_suggestions(st) if st is not None else general_summary_suggestions(u)
@@ -6112,7 +6153,7 @@ def cycle_text_analysis(cid):
     import statistics as ST
     from collections import Counter
     u = row(cid); cyc = cycles_of(cid); logs = logs_of(cid)
-    if is_male_profile(u):
+    if cycle_features_off(u):
         parts = ["📊 Анализ самочувствия"]
         cnt = Counter()
         for lg in logs:
@@ -6238,13 +6279,12 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
     turn_generation = _user_generation(cid) if user_generation is None else int(user_generation)
     if intent == "current_date":
         return await msg.reply_text(current_date_text())
-    if is_male_profile(u) and intent in {
+    if cycle_features_off(u) and intent in {
         "phases", "addcycles", "period_end", "cyclelen", "logperiod",
         "calendar", "period",
     }:
         upsert(cid, state=None)
-        ev(cid, "male_mode_block", meta="intent_" + intent)
-        return await msg.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+        return await cycle_off_notice(msg, cid, u, "intent_" + intent)
     if intent == "analysis":
         return await msg.reply_text(cycle_text_analysis(cid),
             reply_markup=InlineKeyboardMarkup([[B("Собрать выписку PDF", "history")]]))
@@ -6972,8 +7012,8 @@ def _act_settime(cid, values):
     return {"ok": True, "time": hhmm, "text": schedule_text(cid, hhmm)}
 
 def _act_period_date(cid, values):
-    if is_male_profile(row(cid)):
-        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    if cycle_features_off(row(cid)):
+        return cycle_action_unavailable(row(cid))
     iso = values["iso"]
     if not db_mark_period(cid, iso):
         return {"ok": False, "error": "not_saved"}
@@ -6982,8 +7022,8 @@ def _act_period_date(cid, values):
             "text": f"Отметила начало месячных: {date.fromisoformat(iso).strftime('%d.%m.%Y')}."}
 
 def _act_cycle_len(cid, values):
-    if is_male_profile(row(cid)):
-        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    if cycle_features_off(row(cid)):
+        return cycle_action_unavailable(row(cid))
     days = int(values["days"])
     upsert(cid, cycle_len=days)
     return {"ok": True, "cycle_len": days, "text": f"Записала длину цикла: {days} дн."}
@@ -7086,8 +7126,8 @@ def _act_period_delete(cid, values):
     умел лишь мини-апп. Ошибиться при этом легко — «начались вчера» после
     случайного «начались сегодня» оставляло лишний цикл в календаре.
     """
-    if is_male_profile(row(cid)):
-        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    if cycle_features_off(row(cid)):
+        return cycle_action_unavailable(row(cid))
     iso = values["iso"]
     if not period_delete_at(cid, iso):
         return {"ok": False, "error": "not_found",
@@ -7103,8 +7143,8 @@ def _act_period_move(cid, values):
     между ними календарь остаётся без цикла. Одной фразой — и honest: если
     переносить нечего, так и говорим, а не создаём отметку молча.
     """
-    if is_male_profile(row(cid)):
-        return {"ok": False, "error": "unavailable", "note": "недоступно для этого профиля"}
+    if cycle_features_off(row(cid)):
+        return cycle_action_unavailable(row(cid))
     iso = values["iso"]
     periods = periods_of(cid)
     if not periods:
@@ -7229,7 +7269,7 @@ def _save_period_start_atomic(cid, iso, user_generation=None, protect_modes=Fals
     if not user:
         c.close(); return {"status": "stale"}
     mode = user[1] or "cycle"
-    if protect_modes and mode in ("preg", "meno", "male"):
+    if protect_modes and mode in ("preg", "meno", "male", "fit"):
         c.commit(); c.close(); return {"status": "protected", "mode": mode}
     starts = [x[0] for x in c.execute(
         "SELECT start_date FROM cycles WHERE chat_id=? ORDER BY start_date", (cid,)
@@ -7294,8 +7334,8 @@ def _save_period_end_atomic(cid, end_iso, user_generation=None, mutation_key=Non
     user = c.execute("SELECT last_period,mode FROM users WHERE chat_id=?", (cid,)).fetchone()
     if not user:
         c.commit(); c.close(); return {"status": "missing"}
-    if (user[1] or "cycle") == "male":
-        c.commit(); c.close(); return {"status": "protected", "mode": "male"}
+    if (user[1] or "cycle") in ("male", "fit"):
+        c.commit(); c.close(); return {"status": "protected", "mode": (user[1] or "cycle")}
     if (user[1] or "cycle") in ("irregular", "none", "meno", "preg") or not user[0]:
         c.commit(); c.close(); return {"status": "missing"}
     start_iso = user[0]
@@ -7947,18 +7987,18 @@ async def push_partner(context, woman_cid):
         log.warning("partner push: %s", e)
 
 async def addcycles_entry(context, cid, msg):
-    if is_male_profile(row(cid)):
+    _u = row(cid)
+    if cycle_features_off(_u):
         upsert(cid, state=None)
-        ev(cid, "male_mode_block", meta="addcycles_entry")
-        return await msg.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+        return await cycle_off_notice(msg, cid, _u, "addcycles_entry")
     upsert(cid, state="await_cycles")
     await msg.reply_text(ADDCYCLES_TEXT)
 async def addcycles_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
     u = row(cid)
     if not is_onboarded(u): return await need_onboard(update.message)
-    if is_male_profile(u):
-        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+    if cycle_features_off(u):
+        return await cycle_off_notice(update.message, cid, u, "addcycles_cmd")
     await addcycles_entry(context, cid, update.message)
 async def partner_entry(context, cid, msg):
     global BOT_USERNAME
@@ -8036,8 +8076,8 @@ async def id_cmd(update, context):
 async def calendar_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command"); u, st = status_of(cid)
     if not is_onboarded(u): return await need_onboard(update.message)
-    if is_male_profile(u):
-        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+    if cycle_features_off(u):
+        return await cycle_off_notice(update.message, cid, u, "calendar_cmd")
     if st is None: return await update.message.reply_text("Пока не вижу данных цикла. Отметь последние месячные командой /period или кнопкой «Отметить месячные», и я покажу фазы и календарь.")
     if st["status"] != "normal": return await send_delay(context, cid, st)
     await send_infographic(context.bot, cid)
@@ -8055,9 +8095,9 @@ async def period_cmd(update, context):
     ev(update.effective_chat.id, "command"); cid = update.effective_chat.id
     u = row(cid)
     if not is_onboarded(u): return await need_onboard(update.message)
-    if is_male_profile(u):
+    if cycle_features_off(u):
         upsert(cid, state=None)
-        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+        return await cycle_off_notice(update.message, cid, u, "period_cmd")
     if context.args:
         d = parse_date(context.args[0])
         if d:
@@ -8078,6 +8118,7 @@ async def set_time_cmd(update, context):
 MODE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Мужчина", callback_data="mode:male")],
     [InlineKeyboardButton("Цикл", callback_data="onb_cycle")],
+    [InlineKeyboardButton("Питание и нагрузка, без цикла", callback_data="mode:fit")],
     [InlineKeyboardButton("Нерегулярный цикл", callback_data="mode:irregular")],
     [InlineKeyboardButton("Беременность", callback_data="mode:preg")],
     [InlineKeyboardButton("Менопауза", callback_data="mode:meno")],
@@ -8099,8 +8140,9 @@ async def profile_cmd(update, context):
     await update.message.reply_text("Обновим данные. Напиши через пробел рост (см), вес (кг), возраст. Например 168 60 30.")
 async def guide_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
-    if is_male_profile(row(cid)):
-        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+    _u = row(cid)
+    if cycle_features_off(_u):
+        return await cycle_off_notice(update.message, cid, _u, "guide_cmd")
     await send_guide(context, cid, GUIDES[0])
 async def about_cmd(update, context):
     cid = update.effective_chat.id; ev(cid, "command")
@@ -8669,7 +8711,7 @@ async def handle_text(update, context, txt):
     if addressed and not txt:
         topics = (
             "питанием, нагрузкой или самочувствием"
-            if (u or {}).get("mode") == "male"
+            if cycle_features_off(u)
             else "циклом, питанием, нагрузкой или самочувствием"
         )
         return await update.message.reply_text(
@@ -8681,10 +8723,10 @@ async def handle_text(update, context, txt):
     _cycle_state = state in {"await_cycles"} or (
         _act is not None and _act[0] in {ACT_PERIOD_DATE.name, ACT_CYCLE_LEN.name}
     )
-    if is_male_profile(u) and _cycle_state:
+    if cycle_features_off(u) and _cycle_state:
         upsert(cid, state=None, pending_date=None)
-        ev(cid, "male_mode_block", meta="stale_state_" + str(state)[:24])
-        return await update.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+        return await cycle_off_notice(
+            update.message, cid, u, "stale_state_" + str(state)[:24])
 
     if state == "await_food_text":
         pending_at = None
@@ -9114,7 +9156,7 @@ async def on_cb(update, context):
         _u = row(cid)
         if not is_onboarded(_u):
             return await q.message.reply_text("Сначала настрой Айву: /start.")
-        if is_male_profile(_u):
+        if cycle_features_off(_u):
             _QQ = {
                 "train": (
                     "Собери мне короткую тренировку примерно на 10 минут с "
@@ -9179,7 +9221,12 @@ async def on_cb(update, context):
             "Выбери, что ближе сейчас — это можно поменять позже.\n\n"
             "Айва работает и без регулярного цикла: при нерегулярных месячных и менопаузе.", reply_markup=NOCYCLE_KB)
     if data.startswith("mode:"):
-        m = data.split(":")[1]; upsert(cid, mode=m)
+        m = data.split(":")[1]
+        # callback_data приходит от клиента: неизвестный режим не должен
+        # оседать в профиле — по умолчанию он читается как цикл.
+        if m not in VALID_MODES:
+            return await q.answer("Такого режима нет", show_alert=False)
+        upsert(cid, mode=m)
         _invalidate_mode_dependent_state(cid)
         if m == "male":
             # тестовые/старые аккаунты: дата цикла от прежнего профиля не должна
@@ -9199,6 +9246,10 @@ async def on_cb(update, context):
         if m == "male":
             return await q.message.reply_text(
                 "Принято. Напиши рост, вес и возраст через пробел — так рекомендации по питанию и нагрузке будут точнее. Например: 180 80 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
+        if m == "fit":
+            return await q.message.reply_text(
+                "Поняла. Сосредоточимся на питании, нагрузке и самочувствии — про месячные спрашивать не буду. Включить цикл можно позже в профиле, ничего не потеряется.\n\n"
+                "Чтобы советы были точнее, напиши рост, вес и возраст через пробел. Например: 168 60 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
         return await q.message.reply_text(
             "Поняла. Айва не будет считать стандартные фазы цикла, но всё равно сможет давать персональные рекомендации по самочувствию, питанию и движению.\n\n"
             "Чтобы советы были точнее, напиши рост, вес и возраст через пробел. Например: 168 60 30. Можно пропустить и добавить позже.", reply_markup=SKIP_KB)
@@ -9207,12 +9258,11 @@ async def on_cb(update, context):
         return await need_onboard(q.message)
     general = st is None
     today_s = dtoday().isoformat()
-    if is_male_profile(u) and data in {
+    if cycle_features_off(u) and data in {
         "calendar", "addcycles", "cyclelen", "period", "period_today", "guides",
     }:
         upsert(cid, state=None, pending_date=None)
-        ev(cid, "male_mode_block", meta="callback_" + data)
-        return await q.message.reply_text(MALE_PROFILE_FUNCTION_TEXT)
+        return await cycle_off_notice(q.message, cid, u, "callback_" + data)
     if data == "menu":
         _rows = []
         if AIWA_WEBAPP_URL:
@@ -9225,12 +9275,12 @@ async def on_cb(update, context):
     elif data == "more":
         await q.message.reply_text(
             "Ещё возможности:",
-            reply_markup=(MALE_MORE_KB if is_male_profile(u) else MORE_KB),
+            reply_markup=(NOCYCLE_MORE_KB if cycle_features_off(u) else MORE_KB),
         )
     elif data == "edit":
         await q.message.reply_text(
             "Что изменить?",
-            reply_markup=(MALE_EDIT_KB if is_male_profile(u) else EDIT_KB),
+            reply_markup=(NOCYCLE_EDIT_KB if cycle_features_off(u) else EDIT_KB),
         )
     elif data == "profile_edit":
         upsert(cid, state="await_profile_edit")
@@ -10415,7 +10465,7 @@ def _save_journal_atomic(cid, body, user_generation=None):
             c.rollback()
             return _api_error_payload("onboard", "Сначала настрой Айву."), 403
         mode = user[0] or "cycle"
-        if normalized["period_supplied"] and mode in ("preg", "meno", "male", "none"):
+        if normalized["period_supplied"] and mode in ("preg", "meno", "male", "none", "fit"):
             c.rollback()
             return _api_error_payload(
                 "profile_mode", "В текущем режиме нельзя отмечать месячные."
@@ -10509,13 +10559,16 @@ async def _api_period(request):
     body = await request.json(); cid = _verify_init(body.get("initData", ""))
     if not cid: return _cors(web.json_response({"error": "auth"}, status=401))
     generation = _user_generation(cid)
-    if is_male_profile(row(cid)):
+    if cycle_features_off(row(cid)):
+        _u = row(cid)
         ev(
-            cid, "male_mode_block", meta="api_period",
+            cid,
+            "male_mode_block" if is_male_profile(_u) else "fit_mode_block",
+            meta="api_period",
             user_generation=generation,
         )
         return _cors(web.json_response(
-            {"ok": False, "error": "profile_mode", "text": MALE_PROFILE_FUNCTION_TEXT},
+            {"ok": False, "error": "profile_mode", "text": cycle_off_text(_u)},
             status=409,
         ))
     action = body.get("action"); ds = body.get("date")
@@ -11014,6 +11067,10 @@ def _food_ctx(u, st):
         "preg": "Беременность.",
         "irregular": "Нерегулярный цикл.",
         "none": "Месячных сейчас нет.",
+        "fit": (
+            "Женский профиль без трекинга цикла: фазы не отслеживаются, "
+            "в фокусе питание, нагрузка и самочувствие. Обращайся в женском роде."
+        ),
     }.get(u.get("mode"), "")
 
 def _recent_workouts_text(cid):
@@ -11118,6 +11175,7 @@ def _section_fallback(cid, kind, u, st):
             "preg": "В беременности важны белок, фолаты, железо, кальций и безопасные продукты.",
             "irregular": "Без чёткой фазы опирайся на белок, клетчатку, сложные углеводы и регулярность.",
             "none": "Сбалансированная база на день: белок, овощи, сложные углеводы и вода.",
+            "fit": "База под твои цели: белок в каждый приём, овощи, сложные углеводы и вода.",
         }.get(u.get("mode"), "Сбалансированная база на день: белок, овощи, сложные углеводы и вода.")
         phase_key = "follicular"
     restrictions = bool(prof and ((prof.get("diet") or "").strip() or (prof.get("diet_note") or "").strip()))
@@ -13065,7 +13123,7 @@ async def _api_chat(request):
     if not msg: return _cors(web.json_response({"answer": "Напиши вопрос.", "suggestions": []}))
     msg, addressed = strip_aiwa_address(msg)
     if addressed and not msg:
-        if is_male_profile(u):
+        if cycle_features_off(u):
             return _cors(web.json_response({
                 "answer": "Я тут. Напиши вопрос про питание, нагрузку или самочувствие.",
                 "suggestions": ["Что съесть сегодня?", "Собери тренировку"],
@@ -13169,7 +13227,7 @@ def _agent_tools_spec(mode=None):
             "description": "Сохранить в долгую память один устойчивый факт о пользователе. Не сохраняй разовое, сиюминутное или уже известное.",
             "parameters": {"type": "object", "properties": {"key": {"type": "string", "description": "короткий ярлык факта, напр. 'цель', 'не любит', 'плохо переносит'"}, "value": {"type": "string", "description": "сам факт кратко"}}, "required": ["key", "value"]}}},
     ]
-    if mode != "male":
+    if mode not in ("male", "fit"):
         tools.insert(0, {"type": "function", "function": {
             "name": "cycle_status",
             "description": "Текущая фаза, день, прогноз следующего начала и задержка. Вызывай только для репродуктивных вопросов.",
@@ -13178,7 +13236,7 @@ def _agent_tools_spec(mode=None):
     # Пишущие действия берутся из реестра: чат получает ровно то, что умеет
     # приложение, с той же проверкой значений. Отдельного списка больше нет.
     for tool in _registry_chat_tools():
-        if tool["function"]["name"] in {"period_date", "period_delete", "period_move", "cycle_len"} and mode == "male":
+        if tool["function"]["name"] in {"period_date", "period_delete", "period_move", "cycle_len"} and mode in ("male", "fit"):
             continue
         tools.append(tool)
     return tools
@@ -13200,8 +13258,8 @@ def _agent_exec(cid, name, args):
             return {"error": "failed"}
     try:
         if name == "cycle_status":
-            if is_male_profile(row(cid)):
-                return {"available": False, "note": "недоступно для этого профиля"}
+            if cycle_features_off(row(cid)):
+                return {"available": False, "note": cycle_action_unavailable(row(cid))["note"]}
             _, st = status_of(cid)
             if not st:
                 return {"tracked": False, "note": "цикл сейчас не отслеживается"}
@@ -13323,7 +13381,8 @@ async def _agent_final(cid, u, msg, gathered, usage, request_id, user_generation
         if is_male_profile(u):
             q = msg + "\n\nВот его актуальные данные из приложения — когда отвечаешь про здоровье, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Женскую репродуктивную физиологию не упоминай. Если вопрос не про эти данные, отвечай по теме и данные не перечисляй: " + " | ".join(gathered)
         else:
-            q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про здоровье, цикл, питание или тренировки, обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
+            _topics = "здоровье, питание или тренировки" if cycle_features_off(u) else "здоровье, цикл, питание или тренировки"
+            q = msg + "\n\nВот её актуальные данные из приложения — когда отвечаешь про " + _topics + ", обязательно опирайся на них и приводи конкретные числа. Если сам вопрос не про это (болтовня, общие темы), отвечай по теме вопроса и эти данные не упоминай: " + " | ".join(gathered)
     q = _with_memory(cid, q)
     if st is not None:
         return await llm_to_thread(cid, "final_answer", L.answer_question, st, q, prof, hist_get(cid, male=is_male_profile(u)), usage=usage,
@@ -15028,9 +15087,10 @@ async def log_workout_update_action(cid, u, text, target_id, user_generation=Non
 
 async def log_period_action(cid, u, text, context=None, user_generation=None, mutation_key=None):
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
-    if is_male_profile(row(cid)):
-        ev(cid, "male_mode_block", meta="period_start")
-        return {"ok": False, "text": MALE_PROFILE_FUNCTION_TEXT}
+    if cycle_features_off(row(cid)):
+        _u = row(cid)
+        ev(cid, "male_mode_block" if is_male_profile(_u) else "fit_mode_block", meta="period_start")
+        return {"ok": False, "text": cycle_off_text(_u)}
     args_hash = chat_mutation_args_hash("period_start", text)
     event_date, date_error = chat_event_date(text, max_past_days=366)
     if date_error:
@@ -15045,6 +15105,8 @@ async def log_period_action(cid, u, text, context=None, user_generation=None, mu
     if saved["status"] == "protected":
         if saved.get("mode") == "male":
             return {"ok": False, "text": MALE_PROFILE_FUNCTION_TEXT}
+        if saved.get("mode") == "fit":
+            return {"ok": False, "text": FIT_CYCLE_OFF_TEXT}
         label = "беременности" if saved.get("mode") == "preg" else "менопаузы"
         return {"ok": False, "text": f"Сейчас включён режим {label}, поэтому я не стала менять календарь автоматически. Сначала переключи режим в приложении, если это неактуально."}
     if saved["status"] == "duplicate":
@@ -15069,9 +15131,10 @@ async def log_period_action(cid, u, text, context=None, user_generation=None, mu
 
 async def log_period_end_action(cid, u, text, user_generation=None, mutation_key=None):
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
-    if is_male_profile(row(cid)):
-        ev(cid, "male_mode_block", meta="period_end")
-        return {"ok": False, "text": MALE_PROFILE_FUNCTION_TEXT}
+    if cycle_features_off(row(cid)):
+        _u = row(cid)
+        ev(cid, "male_mode_block" if is_male_profile(_u) else "fit_mode_block", meta="period_end")
+        return {"ok": False, "text": cycle_off_text(_u)}
     args_hash = chat_mutation_args_hash("period_end", text)
     event_date, date_error = chat_event_date(text, max_past_days=31)
     if date_error:
@@ -15083,7 +15146,8 @@ async def log_period_end_action(cid, u, text, user_generation=None, mutation_key
     if saved["status"] == "mismatch":
         return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
     if saved["status"] == "protected":
-        return {"ok": False, "text": MALE_PROFILE_FUNCTION_TEXT}
+        return {"ok": False, "text": (
+            FIT_CYCLE_OFF_TEXT if saved.get("mode") == "fit" else MALE_PROFILE_FUNCTION_TEXT)}
     if saved["status"] == "duplicate":
         saved_end = date.fromisoformat(saved.get("end") or event_date.isoformat())
         return {
@@ -16371,7 +16435,7 @@ async def _api_mode(request):
     u = row(cid)
     if not is_onboarded(u): return _cors(web.json_response({"error": "onboard"}, status=403))
     m = body.get("mode")
-    if m not in ("male", "cycle", "irregular", "meno", "none", "preg"):
+    if m not in VALID_MODES:
         return _cors(web.json_response({"error": "bad_mode"}, status=400))
     explicit_lmp = body.get("last_period") if "last_period" in body else None
     payload, status = await asyncio.to_thread(

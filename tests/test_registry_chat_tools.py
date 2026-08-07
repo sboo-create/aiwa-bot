@@ -32,10 +32,12 @@ class RegistryChatToolsTests(unittest.TestCase):
     def test_chat_arguments_go_through_the_same_parsers(self):
         self.assertIn("values, bad = dialog.coerce(name, args)", SOURCE)
 
-    def test_cycle_actions_are_hidden_from_male_profile(self):
+    def test_cycle_actions_are_hidden_from_profiles_without_cycle(self):
+        """Гейт закрыт и для мужского профиля, и для женского без трекинга."""
         self.assertIn('mode == "male"', SOURCE)
         handlers = SOURCE[SOURCE.index("def _act_period_date"):]
-        self.assertIn("is_male_profile", handlers[:400])
+        self.assertIn("cycle_features_off", handlers[:400])
+        self.assertIn('mode in ("male", "fit")', SOURCE)
 
 
 class CoerceTests(unittest.TestCase):

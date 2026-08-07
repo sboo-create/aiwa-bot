@@ -21359,6 +21359,7 @@ const au = [
   Своё: []
 }, Qh = [
   { value: "cycle", label: "Регулярный цикл" },
+  { value: "fit", label: "Питание и нагрузка" },
   { value: "irregular", label: "Нерегулярный" },
   { value: "preg", label: "Беременность" },
   { value: "meno", label: "Менопауза" },
@@ -21560,7 +21561,7 @@ function d7({ label: n, value: t, ok: i }) {
 function h7({ metrics: n, title: t = "Статистика" }) {
   return n?.length ? /* @__PURE__ */ h.jsx(vt.Item, { header: t, children: n.map((i) => /* @__PURE__ */ h.jsx(d7, { ...i }, i.label)) }) : null;
 }
-const m7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v184.js?v=r43").then((n) => ({
+const m7 = C.lazy(() => import("./AiwaWebUiChart-aiwa-v186.js?v=r45").then((n) => ({
   default: n.AiwaWebUiChart
 })));
 function p7() {
@@ -21936,7 +21937,7 @@ function R7({
 }
 const D7 = Object.freeze({});
 function N7({ isOpen: n, onClose: t, checkin: i, symptomGroups: l, mode: o, dayIso: c }) {
-  const u = Qe(), d = c || u, p = i || D7, y = d !== u, g = !y && !["preg", "meno", "male", "none"].includes(o), [v, b] = C.useState(p.symptoms || []), [j, w] = C.useState(p.energy || 0), [T, x] = C.useState(p.mood || 0), [A, _] = C.useState(!!p.period), [E, M] = C.useState(!!p.intimacy), [O, D] = C.useState(""), [N, V] = C.useState(!1), [H, B] = C.useState(0), U = C.useRef(null), F = C.useRef(0), Y = C.useRef({ generation: 0, open: !1 }), st = C.useRef(""), I = C.useRef(d);
+  const u = Qe(), d = c || u, p = i || D7, y = d !== u, g = !y && !["preg", "meno", "male", "none", "fit"].includes(o), [v, b] = C.useState(p.symptoms || []), [j, w] = C.useState(p.energy || 0), [T, x] = C.useState(p.mood || 0), [A, _] = C.useState(!!p.period), [E, M] = C.useState(!!p.intimacy), [O, D] = C.useState(""), [N, V] = C.useState(!1), [H, B] = C.useState(0), U = C.useRef(null), F = C.useRef(0), Y = C.useRef({ generation: 0, open: !1 }), st = C.useRef(""), I = C.useRef(d);
   I.current = d, C.useLayoutEffect(() => {
     Y.current = {
       generation: Y.current.generation + (n ? 1 : 0),
@@ -22501,7 +22502,7 @@ function Q7({ iso: n, label: t, open: i, onClose: l, symptomGroups: o, showIntim
 }
 const cc = (n, t = Qe()) => !!(n?.iso && !n.disabled && n.iso <= t);
 function bp({ isOpen: n, onClose: t, mode: i, revision: l, symptomGroups: o }) {
-  const [c, u] = C.useState(!1), [d, p] = C.useState(null), [y, g] = C.useState(!1), [v, b] = C.useState("period"), [j, w] = C.useState({}), T = C.useRef(Promise.resolve()), x = C.useRef(0), A = C.useRef(null), _ = Array.from({ length: 20 }, (I, $) => Ve("getAiwaCalendarMonth", $ - 12)).filter(Boolean), E = !["preg", "meno", "male", "none"].includes(i), M = I_(E ? ["period", "symptoms", "intimacy"] : ["symptoms", "intimacy"]), O = Zh[v] || Zh.symptoms, D = z_(), N = () => {
+  const [c, u] = C.useState(!1), [d, p] = C.useState(null), [y, g] = C.useState(!1), [v, b] = C.useState("period"), [j, w] = C.useState({}), T = C.useRef(Promise.resolve()), x = C.useRef(0), A = C.useRef(null), _ = Array.from({ length: 20 }, (I, $) => Ve("getAiwaCalendarMonth", $ - 12)).filter(Boolean), E = !["preg", "meno", "male", "none", "fit"].includes(i), M = I_(E ? ["period", "symptoms", "intimacy"] : ["symptoms", "intimacy"]), O = Zh[v] || Zh.symptoms, D = z_(), N = () => {
     g(!1), w({});
   }, V = (I) => {
     b(I), u(!1), g(!0);
@@ -22756,7 +22757,7 @@ const I7 = {
   "days_since",
   "status",
   "delay_days"
-].every((i) => J7(n, i)) || !Array.isArray(n.periods) || !Array.isArray(n.cycles) || !Array.isArray(n.past_periods) || !n.stats || typeof n.stats != "object" || Array.isArray(n.stats) || ["cycle", "irregular"].includes(n.mode) && !Array.isArray(n.stats.history) ? !1 : n.mode === "preg" ? !!(n.preg && typeof n.preg == "object" && !n.cycle && n.periods.length === 0 && n.cycles.length === 0) : ["meno", "none", "male"].includes(n.mode) ? !n.cycle && n.preg === null && n.periods.length === 0 && n.cycles.length === 0 : ["cycle", "irregular"].includes(n.mode), W7 = async (n, t, i) => {
+].every((i) => J7(n, i)) || !Array.isArray(n.periods) || !Array.isArray(n.cycles) || !Array.isArray(n.past_periods) || !n.stats || typeof n.stats != "object" || Array.isArray(n.stats) || ["cycle", "irregular"].includes(n.mode) && !Array.isArray(n.stats.history) ? !1 : n.mode === "preg" ? !!(n.preg && typeof n.preg == "object" && !n.cycle && n.periods.length === 0 && n.cycles.length === 0) : ["meno", "none", "male", "fit"].includes(n.mode) ? !n.cycle && n.preg === null && n.periods.length === 0 && n.cycles.length === 0 : ["cycle", "irregular"].includes(n.mode), W7 = async (n, t, i) => {
   let l = null;
   try {
     l = await n("reloadSettingsData");
@@ -24955,7 +24956,9 @@ function nD({ initialMessages: n = [] }) {
     role: x.role === "user" ? "user" : "assistant",
     text: x.text || "",
     suggestions: []
-  }))), [l, o] = C.useState(""), [c, u] = C.useState(!1), [d, p] = C.useState(!1), y = fh.useRef(null), g = (typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData)?.mode === "male", v = fh.useRef(null);
+  }))), [l, o] = C.useState(""), [c, u] = C.useState(!1), [d, p] = C.useState(!1), y = fh.useRef(null), g = ["male", "fit"].includes(
+    (typeof window.aiwaData == "function" ? window.aiwaData() : window.aiwaData)?.mode
+  ), v = fh.useRef(null);
   C.useEffect(() => {
     t.length || i([{
       id: "hello",

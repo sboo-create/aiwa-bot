@@ -19,7 +19,10 @@ export function ChatScreen({ initialMessages = [] }) {
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   const recorderRef = React.useRef(null);
-  const maleMode = (typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData)?.mode === "male";
+  // male и fit цикл не ведут — приветствие без цикла для обоих.
+  const noCycleMode = ["male", "fit"].includes(
+    (typeof window.aiwaData === "function" ? window.aiwaData() : window.aiwaData)?.mode,
+  );
   const endRef = React.useRef(null);
 
   useEffect(() => {
@@ -27,13 +30,13 @@ export function ChatScreen({ initialMessages = [] }) {
       setMessages([{
         id: "hello",
         role: "assistant",
-        text: maleMode
+        text: noCycleMode
         ? "Привет! Спроси меня о питании, тренировках или самочувствии. Я отвечу с учётом твоих данных."
         : "Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.",
         suggestions: ["Можно ли тренироваться?", "Что съесть сегодня?", "Как моё самочувствие?"],
       }]);
     }
-  }, [maleMode, messages.length]);
+  }, [noCycleMode, messages.length]);
   useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [messages, busy]);
 
   const pollJournalJob = async (jobId, assistantId) => {

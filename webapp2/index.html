@@ -511,7 +511,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 
 /* The main screen is styled by the exact Deslop package and src/deslop-main.css. */
 </style>
-<link rel="stylesheet" href="/assets/deslop/main.css?v=r43">
+<link rel="stylesheet" href="/assets/deslop/main.css?v=r45">
 </head>
 <body class="apple">
 <div id="app" data-component="Page">
@@ -526,7 +526,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 <div id="hub" class="hubsheet hidden"></div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="cmic" aria-label="Голосом">🎤</button><button id="csend" aria-label="Отправить">→</button></div>
 <div id="tabs" aria-label="Разделы приложения"></div><input type="file" id="foodfile" accept="image/*" style="display:none">
-<script type="module" src="/assets/deslop/main.js?v=r43"></script>
+<script type="module" src="/assets/deslop/main.js?v=r45"></script>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp;
 const LOCAL_HOST=/^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/;
@@ -759,6 +759,14 @@ function paperModeHomeConfig(stats){
       {label:"Настроение",value:(todayLog.mood?["плохое","нормальное","хорошее"][todayLog.mood-1]:"—"),ok:!!todayLog.mood}
     ],chartTitle:"Динамика энергии",chartData:paperHomeLogChartData(logs,"energy"),chartSeries:[{key:"value",label:"Энергия",color:"var(--aiwa-accent)"}],chartEmptyText:"Отмечай энергию — здесь появится динамика.",historyTitle:"История отметок",history:history,historyEmptyDescription:"Отмечай самочувствие — здесь появится история.",symptomGroups:[["Самочувствие",[["tired","Усталость"],["stress","Стресс"],["insomnia","Плохой сон"],["soreness","Крепатура"],["head","Голова"]]]]};
   }
+  if(mode==="fit"){
+    var markedDaysF=logs.filter(function(l){return(l.symptoms&&l.symptoms.length)||l.energy||l.mood;}).length;
+    return{heroValue:"Твой день",countdownLabel:"питание · нагрузка · самочувствие",aiText:"Цикл сейчас не отслеживается, поэтому фазы не рассчитываются. Айва опирается на твои отметки о самочувствии, питании и нагрузке. Включить цикл можно в профиле — прошлые данные сохранятся.",metrics:[
+      {label:"Отмечено дней",value:daysText(markedDaysF),ok:true},
+      {label:"Энергия сегодня",value:(todayLog.energy?["низкая","средняя","высокая"][todayLog.energy-1]:"—"),ok:!!todayLog.energy},
+      {label:"Настроение",value:(todayLog.mood?["плохое","нормальное","хорошее"][todayLog.mood-1]:"—"),ok:!!todayLog.mood}
+    ],chartTitle:"Динамика энергии",chartData:paperHomeLogChartData(logs,"energy"),chartSeries:[{key:"value",label:"Энергия",color:"var(--aiwa-accent)"}],chartEmptyText:"Отмечай энергию — здесь появится динамика.",historyTitle:"История отметок",history:history,historyEmptyDescription:"Отмечай самочувствие — здесь появится история.",symptomGroups:SYMGROUPS};
+  }
   if(mode==="none"){
     var last=D&&D.last_period?new Date(D.last_period+"T00:00:00"):null,daysWithout=last?Math.max(0,Math.floor((today-last)/86400000)):0,markedDays=logs.filter(function(l){return(l.symptoms&&l.symptoms.length)||l.energy||l.mood;}).length;
     return{heroValue:daysText(daysWithout),countdownLabel:"без месячных",aiText:"Месячных сейчас нет, поэтому фазы цикла не рассчитываются. Айва опирается на самочувствие, симптомы и историю. Если пауза длится три месяца, стоит обсудить причины с врачом.",chartData:null,metrics:[
@@ -871,7 +879,7 @@ function homeDayCountdown(iso,dd,mode){
     var week=Math.max(1,(Number(D.preg.week)||0)-Math.floor((today-dd)/604800000));
     return{value:week+" неделя",label:"беременности"};
   }
-  if(mode==="meno"||mode==="none"){
+  if(mode==="meno"||mode==="none"||mode==="fit"){
     return{value:symptomsText((homeDayLog(iso).symptoms||[]).length),label:"отмечено в этот день"};
   }
   var inCycle=periodDayNumber(iso,dd);
@@ -1119,7 +1127,7 @@ function applySettingsMutationReceipt(action,result){
     complete=complete&&Array.isArray(snapshot.periods)&&Array.isArray(snapshot.cycles)&&Array.isArray(snapshot.past_periods)&&snapshot.stats&&typeof snapshot.stats==="object";
     if(complete&&(snapshot.mode==="cycle"||snapshot.mode==="irregular"))complete=Array.isArray(snapshot.stats.history);
     if(complete&&snapshot.mode==="preg")complete=!!snapshot.preg&&typeof snapshot.preg==="object"&&!snapshot.cycle&&snapshot.periods.length===0&&snapshot.cycles.length===0;
-    if(complete&&(snapshot.mode==="meno"||snapshot.mode==="none"||snapshot.mode==="male"))complete=!snapshot.cycle&&snapshot.preg===null&&snapshot.periods.length===0&&snapshot.cycles.length===0;
+    if(complete&&(snapshot.mode==="meno"||snapshot.mode==="none"||snapshot.mode==="male"||snapshot.mode==="fit"))complete=!snapshot.cycle&&snapshot.preg===null&&snapshot.periods.length===0&&snapshot.cycles.length===0;
     if(!complete)return{ok:false,error:"incomplete_mode_receipt",message:"Сервер не вернул полное состояние режима"};
     required.forEach(function(key){D[key]=snapshot[key];});
     // These legacy keys are absent from a full /api/data snapshot. Removing
@@ -1769,7 +1777,7 @@ async function saveProfileApp(){
 function renderStats(){
   var el=document.getElementById('scr-stats');
   if(D&&D.mode==='male'){el.innerHTML="<div class='h'>Дневник</div><div class='card'><div class='sec' style='margin-top:0'>Самочувствие и восстановление</div>"+symptomDiary()+"</div><div class='card'><div class='sec' style='margin-top:0'>Выписка для врача</div><div class='partnernote'>PDF с отметками о самочувствии, питании и нагрузке придёт в чат бота.</div><button class='copylink' onclick='getReport()'>Получить выписку</button></div><div class='foot'>Дневник строится по твоим отметкам о самочувствии, питании и нагрузке.</div>";return;}
-  if(D&&(D.mode==='meno'||D.mode==='preg'||D.mode==='irregular'||D.mode==='none')){el.innerHTML="<div class='h'>Дневник</div><div class='card'><div class='sec' style='margin-top:0'>Дневник симптомов</div>"+symptomDiary()+"</div>"+periodHistory()+"<div class='foot'>Дневник строится по твоим отметкам. Прошлые циклы сохранены и вернутся при переключении на «Цикл». Профиль и партнёр — в кружке профиля сверху.</div>";return;}
+  if(D&&(D.mode==='meno'||D.mode==='preg'||D.mode==='irregular'||D.mode==='none'||D.mode==='fit')){el.innerHTML="<div class='h'>Дневник</div><div class='card'><div class='sec' style='margin-top:0'>Дневник симптомов</div>"+symptomDiary()+"</div>"+periodHistory()+"<div class='foot'>Дневник строится по твоим отметкам. Прошлые циклы сохранены и вернутся при переключении на «Цикл». Профиль и партнёр — в кружке профиля сверху.</div>";return;}
   var s=(D&&D.stats)||{},p=(D&&D.profile)||{};
   var html="<div class='h'>Статистика</div>";
   html+="<div class='stats'>";
@@ -1805,10 +1813,11 @@ function initChat(){
   if(chatInited)return;chatInited=true;var log=(D&&D.chatlog)||[];
   if(log.length){log.forEach(function(m){if(m.role==="user")bubbleMe(m.text);else bubbleAI(m.text);});scrollBottom();}
   else{
-    var male=!!(D&&D.mode==="male");
-    var b=bubbleAI(male?"Привет! Спроси меня о питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.":"Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоей фазы, данных и медицинских рекомендаций.");
+    // male и fit цикл не ведут: приветствие и чипсы без фазы и овуляции.
+    var noCycle=!!(D&&(D.mode==="male"||D.mode==="fit"));
+    var b=bubbleAI(noCycle?"Привет! Спроси меня о питании, тренировках или самочувствии. Я отвечу с учётом твоих данных.":"Привет! Спроси меня о цикле, питании, тренировках или самочувствии. Я отвечу с учётом твоей фазы, данных и медицинских рекомендаций.");
     var c=document.createElement("div");c.className="chips";
-    (male?["Что есть сегодня?","Как восстановиться?","Можно тренироваться?"]:["Когда овуляция?","Что есть сегодня?","Можно тренироваться?"]).forEach(function(s){var x=document.createElement("button");x.className="chip";x.textContent=s;x.onclick=function(){send(s);};c.appendChild(x);});
+    (noCycle?["Что есть сегодня?","Как восстановиться?","Можно тренироваться?"]:["Когда овуляция?","Что есть сегодня?","Можно тренироваться?"]).forEach(function(s){var x=document.createElement("button");x.className="chip";x.textContent=s;x.onclick=function(){send(s);};c.appendChild(x);});
     b.appendChild(c);
   }
 }
@@ -1866,14 +1875,14 @@ function showNeedOnboard(){
 function addHome(){haptic("impact","light");if(tg&&tg.addToHomeScreen){tg.addToHomeScreen();}else if(tg&&tg.showAlert){tg.showAlert('Доступно в новых версиях Telegram: меню \u22EE \u2192 «На главный экран».');}}
 function updateHomeBtn(){var b=document.getElementById('homebtn');if(!b)return;if(!(tg&&tg.isVersionAtLeast&&tg.isVersionAtLeast('8.0'))){b.style.display='none';return;}if(tg.checkHomeScreenStatus){tg.checkHomeScreenStatus(function(st){b.style.display=(st==='added'||st==='unsupported')?'none':'block';});}else{b.style.display='block';}}
 var HUB_OPEN=false;
-function modeLabel(m){return {cycle:"Цикл",irregular:"Нерегулярный цикл",preg:"Беременность",meno:"Менопауза",none:"Сейчас нет месячных",male:"Мужской режим"}[m]||"Цикл";}
+function modeLabel(m){return {cycle:"Цикл",irregular:"Нерегулярный цикл",preg:"Беременность",meno:"Менопауза",none:"Сейчас нет месячных",fit:"Питание и нагрузка",male:"Мужской режим"}[m]||"Цикл";}
 function setAvatar(){var av=document.getElementById('avatar');if(av)av.textContent=(NAME&&NAME.trim())?NAME.trim().charAt(0):'•';}
 function openHub(){renderHub();document.getElementById('hubBackdrop').classList.remove('hidden');document.getElementById('hub').classList.remove('hidden');HUB_OPEN=true;haptic("impact","light");}
 function closeHub(){document.getElementById('hubBackdrop').classList.add('hidden');document.getElementById('hub').classList.add('hidden');HUB_OPEN=false;}
 function hubToggle(k){var el=document.getElementById('hub-'+k);if(!el)return;var was=el.classList.contains('hidden');['mode','prefs','data','time','partner'].forEach(function(x){var e=document.getElementById('hub-'+x);if(e)e.classList.add('hidden');});if(was)el.classList.remove('hidden');haptic("selection");}
 function renderHub(){
   var p=(D&&D.profile)||{},m=(D&&D.mode)||"cycle";
-  var modeOpts=["cycle","irregular","preg","meno","none","male"].map(function(x){return "<div class='modeopt"+(x===m?" on":"")+"' onclick=\"chooseMode('"+x+"')\">"+modeLabel(x)+(x===m?" ✓":"")+"</div>";}).join("");
+  var modeOpts=["cycle","fit","irregular","preg","meno","none","male"].map(function(x){return "<div class='modeopt"+(x===m?" on":"")+"' onclick=\"chooseMode('"+x+"')\">"+modeLabel(x)+(x===m?" ✓":"")+"</div>";}).join("");
   var h="";
   h+="<div class='hubhead'><div class='hubtitle'>Профиль</div><button class='hubclose' aria-label='Закрыть профиль' onclick='closeHub()'>✕</button></div>";
   h+="<div class='cells'>";
@@ -1883,7 +1892,7 @@ function renderHub(){
   h+="<div class='cellrow' onclick=\"hubToggle('prefs')\"><div class='ci'>🍽</div><div class='ctxt'><div class='ct'>Предпочтения по питанию</div><div class='cc'>любимое, что исключить, аллергии</div></div><div class='chev'>›</div></div>";
   h+="<div id='hub-prefs' class='hubpanel hidden'><textarea id='hubPrefs' placeholder='Например: без свинины, люблю рыбу и творог, аллергия на орехи'>"+esc(p.diet_note||"")+"</textarea><div class='trlabel' style='margin:12px 2px 6px'>Желаемые калории <span style='text-transform:none;letter-spacing:0;font-weight:600;color:var(--inkSoft)'>&middot; необязательно</span></div><input id='hubKcal' class='tpin' inputmode='numeric' placeholder='напр. 1700 &middot; пусто = рассчитаю сама' value='"+esc(p.kcal_goal||"")+"'><div class='trpick' style='margin-top:8px'><div class='trpill' onclick='setKcalPreset(0.8)'>Дефицит</div><div class='trpill' onclick='setKcalPreset(1)'>Норма</div><div class='trpill' onclick='setKcalPreset(1.12)'>Профицит</div></div><div class='cc' style='margin-top:6px'>"+((D&&D.kcal_base)?('Норма для тебя ~'+D.kcal_base+' ккал в день'):'Заполни рост, вес и возраст — рассчитаю норму.')+"</div><button class='pbtn' style='margin-top:10px' onclick='saveHubPrefs()'>Сохранить</button></div>";
   h+="<div class='cellrow' onclick=\"hubToggle('data')\"><div class='ci'>📏</div><div class='ctxt'><div class='ct'>Мои данные</div><div class='cc'>рост "+(p.height||"—")+" · вес "+(p.weight||"—")+" · возраст "+(p.age||"—")+"</div></div><div class='chev'>›</div></div>";
-  h+="<div id='hub-data' class='hubpanel hidden'><div class='hubgrid3'><input id='hubH' inputmode='decimal' placeholder='Рост' value='"+esc(p.height||"")+"'><input id='hubW' inputmode='decimal' placeholder='Вес' value='"+esc(p.weight||"")+"'><input id='hubA' inputmode='numeric' placeholder='Возраст' value='"+esc(p.age||"")+"'></div>"+(m==="male"?"":"<div class='trlabel' style='margin:12px 2px 6px'>Средняя длина цикла</div><input id='hubCycle' class='tpin' inputmode='numeric' placeholder='напр. 28' value='"+esc(D&&D.cycle_len||"")+"'>")+"<button class='pbtn' style='margin-top:10px' onclick='saveHubProfile()'>Сохранить</button></div>";
+  h+="<div id='hub-data' class='hubpanel hidden'><div class='hubgrid3'><input id='hubH' inputmode='decimal' placeholder='Рост' value='"+esc(p.height||"")+"'><input id='hubW' inputmode='decimal' placeholder='Вес' value='"+esc(p.weight||"")+"'><input id='hubA' inputmode='numeric' placeholder='Возраст' value='"+esc(p.age||"")+"'></div>"+(m==="male"||m==="fit"?"":"<div class='trlabel' style='margin:12px 2px 6px'>Средняя длина цикла</div><input id='hubCycle' class='tpin' inputmode='numeric' placeholder='напр. 28' value='"+esc(D&&D.cycle_len||"")+"'>")+"<button class='pbtn' style='margin-top:10px' onclick='saveHubProfile()'>Сохранить</button></div>";
   h+="<div class='cellrow' onclick=\"hubToggle('time')\"><div class='ci'>⏰</div><div class='ctxt'><div class='ct'>Время утренней сводки</div><div class='cc'>"+(D.send_time||"08:00")+" · МСК</div></div><div class='chev'>›</div></div>";
   h+="<div id='hub-time' class='hubpanel hidden'><input id='hubTime' placeholder='09:00' value='"+esc(D.send_time||"08:00")+"'><button class='pbtn' style='margin-top:8px' onclick='saveHubTime()'>Сохранить</button></div>";
   h+="<div class='cellrow' onclick='hubPartner()'><div class='ci'>❤️</div><div class='ctxt'><div class='ct'>Партнёр и близкие</div><div class='cc'>"+(D.partner_linked?"подключён":"короткая сводка партнёру")+"</div></div><div class='chev'>›</div></div>";
