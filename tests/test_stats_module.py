@@ -167,7 +167,9 @@ class StatsModuleTests(unittest.TestCase):
             week = self.module.compute_dashboard(7)
 
         self.assertEqual(day["overview"]["dau"], 1)
-        self.assertEqual(day["overview"]["sessions_per_dau"], 1.0)
+        # The 20-minute quiet stretch between the first two events splits
+        # them under the fleet 5-minute inactivity timeout (07.08.2026).
+        self.assertEqual(day["overview"]["sessions_per_dau"], 2.0)
         self.assertEqual(day["overview"]["tools_per_dau"], 2.0)
         self.assertEqual(day["audience"]["avg_dau"], 1.0)
         self.assertEqual(day["overview"], week["overview"])
