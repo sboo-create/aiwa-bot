@@ -12771,8 +12771,20 @@ async def _journal_job_worker(worker_no):
                    ms=int((time.monotonic() - route_started) * 1000),
                    request_id=request_id, user_generation=job["generation"])
             if not known_intent:
-                result = {"answer": "Не увидела однозначной записи для дневника.",
-                          "suggestions": []}
+                # Роутер не нашёл записи — частый случай: отрицание («пропустила
+                # тренировку», «ничего не ела»). Это разговор, а не журналирование:
+                # отвечаем обычным ответом Айвы, а не заглушкой. Пустой
+                # journal_override гасит повторный семантический роутинг.
+                ev(job["chat_id"], "journal_job_stage", meta="no_intent|freeform",
+                   request_id=request_id, user_generation=job["generation"])
+                result = await _chat_reply(
+                    job["chat_id"], row(job["chat_id"]), payload.get("text") or "",
+                    user_generation=job["generation"],
+                    mutation_key=payload.get("mutation_key"),
+                    require_mutation_key=True,
+                    channel=payload.get("channel") or "bot",
+                    journal_override={}, request_id=request_id,
+                )
             elif known_intent == "journalunavailable":
                 raise RuntimeError("route_unavailable")
             else:
