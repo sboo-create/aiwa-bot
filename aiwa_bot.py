@@ -12778,7 +12778,9 @@ async def _journal_job_worker(worker_no):
                 ev(job["chat_id"], "journal_job_stage", meta="no_intent|freeform",
                    request_id=request_id, user_generation=job["generation"])
                 result = await _chat_reply(
-                    job["chat_id"], row(job["chat_id"]), payload.get("text") or "",
+                    job["chat_id"],
+                    await asyncio.to_thread(row, job["chat_id"]),
+                    payload.get("text") or "",
                     user_generation=job["generation"],
                     mutation_key=payload.get("mutation_key"),
                     require_mutation_key=True,
