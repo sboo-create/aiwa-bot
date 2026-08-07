@@ -511,7 +511,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 
 /* The main screen is styled by the exact Deslop package and src/deslop-main.css. */
 </style>
-<link rel="stylesheet" href="/assets/deslop/main.css?v=r43">
+<link rel="stylesheet" href="/assets/deslop/main.css?v=r44">
 </head>
 <body class="apple">
 <div id="app" data-component="Page">
@@ -526,7 +526,7 @@ body.material{--side-padding:20px}.material #scr-today .cycle-hero,.material #sc
 <div id="hub" class="hubsheet hidden"></div>
 <div class="composer hidden" id="composer"><input id="cin" placeholder="Спроси Айву…"><button id="cmic" aria-label="Голосом">🎤</button><button id="csend" aria-label="Отправить">→</button></div>
 <div id="tabs" aria-label="Разделы приложения"></div><input type="file" id="foodfile" accept="image/*" style="display:none">
-<script type="module" src="/assets/deslop/main.js?v=r43"></script>
+<script type="module" src="/assets/deslop/main.js?v=r44"></script>
 <script>
 const tg=window.Telegram&&window.Telegram.WebApp;
 const LOCAL_HOST=/^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/;
@@ -871,7 +871,9 @@ function homeDayCountdown(iso,dd,mode){
     var week=Math.max(1,(Number(D.preg.week)||0)-Math.floor((today-dd)/604800000));
     return{value:week+" неделя",label:"беременности"};
   }
-  if(mode==="meno"||mode==="none"){
+  /* Цикл — только по явному opt-in: male и любой будущий режим без месячных
+     не должны проваливаться в ветку «до месячных» (фидбек бета-тестера). */
+  if(mode!=="cycle"&&mode!=="irregular"){
     return{value:symptomsText((homeDayLog(iso).symptoms||[]).length),label:"отмечено в этот день"};
   }
   var inCycle=periodDayNumber(iso,dd);
@@ -1630,8 +1632,8 @@ function openLog(pre){
   trcur.date=pre||todayISO();
   var h="<div class='hubhead'><div class='hubtitle'>Отметить тренировку</div><button class='hubclose' aria-label='Закрыть' onclick='closeHub()'>✕</button></div><div class='hubpanel'>";
   h+="<div class='trlabel'>Когда</div><div class='trpick' id='trWhen'></div>";
-  h+="<div class='trlabel'>Что делала</div><div class='trpick' id='trType'></div>";
-  h+="<div class='trlabel'>Упражнения <span style='text-transform:none;letter-spacing:0;font-weight:600;color:var(--inkSoft)'>· отметь, что делала</span></div><div id='trEx'></div>";
+  h+="<div class='trlabel'>Тип тренировки</div><div class='trpick' id='trType'></div>";
+  h+="<div class='trlabel'>Упражнения <span style='text-transform:none;letter-spacing:0;font-weight:600;color:var(--inkSoft)'>· отметь выполненные</span></div><div id='trEx'></div>";
   h+="<div class='trlabel'>Сколько по времени</div><div class='trpick' id='trDur'></div>";
   h+="<div class='trlabel'>Как ощущалось</div><div class='trpick' id='trRpe'></div>";
   h+="<button class='pbtn' style='margin-top:20px' onclick='saveWorkout()'>Сохранить и разобрать</button></div>";

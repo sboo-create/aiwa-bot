@@ -217,7 +217,7 @@ export function WorkoutPanel({ isOpen, onClose, onSaved, suggested, favoriteType
             value={date}
             onChange={setDate}
           />
-          <ChoicePills surface="canvas" label="Что делала" options={typeOptions} value={type} onChange={(value) => { setType(value); setSelected([]); }} />
+          <ChoicePills surface="canvas" label="Тип тренировки" options={typeOptions} value={type} onChange={(value) => { setType(value); setSelected([]); }} />
           {type === "Своё" ? (
             <Field label="Название тренировки" value={customType} onChange={setCustomType} placeholder="Напр. Сквош" />
           ) : null}

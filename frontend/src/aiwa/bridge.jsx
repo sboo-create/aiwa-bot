@@ -17,6 +17,7 @@ let profileOpen = false;
 let panelRevision = 0;
 let navRoot = null;
 let navElement = null;
+let navActive;
 let foodRoot = null;
 let foodElement = null;
 let foodProps = {};
@@ -134,7 +135,12 @@ export const bridge = {
       navRoot?.unmount();
       navElement = element;
       navRoot = createRoot(element);
+      navActive = undefined;
     }
+    // go() зовёт renderNav на каждый переход, включая повторные тапы по тому же
+    // табу — без гарда перерисовка ремоунтила TabBar (key) и мигала индикатором.
+    if (navActive === active) return;
+    navActive = active;
     navRoot.render(<Navigation active={active} />);
   },
 };

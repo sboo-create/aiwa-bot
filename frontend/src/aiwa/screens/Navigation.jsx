@@ -25,6 +25,11 @@ export function Navigation({ active }) {
       {/* Storybook pattern: fixed bottom host, pointer-events only on controls */}
       <div className="aiwa-nav-root" data-aiwa-nav="true">
         <div className="aiwa-nav-tabbar-layer">
+          {/* TabBar из TMA — uncontrolled: класс _active_ он синхронизирует по
+              defaultIndex, но пилюлю-индикатор рисует только собственная
+              тап-анимация — при программных go() (чипсы, снапшот, закрытие
+              чата) пилюля пропадала или застревала. Резюмирующее состояние
+              пилюли задаёт theme.css от _active_ (см. _clipPathContainer_). */}
           <TabBar
             tabs={tabs.map(({ label, icon }) => ({ label, icon }))}
             defaultIndex={defaultIndex}
