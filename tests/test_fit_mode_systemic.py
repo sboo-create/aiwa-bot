@@ -148,6 +148,40 @@ class FitModeSystemicTests(unittest.TestCase):
             self.assertNotIn(mode, bot.VALID_MODES)
         self.assertEqual(bot.row(self.cid)["mode"], "fit")
 
+    def test_welcome_message_has_no_cycle_leftovers(self):
+        """После скипа нельзя звать в /addcycles и календарь цикла."""
+        sent = []
+
+        class FakeMessage:
+            async def reply_text(self, text, **kwargs):
+                sent.append(text)
+                return None
+
+        with mock.patch.object(bot, "summary_sent_today", return_value=True):
+            asyncio.run(bot.welcome_finish(None, self.cid, FakeMessage()))
+
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn("/addcycles", sent[0])
+        self.assertNotIn("Календарь", sent[0])
+        self.assertIn("пробежала", sent[0])  # женский род сохранён
+
+    def test_chat_router_answers_period_intents_without_cycle(self):
+        """Голос и мини-апп идут этим путём: там же был мужской текст."""
+        result = asyncio.run(
+            bot._chat_reply(self.cid, bot.row(self.cid), "запиши, месячные начались")
+        )
+        self.assertEqual(result["answer"], bot.FIT_CYCLE_OFF_TEXT)
+        joined = " ".join(result.get("suggestions") or []).lower()
+        for token in ("цикл", "календар", "месячн"):
+            self.assertNotIn(token, joined)
+        self.assertNotIn("мужск", result["answer"].lower())
+        self.assertEqual(bot.periods_of(self.cid), [])
+
+    def test_off_text_promises_only_what_exists(self):
+        """Текст обещал «одно касание» там, где кнопки не было."""
+        self.assertNotIn("одно касание", bot.FIT_CYCLE_OFF_TEXT)
+        self.assertIn("/mode", bot.FIT_CYCLE_OFF_TEXT)
+
     # ---------- записи цикла закрыты ----------
 
     def test_period_api_actions_fail_closed(self):
@@ -283,6 +317,7 @@ class FitModeSystemicTests(unittest.TestCase):
             lambda: llm.general_summary(profile, "fit")
         )
         self.assertIn("женском роде", whole)
+        self.assertIn("на «ты»", own)
         for token in ("аменорея", "мгт", "перименопауза", "приливы"):
             self.assertNotIn(token, own)
 

@@ -2418,7 +2418,13 @@ def is_male_profile(u):
 
 FIT_CYCLE_OFF_TEXT = (
     "Сейчас цикл не отслеживается — в профиле выбран режим «Питание и нагрузка». "
-    "Включить его можно в одно касание, отметки и история сохранятся."
+    "Включить цикл можно в профиле приложения или командой /mode: отметки и "
+    "история сохранятся."
+)
+FIT_SAFE_SUGGESTIONS = (
+    "Что важно сегодня?",
+    "Открыть питание",
+    "Открыть нагрузку",
 )
 
 def cycle_features_off(u):
@@ -7711,10 +7717,14 @@ def finish_onboarding(context, cid, last_period_iso, n):
 async def welcome_finish(context, cid, msg):
     u = row(cid)
     male = (u.get("mode") == "male")
+    # Цикл выключен — значит и подсказки про него: /addcycles и календарь
+    # сразу после онбординга противоречат только что сделанному выбору.
+    no_cycle = cycle_features_off(u)
     ev(cid, "onboarding_completed", meta=(u.get("mode") or "cycle"))
     text = ("Готово. " + schedule_text(cid, "08:00") +
-            ("" if male else "\n\nИсторию прошлых циклов можно добавить позже командой /addcycles.") +
-            "\n\nКалендарь, питание и тренировки — в приложении по кнопке ниже. "
+            ("" if no_cycle else "\n\nИсторию прошлых циклов можно добавить позже командой /addcycles.") +
+            ("\n\nПитание, нагрузка и отметки самочувствия — в приложении по кнопке ниже. " if no_cycle
+             else "\n\nКалендарь, питание и тренировки — в приложении по кнопке ниже. ") +
             "А здесь, в чате, задай любой вопрос или опиши блюдо или тренировку — текстом или голосом, разберу и запишу. "
             + ("Например: «яичница и кофе на завтрак» или «пожал 60 кг, запиши тренировку»." if male
                else "Например: «овсянка с ягодами на завтрак» или «пробежала 5 км, запиши»."))
@@ -13429,15 +13439,21 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
             )
         if journal:
             intent = journal["intent"]
-    if is_male_profile(u) and intent in {
+    if cycle_features_off(u) and intent in {
         "phases", "period", "addcycles", "cyclelen", "logperiod",
         "period_end", "calendar",
     }:
         upsert(cid, state=None, pending_date=None)
-        ev(cid, "male_mode_block", meta="chat_" + intent)
+        if is_male_profile(u):
+            ev(cid, "male_mode_block", meta="chat_" + intent)
+            return {
+                "answer": MALE_PROFILE_FUNCTION_TEXT,
+                "suggestions": list(MALE_SAFE_SUGGESTIONS[:2]),
+            }
+        ev(cid, "fit_mode_block", meta="chat_" + intent)
         return {
-            "answer": MALE_PROFILE_FUNCTION_TEXT,
-            "suggestions": list(MALE_SAFE_SUGGESTIONS[:2]),
+            "answer": FIT_CYCLE_OFF_TEXT,
+            "suggestions": list(FIT_SAFE_SUGGESTIONS[:2]),
         }
     if intent == "phases":
         _pu = []
