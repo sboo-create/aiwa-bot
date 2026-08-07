@@ -1,10 +1,14 @@
 name: Deploy to i167
 
-# Ручной запуск: репозиторий публичный, поэтому workflow_dispatch доступен
-# только пользователям с write-доступом, а секреты недоступны форкам.
+# Автодеплой при каждом пуше/мерже в main плюс ручной запуск (для отката на
+# более старый SHA с main). Репозиторий публичный, но обе дорожки требуют
+# write-доступа: пушить в main и жать workflow_dispatch могут только
+# коллабораторы, а секреты недоступны форкам.
 # Артефакты не создаются: релиз собирается git archive и уходит по SSH
 # прямо на сервер, поэтому storage GitHub не расходуется.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
@@ -28,12 +32,13 @@ jobs:
     # и добавить сюда `environment: production` — нужны admin-права на репозиторий.
     steps:
       - name: Check confirmation
-        if: inputs.confirm != 'deploy'
+        if: github.event_name == 'workflow_dispatch' && inputs.confirm != 'deploy'
         run: echo "confirm must be exactly 'deploy'" && exit 1
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          # push → выкатываем запушенный коммит; dispatch → указанный ref
+          ref: ${{ github.event_name == 'push' && github.sha || inputs.ref }}
           fetch-depth: 0
 
       - name: Resolve exact SHA
