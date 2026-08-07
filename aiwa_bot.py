@@ -8646,17 +8646,15 @@ async def _on_photo_bounded(update, context):
         except Exception: pass
         return await update.message.reply_text("Не разобрала фото 🙈 Сфоткай ближе и светлее, либо напиши текстом." + (("\n\n⚙️ " + _e) if _e else ""))
     mid = meal_add(cid, rec); ev(cid, "goal", meta="food_log"); ev(cid, "manual", meta="food_log")
-    review = await _llm_log_review(
-        cid, u, "food_review", L.food_log_review,
-        _food_review_facts(rec, cid, dtoday()), generation,
-    )
-    if not review:
-        # Фолбэк: короткий детерминированный разбор + итог дня.
-        review = _food_short_analysis(rec)
-        try:
-            review += _food_day_context_line(cid, dtoday(), rec.get("slot"))
-        except Exception as exc:
-            log.warning("photo day context %s: %s", cid, exc)
+    # Карточка уходит сразу с коротким разбором; полный LLM-разбор догонит
+    # отдельным сообщением и не держит слот распознавания фото.
+    review = _food_short_analysis(rec)
+    try:
+        review += _food_day_context_line(cid, dtoday(), rec.get("slot"))
+    except Exception as exc:
+        log.warning("photo day context %s: %s", cid, exc)
+    _spawn_log_review(cid, u, "food_review", L.food_log_review,
+                      _food_review_facts(rec, cid, dtoday()), generation)
     rows = [[B("🗑 Убрать из дневника", f"mdel:{mid}")]]
     wu = campaign_webapp_url(u, tab="food")
     if wu: rows.append([InlineKeyboardButton("Открыть питание", web_app=WebAppInfo(url=wu))])
@@ -14082,6 +14080,50 @@ async def _llm_log_review(cid, u, purpose, fn, facts, generation=None):
     # Слишком короткий или неправдоподобно длинный ответ — не разбор, а мусор.
     return out if 40 <= len(out) <= 900 else None
 
+_REVIEW_DAILY_CAP = int(os.environ.get("AIWA_LOG_REVIEW_DAILY_CAP", "15") or 15)
+_REVIEW_TASKS = set()
+
+def _review_quota_take(cid):
+    """Списывает одну единицу дневного лимита LLM-разборов; False — лимит исчерпан.
+
+    Запись еды — самое частое действие, поэтому у разбора есть потолок стоимости.
+    """
+    try:
+        used = int(dc_get(cid, "logrvw") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    if used >= _REVIEW_DAILY_CAP:
+        return False
+    dc_put(cid, "logrvw", used + 1)
+    return True
+
+def _spawn_log_review(cid, u, purpose, fn, facts, generation=None):
+    """Разбор не задерживает подтверждение записи: генерим фоном, шлём вдогонку.
+
+    Подтверждение уходит мгновенно с детерминированным разбором; когда модель
+    успевает — приходит отдельное сообщение с полным разбором. Ошибки и лимиты
+    здесь молчаливые: чек записи уже у пользователя.
+    """
+    if BOT_APP is None or os.environ.get("AIWA_LOG_REVIEW_LLM", "1") != "1":
+        return
+    if not _review_quota_take(cid):
+        return
+
+    async def _run():
+        try:
+            review = await _llm_log_review(cid, u, purpose, fn, facts, generation)
+            if review and _user_write_allowed(cid, generation):
+                await BOT_APP.bot.send_message(cid, review)
+        except Exception as exc:
+            log.warning("log review followup %s: %s", cid, exc)
+
+    try:
+        task = asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        return
+    _REVIEW_TASKS.add(task)
+    task.add_done_callback(_REVIEW_TASKS.discard)
+
 def _food_action_success(rec, mid, event_date, cid=None, review=None):
     slot = rec.get("slot") or slot_for_now()
     sm = SLOT_RU.get(slot, "приём")
@@ -14502,14 +14544,11 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         ev(cid, "tool_execution", meta="success|create_meal|journal", user_generation=generation)
     ev(cid, "journal_mutation_verified", meta="create|food", user_generation=generation)
     saved_date = date.fromisoformat(rec.get("date") or event_date.isoformat())
-    review = None
     if day_context:
-        review = await _llm_log_review(
-            cid, u, "food_review", L.food_log_review,
-            _food_review_facts(rec, cid, saved_date), generation,
-        )
+        _spawn_log_review(cid, u, "food_review", L.food_log_review,
+                          _food_review_facts(rec, cid, saved_date), generation)
     return _food_action_success(rec, mid, saved_date,
-                                cid=cid if day_context else None, review=review)
+                                cid=cid if day_context else None)
 
 async def log_food_batch_action(cid, u, journal, user_generation=None, mutation_key=None):
     """Persist every prevalidated explicit meal section with its own receipt."""
@@ -14910,13 +14949,10 @@ async def log_workout_action(cid, u, text, user_generation=None, mutation_key=No
         ev(cid, "journal_mutation_executed", meta="create|workout", user_generation=generation)
         ev(cid, "tool_execution", meta="success|create_workout|journal", user_generation=generation)
     ev(cid, "journal_mutation_verified", meta="create|workout", user_generation=generation)
-    review = await _llm_log_review(
-        cid, u, "workout_review", L.workout_log_review,
-        _workout_review_facts(rec), generation,
-    )
+    _spawn_log_review(cid, u, "workout_review", L.workout_log_review,
+                      _workout_review_facts(rec), generation)
     return _workout_action_success(
         rec, wid, date.fromisoformat(rec.get("date") or event_date.isoformat()),
-        review=review,
     )
 
 async def log_workout_update_action(cid, u, text, target_id, user_generation=None,
