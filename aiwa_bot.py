@@ -4422,6 +4422,41 @@ def diet_kb(selected):
     rows += [[InlineKeyboardButton(("✓ " if code in selected else "") + ru, callback_data=f"diet:s:{code}")] for code, ru in DIET]
     rows.append([InlineKeyboardButton("Готово", callback_data="diet:done")]); return InlineKeyboardMarkup(rows)
 
+# Раскладка ЙЦУКЕН↔QWERTY посимвольно. «нет», набранное с английской
+# раскладкой, приходит как «ytn» (н на клавише y, е на t, т на n): сравнение
+# сырой строки его не узнавало, и промах по раскладке молча уезжал в
+# diet_note, а оттуда — в каждый промпт как «Пищевые ограничения: ytn».
+_QWERTY_KEYS = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`"
+_JCUKEN_KEYS = "йцукенгшщзхъфывапролджэячсмитьбю.ё"
+_LAYOUT_TO_RU = str.maketrans(_QWERTY_KEYS, _JCUKEN_KEYS)
+_LAYOUT_TO_LAT = str.maketrans(_JCUKEN_KEYS, _QWERTY_KEYS)
+
+# Списки хранятся в канонической форме: сверяемся с ними по всем прочтениям.
+DIET_DENIALS = frozenset({"нет", "нету", "не", "no", "ограничений нет", "нет ограничений", "-", "пропустить"})
+# «да» на вопрос «есть ограничения?» — это не ограничение, а обещание назвать
+# его следующим сообщением. Сохранять такой ответ в профиль нельзя.
+DIET_NON_ANSWERS = frozenset({"да", "ага", "угу", "есть", "да есть", "да, есть", "есть ограничения", "имеются"})
+_DIET_VOWELS = frozenset("аеиоуыэюяaeiou")
+
+def diet_answer_keys(text):
+    """Прочтения ответа про еду, по которым сверяемся со списками.
+
+    Кроме регистра, ё и хвостовой пунктуации учитываем обе раскладки: строка
+    читается и как есть, и как набранная не в той раскладке.
+    """
+    low = (text or "").strip().lower()
+    low = low.rstrip(" .!,;") or low   # «-» состоит из пунктуации: пустой хвост не берём
+    return {v.replace("ё", "е") for v in (low, low.translate(_LAYOUT_TO_RU), low.translate(_LAYOUT_TO_LAT))}
+
+def diet_answer_is_noise(text):
+    """Короткий набор согласных — промах по клавишам, а не ограничение.
+
+    Отказы («-», «не») проверяются раньше и сюда не доходят, поэтому здесь
+    безопасно переспросить: сохранить мусор в профиль дороже лишнего вопроса.
+    """
+    low = (text or "").strip().lower()
+    return 1 <= len(low) <= 4 and not (_DIET_VOWELS & set(low))
+
 def time_kb():
     times = ["07:00", "08:00", "09:00", "10:00", "21:00", "22:00"]
     return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=f"tm:{t}") for t in times[i:i + 3]] for i in (0, 3)])
@@ -8890,9 +8925,19 @@ async def handle_text(update, context, txt):
             "Напиши через пробел рост, вес и возраст — например: 168 60 30.\nПо ним я рассчитаю калории и подберу питание.", reply_markup=SKIP_KB)
 
     if state == "await_diet":
-        _clean = txt.strip().lower()
-        if _clean in ("нет", "нету", "не", "no", "ограничений нет", "нет ограничений", "-", "пропустить"):
+        _keys = diet_answer_keys(txt)
+        _ticked = set((u.get("diet") or "").split(",")) - {""} if u else set()
+        if _keys & DIET_DENIALS:
             upsert(cid, diet="", diet_note="", state=None)
+        elif _keys & DIET_NON_ANSWERS:
+            # состояние не трогаем: следующее сообщение разберётся этой же веткой
+            return await update.message.reply_text(
+                "А какие именно? Напиши текстом — например «без свинины, без сахара». "
+                "Или отметь варианты кнопками ниже.", reply_markup=diet_kb(_ticked))
+        elif diet_answer_is_noise(txt):
+            return await update.message.reply_text(
+                "Не разобрала ответ. Напиши ограничения словами — например «без свинины, "
+                "без сахара», или нажми «Ограничений нет».", reply_markup=diet_kb(_ticked))
         else:
             upsert(cid, diet="", diet_note=txt[:200], state=None)
         return await welcome_finish(context, cid, update.message)
