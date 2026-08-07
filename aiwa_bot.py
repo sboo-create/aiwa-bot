@@ -2432,6 +2432,27 @@ def cycle_features_off(u):
     у fit они выключены её собственным выбором и включаются обратно."""
     return bool(u and u.get("mode") in ("male", "fit"))
 
+# В fit-режиме команды цикла выключены, но общий SYSTEM учит модель звать
+# в /period. Совет воспользоваться выключенной командой упирается в отказ,
+# поэтому такое предложение вырезается и заменяется рабочим путём.
+_FIT_CYCLE_CMD_RE = re.compile(
+    r"[^.!?\n]*(?:/period\b|/addcycles\b|/calendar\b)[^.!?\n]*[.!?]?",
+    re.I,
+)
+FIT_CYCLE_SWITCH_HINT = (
+    "Если захочешь вести цикл, включи режим «Цикл» в профиле — команда /mode."
+)
+
+def _fit_cycle_command_guard(cid, text):
+    value = str(text or "")
+    if not _FIT_CYCLE_CMD_RE.search(value):
+        return value
+    cleaned = _FIT_CYCLE_CMD_RE.sub("", value)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    ev(cid, "fit_mode_block", meta="reply_cycle_command")
+    return (cleaned + "\n\n" + FIT_CYCLE_SWITCH_HINT).strip() if cleaned else FIT_CYCLE_SWITCH_HINT
+
 def cycle_action_unavailable(u):
     """Отказ действия цикла в машинных ответах чат-действий."""
     return {"ok": False, "error": "unavailable",
@@ -2553,6 +2574,8 @@ def guard_aiwa_reply(cid, text, verified_mutation=False):
         guarded = L.split_followups(guarded)[0]
     except Exception:
         pass
+    if (u or {}).get("mode") == "fit":
+        guarded = _fit_cycle_command_guard(cid, guarded)
     if is_male_profile(u) and _male_cycle_content_forbidden(guarded):
         ev(cid, "fallback", meta="male_mode_content_guard")
         return _male_reply_fallback(

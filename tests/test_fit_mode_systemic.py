@@ -177,6 +177,33 @@ class FitModeSystemicTests(unittest.TestCase):
         self.assertNotIn("мужск", result["answer"].lower())
         self.assertEqual(bot.periods_of(self.cid), [])
 
+    def test_reply_never_recommends_disabled_cycle_commands(self):
+        """Модель звала в /period, а он в этом режиме отвечает отказом."""
+        answer = (
+            "🗓 Овуляция — это выход яйцеклетки.\n\n"
+            "Для более точного понимания рекомендую начать фиксировать даты "
+            "начала менструаций в боте, используя команду /period. "
+            "Это позволит точнее прогнозировать твои периоды."
+        )
+        guarded = bot.guard_aiwa_reply(self.cid, answer)
+
+        self.assertNotIn("/period", guarded)
+        self.assertNotIn("/addcycles", guarded)
+        self.assertIn("/mode", guarded)
+        self.assertIn("Овуляция", guarded)  # сам ответ по теме сохранён
+
+        untouched = "Овуляция происходит примерно в середине цикла."
+        self.assertEqual(bot.guard_aiwa_reply(self.cid, untouched), untouched)
+
+    def test_general_answer_prompt_forbids_disabled_commands(self):
+        profile = bot.llm_profile_of(bot.row(self.cid))
+        _, own = self._capture_prompt(
+            lambda: llm.general_answer(profile, "fit", "когда овуляция?")
+        )
+        self.assertIn("/period", own)   # назван как запрещённый
+        self.assertIn("не зови", own)
+        self.assertIn("/mode", own)
+
     def test_off_text_promises_only_what_exists(self):
         """Текст обещал «одно касание» там, где кнопки не было."""
         self.assertNotIn("одно касание", bot.FIT_CYCLE_OFF_TEXT)
@@ -307,7 +334,7 @@ class FitModeSystemicTests(unittest.TestCase):
             lambda: llm.general_answer(profile, "fit", "что съесть после тренировки?")
         )
         self.assertIn("женском роде", whole)
-        self.assertIn("не привязывай советы к фазе", whole)
+        self.assertIn("не привязывай к ним советы", whole)
         self.assertIn("не упоминай фазы менструального цикла", own)
         self.assertNotIn("используй мужской род", own)
 
