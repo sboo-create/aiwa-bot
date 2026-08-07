@@ -46,6 +46,9 @@ PROFILE_AVATAR = ROOT / "frontend" / "src" / "aiwa" / "components" / "ProfileAva
 SCREEN_DAY_HEADER = ROOT / "frontend" / "src" / "aiwa" / "components" / "ScreenDayHeader.jsx"
 FOOD_SCREEN = ROOT / "frontend" / "src" / "aiwa" / "screens" / "FoodScreen.jsx"
 ACTIVITY_SCREEN = ROOT / "frontend" / "src" / "aiwa" / "screens" / "ActivityScreen.jsx"
+BRIDGE = ROOT / "frontend" / "src" / "aiwa" / "bridge.jsx"
+THEME_CSS = ROOT / "frontend" / "src" / "aiwa" / "styles" / "theme.css"
+WORKOUT_PANEL = ROOT / "frontend" / "src" / "aiwa" / "panels" / "WorkoutPanel.jsx"
 
 
 class FakeJsonRequest:
@@ -270,6 +273,58 @@ class MaleWebappStaticContractTests(unittest.TestCase):
             '"Динамика энергии и дневник самочувствия придут PDF-файлом в чат бота."',
             bundle,
         )
+
+    def test_home_day_countdown_gates_cycle_copy_behind_cycle_modes(self):
+        """Листание дат на главной: «до месячных» — только при явном cycle/irregular.
+
+        Мужской режим (и любой будущий режим без месячных) не должен
+        проваливаться в цикл-ветку по умолчанию — фидбек бета-тестера."""
+        index = INDEX.read_text(encoding="utf-8")
+
+        self.assertIn("function homeDayCountdown", index)
+        body = index.split("function homeDayCountdown", 1)[1].split("\nfunction ", 1)[0]
+        guard = 'mode!=="cycle"&&mode!=="irregular"'
+        self.assertIn(guard, body)
+        # Гард стоит раньше цикл-копии: до него «до месячных» недостижимо.
+        self.assertLess(body.index(guard), body.index('label:"до месячных"'))
+
+    def test_workout_form_copy_is_gender_neutral(self):
+        bundle = BUNDLE.read_text(encoding="utf-8")
+        index = INDEX.read_text(encoding="utf-8")
+        workout_panel = WORKOUT_PANEL.read_text(encoding="utf-8")
+
+        self.assertIn('label="Тип тренировки"', workout_panel)
+        self.assertIn("Тип тренировки", bundle)
+        self.assertNotIn("Что делала", workout_panel)
+        self.assertNotIn("Что делала", bundle)
+        self.assertNotIn("Что делала", index)
+
+    def test_tabbar_scrim_is_hidden_and_nav_rerenders_only_on_change(self):
+        """Скрим-градиент TabBar рисует прорезь по геометрии TMA (54px), а бар
+        re-anchored под маскота — прорезь уезжает и градиент ложится пятном на
+        левый край бара (баг бета-теста «навбар ломается»). Скрим гасится в
+        theme.css; renderNav не перерисовывает навигацию без смены таба."""
+        theme_css = THEME_CSS.read_text(encoding="utf-8")
+        bridge_src = BRIDGE.read_text(encoding="utf-8")
+
+        self.assertIn('.aiwa-nav-tabbar-layer [class*="_gradient_"]', theme_css)
+        gradient_rule = theme_css.split('[class*="_gradient_"]', 1)[1].split("}", 1)[0]
+        self.assertIn("display: none !important", gradient_rule)
+        # Пилюлю рисует только тап-анимация вендора: программный go() оставлял
+        # бар без индикатора. Резюмирующее состояние пилюли — CSS от _active_.
+        for slot in (1, 2, 3):
+            self.assertIn(
+                f':has(> [class*="_tab_"]:nth-child({slot})[class*="_active_"])',
+                theme_css,
+            )
+        self.assertIn("opacity: 1 !important", theme_css)
+        # CSS позиций пилюли рассчитан ровно на 3 таба: добавление таба в
+        # Navigation без правки theme.css молча сломает индикатор.
+        navigation = (ROOT / "frontend" / "src" / "aiwa" / "screens" / "Navigation.jsx").read_text(encoding="utf-8")
+        self.assertEqual(len(re.findall(r'\{ id: "', navigation)), 3)
+        self.assertIn("if (navActive === active) return;", bridge_src)
+        self.assertIn("navActive = active;", bridge_src)
+        self.assertIn("navActive = undefined;", bridge_src)
 
     def test_mascot_has_an_unclipped_layout_contract(self):
         css = OVERRIDES_CSS.read_text(encoding="utf-8")

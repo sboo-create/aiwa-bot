@@ -372,7 +372,8 @@ class FitModeStaticContractTests(unittest.TestCase):
         self.assertIn('countdownLabel:"питание · нагрузка · самочувствие"', self.index)
 
     def test_host_day_countdown_never_falls_into_cycle_math(self):
-        self.assertIn('mode==="meno"||mode==="none"||mode==="fit"', self.index)
+        """Цикл — opt-in: fit и любой будущий режим не должны считать месячные."""
+        self.assertIn('if(mode!=="cycle"&&mode!=="irregular"){', self.index)
 
     def test_host_mode_picker_and_labels_know_fit(self):
         self.assertIn('fit:"Питание и нагрузка"', self.index)

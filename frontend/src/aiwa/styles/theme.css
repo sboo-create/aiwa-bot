@@ -152,6 +152,31 @@ body {
   --ui-action-primary-background: var(--aiwa-accent) !important;
 }
 
+/* Пилюля TabBar живёт только в его тап-анимации: inline-стиль держит
+   opacity:0 / clip на первом слоте, и любой программный переход (чипсы,
+   снапшот, закрытие чата) оставлял бар вовсе без индикатора — «навбар
+   ломается» из бета-теста. Класс _active_ при этом синхронизируется всегда,
+   поэтому резюмирующее состояние пилюли выводим из него: три таба — три
+   статичных позиции (числа повторяют вендорные кейфреймы, тап-морф
+   перекрывается по правилам each-important > animations). */
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"]:has(> [class*="_tab_"]:nth-child(1)[class*="_active_"]),
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"]:has(> [class*="_tab_"]:nth-child(2)[class*="_active_"]),
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"]:has(> [class*="_tab_"]:nth-child(3)[class*="_active_"]) {
+  opacity: 1 !important;
+}
+
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"]:has(> [class*="_tab_"]:nth-child(1)[class*="_active_"]) {
+  clip-path: inset(0 calc(66.6666% - 1.99px) 0 0 round 9999px) !important;
+}
+
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"]:has(> [class*="_tab_"]:nth-child(2)[class*="_active_"]) {
+  clip-path: inset(0 calc(33.3333% - 1.99px) 0 calc(33.3333% - 3.67px) round 9999px) !important;
+}
+
+.aiwa-nav-tabbar-layer [class*="_clipPathContainer_"]:has(> [class*="_tab_"]:nth-child(3)[class*="_active_"]) {
+  clip-path: inset(0 0 0 calc(66.6666% - 3.67px) round 9999px) !important;
+}
+
 .aiwa-nav-tabbar-layer [class*="_clipPathContainer_"] span {
   color: var(--aiwa-accent) !important;
 }
@@ -161,6 +186,17 @@ body {
   color: var(--aiwa-accent) !important;
   fill: var(--aiwa-accent) !important;
   stroke: var(--aiwa-accent) !important;
+}
+
+/* Скрим-градиент TabBar (vendored: _gradient_*) рисует маску с прорезью под
+   бар по внутренней геометрии TMA — отступы 54px зашиты в React-измерения.
+   Мы re-anchor'им бар под маскота (left:16px / right:84px в composition.css),
+   прорезь уезжает вправо, и градиент ложится полупрозрачным пятном на левый
+   край бара поверх «Главной» (баг бета-теста «навбар ломается» на Нагрузке —
+   на коротких экранах пятно заметнее). Пересчитать прорезь снаружи нельзя,
+   на плоском фоне скрим декоративен — гасим целиком. */
+.aiwa-nav-tabbar-layer [class*="_gradient_"] {
+  display: none !important;
 }
 
 /* Inactive base row also inherits product ink; active overlay paints orange */
