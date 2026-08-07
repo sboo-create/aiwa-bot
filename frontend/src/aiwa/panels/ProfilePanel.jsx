@@ -94,6 +94,11 @@ export function ProfilePanel({ isOpen, onClose }) {
   const [partner, setPartner] = useState(null);
   const [reportPeriod, setReportPeriod] = useState("3");
   const [form, setForm] = useState({});
+  // Бережные реплики с сервера: про крайние значения ИМТ и про поднятую до
+  // базового обмена цель. Держим их на экране, а не в тосте, — исчезающее
+  // сообщение о здоровье легко пропустить.
+  const [healthNote, setHealthNote] = useState(null);
+  const [kcalNote, setKcalNote] = useState(null);
   const [reportBusy, setReportBusy] = useState(isReportRequestInFlight);
   const [mutationState, setMutationState] = useState(getProfileMutationState);
   const mutationOwnerId = useId();
@@ -123,6 +128,9 @@ export function ProfilePanel({ isOpen, onClose }) {
 
   const updateDraft = (field, value) => {
     userDraftVersion.current += 1;
+    // Правка формы относится уже к другим числам — старая реплика устарела.
+    if (field === "height" || field === "weight" || field === "age") setHealthNote(null);
+    if (field === "kcal_goal") setKcalNote(null);
     setForm((current) => ({ ...current, [field]: value }));
   };
 
@@ -275,7 +283,10 @@ export function ProfilePanel({ isOpen, onClose }) {
       if (!snapshot) return { synced: false };
       if (!isCurrentSession()) return { synced: true };
       showToast("Данные сохранены", { type: "success" });
-      setView("main");
+      // С репликой остаёмся на экране данных: она про только что введённые
+      // числа, и на «главной» панели профиля читалась бы вне контекста.
+      setHealthNote(result.bmi_note || null);
+      if (!result.bmi_note) setView("main");
     } else if (isCurrentSession()) {
       showToast(result?.text || (isCycleMode
         ? "Проверь рост, вес, возраст и длину цикла"
@@ -296,7 +307,8 @@ export function ProfilePanel({ isOpen, onClose }) {
       if (!snapshot) return { synced: false };
       if (!isCurrentSession()) return { synced: true };
       showToast("Предпочтения сохранены", { type: "success" });
-      setView("main");
+      setKcalNote(result.kcal_note || null);
+      if (!result.kcal_note) setView("main");
     } else if (isCurrentSession()) {
       showToast(result?.text || "Не получилось сохранить предпочтения", { type: "error" });
     }
@@ -520,6 +532,13 @@ export function ProfilePanel({ isOpen, onClose }) {
                     ) : null}
                   </div>
                 </SectionList.Item>
+                {healthNote ? (
+                  <SectionList.Item header="Стоит обсудить с врачом">
+                    <div className="aiwa-settings-form">
+                      <Text variant="body" weight="regular">{healthNote}</Text>
+                    </div>
+                  </SectionList.Item>
+                ) : null}
               </SectionList>
               <div className="aiwa-page-action">
                 <AiwaButton
@@ -552,6 +571,13 @@ export function ProfilePanel({ isOpen, onClose }) {
                     <Field label="Желаемые калории" value={form.kcal_goal || ""} onChange={(value) => updateDraft("kcal_goal", value)} inputMode="numeric" disabled={actionLocked} />
                   </div>
                 </SectionList.Item>
+                {kcalNote ? (
+                  <SectionList.Item header="Про цель по калориям">
+                    <div className="aiwa-settings-form">
+                      <Text variant="body" weight="regular">{kcalNote}</Text>
+                    </div>
+                  </SectionList.Item>
+                ) : null}
               </SectionList>
               <div className="aiwa-page-action">
                 <AiwaButton

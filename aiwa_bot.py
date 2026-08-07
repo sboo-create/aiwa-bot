@@ -2325,12 +2325,76 @@ ACT_CYCLE_LEN = dialog.register(dialog.Action(
     ),),
 ))
 
-def calc_calories(cm, kg, age, act, male=False):
+def calc_bmr(cm, kg, age, male=False):
     # Миффлин-Сан Жеор: −161 для женщин, +5 для мужчин.
-    bmr = 10 * kg + 6.25 * cm - 5 * age + (5 if male else -161)
+    return 10 * kg + 6.25 * cm - 5 * age + (5 if male else -161)
+
+def calc_calories(cm, kg, age, act, male=False):
+    bmr = calc_bmr(cm, kg, age, male)
     tdee = bmr * {1: 1.2, 2: 1.375, 3: 1.55, 4: 1.725, 5: 1.9}.get(act, 1.375)
     p = round(1.6 * kg); fat = round(tdee * 0.3 / 9); carbs = round(max(0, tdee - p * 4 - fat * 9) / 4)
     return round(tdee), p, fat, carbs
+
+# Пороги ВОЗ: ИМТ < 16 — выраженный дефицит массы тела, > 40 — ожирение III
+# степени. Реплика намеренно недиагностическая, не называет цифру ИМТ и НЕ
+# блокирует сохранение: профиль записывается как есть, мы только предлагаем
+# обсудить питание с врачом. Молчаливое сохранение 166/40 (ИМТ 14.5) с целью
+# 2021 ккал — то, ради чего это появилось.
+BMI_LOW, BMI_HIGH = 16.0, 40.0
+_BMI_NOTE_TAIL = ("Это не диагноз и не повод себя ругать — причин может быть много. "
+                  "Но питание при таких цифрах стоит обсудить с врачом. "
+                  "Я пока посчитаю всё как есть.")
+BMI_NOTE_LOW = "И ещё, спокойно: для такого роста вес заметно ниже привычного диапазона. " + _BMI_NOTE_TAIL
+BMI_NOTE_HIGH = "И ещё, спокойно: для такого роста вес заметно выше привычного диапазона. " + _BMI_NOTE_TAIL
+
+def bmi_of(cm, kg):
+    """ИМТ по росту в см и весу в кг. None — если данных нет или они бессмысленны."""
+    try:
+        m = float(cm) / 100.0
+        if m <= 0: return None
+        return round(float(kg) / (m * m), 1)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+def bmi_note(cm, kg, age=None, mode=None):
+    """Бережная реплика при крайних значениях ИМТ, иначе None.
+
+    Молчим в двух случаях. В беременности прибавка веса ожидаема, и взрослые
+    пороги ИМТ к ней неприменимы. До 18 лет ИМТ читается по перцентильным
+    кривым ВОЗ (BMI-for-age), а не по порогам 16/40: у здоровой 13-летней ИМТ 15
+    — норма, и ложная тревога о теле подростку сама по себе вредна. Данных для
+    перцентилей у нас нет, поэтому не говорим ничего.
+    """
+    if mode == "preg": return None
+    try:
+        if age is not None and int(age) < 18: return None
+    except (TypeError, ValueError):
+        return None
+    b = bmi_of(cm, kg)
+    if b is None: return None
+    if b < BMI_LOW: return BMI_NOTE_LOW
+    if b > BMI_HIGH: return BMI_NOTE_HIGH
+    return None
+
+# Ручная цель принималась в диапазоне 800–6000 без оглядки на профиль: при ИМТ
+# 14.5 можно было выставить 800 ккал, и меню строилось под 800. Базовый обмен —
+# та граница, ниже которой планировать без врача небезопасно.
+KCAL_FLOOR_NOTE = ("Подняла цель до {floor} ккал — это твой базовый обмен, столько тело тратит в покое. "
+                   "Ниже я не планирую: такой дефицит небезопасен без наблюдения врача. "
+                   "Если цель ниже нужна по медицинским показаниям, обсуди её со своим врачом.")
+
+def kcal_floor(cm, kg, age, male=False):
+    """Нижняя граница целевых калорий: базовый обмен, но не ниже прежних 800."""
+    try:
+        return max(800, int(round(calc_bmr(float(cm), float(kg), int(age), male))))
+    except (TypeError, ValueError):
+        return 800
+
+def profile_kcal_floor(u):
+    """Нижняя граница цели для сохранённого профиля. None — профиль неполный."""
+    if not (u and u.get("height") and u.get("weight") and u.get("age")):
+        return None
+    return kcal_floor(u["height"], u["weight"], u["age"], male=(u.get("mode") == "male"))
 
 ACT_RU = {1: "сидячий образ жизни", 2: "лёгкая активность", 3: "умеренная активность", 4: "высокая активность", 5: "очень высокая активность"}
 DIET = [("veg", "Вегетарианство"), ("vegan", "Веган"), ("nolac", "Без лактозы"), ("noglu", "Без глютена"), ("nonuts", "Без орехов"), ("pesc", "Пескетарианство")]
@@ -2580,6 +2644,9 @@ def profile_kcal(p):
     except (TypeError, ValueError):
         goal = 0
     if 800 <= goal <= 6000:
+        # Клэмп и на чтении, а не только на записи: цели ниже базового обмена
+        # уже лежат в базе с тех пор, когда нижней границей было просто 800.
+        goal = max(goal, kcal_floor(p["height"], p["weight"], p["age"], male=bool(p.get("male"))))
         kg = p["weight"]; prot = round(1.6 * kg); fat = round(goal * 0.3 / 9)
         carbs = round(max(0, goal - prot * 4 - fat * 9) / 4)
         return (goal, prot, fat, carbs)
@@ -8830,7 +8897,10 @@ async def handle_text(update, context, txt):
         except Exception:
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30.")
         upsert(cid, height=int(cm), weight=kg, age=age, state=None)
-        return await update.message.reply_text(f"Обновила: рост {int(cm)} см, вес {kg:g} кг, возраст {age}. Пересчитаю калории и питание под тебя.")
+        _bmi = bmi_note(cm, kg, age, (u or {}).get("mode"))
+        return await update.message.reply_text(
+            f"Обновила: рост {int(cm)} см, вес {kg:g} кг, возраст {age}. Пересчитаю калории и питание под тебя."
+            + (("\n\n" + _bmi) if _bmi else ""))
     if state == "await_profile":
         nums = [p for p in re.split(r"[ ,;/]+", txt) if p]
         try:
@@ -8846,7 +8916,10 @@ async def handle_text(update, context, txt):
                 return await reply_long(update.message, L.split_followups(a)[0] + "\n\nА теперь вернёмся: напиши рост (см), вес (кг), возраст. Например 168 60 30, или нажми «Пропустить».", reply_markup=SKIP_KB)
             return await update.message.reply_text("Нужно три числа: рост в см, вес в кг, возраст. Например 168 60 30. Или нажми «Пропустить».", reply_markup=SKIP_KB)
         upsert(cid, height=int(cm), weight=kg, age=age, state="await_activity")
-        return await update.message.reply_text("Записала. Какой у тебя уровень физической активности?\n\n"
+        _bmi = bmi_note(cm, kg, age, (u or {}).get("mode"))
+        return await update.message.reply_text("Записала."
+            + (("\n\n" + _bmi) if _bmi else "")
+            + "\n\nКакой у тебя уровень физической активности?\n\n"
             "• Минимальная — сидячий образ жизни, почти без спорта\n"
             "• Лёгкая — лёгкие тренировки 1–3 раза в неделю\n"
             "• Умеренная — спорт 3–5 раз в неделю\n"
@@ -10894,8 +10967,14 @@ def _save_profile_atomic(cid, generation, body, cm, kg, age):
                 except (TypeError, ValueError):
                     parsed_goal = None
                 if parsed_goal is not None:
+                    if 800 <= parsed_goal <= 6000:
+                        # Рост/вес берём из этого же запроса: цель и профиль
+                        # приезжают вместе, граница должна считаться по новым.
+                        parsed_goal = max(parsed_goal, kcal_floor(cm, kg, age, male=(mode == "male")))
+                    else:
+                        parsed_goal = None
                     sets.append("kcal_goal=?")
-                    values.append(parsed_goal if 800 <= parsed_goal <= 6000 else None)
+                    values.append(parsed_goal)
 
         values.append(cid)
         # Every identifier above is a fixed literal selected by this function.
@@ -10933,6 +11012,7 @@ def _save_profile_atomic(cid, generation, body, cm, kg, age):
         },
         "cycle_len": saved_user.get("cycle_len") if is_cycle(saved_user) else None,
         "kcal_base": profile_kcal(profile)[0] if profile else None,
+        "bmi_note": bmi_note(cm, kg, age, saved_user["mode"]),
         "mode": saved_user["mode"],
         "send_time": saved_user["send_time"],
         "cycle_len_changed": cycle_len is not None,
@@ -16394,10 +16474,12 @@ async def _api_mode(request):
     return _cors(web.json_response(payload))
 
 def _api_prefs_sync(cid, body, user_generation=None):
-    if not is_onboarded(row(cid)):
+    _u = row(cid)
+    if not is_onboarded(_u):
         return {"error": "onboard"}, 403
     note = str(body.get("diet_note") or "").strip()[:300]
     changes = {"diet_note": note}
+    kcal_note = None
     if "kcal_goal" in body:
         g = body.get("kcal_goal")
         if g is None or (isinstance(g, str) and not g.strip()):
@@ -16407,6 +16489,10 @@ def _api_prefs_sync(cid, body, user_generation=None):
                 gi = _strict_integer(g)
                 if not 800 <= gi <= 6000:
                     raise ValueError("calorie goal out of range")
+                _floor = profile_kcal_floor(_u)
+                if _floor and gi < _floor:
+                    kcal_note = KCAL_FLOOR_NOTE.format(floor=_floor)
+                    gi = _floor
                 changes["kcal_goal"] = gi
             except (TypeError, ValueError):
                 return _api_error_payload(
@@ -16430,6 +16516,7 @@ def _api_prefs_sync(cid, body, user_generation=None):
         "diet_note": note,
         "kcal_goal": _up.get("kcal_goal"),
         "kcal_base": _kb,
+        "kcal_note": kcal_note,
     }, 200
 
 async def _api_prefs(request):
