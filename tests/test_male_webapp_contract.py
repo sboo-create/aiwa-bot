@@ -318,6 +318,10 @@ class MaleWebappStaticContractTests(unittest.TestCase):
                 theme_css,
             )
         self.assertIn("opacity: 1 !important", theme_css)
+        # CSS позиций пилюли рассчитан ровно на 3 таба: добавление таба в
+        # Navigation без правки theme.css молча сломает индикатор.
+        navigation = (ROOT / "frontend" / "src" / "aiwa" / "screens" / "Navigation.jsx").read_text(encoding="utf-8")
+        self.assertEqual(len(re.findall(r'\{ id: "', navigation)), 3)
         self.assertIn("if (navActive === active) return;", bridge_src)
         self.assertIn("navActive = active;", bridge_src)
         self.assertIn("navActive = undefined;", bridge_src)
