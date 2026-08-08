@@ -217,6 +217,21 @@ class FreeSlotTests(unittest.TestCase):
             self.cid, bot.row(self.cid), mid, scope="unclear"))
         self.assertTrue(res["ok"])
 
+    def test_manual_app_write_uses_the_same_rule(self):
+        """Ручное добавление из мини-аппа шло мимо правила и падало на NameError."""
+        self._add("суп")
+        slot_now = bot.slot_for_now()
+        payload, error, status = bot._save_manual_food_atomic(
+            self.cid,
+            {"title": "яблоко", "kcal": 78, "protein": 0, "fat": 0, "carbs": 21,
+             "items": [{"name": "яблоко", "kcal": 78}], "source": "text"},
+            self.today, "manual-1", bot._user_generation(self.cid), None,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(status, 200)
+        saved_slot = payload["data"]["rec"]["slot"]
+        self.assertEqual(saved_slot, slot_now if slot_now == "snack" else "snack")
+
     def test_explicit_slot_from_the_model_still_wins(self):
         """Явный слот («это был завтрак») правило не переопределяет."""
         self._add("грибной суп")

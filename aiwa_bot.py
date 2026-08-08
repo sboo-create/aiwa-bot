@@ -1273,7 +1273,7 @@ def slot_for_now():
     if 18 <= h < 24: return "dinner"
     return "snack"
 
-def _free_slot_for_now(cid, d):
+def _free_slot_for_now(cid, d, conn=None):
     """Слот по времени, но занятый обед не превращает второй приём в его часть.
 
     Правило одно и без исключений: если в слоте на этот день запись уже есть,
@@ -1283,12 +1283,14 @@ def _free_slot_for_now(cid, d):
     slot = slot_for_now()
     if slot == "snack":
         return slot
+    sql = "SELECT 1 FROM meals WHERE chat_id=? AND d=? AND slot=? LIMIT 1"
+    if conn is not None:
+        # Внутри уже открытой BEGIN IMMEDIATE второе соединение к той же базе
+        # ловит SQLITE_BUSY, поэтому читаем тем же курсором.
+        return "snack" if conn.execute(sql, (cid, d, slot)).fetchone() else slot
     c = db()
     try:
-        taken = c.execute(
-            "SELECT 1 FROM meals WHERE chat_id=? AND d=? AND slot=? LIMIT 1",
-            (cid, d, slot),
-        ).fetchone()
+        taken = c.execute(sql, (cid, d, slot)).fetchone()
     finally:
         c.close()
     return "snack" if taken else slot
@@ -16607,7 +16609,7 @@ def _save_manual_food_atomic(
             c.commit()
             return {"created": False, "data": data}, None, 200
 
-        slot = rec.get("slot") or _free_slot_for_now(cid, d)
+        slot = rec.get("slot") or _free_slot_for_now(cid, target, conn=c)
         now = datetime.now(TZ).isoformat()
         mid = c.execute(
             """INSERT INTO meals
