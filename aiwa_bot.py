@@ -1273,9 +1273,31 @@ def slot_for_now():
     if 18 <= h < 24: return "dinner"
     return "snack"
 
+def _free_slot_for_now(cid, d, conn=None):
+    """Слот по времени, но занятый обед не превращает второй приём в его часть.
+
+    Правило одно и без исключений: если в слоте на этот день запись уже есть,
+    новая идёт перекусом. Иначе за обеденные часы всё съеденное оседало в одном
+    «обеде», хотя между приёмами проходило больше часа.
+    """
+    slot = slot_for_now()
+    if slot == "snack":
+        return slot
+    sql = "SELECT 1 FROM meals WHERE chat_id=? AND d=? AND slot=? LIMIT 1"
+    if conn is not None:
+        # Внутри уже открытой BEGIN IMMEDIATE второе соединение к той же базе
+        # ловит SQLITE_BUSY, поэтому читаем тем же курсором.
+        return "snack" if conn.execute(sql, (cid, d, slot)).fetchone() else slot
+    c = db()
+    try:
+        taken = c.execute(sql, (cid, d, slot)).fetchone()
+    finally:
+        c.close()
+    return "snack" if taken else slot
+
 def meal_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_hash=None, return_status=False):
     d = d or dtoday().isoformat()
-    slot = rec.get("slot") or slot_for_now()
+    slot = rec.get("slot") or _free_slot_for_now(cid, d)
     c = db()
     if user_generation is not None or mutation_key:
         c.execute("BEGIN IMMEDIATE")
@@ -3079,6 +3101,7 @@ def match_intent(t):
 
 _JOURNAL_MUTATION_INTENTS = frozenset({
     "logmeal", "logmealbatch", "logjournalbatch", "updatemeal", "movemealslot", "appendmealitem",
+    "repeatmeal",
     "logworkout", "updateworkout", "logperiod", "period_end",
     "journalunavailable", "journalreplay",
 })
@@ -3818,6 +3841,15 @@ def _semantic_action_matches_source(
         or _JOURNAL_META_INSTRUCTION_RE.search(raw)
     ):
         return False
+    if action == "repeat_meal":
+        # Повтор указывает на уже сохранённую запись, а не описывает еду словами:
+        # проверяем владение и свежесть цели, состав берём из БД. Требовать
+        # дословных цитат блюда здесь нельзя — их в такой фразе нет по смыслу.
+        return bool(
+            _semantic_owned_recent_target(context, "meals", str((payload or {}).get("target_id") or ""))
+            and _journal_target_day_allowed(
+                context, "meals", str((payload or {}).get("target_id") or ""), raw)
+        )
     if require_evidence:
         evidence_spans = _semantic_evidence_spans(raw, payload)
         if not evidence_spans or any(
@@ -3995,13 +4027,14 @@ def _normalize_semantic_journal(
         "food_update": "updatemeal",
         "move_meal_slot": "movemealslot",
         "append_meal_item": "appendmealitem",
+        "repeat_meal": "repeatmeal",
         "workout": "logworkout",
         "workout_update": "updateworkout",
         "period_start": "logperiod",
         "period_end": "period_end",
     }
     action = str(data.get("action") or "").strip().lower()
-    if action in {"move_meal_slot", "append_meal_item"} and not enable_v2:
+    if action in {"move_meal_slot", "append_meal_item", "repeat_meal"} and not enable_v2:
         return None
     confidence_raw = data.get("confidence")
     confidence = (
@@ -4028,7 +4061,7 @@ def _normalize_semantic_journal(
         failed = "certainty"
     elif str(data.get("primary_purpose") or "").lower() not in (
         {"journal", "repair"}
-        if action in {"move_meal_slot", "append_meal_item"}
+        if action in {"move_meal_slot", "append_meal_item", "repeat_meal"}
         else {"journal"}
     ):
         failed = "purpose"
@@ -4049,6 +4082,10 @@ def _normalize_semantic_journal(
         )
         if enable_v2 and "evidence_spans" in data:
             if not food_record:
+                # Без причины этот отказ читался в логах как reason=unknown,
+                # и разбор инцидента начинался с гадания.
+                if reasons is not None:
+                    reasons.append("food_record")
                 return None
             parts = [
                 str(item.get("name") or "").strip()
@@ -4067,6 +4104,10 @@ def _normalize_semantic_journal(
         slot = str(data.get("slot") or "")
         if slot in {"breakfast", "lunch", "snack", "dinner"}:
             out["slot"] = slot
+    elif action == "repeat_meal":
+        out["target_id"] = int(data.get("target_id"))
+        scope = str(data.get("repeat_scope") or "").strip().lower()
+        out["repeat_scope"] = scope if scope in {"meal", "last_item"} else "unclear"
     elif action == "food_update":
         out["target_id"] = int(data.get("target_id"))
         out["food_text"] = str(data.get("food_text") or "").strip()[:500]
@@ -6619,6 +6660,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             preparsed_food_text=((journal or {}).get("food_text")),
             preparsed_slot=((journal or {}).get("slot")),
             preparsed_food_record=((journal or {}).get("food_record")),
+            allow_duplicate=bool((journal or {}).get("repeat_of")),
         )
         rows = []
         if result.get("ok") and result.get("record_id"):
@@ -6651,6 +6693,31 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
         )
         return await msg.reply_text(result["text"])
+    if intent == "repeatmeal":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await repeat_meal_action(
+            cid, u, (journal or {}).get("target_id"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            scope=((journal or {}).get("repeat_scope") or "unclear"),
+        )
+        clarify = result.get("clarify_repeat")
+        if clarify:
+            return await msg.reply_text(result["text"], reply_markup=InlineKeyboardMarkup([
+                [B("Весь приём", f"rpt:{clarify['record_id']}:meal")],
+                [B(clarify["last_item"][:40] or "Последнее блюдо",
+                   f"rpt:{clarify['record_id']}:last")],
+            ]))
+        # Повтор — такая же новая запись, как обычная: убрать её из дневника
+        # надо уметь там же, где она появилась, а не только в мини-аппе.
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
+            wu = campaign_webapp_url(u, tab="food")
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть питание", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(
+            result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
     if intent == "appendmealitem":
         await context.bot.send_chat_action(cid, "typing")
         result = await append_meal_item_action(
@@ -9416,6 +9483,21 @@ async def on_cb(update, context):
         return await q.message.reply_text(
             "Выбери, что ближе сейчас — это можно поменять позже.\n\n"
             "Айва работает и без регулярного цикла: при нерегулярных месячных и менопаузе.", reply_markup=NOCYCLE_KB)
+    if data.startswith("rpt:"):
+        _parts = data.split(":")
+        if len(_parts) == 3 and _parts[1].isdigit():
+            _scope = "last_item" if _parts[2] == "last" else "meal"
+            _res = await repeat_meal_action(
+                cid, row(cid), int(_parts[1]),
+                mutation_key=chat_mutation_key("telegram", f"rpt{_parts[1]}{_parts[2]}"),
+                scope=_scope,
+            )
+            _rows = []
+            if _res.get("ok") and _res.get("record_id"):
+                _rows.append([B("🗑 Убрать из дневника", f"mdel:{_res['record_id']}")])
+            return await q.message.reply_text(
+                _res["text"], reply_markup=(InlineKeyboardMarkup(_rows) if _rows else None))
+        return await q.answer("Не поняла, что повторить")
     if data.startswith("mode:"):
         m = data.split(":")[1]
         # callback_data приходит от клиента: неизвестный режим не должен
@@ -12600,13 +12682,13 @@ def _journal_result_rows(u, result):
             rows.append([B("🗑 Убрать из дневника", f"mdel:{record_id}")])
         elif kind.startswith("workout"):
             rows.append([B("🗑 Убрать тренировку", f"wdel:{record_id}")])
-    receipt = result.get("receipt") or {}
-    target_url = campaign_webapp_url(
-        u, open_token=receipt.get("token")
-    ) if receipt else None
+    # Одна и та же по смыслу запись давала разные кнопки: синхронный путь —
+    # «Открыть питание», отложенный — deep link «Открыть запись в дневнике»,
+    # который открывает форму приёма без выхода. Ведём обе в раздел питания.
+    target_url = campaign_webapp_url(u, tab="food")
     if target_url:
         rows.append([InlineKeyboardButton(
-            "Открыть запись в дневнике", web_app=WebAppInfo(url=target_url),
+            "Открыть питание", web_app=WebAppInfo(url=target_url),
         )])
     return rows
 
@@ -13766,12 +13848,26 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
             preparsed_food_text=((journal or {}).get("food_text")),
             preparsed_slot=((journal or {}).get("slot")),
             preparsed_food_record=((journal or {}).get("food_record")),
+            allow_duplicate=bool((journal or {}).get("repeat_of")),
         )
         out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
         if result.get("mutation"):
             out["mutation"] = result["mutation"]
         if result.get("semantic_duplicate"):
             out["semantic_duplicate"] = result["semantic_duplicate"]
+        return out
+    if intent == "repeatmeal":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала записывать без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть питание"]}
+        result = await repeat_meal_action(
+            cid, u, (journal or {}).get("target_id"),
+            user_generation=generation, mutation_key=mutation_key,
+            scope=((journal or {}).get("repeat_scope") or "unclear"),
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
         return out
     if intent == "updatemeal":
         if require_mutation_key and not mutation_key:
@@ -14730,7 +14826,8 @@ def _semantic_duplicate_food_result(existing):
 
 async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
                           preparsed_food_text=None, preparsed_slot=None,
-                          preparsed_food_record=None, day_context=True):
+                          preparsed_food_record=None, day_context=True,
+                          allow_duplicate=False):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     args_hash = chat_mutation_args_hash("food", text)
@@ -14754,9 +14851,13 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         if preparsed_slot in {"breakfast", "lunch", "snack", "dinner"}
         else slot_from_text(text)
     )
-    resolved_slot = slot or slot_for_now()
-    duplicate = _find_semantic_duplicate_meal(
-        cid, event_date, args_hash, expected_slot=resolved_slot,
+    # Слот для поиска дубля — естественный по времени: иначе вторая формулировка
+    # того же приёма уезжает в перекус и перестаёт считаться дублем. Записывается
+    # она всё равно в свободный слот.
+    duplicate_slot = slot or slot_for_now()
+    resolved_slot = slot or _free_slot_for_now(cid, event_date.isoformat())
+    duplicate = None if allow_duplicate else _find_semantic_duplicate_meal(
+        cid, event_date, args_hash, expected_slot=duplicate_slot,
     )
     if duplicate:
         ev(cid, "journal_semantic_duplicate", meta="food|exact",
@@ -14784,8 +14885,8 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «200 г творога 5%, запиши»."}
     rec["slot"] = resolved_slot
     rec["slot_guessed"] = not bool(slot)
-    duplicate = _find_semantic_duplicate_meal(
-        cid, event_date, args_hash, rec=rec, expected_slot=resolved_slot,
+    duplicate = None if allow_duplicate else _find_semantic_duplicate_meal(
+        cid, event_date, args_hash, rec=rec, expected_slot=duplicate_slot,
     )
     if duplicate:
         ev(cid, "journal_semantic_duplicate", meta="food|content",
@@ -14977,6 +15078,96 @@ async def move_meal_slot_action(cid, meal_id, slot, user_generation=None, mutati
         "mutation": {"kind": "food_update", "date": verified.get("date") or dtoday().isoformat()},
     }
 
+# «Забыла добавить» — это про только что сделанную запись. Без окна дополнение
+# клеило в один приём всё съеденное за три часа: грибной суп в 11:04 и пирожок
+# в 12:29 оказывались одной строкой на 340 ккал (разбор с Соней 08.08.2026).
+APPEND_WINDOW_MIN = 10
+
+def _meal_within_append_window(meal, max_minutes=APPEND_WINDOW_MIN):
+    """Свежесть записи по её метке времени. Нет метки — считаем несвежей."""
+    raw = str((meal or {}).get("ts") or "")
+    if not raw:
+        return False
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=TZ)
+    return timedelta(0) <= datetime.now(TZ) - stamp <= timedelta(minutes=max_minutes)
+
+async def repeat_meal_action(cid, u, meal_id, user_generation=None, mutation_key=None,
+                             scope="meal"):
+    """Записать ещё раз то, что уже сохранено: состав берётся из самой записи.
+
+    Повторить можно приём целиком или только последнее блюдо. Когда модель не
+    смогла выбрать, спрашиваем: угадывать здесь дороже, чем переспросить —
+    лишний приём в дневнике человек потом ищет глазами.
+    """
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    source = meal_get(cid, meal_id)
+    if not source:
+        return {"ok": False, "text": "Не нашла запись, которую нужно повторить. Уточни, что именно ты съела."}
+    items = _items_or_synthetic(source)
+    if not items:
+        return {"ok": False, "text": "В той записи нет состава, поэтому повторить её не получилось. Напиши блюдо словами."}
+    if len(items) > 1 and scope not in {"meal", "last_item"}:
+        # В записи несколько блюд, и по фразе не видно, о чём речь.
+        return {
+            "ok": False,
+            "clarify_repeat": {"record_id": meal_id,
+                               "last_item": str(items[-1].get("name") or "").strip()},
+            "text": (
+                f"Повторить весь приём ({_meal_items_line(source)}) или только "
+                f"{str(items[-1].get('name') or 'последнее блюдо')}?"
+            ),
+        }
+    if len(items) > 1 and scope == "last_item":
+        items = items[-1:]
+    rec = {
+        "title": ", ".join(str(x.get("name") or "") for x in items[:4])[:80] or source.get("title"),
+        "items": items,
+        "source": "text",
+        "fclass": source.get("fclass"),
+        "kcal": sum(int(x.get("kcal") or 0) for x in items),
+        "protein": round(sum(float(x.get("protein") or 0) for x in items), 1),
+        "fat": round(sum(float(x.get("fat") or 0) for x in items), 1),
+        "carbs": round(sum(float(x.get("carbs") or 0) for x in items), 1),
+        "grams": sum(int(x.get("grams") or 0) for x in items) or None,
+    }
+    args_hash = chat_mutation_args_hash("food", f"repeat={meal_id}")
+    saved = meal_add(
+        cid, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    # Тот же разбор статуса, что у обычной записи: идентификатор запроса мог
+    # уже быть использован для другой записи или отменён — тогда id в ответе
+    # указывает на чужую строку, и рапортовать успех по ней нельзя.
+    if not saved or saved.get("status") == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved.get("status") == "reversed":
+        return {"ok": False, "text": "Эта запись уже была отменена и не добавлена повторно."}
+    new_id = (saved or {}).get("id")
+    if not new_id:
+        ev(cid, "journal_mutation_failed", meta="repeat|failed", user_generation=generation)
+        return {"ok": False, "text": "Не получилось повторить запись. Дневник не меняла — попробуй ещё раз."}
+    verified = meal_get(cid, new_id)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="repeat|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить повтор в дневнике. Попробуй ещё раз."}
+    ev(cid, "journal_mutation_verified", meta="repeat|food", user_generation=generation)
+    ev(cid, "tool_execution", meta="success|repeat_meal|journal", user_generation=generation)
+    return {
+        "ok": True,
+        "text": (
+            f"Записала ещё раз в {SLOT_RU.get(verified.get('slot'), 'приём пищи')}: "
+            f"{_meal_items_line(verified)} — около {verified['kcal']} ккал."
+        ),
+        "record_id": new_id,
+        "rec": verified,
+        "mutation": {"kind": "food", "date": verified.get("date") or dtoday().isoformat()},
+    }
+
 async def append_meal_item_action(cid, u, meal_id, food_text, user_generation=None,
                                   mutation_key=None, preparsed_food_record=None):
     """Append one omitted item, recompute totals in code, and verify the update."""
@@ -14984,6 +15175,13 @@ async def append_meal_item_action(cid, u, meal_id, food_text, user_generation=No
     current = meal_get(cid, meal_id)
     if not current:
         return {"ok": False, "text": "Не нашла запись, куда добавить продукт. Уточни нужный приём пищи."}
+    if not _meal_within_append_window(current):
+        # Не отказ: это просто новая еда, а не забытая позиция в старой записи.
+        ev(cid, "journal_append_reroute", meta="stale_target", user_generation=generation)
+        return await log_food_action(
+            cid, u, str(food_text or ""), user_generation=user_generation,
+            mutation_key=mutation_key,
+        )
     addition = str(food_text or "").strip()[:500]
     if not addition:
         return {"ok": False, "text": "Не поняла, какой продукт пропущен. Напиши название и количество."}
@@ -16418,7 +16616,7 @@ def _save_manual_food_atomic(
             c.commit()
             return {"created": False, "data": data}, None, 200
 
-        slot = rec.get("slot") or slot_for_now()
+        slot = rec.get("slot") or _free_slot_for_now(cid, target, conn=c)
         now = datetime.now(TZ).isoformat()
         mid = c.execute(
             """INSERT INTO meals
