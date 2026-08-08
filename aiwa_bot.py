@@ -14814,9 +14814,13 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         if preparsed_slot in {"breakfast", "lunch", "snack", "dinner"}
         else slot_from_text(text)
     )
-    resolved_slot = slot or slot_for_now()
+    # Слот для поиска дубля — естественный по времени: иначе вторая формулировка
+    # того же приёма уезжает в перекус и перестаёт считаться дублем. Записывается
+    # она всё равно в свободный слот.
+    duplicate_slot = slot or slot_for_now()
+    resolved_slot = slot or _free_slot_for_now(cid, event_date.isoformat())
     duplicate = None if allow_duplicate else _find_semantic_duplicate_meal(
-        cid, event_date, args_hash, expected_slot=resolved_slot,
+        cid, event_date, args_hash, expected_slot=duplicate_slot,
     )
     if duplicate:
         ev(cid, "journal_semantic_duplicate", meta="food|exact",
@@ -14845,7 +14849,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
     rec["slot"] = resolved_slot
     rec["slot_guessed"] = not bool(slot)
     duplicate = None if allow_duplicate else _find_semantic_duplicate_meal(
-        cid, event_date, args_hash, rec=rec, expected_slot=resolved_slot,
+        cid, event_date, args_hash, rec=rec, expected_slot=duplicate_slot,
     )
     if duplicate:
         ev(cid, "journal_semantic_duplicate", meta="food|content",
@@ -16549,7 +16553,7 @@ def _save_manual_food_atomic(
             c.commit()
             return {"created": False, "data": data}, None, 200
 
-        slot = rec.get("slot") or slot_for_now()
+        slot = rec.get("slot") or _free_slot_for_now(cid, d)
         now = datetime.now(TZ).isoformat()
         mid = c.execute(
             """INSERT INTO meals

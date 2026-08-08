@@ -10,6 +10,7 @@
 слот по времени уже занят, он идёт перекусом.
 """
 
+import asyncio
 import os
 import sys
 import unittest
@@ -141,6 +142,35 @@ class FreeSlotTests(unittest.TestCase):
         if slot_now == "snack":
             self.skipTest("в этот час слот и так перекус")
         self.assertEqual(bot.meal_get(self.cid, second)["slot"], "snack")
+
+    def test_sequence_of_meals_lands_in_one_slot_then_snacks(self):
+        """Последовательность за обеденные часы: обед один, дальше перекусы.
+
+        На скриншоте 08.08.2026 яблоко и арбуз ушли в тот же обед, потому что
+        чат-путь считал слот сам и правило до записи не доходило.
+        """
+        slot_now = bot.slot_for_now()
+        if slot_now == "snack":
+            self.skipTest("в этот час слот и так перекус")
+        ids = [self._add(name) for name in ("суп", "яблоко", "арбуз", "мандарин")]
+        slots = [bot.meal_get(self.cid, i)["slot"] for i in ids]
+        self.assertEqual(slots, [slot_now, "snack", "snack", "snack"])
+
+    def test_repeat_and_plain_writes_agree_on_the_slot(self):
+        """Повтор и обычная запись не должны расходиться по слоту."""
+        slot_now = bot.slot_for_now()
+        if slot_now == "snack":
+            self.skipTest("в этот час слот и так перекус")
+        first = self._add("арбуз")
+        self.assertEqual(bot.meal_get(self.cid, first)["slot"], slot_now)
+
+        plain = self._add("мандарин")
+        repeated = asyncio.run(bot.repeat_meal_action(self.cid, bot.row(self.cid), first))
+        self.assertTrue(repeated["ok"])
+        self.assertEqual(
+            bot.meal_get(self.cid, plain)["slot"],
+            repeated["rec"]["slot"],
+        )
 
     def test_explicit_slot_from_the_model_still_wins(self):
         """Явный слот («это был завтрак») правило не переопределяет."""
