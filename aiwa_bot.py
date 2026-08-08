@@ -15140,6 +15140,13 @@ async def repeat_meal_action(cid, u, meal_id, user_generation=None, mutation_key
         cid, rec, user_generation=generation, mutation_key=mutation_key,
         args_hash=args_hash, return_status=True,
     )
+    # Тот же разбор статуса, что у обычной записи: идентификатор запроса мог
+    # уже быть использован для другой записи или отменён — тогда id в ответе
+    # указывает на чужую строку, и рапортовать успех по ней нельзя.
+    if not saved or saved.get("status") == "mismatch":
+        return {"ok": False, "text": "Не стала повторять запрос: его идентификатор уже использован для другой записи."}
+    if saved.get("status") == "reversed":
+        return {"ok": False, "text": "Эта запись уже была отменена и не добавлена повторно."}
     new_id = (saved or {}).get("id")
     if not new_id:
         ev(cid, "journal_mutation_failed", meta="repeat|failed", user_generation=generation)

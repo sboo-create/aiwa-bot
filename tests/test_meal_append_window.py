@@ -210,6 +210,19 @@ class FreeSlotTests(unittest.TestCase):
         self.assertEqual([x["name"] for x in res["rec"]["items"]], ["кекс"])
         self.assertEqual(res["rec"]["kcal"], 350)
 
+    def test_repeat_rejects_a_reused_request_id(self):
+        """Тот же ключ запроса под другую запись — не успех, а честный отказ."""
+        first = self._add("яблоко")
+        second = self._add("груша")
+        key = bot.chat_mutation_key("telegram", "same-key")
+        ok = asyncio.run(bot.repeat_meal_action(
+            self.cid, bot.row(self.cid), first, mutation_key=key, scope="meal"))
+        self.assertTrue(ok["ok"])
+        clash = asyncio.run(bot.repeat_meal_action(
+            self.cid, bot.row(self.cid), second, mutation_key=key, scope="meal"))
+        self.assertFalse(clash["ok"])
+        self.assertIn("идентификатор", clash["text"])
+
     def test_single_dish_never_asks(self):
         """Одно блюдо в записи — выбирать не из чего, вопрос был бы лишним."""
         mid = self._add("яблоко")
