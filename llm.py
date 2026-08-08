@@ -3003,11 +3003,16 @@ def classify_journal_event(text, usage=None, context=None, enable_v2=False):
         "что это был завтрак, а не обед;\n"
         "- append_meal_item: она сообщает, что конкретный уже съеденный продукт пропущен "
         "в недавней записи; жалоба может быть сформулирована вопросом «ты не записала...?»;\n"
+        "- repeat_meal: она съела ещё раз то же, что уже записано, и не называет блюдо заново — "
+        "«то же самое ещё раз», «снова съел это же», «ещё одну такую же тарелку», «повтори тот же приём». "
+        "Верни target_id повторяемой записи из JOURNAL_CONTEXT; food_text не нужен, состав возьмётся "
+        "из самой записи. Это НЕ repeat_meal, если блюдо названо словами (тогда food) или если она "
+        "просит показать дневник, а не записать ещё раз;\n"
         if enable_v2 else ""
     )
     target_rule = (
-        "Для food_update, move_meal_slot и append_meal_item обязательно верни target_id "
-        "строго из JOURNAL_CONTEXT; если цель неоднозначна, выбери none. "
+        "Для food_update, move_meal_slot, append_meal_item и repeat_meal обязательно верни "
+        "target_id строго из JOURNAL_CONTEXT; если цель неоднозначна, выбери none. "
         "Для move_meal_slot верни slot. Для append_meal_item в food_text верни только "
         "пропущенную позицию с количеством. "
         if enable_v2 else

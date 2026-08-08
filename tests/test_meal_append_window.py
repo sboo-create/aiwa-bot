@@ -55,70 +55,58 @@ class AppendWindowTests(unittest.TestCase):
         self.assertEqual(bot.APPEND_WINDOW_MIN, 10)
 
 
-class RepeatLastMealTests(unittest.TestCase):
-    """«Ещё то же самое» повторяет последнее блюдо, а не весь приём."""
+class RepeatMealPlanTests(unittest.TestCase):
+    """Повтор — действие модели с target_id, а не список формулировок.
+
+    Раньше это ловилось регулярками, и каждая новая фраза («а теперь снова
+    съел это же») падала. Теперь фразу разбирает модель, а код проверяет
+    владение записью и её свежесть — как для move_meal_slot и append_meal_item.
+    """
 
     def _context(self, minutes_ago=2):
         return {
-            "meals": [{
-                "id": 7,
-                "title": "грибной суп, пирожок со шпинатом, пирожок с клюквой",
-                "items": [
-                    {"name": "грибной суп"},
-                    {"name": "пирожок со шпинатом"},
-                    {"name": "пирожок с клюквой"},
-                ],
-            }],
-            "last_mutation": {
-                "kind": "food_append", "record_id": 7,
-                "created_at": _stamp(minutes_ago),
-            },
+            "meals": [{"id": 7, "date": bot.dtoday().isoformat(),
+                       "title": "геркулесовая каша",
+                       "items": [{"name": "геркулесовая каша"}]}],
+            "last_mutation": {"kind": "food", "record_id": 7,
+                              "created_at": _stamp(minutes_ago)},
         }
 
-    def test_repeat_takes_the_last_item_only(self):
-        for text in (
-            "я еще то же самое съела",
-            "Ещё раз то же самое съела",
-            "ещё один такой же съела",
-        ):
-            with self.subTest(text=text):
-                plan = bot._journal_repeat_last_meal(text, self._context())
-                self.assertEqual(plan["intent"], "logmeal")
-                self.assertEqual(plan["food_text"], "пирожок с клюквой")
-
-    def test_repeat_works_without_the_word_eshe(self):
-        """«я то же самое съел» — тот же повтор, слово «ещё» не обязательно."""
-        for text in (
-            "я то же самое съел",
-            "то же самое съела",
-            "такой же съел",
-        ):
-            with self.subTest(text=text):
-                plan = bot._journal_repeat_last_meal(text, self._context())
-                self.assertIsNotNone(plan)
-                self.assertEqual(plan["food_text"], "пирожок с клюквой")
-
-    def test_repeat_is_marked_so_the_duplicate_prompt_is_skipped(self):
-        """Повтор — намеренный дубль: кнопка «Записать ещё раз» тут лишняя."""
-        plan = bot._journal_repeat_last_meal("я ещё то же самое съела", self._context())
-        self.assertEqual(plan["repeat_of"], 7)
-
-    def test_plain_entries_and_negations_are_not_repeats(self):
-        for text in (
-            "съела творог",
-            "я не ещё то же самое съела",
-            "я не то же самое съел",
-            "подруга ещё то же самое съела",
-        ):
-            with self.subTest(text=text):
-                self.assertIsNone(bot._journal_repeat_last_meal(text, self._context()))
-
-    def test_repeat_needs_a_recent_meal_to_point_at(self):
-        """Без свежей записи повторять нечего — гадать не начинаем."""
-        self.assertIsNone(
-            bot._journal_repeat_last_meal("я еще то же самое съела", self._context(minutes_ago=300))
+    def _plan(self, payload, context=None):
+        return bot._normalize_semantic_journal(
+            payload, source_text="а теперь снова съел это же",
+            context=context or self._context(), enable_v2=True,
         )
-        self.assertIsNone(bot._journal_repeat_last_meal("я еще то же самое съела", {}))
+
+    def _payload(self, **over):
+        base = {
+            "action": "repeat_meal", "target_id": 7, "confidence": 0.95,
+            "subject": "self", "status": "completed", "polarity": "positive",
+            "certainty": "certain", "primary_purpose": "journal",
+        }
+        base.update(over)
+        return base
+
+    def test_repeat_plan_carries_only_the_target(self):
+        plan = self._plan(self._payload())
+        self.assertEqual(plan["intent"], "repeatmeal")
+        self.assertEqual(plan["target_id"], 7)
+        # Состав берётся из записи, поэтому food_text в плане не нужен.
+        self.assertNotIn("food_text", plan)
+
+    def test_repeat_needs_an_owned_target(self):
+        self.assertIsNone(self._plan(self._payload(target_id=999)))
+
+    def test_repeat_keeps_the_usual_subject_and_polarity_guards(self):
+        for over in (
+            {"subject": "other"},
+            {"polarity": "negative"},
+            {"status": "planned"},
+            {"certainty": "unsure"},
+            {"confidence": 0.4},
+        ):
+            with self.subTest(over=over):
+                self.assertIsNone(self._plan(self._payload(**over)))
 
 
 class FreeSlotTests(unittest.TestCase):

@@ -3099,6 +3099,7 @@ def match_intent(t):
 
 _JOURNAL_MUTATION_INTENTS = frozenset({
     "logmeal", "logmealbatch", "logjournalbatch", "updatemeal", "movemealslot", "appendmealitem",
+    "repeatmeal",
     "logworkout", "updateworkout", "logperiod", "period_end",
     "journalunavailable", "journalreplay",
 })
@@ -3538,47 +3539,6 @@ def _journal_recent_meal_slot_followup(text, context, max_minutes=10):
     }[match.group(1).lower()]
     return {"intent": "movemealslot", "target_id": int(target_id), "slot": slot}
 
-# «Ещё то же самое» — повтор того, о чём только что была речь: последней
-# позиции последней записи. Состав берётся из БД, а не из фразы, поэтому
-# контракт «каждое блюдо дословно из текста» здесь неприменим — на нём такие
-# сообщения и падали молча (разбор с Соней 08.08.2026).
-_JOURNAL_REPEAT_LAST_RE = re.compile(
-    r"^\s*(?:(?:я|мы|сегодня|потом|затем)\s+){0,2}(?:а\s+)?(?:и\s+)?"
-    # «ещё» необязательно: «я то же самое съел» — такой же повтор.
-    r"(?:(?:ещ[её]|повтори\w*)\b[^.!?\n]{0,40}?)?"
-    r"\b(?:то\s+же\s+самое|такой\s+же|такую\s+же|такое\s+же|столько\s+же)\b",
-    re.I,
-)
-
-def _journal_repeat_last_meal(text, context, max_minutes=180):  # noqa: D401
-    """Повтор последней позиции без второго обращения к модели."""
-    raw = str(text or "")
-    if len(raw) > 120 or not _JOURNAL_REPEAT_LAST_RE.search(raw):
-        return None
-    if _journal_third_party_source(raw) or _JOURNAL_FOOD_NEGATED_RE.search(raw):
-        return None
-    if not _journal_has_recent_mutation(context, max_minutes=max_minutes):
-        return None
-    last = (context or {}).get("last_mutation") or {}
-    if not str(last.get("kind") or "").startswith("food"):
-        return None
-    meals = list((context or {}).get("meals") or [])
-    meal = next(
-        (x for x in meals if str(x.get("id")) == str(last.get("record_id"))), None
-    )
-    if not meal:
-        return None
-    items = [x for x in (meal.get("items") or []) if str(x.get("name") or "").strip()]
-    # Повторяем именно последнее блюдо: разговор шёл про него, а не про весь
-    # приём целиком.
-    name = str((items[-1].get("name") if items else meal.get("title")) or "").strip()
-    if not name:
-        return None
-    # Повтор — намеренный дубль: спрашивать «записать ещё раз?» здесь незачем,
-    # человек только что об этом и попросил.
-    return {"intent": "logmeal", "confidence": 1.0, "food_text": name[:200],
-            "repeat_of": last.get("record_id")}
-
 _JOURNAL_MEAL_HEADING_RE = re.compile(
     r"(?i)(?<![а-яёa-z0-9])(?:(?:сегодня|вчера|позавчера)\s+)?(?:на\s+)?"
     r"(завтрак\w*|обед\w*|перекус\w*|полдник\w*|ужин\w*)"
@@ -3879,6 +3839,15 @@ def _semantic_action_matches_source(
         or _JOURNAL_META_INSTRUCTION_RE.search(raw)
     ):
         return False
+    if action == "repeat_meal":
+        # Повтор указывает на уже сохранённую запись, а не описывает еду словами:
+        # проверяем владение и свежесть цели, состав берём из БД. Требовать
+        # дословных цитат блюда здесь нельзя — их в такой фразе нет по смыслу.
+        return bool(
+            _semantic_owned_recent_target(context, "meals", str((payload or {}).get("target_id") or ""))
+            and _journal_target_day_allowed(
+                context, "meals", str((payload or {}).get("target_id") or ""), raw)
+        )
     if require_evidence:
         evidence_spans = _semantic_evidence_spans(raw, payload)
         if not evidence_spans or any(
@@ -4056,13 +4025,14 @@ def _normalize_semantic_journal(
         "food_update": "updatemeal",
         "move_meal_slot": "movemealslot",
         "append_meal_item": "appendmealitem",
+        "repeat_meal": "repeatmeal",
         "workout": "logworkout",
         "workout_update": "updateworkout",
         "period_start": "logperiod",
         "period_end": "period_end",
     }
     action = str(data.get("action") or "").strip().lower()
-    if action in {"move_meal_slot", "append_meal_item"} and not enable_v2:
+    if action in {"move_meal_slot", "append_meal_item", "repeat_meal"} and not enable_v2:
         return None
     confidence_raw = data.get("confidence")
     confidence = (
@@ -4089,7 +4059,7 @@ def _normalize_semantic_journal(
         failed = "certainty"
     elif str(data.get("primary_purpose") or "").lower() not in (
         {"journal", "repair"}
-        if action in {"move_meal_slot", "append_meal_item"}
+        if action in {"move_meal_slot", "append_meal_item", "repeat_meal"}
         else {"journal"}
     ):
         failed = "purpose"
@@ -4132,6 +4102,8 @@ def _normalize_semantic_journal(
         slot = str(data.get("slot") or "")
         if slot in {"breakfast", "lunch", "snack", "dinner"}:
             out["slot"] = slot
+    elif action == "repeat_meal":
+        out["target_id"] = int(data.get("target_id"))
     elif action == "food_update":
         out["target_id"] = int(data.get("target_id"))
         out["food_text"] = str(data.get("food_text") or "").strip()[:500]
@@ -4293,10 +4265,6 @@ async def resolve_semantic_journal_action(
     if slot_followup:
         ev(cid, "journal_action_planned", meta="movemealslot_fastpath")
         return slot_followup
-    repeat = _journal_repeat_last_meal(text, context)
-    if repeat:
-        ev(cid, "journal_action_planned", meta="repeatlastmeal_fastpath")
-        return repeat
     mixed = _journal_mixed_segments(
         text, male=(row(cid) or {}).get("mode") == "male",
     )
@@ -6717,6 +6685,14 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
         await context.bot.send_chat_action(cid, "typing")
         result = await move_meal_slot_action(
             cid, (journal or {}).get("target_id"), (journal or {}).get("slot"),
+            user_generation=turn_generation,
+            mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+        )
+        return await msg.reply_text(result["text"])
+    if intent == "repeatmeal":
+        await context.bot.send_chat_action(cid, "typing")
+        result = await repeat_meal_action(
+            cid, u, (journal or {}).get("target_id"),
             user_generation=turn_generation,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
         )
@@ -13844,6 +13820,18 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
         if result.get("semantic_duplicate"):
             out["semantic_duplicate"] = result["semantic_duplicate"]
         return out
+    if intent == "repeatmeal":
+        if require_mutation_key and not mutation_key:
+            return {"answer": "Не стала записывать без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
+                    "suggestions": ["Открыть питание"]}
+        result = await repeat_meal_action(
+            cid, u, (journal or {}).get("target_id"),
+            user_generation=generation, mutation_key=mutation_key,
+        )
+        out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
+        if result.get("mutation"):
+            out["mutation"] = result["mutation"]
+        return out
     if intent == "updatemeal":
         if require_mutation_key and not mutation_key:
             return {"answer": "Не стала исправлять без идентификатора запроса. Обнови приложение и попробуй ещё раз.",
@@ -15066,6 +15054,52 @@ def _meal_within_append_window(meal, max_minutes=APPEND_WINDOW_MIN):
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=TZ)
     return timedelta(0) <= datetime.now(TZ) - stamp <= timedelta(minutes=max_minutes)
+
+async def repeat_meal_action(cid, u, meal_id, user_generation=None, mutation_key=None):
+    """Записать ещё раз то, что уже сохранено: состав берётся из самой записи."""
+    generation = _user_generation(cid) if user_generation is None else int(user_generation)
+    source = meal_get(cid, meal_id)
+    if not source:
+        return {"ok": False, "text": "Не нашла запись, которую нужно повторить. Уточни, что именно ты съела."}
+    items = _items_or_synthetic(source)
+    if not items:
+        return {"ok": False, "text": "В той записи нет состава, поэтому повторить её не получилось. Напиши блюдо словами."}
+    rec = {
+        "title": source.get("title"),
+        "items": items,
+        "source": "text",
+        "fclass": source.get("fclass"),
+        "kcal": source.get("kcal"),
+        "protein": source.get("protein"),
+        "fat": source.get("fat"),
+        "carbs": source.get("carbs"),
+        "grams": source.get("grams"),
+    }
+    args_hash = chat_mutation_args_hash("food", f"repeat={meal_id}")
+    saved = meal_add(
+        cid, rec, user_generation=generation, mutation_key=mutation_key,
+        args_hash=args_hash, return_status=True,
+    )
+    new_id = (saved or {}).get("id")
+    if not new_id:
+        ev(cid, "journal_mutation_failed", meta="repeat|failed", user_generation=generation)
+        return {"ok": False, "text": "Не получилось повторить запись. Дневник не меняла — попробуй ещё раз."}
+    verified = meal_get(cid, new_id)
+    if not verified:
+        ev(cid, "journal_mutation_failed", meta="repeat|verify_failed", user_generation=generation)
+        return {"ok": False, "text": "Не смогла проверить повтор в дневнике. Попробуй ещё раз."}
+    ev(cid, "journal_mutation_verified", meta="repeat|food", user_generation=generation)
+    ev(cid, "tool_execution", meta="success|repeat_meal|journal", user_generation=generation)
+    return {
+        "ok": True,
+        "text": (
+            f"Записала ещё раз в {SLOT_RU.get(verified.get('slot'), 'приём пищи')}: "
+            f"{_meal_items_line(verified)} — около {verified['kcal']} ккал."
+        ),
+        "record_id": new_id,
+        "rec": verified,
+        "mutation": {"kind": "food", "date": verified.get("date") or dtoday().isoformat()},
+    }
 
 async def append_meal_item_action(cid, u, meal_id, food_text, user_generation=None,
                                   mutation_key=None, preparsed_food_record=None):
