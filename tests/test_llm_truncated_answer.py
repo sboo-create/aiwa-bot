@@ -105,6 +105,27 @@ class BudgetEscalationTests(unittest.TestCase):
         self.assertEqual(seen[0], (300, 4, False))
         self.assertEqual(seen[1], (600, 1, True))
 
+    def test_truncation_is_recorded_as_a_route_failure(self):
+        """Обрыв — неудача маршрута: иначе предохранитель его не отключит."""
+        recorded = []
+
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+
+            def json(self):
+                return _reply("", "length")
+
+        with mock.patch.object(L._HTTP, "post", return_value=FakeResponse()), \
+             mock.patch.object(L, "_route_available", return_value=True), \
+             mock.patch.object(L, "_capture_usage"), \
+             mock.patch.object(L, "_route_record_failure",
+                               side_effect=lambda cfg, status, *a, **kw: recorded.append(status) or False):
+            L._call_proxy_one(self.CFG, [{"role": "user", "content": "x"}],
+                              300, 0.2, None, attempts=1)
+
+        self.assertIn("truncated", recorded)
+
     def test_plain_empty_answer_is_not_escalated(self):
         """Пустой ответ без обрыва — это отказ модели, лимит тут ни при чём."""
         out, budgets = self._run([_reply("", "stop")])

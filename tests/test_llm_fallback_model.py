@@ -30,6 +30,20 @@ class FallbackModelTests(unittest.TestCase):
         self.assertEqual(seen, [("openrouter","openai/gpt-5.6-luna"),
                                 ("litellm_fallback","gigachat-3-ultra")])
 
+    def test_fallback_without_its_own_model_is_skipped(self):
+        """Резерв без своей модели пропускаем: чужое имя = 403 и мёртвый маршрут."""
+        cfgs = [
+            {"name": "openrouter", "url": "https://main/v1", "model": "cfg", "key": "k"},
+            {"name": "litellm_fallback", "url": "https://fb/v1", "model": "", "key": "k"},
+        ]
+        seen = []
+
+        with mock.patch.object(L, "_proxy_configs", return_value=cfgs), \
+             mock.patch.object(L, "_call_proxy_one",
+                               side_effect=lambda cfg, *a, **kw: seen.append(cfg["name"]) or None):
+            L._call_model([{"role": "user", "content": "x"}], "openai/gpt-5.6-luna")
+        self.assertEqual(seen, ["openrouter"])
+
     def test_choice_follows_route_identity_not_position(self):
         """Маршрут со своим каталогом узнаётся по имени, а не по месту в списке."""
         cfgs = [
