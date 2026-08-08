@@ -835,6 +835,18 @@ def _proxy_configs():
              "title": os.environ.get("OPENROUTER_APP_TITLE") or "AIWA",
              "provider": (_openrouter_provider_preferences() if is_openrouter else None),
              "cost_unit": ("usd" if uses_openrouter_billing else os.environ.get("LITELLM_COST_UNIT"))}]
+    # Промежуточный резерв на том же провайдере, но другой моделью. Падение
+    # конкретной модели (недоступна, деградировала, отвечает пустым) не должно
+    # означать падение всего пути: предохранитель считается по имени, url и
+    # модели, поэтому закрытый маршрут luna не блокирует этот. Свою модель он
+    # получает сам — подстановка чужой была причиной 403 у второго резерва.
+    sibling_model = (os.environ.get("OPENROUTER_FALLBACK_MODEL") or "").strip()
+    if sibling_model and sibling_model != str(PROXY_MODEL or "") and cfgs[0].get("url"):
+        cfgs.append(dict(
+            cfgs[0],
+            name=(cfgs[0].get("name") or "openrouter") + "_model_fallback",
+            model=sibling_model,
+        ))
     fb_key = os.environ.get("LITELLM_FALLBACK_KEY") or os.environ.get("AIWA_LLM_FALLBACK_KEY")
     fb_xkey = os.environ.get("LITELLM_FALLBACK_XKEY") or os.environ.get("AIWA_LLM_FALLBACK_XKEY")
     fb_url = os.environ.get("LITELLM_FALLBACK_URL") or os.environ.get("AIWA_LLM_FALLBACK_URL") or FALLBACK_PROXY_URL
