@@ -86,10 +86,28 @@ class RepeatLastMealTests(unittest.TestCase):
                 self.assertEqual(plan["intent"], "logmeal")
                 self.assertEqual(plan["food_text"], "пирожок с клюквой")
 
+    def test_repeat_works_without_the_word_eshe(self):
+        """«я то же самое съел» — тот же повтор, слово «ещё» не обязательно."""
+        for text in (
+            "я то же самое съел",
+            "то же самое съела",
+            "такой же съел",
+        ):
+            with self.subTest(text=text):
+                plan = bot._journal_repeat_last_meal(text, self._context())
+                self.assertIsNotNone(plan)
+                self.assertEqual(plan["food_text"], "пирожок с клюквой")
+
+    def test_repeat_is_marked_so_the_duplicate_prompt_is_skipped(self):
+        """Повтор — намеренный дубль: кнопка «Записать ещё раз» тут лишняя."""
+        plan = bot._journal_repeat_last_meal("я ещё то же самое съела", self._context())
+        self.assertEqual(plan["repeat_of"], 7)
+
     def test_plain_entries_and_negations_are_not_repeats(self):
         for text in (
             "съела творог",
             "я не ещё то же самое съела",
+            "я не то же самое съел",
             "подруга ещё то же самое съела",
         ):
             with self.subTest(text=text):

@@ -3544,12 +3544,13 @@ def _journal_recent_meal_slot_followup(text, context, max_minutes=10):
 # сообщения и падали молча (разбор с Соней 08.08.2026).
 _JOURNAL_REPEAT_LAST_RE = re.compile(
     r"^\s*(?:(?:я|мы|сегодня|потом|затем)\s+){0,2}(?:а\s+)?(?:и\s+)?"
-    r"(?:ещ[её]|повтори\w*)\b[^.!?\n]{0,40}?"
+    # «ещё» необязательно: «я то же самое съел» — такой же повтор.
+    r"(?:(?:ещ[её]|повтори\w*)\b[^.!?\n]{0,40}?)?"
     r"\b(?:то\s+же\s+самое|такой\s+же|такую\s+же|такое\s+же|столько\s+же)\b",
     re.I,
 )
 
-def _journal_repeat_last_meal(text, context, max_minutes=180):
+def _journal_repeat_last_meal(text, context, max_minutes=180):  # noqa: D401
     """Повтор последней позиции без второго обращения к модели."""
     raw = str(text or "")
     if len(raw) > 120 or not _JOURNAL_REPEAT_LAST_RE.search(raw):
@@ -3573,7 +3574,10 @@ def _journal_repeat_last_meal(text, context, max_minutes=180):
     name = str((items[-1].get("name") if items else meal.get("title")) or "").strip()
     if not name:
         return None
-    return {"intent": "logmeal", "confidence": 1.0, "food_text": name[:200]}
+    # Повтор — намеренный дубль: спрашивать «записать ещё раз?» здесь незачем,
+    # человек только что об этом и попросил.
+    return {"intent": "logmeal", "confidence": 1.0, "food_text": name[:200],
+            "repeat_of": last.get("record_id")}
 
 _JOURNAL_MEAL_HEADING_RE = re.compile(
     r"(?i)(?<![а-яёa-z0-9])(?:(?:сегодня|вчера|позавчера)\s+)?(?:на\s+)?"
@@ -6684,6 +6688,7 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             preparsed_food_text=((journal or {}).get("food_text")),
             preparsed_slot=((journal or {}).get("slot")),
             preparsed_food_record=((journal or {}).get("food_record")),
+            allow_duplicate=bool((journal or {}).get("repeat_of")),
         )
         rows = []
         if result.get("ok") and result.get("record_id"):
@@ -13831,6 +13836,7 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
             preparsed_food_text=((journal or {}).get("food_text")),
             preparsed_slot=((journal or {}).get("slot")),
             preparsed_food_record=((journal or {}).get("food_record")),
+            allow_duplicate=bool((journal or {}).get("repeat_of")),
         )
         out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
         if result.get("mutation"):
@@ -14795,7 +14801,8 @@ def _semantic_duplicate_food_result(existing):
 
 async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
                           preparsed_food_text=None, preparsed_slot=None,
-                          preparsed_food_record=None, day_context=True):
+                          preparsed_food_record=None, day_context=True,
+                          allow_duplicate=False):
     """«добавь на завтрак рисовую кашу» -> распознать КБЖУ и записать в дневник."""
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     args_hash = chat_mutation_args_hash("food", text)
@@ -14820,7 +14827,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         else slot_from_text(text)
     )
     resolved_slot = slot or slot_for_now()
-    duplicate = _find_semantic_duplicate_meal(
+    duplicate = None if allow_duplicate else _find_semantic_duplicate_meal(
         cid, event_date, args_hash, expected_slot=resolved_slot,
     )
     if duplicate:
@@ -14849,7 +14856,7 @@ async def log_food_action(cid, u, text, user_generation=None, mutation_key=None,
         return {"ok": False, "text": "Не поняла продукт или порцию. Напиши, например «200 г творога 5%, запиши»."}
     rec["slot"] = resolved_slot
     rec["slot_guessed"] = not bool(slot)
-    duplicate = _find_semantic_duplicate_meal(
+    duplicate = None if allow_duplicate else _find_semantic_duplicate_meal(
         cid, event_date, args_hash, rec=rec, expected_slot=resolved_slot,
     )
     if duplicate:
