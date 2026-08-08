@@ -941,6 +941,11 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4,
                 _capture_usage(None, data, actual_provider, actual_model, started,
                                status="truncated_retry", retry_index=i,
                                cost_unit=cfg.get("cost_unit"))
+                # Обрыв — это тоже неудача маршрута. Без записи в предохранитель
+                # систематически обрывающийся маршрут не отключался бы, и каждый
+                # запрос платил бы двойным заходом.
+                if _route_record_failure(cfg, "truncated"):
+                    return None
                 bigger = min(_MAX_TOKEN_BUDGET, budget * 2)
                 print("LLM truncated before answer, retrying with", bigger, "tokens")
                 # Ровно одна попытка: расширение бюджета не должно открывать
@@ -1194,6 +1199,13 @@ def _call_model(messages, model, max_tokens=1100, temperature=0.45, usage=None, 
             # не спасал, а добивал запрос. Смотрим на сам маршрут, а не на его
             # позицию в списке: порядок маршрутов — не признак чужого каталога.
             own_catalog = str(original.get("name") or "").endswith("_fallback")
+            if own_catalog and not original.get("model"):
+                # Резерв без своей модели пропускаем: слать туда чужое имя —
+                # это 403 от шлюза с собственным каталогом и открытый
+                # предохранитель вместо подстраховки.
+                print("LLM fallback route has no model of its own, skipping:",
+                      original.get("name"))
+                continue
             route_model = (original.get("model") or selected) if own_catalog else selected
             cfg = dict(
                 original,
@@ -2953,7 +2965,7 @@ def analyze_food_text(text, profile=None, usage=None, structured=False):
         # Feature flag off means the existing production contract and retry
         # behavior remain unchanged.
         out = _call(
-            messages, max_tokens=300, temperature=0.2, usage=usage,
+            messages, max_tokens=700, temperature=0.2, usage=usage,
         )
     try:
         print("FOOD text raw:", repr(out)[:400])
@@ -3012,7 +3024,7 @@ def food_log_review(facts, usage=None, male=False):
     out = _call(
         [{"role": "system", "content": sys_msg},
          {"role": "user", "content": (facts or "").strip() + "\n\nНапиши разбор."}],
-        max_tokens=300, temperature=0.4, usage=usage,
+        max_tokens=500, temperature=0.4, usage=usage,
     )
     return _ensure_complete(strip_md(out or "")).strip()
 
