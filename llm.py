@@ -1138,9 +1138,14 @@ def _call_model(messages, model, max_tokens=1100, temperature=0.45, usage=None, 
     out = None
     try:
         for index, original in enumerate(cfgs):
+            # Явно выбранная модель принадлежит основному маршруту. У запасного
+            # шлюза свой каталог: ключ LiteLLM пускает только свои модели, и
+            # подстановка чужого имени давала 403 и открытый circuit — резерв
+            # не спасал, а добивал запрос.
+            route_model = selected if index == 0 else (original.get("model") or selected)
             cfg = dict(
                 original,
-                model=selected,
+                model=route_model,
                 read_timeout=_env_float(
                     "AIWA_JOURNAL_HTTP_TIMEOUT_SECONDS", 12, low=3, high=25,
                 ),
