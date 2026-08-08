@@ -1170,7 +1170,7 @@ def probe_once():
     t0 = _t.time()
     try:
         out = _call_impl([{"role": "system", "content": "Ответь одним словом."},
-                          {"role": "user", "content": "ок"}], max_tokens=5, temperature=0.1, usage=None, attempts=1)
+                          {"role": "user", "content": "ок"}], max_tokens=64, temperature=0.1, usage=None, attempts=1)
         return (bool(out), int((_t.time() - t0) * 1000))
     except Exception:
         return (False, int((_t.time() - t0) * 1000))
@@ -1183,10 +1183,14 @@ def pop_stats():
         return s
 
 def health_check(usage=None):
+    # Бюджет с запасом: у reasoning-моделей часть токенов уходит на внутренние
+    # рассуждения, и при тесном лимите ответ приходит пустым (finish=length).
+    # На gpt-5.6-luna 16 токенов уходили в рассуждения целиком, проба видела
+    # пустоту и будила дежурного, хотя модель была здорова.
     out = _call([
         {"role": "system", "content": "Ты AIWA. Ответь только одним словом на русском."},
         {"role": "user", "content": "Служебная проверка. Ответь: работает"}
-    ], max_tokens=16, temperature=0.1, usage=usage, attempts=1,
+    ], max_tokens=64, temperature=0.1, usage=usage, attempts=1,
         track_stats=False)
     return bool(out and out.strip()), (out or "").strip()
 
