@@ -2798,6 +2798,15 @@ _JOURNAL_NON_NAME_STARTERS = (
     r"Силовая|Силовую|Йога|Завтрак|Обед|Ужин|Перекус"
 )
 
+# Начало фразы — это не только позиция 0: перед едой могут стоять вводные
+# слова («Кстати Пирожок съела», «Ну Творог съела»). Пока префикс состоит из
+# пробелов, пунктуации и служебных зачинов, заглавная буква за ним объясняется
+# началом предложения, а не именем собственным.
+_JOURNAL_SENTENCE_LEAD_RE = re.compile(
+    r"^(?:\s|[,.!?:;«»\"'—–-]|\b(?:" + _JOURNAL_NON_NAME_STARTERS + r")\b)*$",
+    re.I,
+)
+
 def _journal_third_party_source(text):
     """Общий fail-closed guard для старого и семантического mutation router."""
     raw = str(text or "")
@@ -2825,7 +2834,7 @@ def _journal_third_party_source(text):
     # Субъекта определяет разбор модели — здесь остаются только явные маркеры
     # чужого события и имя внутри фразы («В офисе Соня съела творог»).
     return any(
-        match.start() > 0
+        not _JOURNAL_SENTENCE_LEAD_RE.match(raw[:match.start()])
         for match in re.finditer(
             r"\b(?!(?:" + _JOURNAL_NON_NAME_STARTERS + r")\b)"
             r"[А-ЯЁ][а-яё-]{1,30}\b.{0,55}" + _JOURNAL_THIRD_PARTY_EVENT_RE,

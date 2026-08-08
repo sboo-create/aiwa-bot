@@ -54,6 +54,18 @@ class OwnMealsAreNotReadAsSomeoneElse(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(bot._journal_third_party_source(text))
 
+    def test_leading_filler_word_still_counts_as_sentence_start(self):
+        """«Кстати Пирожок съела»: вводное слово не делает еду именем."""
+        for text in (
+            "Кстати Пирожок съела",
+            "Ну Творог съела",
+            "А Кофе выпила",
+            "Сегодня Овсянку съела",
+            "Ещё Салат съела на ужин",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(bot._journal_third_party_source(text))
+
     def test_verb_first_phrasing_still_works(self):
         """Обходной путь инцидента не должен перестать работать."""
         self.assertFalse(bot._journal_third_party_source("Съела пирожок со шпинатом"))
@@ -66,6 +78,15 @@ class ThirdPartyReportsStayBlocked(unittest.TestCase):
         for text in (
             "В офисе Соня съела творог",
             "Вчера в офисе Соня бегала 30 минут",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(bot._journal_third_party_source(text))
+
+    def test_name_after_a_real_phrase_start_is_still_blocked(self):
+        """Зачин кончается на первом же значимом слове: дальше заглавная = имя."""
+        for text in (
+            "Вчера в офисе Соня бегала 30 минут",
+            "На кухне Соня съела творог",
         ):
             with self.subTest(text=text):
                 self.assertTrue(bot._journal_third_party_source(text))
