@@ -29,5 +29,23 @@ class FallbackModelTests(unittest.TestCase):
         self.assertEqual(out, "ответ")
         self.assertEqual(seen, [("openrouter","openai/gpt-5.6-luna"),
                                 ("litellm_fallback","gigachat-3-ultra")])
+
+    def test_choice_follows_route_identity_not_position(self):
+        """Маршрут со своим каталогом узнаётся по имени, а не по месту в списке."""
+        cfgs = [
+            {"name": "litellm_fallback", "url": "https://fb/v1", "model": "gigachat-3-ultra", "key": "k"},
+            {"name": "openrouter", "url": "https://main/v1", "model": "cfg-model", "key": "k"},
+        ]
+        seen = []
+
+        def fake_one(cfg, *a, **kw):
+            seen.append((cfg["name"], cfg["model"]))
+            return None if cfg["name"] == "litellm_fallback" else "ответ"
+
+        with mock.patch.object(L, "_proxy_configs", return_value=cfgs), \
+             mock.patch.object(L, "_call_proxy_one", side_effect=fake_one):
+            L._call_model([{"role": "user", "content": "x"}], "openai/gpt-5.6-luna")
+        self.assertEqual(seen, [("litellm_fallback", "gigachat-3-ultra"),
+                                ("openrouter", "openai/gpt-5.6-luna")])
 if __name__ == "__main__":
     unittest.main()

@@ -1188,8 +1188,10 @@ def _call_model(messages, model, max_tokens=1100, temperature=0.45, usage=None, 
             # Явно выбранная модель принадлежит основному маршруту. У запасного
             # шлюза свой каталог: ключ LiteLLM пускает только свои модели, и
             # подстановка чужого имени давала 403 и открытый circuit — резерв
-            # не спасал, а добивал запрос.
-            route_model = selected if index == 0 else (original.get("model") or selected)
+            # не спасал, а добивал запрос. Смотрим на сам маршрут, а не на его
+            # позицию в списке: порядок маршрутов — не признак чужого каталога.
+            own_catalog = str(original.get("name") or "").endswith("_fallback")
+            route_model = (original.get("model") or selected) if own_catalog else selected
             cfg = dict(
                 original,
                 model=route_model,
