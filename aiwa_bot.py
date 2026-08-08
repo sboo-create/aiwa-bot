@@ -6696,7 +6696,16 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             user_generation=turn_generation,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
         )
-        return await msg.reply_text(result["text"])
+        # Повтор — такая же новая запись, как обычная: убрать её из дневника
+        # надо уметь там же, где она появилась, а не только в мини-аппе.
+        rows = []
+        if result.get("ok") and result.get("record_id"):
+            rows.append([B("🗑 Убрать из дневника", f"mdel:{result['record_id']}")])
+            wu = campaign_webapp_url(u, tab="food")
+            if wu:
+                rows.append([InlineKeyboardButton("Открыть питание", web_app=WebAppInfo(url=wu))])
+        return await msg.reply_text(
+            result["text"], reply_markup=(InlineKeyboardMarkup(rows) if rows else None))
     if intent == "appendmealitem":
         await context.bot.send_chat_action(cid, "typing")
         result = await append_meal_item_action(
