@@ -1273,9 +1273,29 @@ def slot_for_now():
     if 18 <= h < 24: return "dinner"
     return "snack"
 
+def _free_slot_for_now(cid, d):
+    """Слот по времени, но занятый обед не превращает второй приём в его часть.
+
+    Правило одно и без исключений: если в слоте на этот день запись уже есть,
+    новая идёт перекусом. Иначе за обеденные часы всё съеденное оседало в одном
+    «обеде», хотя между приёмами проходило больше часа.
+    """
+    slot = slot_for_now()
+    if slot == "snack":
+        return slot
+    c = db()
+    try:
+        taken = c.execute(
+            "SELECT 1 FROM meals WHERE chat_id=? AND d=? AND slot=? LIMIT 1",
+            (cid, d, slot),
+        ).fetchone()
+    finally:
+        c.close()
+    return "snack" if taken else slot
+
 def meal_add(cid, rec, d=None, user_generation=None, mutation_key=None, args_hash=None, return_status=False):
     d = d or dtoday().isoformat()
-    slot = rec.get("slot") or slot_for_now()
+    slot = rec.get("slot") or _free_slot_for_now(cid, d)
     c = db()
     if user_generation is not None or mutation_key:
         c.execute("BEGIN IMMEDIATE")
@@ -3518,6 +3538,43 @@ def _journal_recent_meal_slot_followup(text, context, max_minutes=10):
     }[match.group(1).lower()]
     return {"intent": "movemealslot", "target_id": int(target_id), "slot": slot}
 
+# «Ещё то же самое» — повтор того, о чём только что была речь: последней
+# позиции последней записи. Состав берётся из БД, а не из фразы, поэтому
+# контракт «каждое блюдо дословно из текста» здесь неприменим — на нём такие
+# сообщения и падали молча (разбор с Соней 08.08.2026).
+_JOURNAL_REPEAT_LAST_RE = re.compile(
+    r"^\s*(?:(?:я|мы|сегодня|потом|затем)\s+){0,2}(?:а\s+)?(?:и\s+)?"
+    r"(?:ещ[её]|повтори\w*)\b[^.!?\n]{0,40}?"
+    r"\b(?:то\s+же\s+самое|такой\s+же|такую\s+же|такое\s+же|столько\s+же)\b",
+    re.I,
+)
+
+def _journal_repeat_last_meal(text, context, max_minutes=180):
+    """Повтор последней позиции без второго обращения к модели."""
+    raw = str(text or "")
+    if len(raw) > 120 or not _JOURNAL_REPEAT_LAST_RE.search(raw):
+        return None
+    if _journal_third_party_source(raw) or _JOURNAL_FOOD_NEGATED_RE.search(raw):
+        return None
+    if not _journal_has_recent_mutation(context, max_minutes=max_minutes):
+        return None
+    last = (context or {}).get("last_mutation") or {}
+    if not str(last.get("kind") or "").startswith("food"):
+        return None
+    meals = list((context or {}).get("meals") or [])
+    meal = next(
+        (x for x in meals if str(x.get("id")) == str(last.get("record_id"))), None
+    )
+    if not meal:
+        return None
+    items = [x for x in (meal.get("items") or []) if str(x.get("name") or "").strip()]
+    # Повторяем именно последнее блюдо: разговор шёл про него, а не про весь
+    # приём целиком.
+    name = str((items[-1].get("name") if items else meal.get("title")) or "").strip()
+    if not name:
+        return None
+    return {"intent": "logmeal", "confidence": 1.0, "food_text": name[:200]}
+
 _JOURNAL_MEAL_HEADING_RE = re.compile(
     r"(?i)(?<![а-яёa-z0-9])(?:(?:сегодня|вчера|позавчера)\s+)?(?:на\s+)?"
     r"(завтрак\w*|обед\w*|перекус\w*|полдник\w*|ужин\w*)"
@@ -4049,6 +4106,10 @@ def _normalize_semantic_journal(
         )
         if enable_v2 and "evidence_spans" in data:
             if not food_record:
+                # Без причины этот отказ читался в логах как reason=unknown,
+                # и разбор инцидента начинался с гадания.
+                if reasons is not None:
+                    reasons.append("food_record")
                 return None
             parts = [
                 str(item.get("name") or "").strip()
@@ -4228,6 +4289,10 @@ async def resolve_semantic_journal_action(
     if slot_followup:
         ev(cid, "journal_action_planned", meta="movemealslot_fastpath")
         return slot_followup
+    repeat = _journal_repeat_last_meal(text, context)
+    if repeat:
+        ev(cid, "journal_action_planned", meta="repeatlastmeal_fastpath")
+        return repeat
     mixed = _journal_mixed_segments(
         text, male=(row(cid) or {}).get("mode") == "male",
     )
@@ -14977,6 +15042,24 @@ async def move_meal_slot_action(cid, meal_id, slot, user_generation=None, mutati
         "mutation": {"kind": "food_update", "date": verified.get("date") or dtoday().isoformat()},
     }
 
+# «Забыла добавить» — это про только что сделанную запись. Без окна дополнение
+# клеило в один приём всё съеденное за три часа: грибной суп в 11:04 и пирожок
+# в 12:29 оказывались одной строкой на 340 ккал (разбор с Соней 08.08.2026).
+APPEND_WINDOW_MIN = 10
+
+def _meal_within_append_window(meal, max_minutes=APPEND_WINDOW_MIN):
+    """Свежесть записи по её метке времени. Нет метки — считаем несвежей."""
+    raw = str((meal or {}).get("ts") or "")
+    if not raw:
+        return False
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=TZ)
+    return timedelta(0) <= datetime.now(TZ) - stamp <= timedelta(minutes=max_minutes)
+
 async def append_meal_item_action(cid, u, meal_id, food_text, user_generation=None,
                                   mutation_key=None, preparsed_food_record=None):
     """Append one omitted item, recompute totals in code, and verify the update."""
@@ -14984,6 +15067,13 @@ async def append_meal_item_action(cid, u, meal_id, food_text, user_generation=No
     current = meal_get(cid, meal_id)
     if not current:
         return {"ok": False, "text": "Не нашла запись, куда добавить продукт. Уточни нужный приём пищи."}
+    if not _meal_within_append_window(current):
+        # Не отказ: это просто новая еда, а не забытая позиция в старой записи.
+        ev(cid, "journal_append_reroute", meta="stale_target", user_generation=generation)
+        return await log_food_action(
+            cid, u, str(food_text or ""), user_generation=user_generation,
+            mutation_key=mutation_key,
+        )
     addition = str(food_text or "").strip()[:500]
     if not addition:
         return {"ok": False, "text": "Не поняла, какой продукт пропущен. Напиши название и количество."}
