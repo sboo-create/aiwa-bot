@@ -172,6 +172,51 @@ class FreeSlotTests(unittest.TestCase):
             repeated["rec"]["slot"],
         )
 
+    def _add_multi(self):
+        return bot.meal_add(self.cid, {
+            "title": "караси жареные, квас, кекс",
+            "kcal": 790, "protein": 40, "fat": 30, "carbs": 85,
+            "items": [
+                {"name": "караси жареные", "kcal": 400, "protein": 35, "fat": 15, "carbs": 5},
+                {"name": "квас", "kcal": 40, "protein": 0, "fat": 0, "carbs": 30},
+                {"name": "кекс", "kcal": 350, "protein": 5, "fat": 15, "carbs": 50},
+            ],
+            "source": "text",
+        }, d=self.today)
+
+    def test_unclear_scope_asks_instead_of_guessing(self):
+        """Из нескольких блюд без явного указания повтор не выбирается сам."""
+        mid = self._add_multi()
+        res = asyncio.run(bot.repeat_meal_action(
+            self.cid, bot.row(self.cid), mid, scope="unclear"))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["clarify_repeat"]["record_id"], mid)
+        self.assertEqual(res["clarify_repeat"]["last_item"], "кекс")
+        self.assertEqual(len(bot.meals_of(self.cid)), 1)   # ничего не записано
+
+    def test_scope_meal_copies_everything(self):
+        mid = self._add_multi()
+        res = asyncio.run(bot.repeat_meal_action(
+            self.cid, bot.row(self.cid), mid, scope="meal"))
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["rec"]["kcal"], 790)
+        self.assertEqual(len(res["rec"]["items"]), 3)
+
+    def test_scope_last_item_copies_only_the_last_dish(self):
+        mid = self._add_multi()
+        res = asyncio.run(bot.repeat_meal_action(
+            self.cid, bot.row(self.cid), mid, scope="last_item"))
+        self.assertTrue(res["ok"])
+        self.assertEqual([x["name"] for x in res["rec"]["items"]], ["кекс"])
+        self.assertEqual(res["rec"]["kcal"], 350)
+
+    def test_single_dish_never_asks(self):
+        """Одно блюдо в записи — выбирать не из чего, вопрос был бы лишним."""
+        mid = self._add("яблоко")
+        res = asyncio.run(bot.repeat_meal_action(
+            self.cid, bot.row(self.cid), mid, scope="unclear"))
+        self.assertTrue(res["ok"])
+
     def test_explicit_slot_from_the_model_still_wins(self):
         """Явный слот («это был завтрак») правило не переопределяет."""
         self._add("грибной суп")

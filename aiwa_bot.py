@@ -4104,6 +4104,8 @@ def _normalize_semantic_journal(
             out["slot"] = slot
     elif action == "repeat_meal":
         out["target_id"] = int(data.get("target_id"))
+        scope = str(data.get("repeat_scope") or "").strip().lower()
+        out["repeat_scope"] = scope if scope in {"meal", "last_item"} else "unclear"
     elif action == "food_update":
         out["target_id"] = int(data.get("target_id"))
         out["food_text"] = str(data.get("food_text") or "").strip()[:500]
@@ -6695,7 +6697,15 @@ async def dispatch_intent(context, update, cid, u, intent, txt="", journal=None,
             cid, u, (journal or {}).get("target_id"),
             user_generation=turn_generation,
             mutation_key=chat_mutation_key("telegram", getattr(update, "update_id", None)),
+            scope=((journal or {}).get("repeat_scope") or "unclear"),
         )
+        clarify = result.get("clarify_repeat")
+        if clarify:
+            return await msg.reply_text(result["text"], reply_markup=InlineKeyboardMarkup([
+                [B("Весь приём", f"rpt:{clarify['record_id']}:meal")],
+                [B(clarify["last_item"][:40] or "Последнее блюдо",
+                   f"rpt:{clarify['record_id']}:last")],
+            ]))
         # Повтор — такая же новая запись, как обычная: убрать её из дневника
         # надо уметь там же, где она появилась, а не только в мини-аппе.
         rows = []
@@ -9471,6 +9481,21 @@ async def on_cb(update, context):
         return await q.message.reply_text(
             "Выбери, что ближе сейчас — это можно поменять позже.\n\n"
             "Айва работает и без регулярного цикла: при нерегулярных месячных и менопаузе.", reply_markup=NOCYCLE_KB)
+    if data.startswith("rpt:"):
+        _parts = data.split(":")
+        if len(_parts) == 3 and _parts[1].isdigit():
+            _scope = "last_item" if _parts[2] == "last" else "meal"
+            _res = await repeat_meal_action(
+                cid, row(cid), int(_parts[1]),
+                mutation_key=chat_mutation_key("telegram", f"rpt{_parts[1]}{_parts[2]}"),
+                scope=_scope,
+            )
+            _rows = []
+            if _res.get("ok") and _res.get("record_id"):
+                _rows.append([B("🗑 Убрать из дневника", f"mdel:{_res['record_id']}")])
+            return await q.message.reply_text(
+                _res["text"], reply_markup=(InlineKeyboardMarkup(_rows) if _rows else None))
+        return await q.answer("Не поняла, что повторить")
     if data.startswith("mode:"):
         m = data.split(":")[1]
         # callback_data приходит от клиента: неизвестный режим не должен
@@ -13836,6 +13861,7 @@ async def _chat_reply(cid, u, msg, user_generation=None, mutation_key=None,
         result = await repeat_meal_action(
             cid, u, (journal or {}).get("target_id"),
             user_generation=generation, mutation_key=mutation_key,
+            scope=((journal or {}).get("repeat_scope") or "unclear"),
         )
         out = {"answer": result["text"], "suggestions": ["Открыть питание", "Совет по дневнику"]}
         if result.get("mutation"):
@@ -15068,8 +15094,14 @@ def _meal_within_append_window(meal, max_minutes=APPEND_WINDOW_MIN):
         stamp = stamp.replace(tzinfo=TZ)
     return timedelta(0) <= datetime.now(TZ) - stamp <= timedelta(minutes=max_minutes)
 
-async def repeat_meal_action(cid, u, meal_id, user_generation=None, mutation_key=None):
-    """Записать ещё раз то, что уже сохранено: состав берётся из самой записи."""
+async def repeat_meal_action(cid, u, meal_id, user_generation=None, mutation_key=None,
+                             scope="meal"):
+    """Записать ещё раз то, что уже сохранено: состав берётся из самой записи.
+
+    Повторить можно приём целиком или только последнее блюдо. Когда модель не
+    смогла выбрать, спрашиваем: угадывать здесь дороже, чем переспросить —
+    лишний приём в дневнике человек потом ищет глазами.
+    """
     generation = _user_generation(cid) if user_generation is None else int(user_generation)
     source = meal_get(cid, meal_id)
     if not source:
@@ -15077,16 +15109,29 @@ async def repeat_meal_action(cid, u, meal_id, user_generation=None, mutation_key
     items = _items_or_synthetic(source)
     if not items:
         return {"ok": False, "text": "В той записи нет состава, поэтому повторить её не получилось. Напиши блюдо словами."}
+    if len(items) > 1 and scope not in {"meal", "last_item"}:
+        # В записи несколько блюд, и по фразе не видно, о чём речь.
+        return {
+            "ok": False,
+            "clarify_repeat": {"record_id": meal_id,
+                               "last_item": str(items[-1].get("name") or "").strip()},
+            "text": (
+                f"Повторить весь приём ({_meal_items_line(source)}) или только "
+                f"{str(items[-1].get('name') or 'последнее блюдо')}?"
+            ),
+        }
+    if len(items) > 1 and scope == "last_item":
+        items = items[-1:]
     rec = {
-        "title": source.get("title"),
+        "title": ", ".join(str(x.get("name") or "") for x in items[:4])[:80] or source.get("title"),
         "items": items,
         "source": "text",
         "fclass": source.get("fclass"),
-        "kcal": source.get("kcal"),
-        "protein": source.get("protein"),
-        "fat": source.get("fat"),
-        "carbs": source.get("carbs"),
-        "grams": source.get("grams"),
+        "kcal": sum(int(x.get("kcal") or 0) for x in items),
+        "protein": round(sum(float(x.get("protein") or 0) for x in items), 1),
+        "fat": round(sum(float(x.get("fat") or 0) for x in items), 1),
+        "carbs": round(sum(float(x.get("carbs") or 0) for x in items), 1),
+        "grams": sum(int(x.get("grams") or 0) for x in items) or None,
     }
     args_hash = chat_mutation_args_hash("food", f"repeat={meal_id}")
     saved = meal_add(
