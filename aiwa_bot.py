@@ -12680,13 +12680,13 @@ def _journal_result_rows(u, result):
             rows.append([B("🗑 Убрать из дневника", f"mdel:{record_id}")])
         elif kind.startswith("workout"):
             rows.append([B("🗑 Убрать тренировку", f"wdel:{record_id}")])
-    receipt = result.get("receipt") or {}
-    target_url = campaign_webapp_url(
-        u, open_token=receipt.get("token")
-    ) if receipt else None
+    # Одна и та же по смыслу запись давала разные кнопки: синхронный путь —
+    # «Открыть питание», отложенный — deep link «Открыть запись в дневнике»,
+    # который открывает форму приёма без выхода. Ведём обе в раздел питания.
+    target_url = campaign_webapp_url(u, tab="food")
     if target_url:
         rows.append([InlineKeyboardButton(
-            "Открыть запись в дневнике", web_app=WebAppInfo(url=target_url),
+            "Открыть питание", web_app=WebAppInfo(url=target_url),
         )])
     return rows
 
