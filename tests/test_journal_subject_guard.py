@@ -91,6 +91,12 @@ class ThirdPartyReportsStayBlocked(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(bot._journal_third_party_source(text))
 
+    def test_a_chain_of_filler_words_cannot_hide_a_name(self):
+        """Зачин ограничен двумя словами: именем нельзя спрятаться за вводными."""
+        self.assertTrue(
+            bot._journal_third_party_source("Ну кстати вообще ладно Соня съела творог")
+        )
+
     def test_explicit_markers_are_untouched(self):
         for text in (
             "У Сони сегодня начались месячные",
@@ -118,6 +124,12 @@ class RepeatedMealContinuesTheRecord(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertTrue(bot._JOURNAL_CONTEXT_OPEN_RE.search(text))
+
+    def test_lead_applies_only_to_eshe(self):
+        """«я также съела печенье» — новая запись, а не продолжение прошлой."""
+        self.assertIsNone(bot._JOURNAL_CONTEXT_OPEN_RE.search("я также съела печенье"))
+        self.assertIsNone(bot._JOURNAL_CONTEXT_OPEN_RE.search("сегодня плюс йогурт съела"))
+        self.assertTrue(bot._JOURNAL_CONTEXT_OPEN_RE.search("также съела печенье"))
 
     def test_unrelated_phrases_do_not_open_the_context(self):
         """Зачин ограничен: обычная новая запись продолжением не считается."""
