@@ -511,7 +511,7 @@ def _sessions(
     for timestamps in by_user.values():
         timestamps.sort(); start = prev = timestamps[0]; n = 1
         for ts in timestamps[1:]:
-            if ts - prev > 1800:
+            if ts - prev > 300:
                 count += 1; lengths.append(prev - start); events.append(n)
                 start = ts; n = 0
             prev = ts; n += 1
@@ -1909,7 +1909,7 @@ MACHINE_EVENT_NAMES: tuple[str, ...] = (
 # Разрыв, после которого следующее человеческое событие открывает новую
 # сессию (веб-стандарт 30 минут; фрейм Цева — интервалы между user msg,
 # «сессия это когда человек касается ноута»).
-SESSION_GAP_SECONDS = 30 * 60
+SESSION_GAP_SECONDS = 5 * 60
 
 
 def _canonical_cards(now: float, retention: dict | None = None) -> list[dict]:
