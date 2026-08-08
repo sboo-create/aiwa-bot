@@ -97,6 +97,14 @@ class ThirdPartyReportsStayBlocked(unittest.TestCase):
             bot._journal_third_party_source("Ну кстати вообще ладно Соня съела творог")
         )
 
+    def test_punctuation_runs_cannot_stretch_the_lead(self):
+        """Длинные разделители между вводными не продлевают начало фразы."""
+        self.assertTrue(
+            bot._journal_third_party_source("Кстати... ... ... вообще Соня съела творог")
+        )
+        # Обычная пунктуация после вводного слова работать не перестала.
+        self.assertFalse(bot._journal_third_party_source("Кстати, Пирожок съела"))
+
     def test_explicit_markers_are_untouched(self):
         for text in (
             "У Сони сегодня начались месячные",
