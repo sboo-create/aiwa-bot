@@ -691,12 +691,27 @@ def _provider_exception_status(exc):
         return "invalid_json"
     return "error"
 
+def _reasoning_preferences():
+    """Бюджет рассуждений. Пусто — параметр не отправляем вовсе.
+
+    Reasoning-модель расходует на размышления весь выданный лимит: на
+    gpt-5.6-luna при max_tokens=300 в рассуждения уходило ровно 300, и ответ
+    приходил пустым. Явный effort оставляет место под сам ответ.
+    """
+    effort = (os.environ.get("AIWA_LLM_REASONING_EFFORT") or "").strip().lower()
+    if effort in {"minimal", "low", "medium", "high"}:
+        return {"effort": effort}
+    return None
+
+
 def _proxy_payload(messages, max_tokens, temperature, url=None, model=None, provider_preferences=None):
     model = model or PROXY_MODEL
+    reasoning = _reasoning_preferences()
     if not _proxy_is_messages(url):
         payload = {"messages": messages, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
         if model: payload["model"] = model
         if provider_preferences: payload["provider"] = provider_preferences
+        if reasoning: payload["reasoning"] = reasoning
         return payload
     system = "\n\n".join((m.get("content") or "") for m in messages if m.get("role") == "system").strip()
     mm = []
@@ -710,6 +725,7 @@ def _proxy_payload(messages, max_tokens, temperature, url=None, model=None, prov
     payload = {"messages": mm, "temperature": max(0.01, temperature), "max_tokens": max_tokens}
     if model: payload["model"] = model
     if provider_preferences: payload["provider"] = provider_preferences
+    if reasoning: payload["reasoning"] = reasoning
     if system:
         payload["system"] = system
     return payload
@@ -850,11 +866,27 @@ def _openrouter_vision_config():
         "cost_unit": "usd",
     }
 
-def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
+# Потолок расширения: выше него переспрашивать бессмысленно, там уже не
+# «не хватило лимита», а модель, которая не отвечает.
+_MAX_TOKEN_BUDGET = 4000
+
+
+def _answer_was_truncated(data):
+    """True, когда провайдер оборвал генерацию до первого слова ответа."""
+    try:
+        choice = (data.get("choices") or [{}])[0] or {}
+    except (AttributeError, IndexError, TypeError):
+        return False
+    return str(choice.get("finish_reason") or "").lower() == "length"
+
+
+def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4,
+                    escalated=False):
     import time as _t
     if not _route_available(cfg):
         print("LLM route circuit open:", cfg.get("name"), cfg.get("model"))
         return None
+    budget = int(max_tokens)
     headers = {"Content-Type": "application/json"}
     if cfg.get("key"): headers["Authorization"] = f"Bearer {cfg['key']}"
     if cfg.get("xkey"): headers["X-API-Key"] = cfg["xkey"]
@@ -865,7 +897,7 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
         started = _t.time()
         try:
             r = _HTTP.post(cfg["url"], headers=headers,
-                json=_proxy_payload(messages, max_tokens, temperature, cfg["url"], cfg.get("model"),
+                json=_proxy_payload(messages, budget, temperature, cfg["url"], cfg.get("model"),
                                     cfg.get("provider")),
                 timeout=(6, float(cfg.get("read_timeout") or 30)), verify=_proxy_verify())
             if r.status_code == 429:
@@ -898,6 +930,24 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4):
             txt = _response_text(data)
             txt = (txt or "").strip()
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
+            if (not txt and not escalated and _answer_was_truncated(data)
+                    and budget < _MAX_TOKEN_BUDGET):
+                # Ответа нет не потому, что модель молчит, а потому, что лимит
+                # кончился раньше первого слова: у reasoning-моделей его
+                # съедают размышления. Гадать «сколько хватит» бесполезно —
+                # они расширяются под любой лимит, поэтому переспрашиваем с
+                # большим ровно один раз. Это отдельный заход, а не одна из
+                # обычных попыток: те считают провалом сам факт пустоты.
+                _capture_usage(None, data, actual_provider, actual_model, started,
+                               status="truncated_retry", retry_index=i,
+                               cost_unit=cfg.get("cost_unit"))
+                bigger = min(_MAX_TOKEN_BUDGET, budget * 2)
+                print("LLM truncated before answer, retrying with", bigger, "tokens")
+                # Ровно одна попытка: расширение бюджета не должно открывать
+                # второй полный цикл ретраев поверх текущего — иначе один
+                # логический вызов множит запросы и задержку.
+                return _call_proxy_one(cfg, messages, bigger, temperature, usage,
+                                       1, escalated=True)
             if not txt:
                 # A syntactically successful provider response may still have
                 # consumed tokens and credits. Preserve its usage and
@@ -1138,9 +1188,16 @@ def _call_model(messages, model, max_tokens=1100, temperature=0.45, usage=None, 
     out = None
     try:
         for index, original in enumerate(cfgs):
+            # Явно выбранная модель принадлежит основному маршруту. У запасного
+            # шлюза свой каталог: ключ LiteLLM пускает только свои модели, и
+            # подстановка чужого имени давала 403 и открытый circuit — резерв
+            # не спасал, а добивал запрос. Смотрим на сам маршрут, а не на его
+            # позицию в списке: порядок маршрутов — не признак чужого каталога.
+            own_catalog = str(original.get("name") or "").endswith("_fallback")
+            route_model = (original.get("model") or selected) if own_catalog else selected
             cfg = dict(
                 original,
-                model=selected,
+                model=route_model,
                 read_timeout=_env_float(
                     "AIWA_JOURNAL_HTTP_TIMEOUT_SECONDS", 12, low=3, high=25,
                 ),
@@ -1165,7 +1222,7 @@ def probe_once():
     t0 = _t.time()
     try:
         out = _call_impl([{"role": "system", "content": "Ответь одним словом."},
-                          {"role": "user", "content": "ок"}], max_tokens=5, temperature=0.1, usage=None, attempts=1)
+                          {"role": "user", "content": "ок"}], max_tokens=64, temperature=0.1, usage=None, attempts=1)
         return (bool(out), int((_t.time() - t0) * 1000))
     except Exception:
         return (False, int((_t.time() - t0) * 1000))
@@ -1178,10 +1235,14 @@ def pop_stats():
         return s
 
 def health_check(usage=None):
+    # Бюджет с запасом: у reasoning-моделей часть токенов уходит на внутренние
+    # рассуждения, и при тесном лимите ответ приходит пустым (finish=length).
+    # На gpt-5.6-luna 16 токенов уходили в рассуждения целиком, проба видела
+    # пустоту и будила дежурного, хотя модель была здорова.
     out = _call([
         {"role": "system", "content": "Ты AIWA. Ответь только одним словом на русском."},
         {"role": "user", "content": "Служебная проверка. Ответь: работает"}
-    ], max_tokens=16, temperature=0.1, usage=usage, attempts=1,
+    ], max_tokens=64, temperature=0.1, usage=usage, attempts=1,
         track_stats=False)
     return bool(out and out.strip()), (out or "").strip()
 
