@@ -943,8 +943,11 @@ def _call_proxy_one(cfg, messages, max_tokens, temperature, usage, attempts=4,
                                cost_unit=cfg.get("cost_unit"))
                 bigger = min(_MAX_TOKEN_BUDGET, budget * 2)
                 print("LLM truncated before answer, retrying with", bigger, "tokens")
+                # Ровно одна попытка: расширение бюджета не должно открывать
+                # второй полный цикл ретраев поверх текущего — иначе один
+                # логический вызов множит запросы и задержку.
                 return _call_proxy_one(cfg, messages, bigger, temperature, usage,
-                                       attempts, escalated=True)
+                                       1, escalated=True)
             if not txt:
                 # A syntactically successful provider response may still have
                 # consumed tokens and credits. Preserve its usage and

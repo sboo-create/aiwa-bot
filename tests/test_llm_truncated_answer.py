@@ -76,6 +76,35 @@ class BudgetEscalationTests(unittest.TestCase):
         self.assertIsNone(out)
         self.assertEqual(budgets, [300, 600])
 
+    def test_escalated_pass_gets_a_single_attempt(self):
+        """Расширение бюджета не должно запускать второй цикл ретраев."""
+        seen = []
+        real = L._call_proxy_one
+
+        def spy(cfg, messages, max_tokens, temperature, usage, attempts=4, escalated=False):
+            seen.append((max_tokens, attempts, escalated))
+            if escalated:
+                return "готово"
+            return real(cfg, messages, max_tokens, temperature, usage, attempts, escalated)
+
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+
+            def json(self):
+                return _reply("", "length")
+
+        with mock.patch.object(L, "_call_proxy_one", side_effect=spy), \
+             mock.patch.object(L._HTTP, "post", return_value=FakeResponse()), \
+             mock.patch.object(L, "_route_available", return_value=True), \
+             mock.patch.object(L, "_capture_usage"), \
+             mock.patch.object(L, "_route_record_failure", return_value=False):
+            L._call_proxy_one(self.CFG, [{"role": "user", "content": "x"}],
+                              300, 0.2, None, attempts=4)
+
+        self.assertEqual(seen[0], (300, 4, False))
+        self.assertEqual(seen[1], (600, 1, True))
+
     def test_plain_empty_answer_is_not_escalated(self):
         """Пустой ответ без обрыва — это отказ модели, лимит тут ни при чём."""
         out, budgets = self._run([_reply("", "stop")])
